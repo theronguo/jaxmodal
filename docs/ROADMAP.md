@@ -13,7 +13,7 @@ Large-scale 3D linear modal analysis (Kv = λMv) in JAX. The solver uses matrix-
 
 Package name: `jaxmodal`. License: MIT.
 
-Status: planning. Review rounds 1–6 incorporated. Implementation starts after three consecutive review rounds with all 5 reviewers satisfied.
+Status: planning. Review rounds 1–8 incorporated. Implementation starts after three consecutive review rounds with all 5 reviewers satisfied.
 
 ## Principles
 
@@ -49,7 +49,7 @@ Status: planning. Review rounds 1–6 incorporated. Implementation starts after 
 
 - **Integration:** full integration only (hex8 2³, hex20/hex27 3³) for K and consistent M. No reduced integration, because its zero-energy modes would pollute the spectrum.
 - **Mass:**
-  - Consistent mass is the default everywhere. Lumping is opt-in via `mass="lumped"`: row-sum for hex8/hex27, HRZ for hex20. Row-sum lumping gives non-positive corner masses for hex20.
+  - Consistent mass is the default everywhere. Lumping is opt-in via `mass="lumped"`: row-sum for hex8/hex27, HRZ for hex20. Row-sum lumping gives non-positive corner masses for hex20. Solid-shell elements are consistent-mass only.
   - An optional nodal (point) mass vector is added to M.
 - **Hex8:** plain, fully integrated hex8 is accepted. It shear-locks in bending, so bending accuracy comes from refinement or from hex20/hex27.
 - **Dirichlet BCs:** zero displacement per component in global axes on node sets. There are no skew constraints.
@@ -86,19 +86,19 @@ Status: planning. Review rounds 1–6 incorporated. Implementation starts after 
   - **Strategy:** chosen by a cost model.
     - Bands whose upper mode index is ≲ 1200 are computed by chunked LOBPCG from 0, then filtered to the band.
     - The stochastic count is on by default for shift-invert bands. For LOBPCG-from-0 bands it is opt-in (`verify=True`, implemented in PR 14), because it can cost more than the solve itself.
-    - Higher bands use shift-invert. Near mode index 1000 (relative gap ~7e-4), shift-invert costs ~10³ MINRES iterations per Lanczos step, and counting costs d ~ 10³–10⁴ solves per probe block.
+    - Higher bands use shift-invert; under the assumed band position below, it is never chosen and exists for bands beyond that assumption. Near mode index 1000 (relative gap ~7e-4), shift-invert costs ~10³ MINRES iterations per Lanczos step, and counting costs d ~ 10³–10⁴ solves per probe block.
   - **[0, f_max]:** chunked LOBPCG until λ > λ_max.
   - **Interior bands [f₁, f₂]:**
     - Shift-invert Lanczos on (K − σM)⁻¹M with σ in the band, full M-reorthogonalization, and a final Rayleigh–Ritz with true residuals on (K, M).
     - Inner MINRES with absolute-value preconditioning by the SPD multigrid of K + σM (Vecharynski–Knyazev 2013), with a fixed inner tolerance τ = 1e-8.
-    - Slice widths come from the cost model (iterations ∝ 1 / relative distance to the slice edge). Duplicate modes at slice edges are removed by M-orthogonalization.
+    - Slice widths come from the cost model (iterations ∝ 1 / relative distance to the slice edge). The cost model also counts deflation-basis memory (n_dof × number of vectors) and rejects strategies over the memory budget. Duplicate modes at slice edges are removed by M-orthogonalization.
     - Neither the Lanczos nor the counting steps need M⁻¹ beyond the one M-solve per probe. Consistent M costs nothing else extra there.
-    - MINRES needs an exactly symmetric preconditioner. An fp32 V-cycle is allowed only if it is applied symmetrically. The PR 15 tests run it in fp64.
+    - MINRES needs a preconditioner that is symmetric up to rounding (symmetric smoother and transfer pairs). An fp32 V-cycle is allowed only if it is applied symmetrically. The PR 15 tests run it in fp64.
   - **Completeness count (stochastic, at scale):**
     - Estimate s = ‖Π_V q(T) Π_V y‖²_M, with:
       - T = (K + σM)⁻¹M and σ ≈ λ_cutoff;
       - Π_V = I − VVᵀM, where V includes the computed modes and R.
-    - Probes: y = M_P⁻¹g with g ~ N(0, M) masked. g comes from element-wise Cholesky factors of Me, plus one Jacobi-PCG solve per probe with the masked M_P (unit diagonal on constrained DOFs).
+    - Probes: y = M_P⁻¹g with g ~ N(0, M) masked. g comes from element-wise Cholesky factors of Me, plus one Jacobi-PCG solve per probe with the masked M_P (unit diagonal on constrained DOFs), to the same tolerance τ as below.
     - q is a Chebyshev–Jackson step polynomial ([0, λ_max]) or band-pass polynomial (interior band, deflated by the modes found in the band).
     - The degree d (∝ λ/gap at the cutoff) is chosen numerically so that the Jackson-tail bias n_dof·max q² over the out-of-band spectrum is ≤ 0.05, and q² ≥ 0.95 over the whole in-band interval.
     - Inner PCG tolerance τ ≲ 0.01/(d·√n_dof).
@@ -118,8 +118,8 @@ Status: planning. Review rounds 1–6 incorporated. Implementation starts after 
 - **Sensitivities:**
   - Formula: dλ/dp = vᵀ(∂K/∂p − λ∂M/∂p)v / vᵀMv.
   - Computed as a chunked `vmap(grad(element energy))` pass with v held fixed, in fp64.
-  - Accuracy: r ≤ 1e-8 in the PR 21 tests. Optimization runs use r ≤ max(1e-6, measured floor), and the sensitivity error is O(r·λ/gap).
-  - Clusters use the sensitivity matrix f_sk = v_sᵀ(K′ − λM′)v_k over an M-orthonormal cluster basis, built from the bilinear forms. The optimization cluster tolerance is a relative gap of 1e-2, as in Du & Olhoff.
+  - Accuracy: the PR 21 finite-difference tests use dense `eigh` modes (~1e-13); the LOBPCG-based gradient tests use r ≤ 1e-8. Optimization runs use r ≤ max(1e-6, measured floor), and the sensitivity error is O(r·λ/gap).
+  - Clusters use the sensitivity matrix f_sk = v_sᵀ(K′ − λM′)v_k over an M-orthonormal cluster basis, built from the bilinear forms, with λ the cluster mean. The optimization cluster tolerance is a relative gap of 1e-2, as in Du & Olhoff.
   - In MMA, each cluster uses the Seyranian / Du & Olhoff conditions:
     - diagonal constraints β ≤ λ_s + f_ss·Δρ;
     - off-diagonal constraints |f_sk·Δρ| ≤ ε_off (s < k), as paired inequalities, with ε_off = 1e-2·|β|. By Gershgorin, β can overshoot the true λ_min by at most (N − 1)·ε_off.
@@ -179,14 +179,14 @@ All sizes are fp64.
   - JSON results go to `benchmarks/results/` and record:
     - jax and jaxlib versions;
     - STREAM triad bandwidth, both jitted and NumPy/C multithreaded, with the method stated;
-    - XLA thread count (the default Eigen pool unless pinned) and P/E-core setup;
+    - XLA:CPU intra-op thread pool size (unless pinned) and P/E-core setup;
     - measured fp64 peak;
     - time, peak memory and compile time.
 - **Compilation cache:**
-  - The persistent cache is enabled in tests, with `persistent_cache_min_compile_time_secs = 0`. PR 0 checks that it actually stores entries on CPU. If it doesn't, the cache is disabled and the tests don't depend on it.
+  - The persistent cache is enabled in tests, with `persistent_cache_min_compile_time_secs = 0` and `persistent_cache_min_entry_size_bytes = 0`. PR 0 checks that it actually stores entries on CPU. If it doesn't, the cache is disabled and the tests don't depend on it.
   - Compile-time tests (PRs 5 and 18; PR 9 only counts compiles) run in a fresh subprocess with the cache disabled and time `jit(f).lower(...).compile()`.
 - **Multi-device tests:**
-  - They live in `tests/multidevice/`, which is in `collect_ignore`. `jax_num_cpu_devices` is used if the pinned jax supports it.
+  - They live in `tests/multidevice/`, which is in `collect_ignore`. `jax_num_cpu_devices` is used if the pinned jax supports it, set before the backend initializes.
   - A wrapper test re-runs them in a fresh subprocess with `XLA_FLAGS=--xla_force_host_platform_device_count=…` set before jax is imported.
 - **Data:**
   - Tiny test meshes live in `tests/data/`.
@@ -273,7 +273,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
   - Partition of unity.
   - Linear completeness.
   - Exactly 6 zero eigenvalues of Ke, on distorted elements too.
-  - On mildly distorted elements (stated shapes), lumped masses are all > 0. Total mass equals ρV per direction, with V the quadrature volume.
+  - On mildly distorted elements (bound stated in the docs, e.g. midside offsets ≤ 10% of the edge length), lumped masses are all > 0. Total mass equals ρV per direction, with V the quadrature volume.
   - Matches a NumPy reference implementation.
   - `jax.grad` of uᵀKe(X)u matches finite differences (rel. err. < 1e-6).
 
@@ -287,8 +287,8 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
 - Docs: `docs/operators.md`.
 - Tests:
   - Distorted multi-element patch test, with linear displacement imposed by lifting inside the test:
-    - Straight-edged distortion (midside nodes at edge midpoints): constant stress to 1e-10.
-    - Curved hex20/hex27 (midside offset amplitude stated): constant stress to 1e-10 at every quadrature point. 3³ Gauss integrates cof(J)ᵀ∇̂N exactly here: for triquadratic geometry the integrand has degree ≤ 5 per direction.
+    - Straight-edged distortion (midside nodes at edge midpoints): constant stress to 1e-10 relative to ‖σ‖.
+    - Curved hex20/hex27 (midside offset amplitude stated): constant stress to 1e-10 relative to ‖σ‖ at every quadrature point. 3³ Gauss integrates cof(J)ᵀ∇̂N exactly here: for triquadratic geometry the integrand has degree ≤ 5 per direction.
   - Clamped model: no spurious eigenvalues compared with SciPy on the reduced matrices.
   - A_P is SPD on a clamped model, and Jacobi built on it has no zero divisions.
 
@@ -343,7 +343,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
   - SciPy `eigsh` shift-invert (negative shift) on assembled matrices, with its largest supported size stated.
   - Dense inertia via `scipy.linalg.ldl` (≤ ~15k DOF).
   - In-test oracles:
-    - A rectangular block with sliding BCs (exact separable solution, including orthotropic).
+    - A rectangular block with sliding BCs (exact separable solution, including orthotropic with material axes aligned to the block axes).
     - Visscher Ritz method for a free anisotropic parallelepiped: a Legendre basis, dense `eigh`, converged when successive degrees change λ by < 1e-6.
     - The Srinivas–Rao exact 3D solution for thick orthotropic and cross-ply simply supported plates.
   - Published benchmarks:
@@ -377,8 +377,8 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
   - Principal angles: sin θ ≤ 10·r_M·λ/gap. Angles are in the M-inner product, the gap is absolute, and r_M is the λ-scaled residual in the M⁻¹-norm with x M-normalized (dense at reference sizes). Clusters with relative gap < 1e-4 are compared by subspace.
   - Exact multiplicities on a square-section beam and a cube.
   - Free-free: ‖RᵀMX‖ ≤ 1e-10.
-  - Near-singular M (void mass ≈ 1e-12): converges to tol = 1e-8 within 500 iterations.
-  - The workspace estimator (9- and 6-block modes) is within 20% of the measured peak at 1M DOFs with m = 40.
+  - Near-singular M (void mass ≈ 1e-12): converges to max(1e-8, floor) within 500 iterations.
+  - The workspace estimator (9- and 6-block modes) is within 20% of the measured peak at 1M DOFs with m = 48 (estimate ≥ 2 GB in both modes).
   - The compiled step function compiles at most twice per solve.
 - **Milestone:** first end-to-end modes in pure JAX.
 
@@ -488,7 +488,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
     - One layered element per laminate is reported, not gated.
     - A clamped cylinder (R/t and L/R stated) against a fine hex27 reference.
   - No locking: at L/t = 10 and 1000, the discretization error is measured against a converged solid-shell run at the same L/t. The error at L/t = 1000 is ≤ 1.5× the error at L/t = 10.
-  - Distorted meshes (parallelogram only): frequencies within 1% of the undistorted mesh at the same density.
+  - Distorted meshes (parallelogram only): frequencies within 1% of the undistorted mesh at the same (stated) density.
   - `jax.grad` matches finite differences.
 
 ## M5: Postprocessing and performance
@@ -551,14 +551,14 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
 - Docs: `docs/optimization.md`.
 - Tests:
   - Central finite differences with a step-size sweep against dense `eigh` solved to ~1e-13 at small sizes, for coordinate, density, material and nodal-mass parameters. Error ≤ 1e-6·‖g‖_∞. The test eigenvalues have relative gap ≥ 1e-3. Density parameters enter through linear scaling (s_K = s_M = ρ); the PR 23 interpolations are tested there.
-  - Double eigenvalue (symmetric cube or plate): one-sided directional differences along d match the eigenvalues of Σ_e d_e f^e. Both pairs are sorted before comparing, with error ≤ 1e-4·max_e‖f^e‖ and an O(h) step sweep.
+  - Double eigenvalue (symmetric cube or plate): one-sided directional differences along d match the eigenvalues of Σ_e d_e f^e. Both pairs are sorted before comparing, with ‖d‖_∞ = 1 and error ≤ 1e-4·‖Σ_e d_e f^e‖₂ and an O(h) step sweep.
 
 ### PR 22: FFD shape parametrization
 - Contents:
   - Bernstein lattice → node coordinates, in JAX.
-  - Nodes outside the lattice, the outer control-point layer (for continuity at the lattice boundary) and BC nodes are frozen.
+  - Nodes outside the lattice, the two outer control-point layers (C¹ continuity at the lattice boundary) and BC nodes are frozen.
   - Constraint: a KS/p-norm aggregate of detJ/detJ₀ ≥ ε.
-  - Example: maximize the fundamental frequency subject to mass ≤ M₀, using MMA.
+  - Example: maximize the fundamental frequency subject to mass ≤ M₀, using MMA, at small size with a Jacobi preconditioner.
 - Docs: `docs/optimization.md`.
 - Tests:
   - Control-point gradients pass the PR 21 finite-difference criterion.
@@ -585,7 +585,7 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
 - Tests:
   - End-to-end finite differences through filter → projection → interpolation → KS/bound, with test densities away from ρ̄ = 0.1 ± h, where the mass interpolation is only C¹.
   - Re-run of the PR 11 SIMP-contrast test on a PR 23 design.
-  - MMA with the PR 21 cluster constraints on a forced double eigenvalue: β is non-decreasing (to 1e-3 relative) after iteration k₀ = 10 (fixed in the test), with no mode-switch oscillation.
+  - MMA with the PR 21 cluster constraints on a forced double eigenvalue, without projection (so no H_β continuation): the bound β is non-decreasing (to 1e-3 relative) after iteration k₀ = 10 (fixed in the test), with no mode-switch oscillation.
   - Benchmark: the chosen Du & Olhoff 2007 example, with the paper's filter radius, and projection only if the paper uses it. The setup:
     - one element layer of thickness t ≤ h;
     - u_z = 0;
