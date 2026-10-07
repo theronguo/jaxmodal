@@ -3,12 +3,16 @@
 Large-scale 3D linear modal analysis (Kv = λMv) in JAX. The solver uses matrix-free operators, preconditioned LOBPCG, hex8/hex20/hex27 and solid-shell elements, and linear anisotropic elasticity. FFD shape optimization and topology optimization come later.
 
 **Targets:**
+- Lowest modes and modes in frequency bands.
 - 10M DOFs, unstructured, on a single GPU.
 - 100M DOFs on voxel meshes with a small number of modes per chunk (see the memory budget).
 - Multi-GPU later.
-- An FP64-capable GPU (A100/H100 class); dtype is configurable.
+- An FP64-capable GPU (A100/H100 class) for production runs; dtype is configurable.
+- Until a GPU is available, development and all tests run on an Apple M3 Max (64 GB, CPU backend, fp64).
 
-Status: planning; review round 1 incorporated.
+Package name: `jaxmodal` (free on PyPI as of 2026-10-07). License: MIT.
+
+Status: planning; review round 1 and the user's answers incorporated.
 
 ## Principles
 
@@ -17,13 +21,14 @@ Status: planning; review round 1 incorporated.
 3. **Fixed array shapes, element groups by type.**
    - Topology preprocessing (connectivity, DOF maps, sets) runs in NumPy.
    - Geometry, densities and material parameters are JAX arrays passed as `jit` arguments, never closed over. A design change therefore needs no NumPy step and no re-JIT.
-4. **Differentiable from day one.** Element kernels are pure JAX functions of `(X_e, C_e, ρ_e)`, and material constructors are traceable. M6 then needs no rework.
-5. **Memory-aware.**
+4. **Extensible element types.** Each element type is one registry entry: node count, shape functions, quadrature rule, reference faces and node-ordering maps per file format. Only hex types are implemented now; wedges and tets can be added later without touching operators or solvers.
+5. **Differentiable from day one.** Element kernels are pure JAX functions of `(X_e, C_e, ρ_e)`, and material constructors are traceable. M6 then needs no rework.
+6. **Memory-aware.**
    - Elements are processed in fixed-size chunks (`lax.map`/`scan`).
    - Connectivity is int32, with an assert that N_dof < 2³¹.
    - Large buffers are donated to `jit`.
    - Memory estimates are checked against measured peaks.
-6. **Conventions** live in `docs/conventions.md` and are fixed in PR 0:
+7. **Conventions** live in `docs/conventions.md` and are fixed in PR 0:
    - VTK node ordering internally (converted at import).
    - Voigt order `[11, 22, 33, 23, 13, 12]` with engineering shear strains.
    - fp64 by default, enabled through an explicit config call (no import side effects).
@@ -51,7 +56,14 @@ Status: planning; review round 1 incorporated.
   - The deflation projector is re-applied every iteration.
   - Convergence is measured by the backward error ‖Kx − λMx‖ / ((‖K‖ + |λ|‖M‖)‖x‖), with norms estimated by power iteration.
   - Block size = nev + max(5, 0.2·nev) guard vectors. Locking never splits an unresolved cluster.
-- **Fallback eigensolver** (nev ≳ 100 or poor preconditioning): Lanczos/Krylov–Schur on (K + σM)⁻¹M, with an inexact inner PCG using the same multigrid. Spectrum slicing for bands. Not scheduled; only added if needed.
+- **Frequency bands (PR 21):**
+  - [0, f_max]: chunked LOBPCG until λ > λ_max. Completeness is checked with a matrix-free stochastic eigenvalue count (Chebyshev/KPM) and, at reference sizes, the LDLᵀ inertia (Sturm count).
+  - Interior bands [f₁, f₂]: shift-invert Lanczos/Krylov–Schur on (K − σM)⁻¹M with σ inside the band. The inner solve uses MINRES, since K − σM is indefinite, with the SPD multigrid of K + |σ|M as preconditioner. Wide bands are split into slices.
+  - The same machinery is the fallback when nev ≳ 100 or LOBPCG preconditioning is poor.
+- **Precision:**
+  - Round-off error in the smallest eigenvalues scales like ε·λ_max/λ_min, with λ_max/λ_min ≈ 1e8–1e10. That gives about 1e-7 relative error in fp64 (fine), but O(1) in fp32 (useless).
+  - Hence fp64 for everything except preconditioner internals and storage.
+  - Discretization error (target ≈ 0.1%) dominates round-off in fp64. PR 9 measures the attainable residual floor.
 - **Preconditioners:**
   - Voxel meshes: geometric multigrid.
   - Unstructured meshes: p-multigrid (hex20/hex27 → hex8), then smoothed-aggregation AMG. AMG setup runs in pyamg on the host; the V-cycle runs on the GPU with a self-written block-ELL SpMV.
@@ -72,7 +84,7 @@ Status: planning; review round 1 incorporated.
   - SLEPc is an optional extra installed via conda, excluded from the default checks.
   - meshio's `.inp` reader doesn't handle parts or assemblies; a small custom reader is added only if needed.
 
-## Memory budget (single 80 GB GPU)
+## Memory budget (single 80 GB GPU; the 64 GB Mac fits the 10M column, but slower)
 
 | Item | 10M DOF unstructured hex20 (~0.8M elements) | 100M DOF voxel hex8 (~33M elements) |
 |---|---|---|
@@ -87,9 +99,10 @@ Status: planning; review round 1 incorporated.
 
 ## Development environment
 
-- **Development:** macOS, CPU only, with fp64. GPU paths are not exercised there.
+- **Development:** Apple M3 Max with 16 cores and 64 GB of unified memory, using the JAX CPU backend in fp64. Everything runs here, including the 10M-DOF unstructured case, which fits in memory but is slow.
+- **No Mac GPU:** the GPU isn't usable for this project. Metal GPUs have no fp64 hardware, and the `jax-metal` plugin is experimental with incomplete op coverage.
 - **Local checks:** `scripts/check.sh` runs lint plus `pytest -m "not slow and not gpu"`. Remote CI comes later.
-- **GPU work:** `gpu`/`slow` tests and benchmarks run on a GPU machine (TBD). Benchmark JSON is committed to `benchmarks/results/`.
+- **GPU work:** `gpu` tests and the 100M benchmarks wait for a CUDA machine (TBD, e.g. a cloud H100); until then they are skipped. Benchmark JSON is committed to `benchmarks/results/`.
 - **Data:**
   - Tiny test meshes live in `tests/data/`.
   - Large benchmark meshes are generated by scripts in `benchmarks/meshes/` and git-ignored.
@@ -98,7 +111,7 @@ Status: planning; review round 1 incorporated.
 ## Package layout
 
 ```
-src/<pkg>/
+src/jaxmodal/
   config.py    dtype / x64 setup
   mesh/        data model, io, voxel generator, reordering, partition
   materials/   anisotropic C, Bond rotations, orientations
@@ -106,7 +119,7 @@ src/<pkg>/
   operators/   dofmap, assembled (oracle), matrix-free, voxel stencil, constraints (masking, rigid modes, deflation)
   linalg/      pcg, block-ELL spmv
   precond/     jacobi, chebyshev, gmg, pmg, amg
-  eigen/       lobpcg, api (solve_modes), backends/{scipy, slepc}
+  eigen/       lobpcg, bands (counting, shift-invert Lanczos, MINRES), api (solve_modes), backends/{scipy, slepc}
   post/        normalization, MAC, effective mass, stresses, export
   opt/         sensitivities, mma, ffd, simp, filters
 tests/  benchmarks/  examples/  docs/  scripts/
@@ -292,6 +305,21 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**.
   - Setup time and host-memory benchmarks.
   - GPU: a 10M-DOF hex20 modal solve on one GPU, with iteration counts reported.
 
+## M3b: Frequency bands
+
+### PR 21: Frequency-band eigensolver
+- Contents:
+  - Stochastic eigenvalue count in [a, b] via Chebyshev/KPM.
+  - [0, f_max] mode with chunked LOBPCG, locked modes stored on the host.
+  - Interior-band shift-invert Lanczos/Krylov–Schur with MINRES inner solves and spectrum slicing.
+  - `solve_modes(..., band=(f1, f2))`.
+- Docs: `docs/eigensolvers.md` (bands, counting, slicing).
+- Tests:
+  - Band eigenvalues match SciPy `eigsh(sigma=...)` to relative error ≤ 1e-8.
+  - No missed modes compared with the LDLᵀ inertia count at reference sizes.
+  - KPM count within ±1 of the true count on the verification suite.
+  - Memory model for many modes (e.g. 1000 modes at 10M DOFs = 80 GB fp64, so they are kept on the host).
+
 ## M4: Solid-shell element
 
 ### PR 14: Solid-shell element (KGW 1999: ANS + EAS, 3 DOFs per node)
@@ -348,6 +376,8 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**.
 - Tests: results match single-GPU runs; weak-scaling plot.
 
 ## M6: Optimization
+
+Working assumptions, still open: topology optimization at ≤ 10M voxel elements, clamped, densities as the only design variables. The user will decide later. Earlier PRs keep the alternatives open: free-free and material or fiber-angle design variables are already differentiable through Principles 4–5.
 
 ### PR 18: Eigenvalue sensitivities and MMA
 - Contents:
@@ -413,7 +443,9 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**.
 | 18 Sensitivities, MMA | 9 |
 | 19 FFD | 18 |
 | 20 Topology opt | 11, 18 |
+| 21 Frequency bands | 9, 10, 11 or 13 |
 
 - **Critical path:** 0 → 1 → 3 → 4 → 5/7 → 8 → 9 gives first modes in pure JAX.
 - **Biggest risk:** M3 (preconditioning). PR 11 gives an early 100M voxel result before the unstructured multigrid work.
 - **Off the critical path:** PRs 2, 6, 14 (element part) and 15 can be developed alongside it.
+- **Numbering:** PR numbers are identifiers, not a strict order; follow the dependency table.

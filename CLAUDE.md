@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-JAX large-scale 3D linear modal analysis (Kv = λMv). The plan lives in `docs/ROADMAP.md`. Work proceeds one PR at a time, in roadmap order.
+JAX large-scale 3D linear modal analysis (Kv = λMv). The plan lives in `docs/ROADMAP.md`. Work proceeds PR by PR, in dependency order.
 
 ## Code
 
@@ -19,9 +19,11 @@ Format: `<type>: <title>`, then a blank line and a short summary. Types: `feat`,
 
 ## Branches (local only for now)
 
-- No remote yet. `main` holds the docs baseline.
-- Each roadmap PR gets its own branch, named `pr-NN-<slug>` (e.g. `pr-00-scaffold`, `pr-01-mesh`). Each branch is created from the previous PR's branch, so they stack (`main` ← `pr-00` ← `pr-01` ← ...).
-- "Pushing a PR" means finishing its branch locally after the checklist below. If an earlier branch changes, rebase the later branches onto it.
+- No remote yet; everything is local.
+- Each roadmap PR gets its own branch, named `pr-NN-<slug>` (e.g. `pr-00-scaffold`, `pr-01-mesh`), created from `main`.
+- "Pushing a PR" means: the checklist below passes, then merge the branch into `main` with `git merge --no-ff`.
+- Stack a branch on another PR branch only while that earlier PR is still unfinished. Rebase with `git rebase --update-refs`.
+- Work in dependency order (see the table in `docs/ROADMAP.md`).
 
 ## Before pushing a PR
 
