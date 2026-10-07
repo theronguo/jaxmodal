@@ -13,7 +13,7 @@ Large-scale 3D linear modal analysis (Kv = λMv) in JAX. The solver uses matrix-
 
 Package name: `jaxmodal`. License: MIT.
 
-Status: planning. Review rounds 1–3 are incorporated. Items marked *(default, pending user)* are provisional.
+Status: planning. Review rounds 1–3 and the user's answers are incorporated.
 
 ## Principles
 
@@ -94,7 +94,7 @@ Status: planning. Review rounds 1–3 are incorporated. Items marked *(default, 
     - A complete V gives zero variance. One missing mode makes the estimate behave like χ²ₙ/n, so about 30 probes detect it at 99%.
     - "99% confidence" means ≤ 1 failure over 100 seeds. A slice passes when its estimate is < 0.5.
   - **Exact count:** at reference sizes (≤ ~15k DOF), from the inertia of dense `scipy.linalg.ldl`.
-  - **Assumed band position:** interior bands sit at mode indices up to ~1000 and contain ≤ 200 modes *(default, pending user)*. This bounds the polynomial degree, and so the cost of counting.
+  - **Assumed band position:** interior bands sit at mode indices up to ~1000 and contain ≤ 200 modes. This is a working assumption (the user doesn't know typical bands yet); PR 14 reports the counting cost as a function of mode index, so the assumption can be revisited. This bounds the polynomial degree, and so the cost of counting.
 - **Preconditioners:**
   - Voxel meshes: geometric multigrid, with semi-coarsening along axes that have few elements.
   - Unstructured meshes: p-multigrid (hex20/hex27 → hex8), then smoothed-aggregation AMG. AMG setup runs in pyamg on the host; the V-cycle runs on the device with a self-written block-ELL SpMV.
@@ -408,6 +408,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
   - With one mode deliberately left out of V, the count detects it in ≥ 99 of 100 seeds.
   - With V complete, the estimate is < 0.5.
   - Includes a κ ≥ 1e7 case.
+  - Counting cost (polynomial degree, wall time) vs mode index is reported.
   - No modes are missed compared with the dense inertia at reference sizes.
 
 ### PR 15: Interior bands
