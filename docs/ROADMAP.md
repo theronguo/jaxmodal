@@ -13,7 +13,7 @@ Large-scale 3D linear modal analysis (Kv = λMv) in JAX. The solver uses matrix-
 
 Package name: `jaxmodal`. License: MIT.
 
-Status: plan approved; review rounds 1–5 incorporated. Implementation proceeds PR by PR.
+Status: planning. Review rounds 1–6 incorporated. Implementation starts after a review round with all 5 reviewers satisfied.
 
 ## Principles
 
@@ -286,7 +286,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
 - Tests:
   - Distorted multi-element patch test, with linear displacement imposed by lifting inside the test:
     - Straight-edged distortion (midside nodes at edge midpoints): constant stress to 1e-10.
-    - Curved hex20/hex27: when the linear field is set nodally, constant strain is reproduced at every quadrature point to 1e-10. The lifted-patch stress error is reported with the midside offset amplitude stated, and must decrease under refinement.
+    - Curved hex20/hex27 (midside offset amplitude stated): constant stress to 1e-10 at every quadrature point. 3³ Gauss integrates cof(J)ᵀ∇̂N exactly here: for triquadratic geometry the integrand has degree ≤ 5 per direction.
   - Clamped model: no spurious eigenvalues compared with SciPy on the reduced matrices.
   - A_P is SPD on a clamped model, and Jacobi built on it has no zero divisions.
 
@@ -371,7 +371,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
 - Docs: `docs/eigensolvers.md` (algorithm, convergence theory, memory model, measured floor).
 - Tests, at reference sizes against PR 8, run at tol = 1e-10:
   - Relative λ error ≤ 1e-8.
-  - Principal angles: sin θ ≤ 10·r_M·λ/gap, with r_M the residual in the M⁻¹-norm (dense at reference sizes). Clusters with relative gap < 1e-4 are compared by subspace.
+  - Principal angles: sin θ ≤ 10·r_M·λ/gap. Angles are in the M-inner product, the gap is absolute, and r_M is the residual in the M⁻¹-norm (dense at reference sizes). Clusters with relative gap < 1e-4 are compared by subspace.
   - Exact multiplicities on a square-section beam and a cube.
   - Free-free: ‖RᵀMX‖ ≤ 1e-10.
   - Near-singular M (void mass ≈ 1e-12): converges to tol = 1e-8 within 500 iterations.
@@ -474,7 +474,8 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
   - Flat patch test with lifting.
   - Exactly 6 zero eigenvalues after condensation.
   - MacNeal–Harder (against the MacNeal–Harder 1985 reference values):
-    - Normalized tip deflection ≥ 0.95 on the regular mesh and ≥ 0.9 on the parallelogram mesh, for in-plane and out-of-plane loads.
+    - Normalized tip deflection ≥ 0.95 on the regular mesh and ≥ 0.9 on the parallelogram mesh, for extension, in-plane shear and out-of-plane shear.
+    - Twist is report-only.
     - Trapezoidal in-plane bending is report-only, because all 4-node membrane elements that pass the patch test lock there (MacNeal 1987).
   - **0.1% target (measured against 3D elasticity):**
     - Srinivas–Rao at L/t = 10 and 100 with ≥ k stacked elements per ply (k stated in the docs).
