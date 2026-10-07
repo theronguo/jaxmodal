@@ -13,7 +13,7 @@ Large-scale 3D linear modal analysis (Kv = λMv) in JAX. The solver uses matrix-
 
 Package name: `jaxmodal`. License: MIT.
 
-Status: planning. Review rounds 1–6 incorporated. Implementation starts after a review round with all 5 reviewers satisfied.
+Status: planning. Review rounds 1–6 incorporated. Implementation starts after three consecutive review rounds with all 5 reviewers satisfied.
 
 ## Principles
 
@@ -35,7 +35,7 @@ Status: planning. Review rounds 1–6 incorporated. Implementation starts after 
    - Sensitivities are a separate pass over the element kernels. Solvers and preconditioners are never differentiated.
 6. **Memory-aware.**
    - Elements (and voxel z-slabs) are processed in fixed-size chunks with `lax.map`/`scan`, the last chunk padded, adding into a donated output.
-   - Indices are int32, with asserts that N_dof and every flattened index product (e.g. n_el × n_dof_e, N_dof × m) stay below 2³¹. The asserts run in NumPy before casting.
+   - Indices are int32, with asserts that N_dof and every flattened index product used by an int32 gather/scatter (e.g. n_el × n_dof_e) stay below 2³¹. The asserts run in NumPy before casting.
    - Estimators include chunk temporaries and are checked against measured peaks.
 7. **Conventions** live in `docs/conventions.md` and are fixed in PR 0:
    - VTK node ordering internally, converted at import.
@@ -92,12 +92,13 @@ Status: planning. Review rounds 1–6 incorporated. Implementation starts after 
     - Shift-invert Lanczos on (K − σM)⁻¹M with σ in the band, full M-reorthogonalization, and a final Rayleigh–Ritz with true residuals on (K, M).
     - Inner MINRES with absolute-value preconditioning by the SPD multigrid of K + σM (Vecharynski–Knyazev 2013), with a fixed inner tolerance τ = 1e-8.
     - Slice widths come from the cost model (iterations ∝ 1 / relative distance to the slice edge). Duplicate modes at slice edges are removed by M-orthogonalization.
-    - Neither the Lanczos nor the counting steps need M⁻¹. Consistent M costs nothing extra there.
+    - Neither the Lanczos nor the counting steps need M⁻¹ beyond the one M-solve per probe. Consistent M costs nothing else extra there.
+    - MINRES needs an exactly symmetric preconditioner. An fp32 V-cycle is allowed only if it is applied symmetrically. The PR 15 tests run it in fp64.
   - **Completeness count (stochastic, at scale):**
     - Estimate s = ‖Π_V q(T) Π_V y‖²_M, with:
       - T = (K + σM)⁻¹M and σ ≈ λ_cutoff;
       - Π_V = I − VVᵀM, where V includes the computed modes and R.
-    - Probes: y = M⁻¹g with g ~ N(0, M). g comes from element-wise Cholesky factors of Me, plus one Jacobi-PCG M-solve per probe.
+    - Probes: y = M_P⁻¹g with g ~ N(0, M) masked. g comes from element-wise Cholesky factors of Me, plus one Jacobi-PCG solve per probe with the masked M_P (unit diagonal on constrained DOFs).
     - q is a Chebyshev–Jackson step polynomial ([0, λ_max]) or band-pass polynomial (interior band, deflated by the modes found in the band).
     - The degree d (∝ λ/gap at the cutoff) is chosen numerically so that the Jackson-tail bias n_dof·max q² over the out-of-band spectrum is ≤ 0.05, and q² ≥ 0.95 over the whole in-band interval.
     - Inner PCG tolerance τ ≲ 0.01/(d·√n_dof).
@@ -120,7 +121,7 @@ Status: planning. Review rounds 1–6 incorporated. Implementation starts after 
   - Accuracy: r ≤ 1e-8 in the PR 21 tests. Optimization runs use r ≤ max(1e-6, measured floor), and the sensitivity error is O(r·λ/gap).
   - Clusters use the sensitivity matrix f_sk = v_sᵀ(K′ − λM′)v_k over an M-orthonormal cluster basis, built from the bilinear forms. The optimization cluster tolerance is a relative gap of 1e-2, as in Du & Olhoff.
   - In MMA, each cluster uses the Seyranian / Du & Olhoff conditions:
-    - diagonal constraints β ≤ λ̄ + f_ss·Δρ;
+    - diagonal constraints β ≤ λ_s + f_ss·Δρ;
     - off-diagonal constraints |f_sk·Δρ| ≤ ε_off (s < k), as paired inequalities, with ε_off = 1e-2·|β|. By Gershgorin, β can overshoot the true λ_min by at most (N − 1)·ε_off.
   - Per-mode diagonal constraints alone are invalid, because f_kk depends on the basis.
   - Deflation and masking leave the formula unchanged.
@@ -182,8 +183,8 @@ All sizes are fp64.
     - measured fp64 peak;
     - time, peak memory and compile time.
 - **Compilation cache:**
-  - The persistent cache is enabled in tests, with `persistent_cache_min_compile_time_secs = 0`. PR 0 checks that it actually stores entries on CPU.
-  - Compile-time tests (PRs 5, 9, 18) run in a fresh subprocess with the cache disabled and time `jit(f).lower(...).compile()`.
+  - The persistent cache is enabled in tests, with `persistent_cache_min_compile_time_secs = 0`. PR 0 checks that it actually stores entries on CPU. If it doesn't, the cache is disabled and the tests don't depend on it.
+  - Compile-time tests (PRs 5 and 18; PR 9 only counts compiles) run in a fresh subprocess with the cache disabled and time `jit(f).lower(...).compile()`.
 - **Multi-device tests:**
   - They live in `tests/multidevice/`, which is in `collect_ignore`. `jax_num_cpu_devices` is used if the pinned jax supports it.
   - A wrapper test re-runs them in a fresh subprocess with `XLA_FLAGS=--xla_force_host_platform_device_count=…` set before jax is imported.
@@ -248,6 +249,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
   - Traceable 6×6 C constructors: isotropic, transversely isotropic, orthotropic (ν_ij/E_i = ν_ji/E_j convention), full anisotropic.
   - Positive-definiteness check.
   - Stress and strain Bond matrices.
+  - Orientations: local material axes per element, from Euler angles or two direction vectors.
   - Density.
 - Docs: `docs/materials.md`.
 - Tests:
@@ -271,7 +273,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
   - Partition of unity.
   - Linear completeness.
   - Exactly 6 zero eigenvalues of Ke, on distorted elements too.
-  - Lumped masses all > 0, and total mass equals ρV per direction.
+  - On mildly distorted elements (stated shapes), lumped masses are all > 0. Total mass equals ρV per direction, with V the quadrature volume.
   - Matches a NumPy reference implementation.
   - `jax.grad` of uᵀKe(X)u matches finite differences (rel. err. < 1e-6).
 
@@ -293,6 +295,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
 ### PR 5: Matrix-free unstructured operator
 - Contents:
   - Two modes: stored Ke, and on-the-fly computation from precomputed invJ·detJ per quadrature point.
+  - Optional per-element scaling arrays s_K and s_M, as in PR 6, so density design on unstructured meshes stays possible.
   - Chunked, block-native apply.
   - Scatter (`segment_sum`) vs chunked inverse-map gather, benchmarked per backend.
   - `diag_K`, `diag_M`, nodal masses.
@@ -316,7 +319,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
 - Tests:
   - Matches PR 5 on the same mesh.
   - `jax.grad` with respect to s_K and s_M matches finite differences.
-  - Mac acceptance: for a matvec plus six preallocated (n_dof, 8) fp64 arrays at 2M DOFs, the estimate is within 20% of the measured peak.
+  - Mac acceptance: for a matvec plus six preallocated (n_dof, 24) fp64 arrays (≈ 2.3 GB) at 2M DOFs, the estimate is within 20% of the measured peak.
   - Deferred GPU check (uses the PR 9 and PR 11 estimators): a 100M matvec plus the LOBPCG and preconditioner workspace fits in 80 GB.
 
 ### PR 7: Rigid body modes and deflation
@@ -355,7 +358,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
   - **NAFEMS:** within 1% of target, after first checking the gap between the target and a fine hex27 run.
   - **Convergence rates:**
     - Measured against the exact sliding-block and Srinivas–Rao solutions on affine meshes. Fitted rate ≥ 1.8 for hex8 and ≥ 3.6 for hex20/hex27, over ≥ 3 levels in the asymptotic range. Richardson extrapolation is used only to estimate errors, never to fit rates.
-    - Voxel Lamb sphere: fitted rate ≥ 0.8 over ≥ 4 levels, with split clusters compared by their mean.
+    - Voxel Lamb sphere: fitted rate ≥ 0.8 over ≥ 4 levels by least squares on log error, with split clusters compared by their mean.
   - **Mode matching:** free bodies (Visscher, Lamb, FV12) are compared from mode 7 on. Modes are paired with Srinivas–Rao by MAC and by the (m, n, family) labels.
   - **Upper bound:** consistent-mass eigenvalues converge from above on meshes of parallelepiped elements.
 
@@ -371,7 +374,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
 - Docs: `docs/eigensolvers.md` (algorithm, convergence theory, memory model, measured floor).
 - Tests, at reference sizes against PR 8, run at tol = 1e-10:
   - Relative λ error ≤ 1e-8.
-  - Principal angles: sin θ ≤ 10·r_M·λ/gap. Angles are in the M-inner product, the gap is absolute, and r_M is the residual in the M⁻¹-norm (dense at reference sizes). Clusters with relative gap < 1e-4 are compared by subspace.
+  - Principal angles: sin θ ≤ 10·r_M·λ/gap. Angles are in the M-inner product, the gap is absolute, and r_M is the λ-scaled residual in the M⁻¹-norm with x M-normalized (dense at reference sizes). Clusters with relative gap < 1e-4 are compared by subspace.
   - Exact multiplicities on a square-section beam and a cube.
   - Free-free: ‖RᵀMX‖ ≤ 1e-10.
   - Near-singular M (void mass ≈ 1e-12): converges to tol = 1e-8 within 500 iterations.
@@ -436,6 +439,8 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
 ### PR 14: Eigenvalue counting and [0, f_max]
 - Contents:
   - Deflated stochastic count with M-weighted probes and a Chebyshev–Jackson step polynomial (50 probes, fixed seed list).
+  - Element-wise Me Cholesky factors for probe sampling.
+  - `verify=True` opt-in for LOBPCG-from-0 bands.
   - Cost-model strategy selection.
   - [0, f_max] mode reusing PR 9 chunking, stopping at λ > λ_max.
   - `solve_modes(..., band=(0, f_max))`.
@@ -467,15 +472,16 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
   - ANS and 5-parameter EAS as under Key design decisions.
   - Static condensation, with condensed Ke stored. This adds to the PR 5 estimator.
   - Laminates with ply angles in the local shell frame.
-  - Mass from the displacement interpolation.
+  - Mass from the displacement interpolation. Consistent mass only; lumping is not supported for solid-shell elements.
   - Simply supported BCs on solids are defined in the docs.
 - Docs: `docs/elements.md`.
 - Tests:
   - Flat patch test with lifting.
   - Exactly 6 zero eigenvalues after condensation.
   - MacNeal–Harder (against the MacNeal–Harder 1985 reference values):
-    - Normalized tip deflection ≥ 0.95 on the regular mesh and ≥ 0.9 on the parallelogram mesh, for extension, in-plane shear and out-of-plane shear.
-    - Twist is report-only.
+    - Normalized tip deflection ≥ 0.95 on the regular mesh for extension, in-plane shear and out-of-plane shear.
+    - On the parallelogram mesh: ≥ 0.9 for extension and out-of-plane shear.
+    - Parallelogram in-plane shear and twist are report-only.
     - Trapezoidal in-plane bending is report-only, because all 4-node membrane elements that pass the patch test lock there (MacNeal 1987).
   - **0.1% target (measured against 3D elasticity):**
     - Srinivas–Rao at L/t = 10 and 100 with ≥ k stacked elements per ply (k stated in the docs).
@@ -545,7 +551,7 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
 - Docs: `docs/optimization.md`.
 - Tests:
   - Central finite differences with a step-size sweep against dense `eigh` solved to ~1e-13 at small sizes, for coordinate, density, material and nodal-mass parameters. Error ≤ 1e-6·‖g‖_∞. The test eigenvalues have relative gap ≥ 1e-3. Density parameters enter through linear scaling (s_K = s_M = ρ); the PR 23 interpolations are tested there.
-  - Double eigenvalue (symmetric cube or plate): one-sided directional differences along d match the eigenvalues of Σ_e d_e f^e. Both pairs are sorted before comparing, with error ≤ 1e-4·‖g‖_∞ and an O(h) step sweep.
+  - Double eigenvalue (symmetric cube or plate): one-sided directional differences along d match the eigenvalues of Σ_e d_e f^e. Both pairs are sorted before comparing, with error ≤ 1e-4·max_e‖f^e‖ and an O(h) step sweep.
 
 ### PR 22: FFD shape parametrization
 - Contents:
@@ -571,7 +577,7 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
   - Filters:
     - Voxel meshes: radial cone density filter by direct convolution, normalized at boundaries.
     - The benchmark also uses a density filter, even if the paper used a sensitivity filter, so that gradients stay consistent. The 5% tolerance on ω₁ absorbs the difference.
-    - Unstructured meshes: a Helmholtz PDE filter with PCG.
+    - Unstructured meshes: a Helmholtz PDE filter with PCG. Its VJP is the same symmetric filter solve (`custom_linear_solve`), so the solver is not differentiated. The PR 23 finite-difference test runs it to a 1e-12 tolerance.
   - Optional Heaviside projection with β-continuation.
   - Bound formulation with MMA.
 - First step of the PR: choose the Du & Olhoff 2007 example (and its volume fraction) and record it in `docs/verification.md`. The benchmark's pass criteria below are then fixed to that example.
@@ -579,7 +585,7 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
 - Tests:
   - End-to-end finite differences through filter → projection → interpolation → KS/bound, with test densities away from ρ̄ = 0.1 ± h, where the mass interpolation is only C¹.
   - Re-run of the PR 11 SIMP-contrast test on a PR 23 design.
-  - MMA with the PR 21 cluster constraints on a forced double eigenvalue: β is non-decreasing (to 1e-3 relative) after iteration k₀, with no mode-switch oscillation.
+  - MMA with the PR 21 cluster constraints on a forced double eigenvalue: β is non-decreasing (to 1e-3 relative) after iteration k₀ = 10 (fixed in the test), with no mode-switch oscillation.
   - Benchmark: the chosen Du & Olhoff 2007 example, with the paper's filter radius, and projection only if the paper uses it. The setup:
     - one element layer of thickness t ≤ h;
     - u_z = 0;
