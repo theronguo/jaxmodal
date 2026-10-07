@@ -13,7 +13,7 @@ Large-scale 3D linear modal analysis (Kv = λMv) in JAX. The solver uses matrix-
 
 Package name: `jaxmodal`. License: MIT.
 
-Status: planning. Review rounds 1–2 are incorporated. Items marked *(default, pending user)* are provisional.
+Status: planning. Review rounds 1–2 and the user's answers are incorporated.
 
 ## Principles
 
@@ -47,10 +47,10 @@ Status: planning. Review rounds 1–2 are incorporated. Items marked *(default, 
 
 - **Integration:** full integration only (hex8 2³, hex20/hex27 3³) for K and consistent M. No reduced integration, because its zero-energy modes would pollute the spectrum.
 - **Mass:**
-  - Consistent mass is the default.
+  - Consistent mass is the default everywhere, including band mode. Lumping is opt-in via `mass="lumped"`.
   - Lumped mass is optional: row-sum for hex8/hex27, HRZ for hex20. Row-sum lumping gives non-positive corner masses for hex20.
 - **Hex8:** plain, fully integrated hex8 is accepted. It shear-locks in bending, so bending accuracy comes from refinement or from hex20/hex27. Incompatible modes are a possible later addition.
-- **Dirichlet BCs** (axis-aligned only; inclined symmetry planes raise an error) *(default, pending user)*:
+- **Dirichlet BCs:** zero displacement per component in global axes on node sets. This covers clamping and, if ever needed, cut planes of symmetric half-models. There are no inclined or skew constraints.
   - Eigen operators are purely masked: `apply_K(v) = m ⊙ K(m ⊙ v)`, the same for M, with all iterates masked.
   - Every preconditioner, linear solve and inertia count instead uses A_P = m A m + (I − diag m): a unit diagonal on constrained DOFs, so the matrix is not singular. Preconditioner output is masked.
 - **Rigid body modes:**
@@ -80,9 +80,9 @@ Status: planning. Review rounds 1–2 are incorporated. Items marked *(default, 
     - Fixed inner tolerance τ = 1e-8.
     - Slice widths come from the iteration cost model (∝ 1 / relative distance to the slice edge). Duplicate modes at slice edges are removed by M-orthogonalization.
   - **Completeness:**
-    - At scale, a deflated stochastic count tr(step(T)) − rank(V) on T = (K + σM)⁻¹M, with PCG + multigrid inner solves, a fixed seed and probe count, and a stated confidence level *(default, pending user)*.
+    - At scale, a deflated stochastic count tr(step(T)) − rank(V) on T = (K + σM)⁻¹M, with PCG + multigrid inner solves, a fixed seed and probe count, at 99% confidence.
     - At reference sizes (≤ ~15k DOF), an exact count from the inertia of dense `scipy.linalg.ldl`.
-  - **Mass in band mode:** lumped M is allowed *(default, pending user)*.
+  - **Mass in band mode:** consistent M by default. That costs an extra M solve (PCG, which is cheap because M is well conditioned) per step. `mass="lumped"` removes that cost.
   - The same machinery is the fallback when nev ≳ 100 or LOBPCG preconditioning is poor.
 - **Preconditioners:**
   - Voxel meshes: geometric multigrid.
@@ -133,7 +133,8 @@ All sizes are fp64 unless noted.
 - **No Mac GPU:** the GPU isn't usable for this project. Metal GPUs have no fp64 hardware, and the `jax-metal` plugin is experimental with incomplete op coverage.
 - **Local checks:** `scripts/check.sh` runs lint plus the fast suite, `pytest -m "not slow and not gpu"`, which must finish in under 5 minutes on the M3. Remote CI comes later.
 - **Merge gate:** `pytest -m "not gpu"`, slow tests included.
-- **GPU checks:** GPU acceptance criteria go into the "Deferred GPU checks" list below and are run in PR 23 once a CUDA machine is available. Each affected PR has a Mac stand-in criterion *(default, pending user)*.
+- **GPU checks:** GPU acceptance criteria go into the "Deferred GPU checks" list below and are run in PR 23 whenever a CUDA machine becomes available; this is not a gate for other milestones. Each affected PR has a Mac acceptance test at a smaller size.
+- **Mac acceptance budgets:** the initial numbers below are fixed in PR 9, once matvec throughput has been measured. The 10M-DOF Mac run is an optional recorded benchmark, not a gate.
 - **Benchmarks:** JSON results are committed to `benchmarks/results/` and record:
   - jax and jaxlib versions;
   - the measured STREAM bandwidth, which is the CPU roofline;
@@ -260,7 +261,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**.
 - Tests:
   - Matches PR 5 on the same mesh.
   - `jax.grad` with respect to s_K and s_M matches finite differences.
-  - Mac stand-in: estimator within 20% of the measured peak at 1M and 10M DOFs, extrapolated to 100M.
+  - Mac acceptance: estimator within 20% of the measured peak at 1M and 10M DOFs, extrapolated to 100M.
   - Deferred GPU check: a 100M-DOF matvec plus the LOBPCG workspace (6 blocks, m = 8) fits in 80 GB.
 
 ### PR 7: Rigid body modes and deflation
@@ -274,7 +275,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**.
 - Tests:
   - ‖KR‖ ≤ 1e-12·‖K‖‖R‖.
   - ‖RᵀMR − I‖ ≤ 1e-12.
-  - A free block with 1, 2 or 3 axis-aligned symmetry planes leaves 3, 1 or 0 rigid modes.
+  - A free block with u_x = 0 on one face leaves 3 rigid modes; adding u_y = 0 on a second face leaves 1; adding u_z = 0 on a third leaves 0.
   - Two disconnected parts give 12 rigid modes.
   - Projected iterates stay M-orthogonal to R.
 
@@ -347,7 +348,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**.
 - Tests:
   - Iterations grow ≤ 20% over 3 refinements.
   - A synthetic SIMP-like density field (checked in; ρ ∈ [1e-3, 1], p = 3, giving a stiffness contrast of 1e-9) converges, with iteration counts reported. This is re-run on a PR 20 design later.
-  - Mac stand-in: a 10M-DOF voxel modal solve, with wall time recorded.
+  - Mac acceptance: a 2M-DOF voxel modal solve, 10 modes, wall time ≤ 10 min.
   - Deferred GPU check: a 100M-DOF voxel modal solve.
 
 ### PR 12: p-multigrid for unstructured meshes
@@ -365,7 +366,8 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**.
 - Docs: `docs/preconditioners.md`.
 - Tests:
   - Setup time and host-memory benchmarks.
-  - Mac: a 10M-DOF hex20 modal solve with 20 modes, peak ≤ 50 GB, wall time ≤ 3 h *(default, pending user)*.
+  - Mac acceptance: a 1M-DOF hex20 modal solve, 20 modes, wall time ≤ 15 min, peak within 20% of the estimator.
+  - Optional benchmark: 10M DOFs on the Mac, recorded.
   - Deferred GPU check: the same run on one GPU.
 
 ## M3b: Frequency bands
