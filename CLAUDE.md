@@ -34,5 +34,6 @@ Format: `<type>: <title>`, then a blank line and a short summary. Types: `feat`,
 
 ## Planning
 
+- Before implementing any PR, write a plan for it (e.g. `docs/plans/pr-NN-<slug>.md`, committed on the PR branch) and review it as below; implement only once all reviewers are satisfied.
 - When making a plan, run several review rounds of 5 subagents each to check it. Revise and repeat until all reviewers are satisfied.
 - Stop the review loop and ask the user when the remaining issues need the user's input (decisions or information only they have) instead of iterating further.
