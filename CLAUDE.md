@@ -20,7 +20,7 @@ Format: `<type>: <title>`, then a blank line and a short summary. Types: `feat`,
 ## Branches (local only for now)
 
 - No remote yet; everything is local.
-- Each roadmap PR gets its own branch, named `pr-NN-<slug>` (e.g. `pr-00-scaffold`, `pr-01-mesh`), created from `main`.
+- Each roadmap PR gets its own branch, named `pr-NN-<slug>` (e.g. `pr-00-scaffold`, `pr-01-mesh`), created from `main`. A PR split into parts uses `pr-NNa-<slug>`, `pr-NNb-<slug>`, ...
 - "Pushing a PR" means: the checklist below passes, then merge the branch into `main` with `git merge --no-ff`.
 - Stack a branch on another PR branch only while that earlier PR is still unfinished. When the base merges, run `git rebase --onto main <base> <branch>` (add `--update-refs` when several branches are stacked).
 - Work in dependency order (see the table in `docs/ROADMAP.md`).
