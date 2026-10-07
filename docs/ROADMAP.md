@@ -13,7 +13,7 @@ Large-scale 3D linear modal analysis (Kv = λMv) in JAX. The solver uses matrix-
 
 Package name: `jaxmodal`. License: MIT.
 
-Status: planning. Review rounds 1–3 and the user's answers are incorporated.
+Status: planning. Review rounds 1–4 and the user's answers are incorporated.
 
 ## Principles
 
@@ -22,7 +22,8 @@ Status: planning. Review rounds 1–3 and the user's answers are incorporated.
 3. **Fixed shapes; everything else is a `jit` argument.**
    - Topology preprocessing (connectivity, DOF maps, sets) runs in NumPy.
    - Every array is a pytree `jit` argument: int32 topology, geometry, densities, material parameters, nodal masses, stored Ke, multigrid/AMG matrices and rigid modes. Nothing is closed over.
-   - Only shapes, chunk sizes, element types and block sizes are static.
+   - Only shapes, chunk sizes, element types, block sizes, Chebyshev smoother degrees and multigrid level counts are static. The counting-polynomial degree is a dynamic `fori_loop` bound.
+   - The one allowed closure exception is the test-only `pure_callback` coarse solve in PR 12.
    - Iterative solvers keep fixed shapes. Dropped or converged columns are masked, not removed.
 4. **Extensible element types.**
    - Each element type is one registry entry: node count, shape functions, quadrature rule and reference faces.
@@ -34,7 +35,7 @@ Status: planning. Review rounds 1–3 and the user's answers are incorporated.
    - Sensitivities are a separate pass over the element kernels. Solvers and preconditioners are never differentiated.
 6. **Memory-aware.**
    - Elements (and voxel z-slabs) are processed in fixed-size chunks with `lax.map`/`scan`, the last chunk padded, adding into a donated output.
-   - Indices are int32, with asserts on N_dof and on every flattened index product (e.g. n_el × n_dof_e) staying below 2³¹.
+   - Indices are int32, with asserts that N_dof and every flattened index product (e.g. n_el × n_dof_e, N_dof × m) stay below 2³¹.
    - Estimators include chunk temporaries and are checked against measured peaks.
 7. **Conventions** live in `docs/conventions.md` and are fixed in PR 0:
    - VTK node ordering internally, converted at import.
@@ -57,13 +58,13 @@ Status: planning. Review rounds 1–3 and the user's answers are incorporated.
 - **Rigid body modes:**
   - Computed analytically per connected part.
   - Under Dirichlet sets, the remaining modes are R·null((I − m)R), computed via an SVD, then M-orthonormalized and deflated with P = I − R Rᵀ M.
-  - The AMG near-null-space is masked the same way.
+  - The AMG near-null-space is m ⊙ R: all 6 modes per part with constrained rows zeroed. It is not the reduced deflation basis, which can be empty for clamped models.
 - **Preconditioning:**
   - Preconditioners approximate A = K + σM with σ > 0 (default ≈ estimated λ_target), used as A_P.
   - They must be fixed, linear and SPD: symmetric pre- and post-smoothing, no inner Krylov.
   - The Chebyshev λ_max estimate uses a safety factor of 1.1.
 - **Eigensolver:** generalized LOBPCG following Hetmaniuk–Lehoucq / Duersch et al. 2018:
-  - SVQB orthonormalization with a drop tolerance; dropped directions are masked.
+  - SVQB orthonormalization with a drop tolerance; dropped directions are masked. In Rayleigh–Ritz, masked columns get B = 1 and A = +big, so they never appear as spurious low Ritz values.
   - P is dropped (masked) when ill-conditioned.
   - Implicit product updates with periodic explicit recompute.
   - The deflation projector is re-applied every iteration.
@@ -72,7 +73,7 @@ Status: planning. Review rounds 1–3 and the user's answers are incorporated.
 - **Convergence:**
   - Measured by the λ-scaled residual r = ‖Kx − λMx‖ / (|λ|‖Mx‖). This gives sin θ ≲ r·λ/gap and δλ/λ ≲ r²·λ/gap. The normwise backward error is only reported.
   - Default tol = 1e-6.
-  - Accept r ≤ max(tol, c·ε·λ̂_max/λ), with λ̂_max from Gershgorin or Chebyshev. A stagnation exit is flagged in `info`.
+  - Accept r ≤ max(tol, c·ε·(‖K‖ + |λ|‖M‖)‖x‖ / (|λ|‖Mx‖)), with c = 10 and ‖K‖, ‖M‖ estimated by power iteration. This stays bounded for near-singular M. A stagnation exit is flagged in `info`.
   - A cluster is a set of eigenvalues whose relative gaps are < 100·tol.
   - Block size m = nev + max(5, 0.2·nev).
   - Chunk and lock cutoffs must fall in a gap.
@@ -81,6 +82,9 @@ Status: planning. Review rounds 1–3 and the user's answers are incorporated.
   - Hence fp32 never goes into X, R, P or the returned modes.
   - PR 9 measures the floor.
 - **Frequency bands (PRs 14–15):**
+  - **Strategy:** chosen by a cost model.
+    - Bands whose upper mode index is ≲ 1200 are computed by chunked LOBPCG from 0, then filtered to the band.
+    - Higher bands use shift-invert. Near mode index 1000 (relative gap ~7e-4), shift-invert costs ~10³ MINRES iterations per Lanczos step, and counting costs d ~ 10³–10⁴ solves per probe block.
   - **[0, f_max]:** chunked LOBPCG until λ > λ_max.
   - **Interior bands [f₁, f₂]:**
     - Shift-invert Lanczos on (K − σM)⁻¹M with σ in the band, full M-reorthogonalization, and a final Rayleigh–Ritz with true residuals on (K, M).
@@ -88,15 +92,20 @@ Status: planning. Review rounds 1–3 and the user's answers are incorporated.
     - Slice widths come from the cost model (iterations ∝ 1 / relative distance to the slice edge). Duplicate modes at slice edges are removed by M-orthogonalization.
     - Neither the Lanczos nor the counting steps need M⁻¹. Consistent M costs nothing extra there.
   - **Completeness count (stochastic, at scale):**
-    - Estimate yᵀM p(T) Π_V y, with T = (K + σM)⁻¹M and Π_V = I − VVᵀM, where V includes the computed modes and R.
+    - Estimate s = ‖Π_V q(T) Π_V y‖²_M, with:
+      - T = (K + σM)⁻¹M and σ ≈ λ_cutoff;
+      - Π_V = I − VVᵀM, where V includes the computed modes and R;
+      - p = q².
     - Probes: y = M⁻¹g with g ~ N(0, M). g comes from element-wise Cholesky factors of Me, plus one Jacobi-PCG M-solve per probe.
-    - p is a Chebyshev–Jackson step polynomial ([0, λ_max]) or band-pass polynomial (interior band, deflated by the modes found in the band). Its degree d ∝ λ/gap at the cutoff, and the inner PCG tolerance is ≪ 1/d.
-    - A complete V gives zero variance. One missing mode makes the estimate behave like χ²ₙ/n, so about 30 probes detect it at 99%.
-    - "99% confidence" means ≤ 1 failure over 100 seeds. A slice passes when its estimate is < 0.5.
+    - q is a Chebyshev–Jackson step polynomial ([0, λ_max]) or band-pass polynomial (interior band, deflated by the modes found in the band).
+    - The degree d (∝ λ/gap at the cutoff) is chosen numerically so that the Jackson-tail bias n_dof·max q² over the out-of-band spectrum is ≤ 0.05, and q² ≥ 0.95 at the last in-band mode.
+    - Inner PCG tolerance τ ≲ 0.01/(d·√n_dof).
+    - One missing mode makes the estimate behave like χ²ₙ/n. With 50 probes, P(missed mode undetected) ≈ 1.3%.
+    - A slice passes when its estimate is < 0.5.
   - **Exact count:** at reference sizes (≤ ~15k DOF), from the inertia of dense `scipy.linalg.ldl`.
   - **Assumed band position:** interior bands sit at mode indices up to ~1000 and contain ≤ 200 modes. This is a working assumption (the user doesn't know typical bands yet); PR 14 reports the counting cost as a function of mode index, so the assumption can be revisited. This bounds the polynomial degree, and so the cost of counting.
 - **Preconditioners:**
-  - Voxel meshes: geometric multigrid, with semi-coarsening along axes that have few elements.
+  - Voxel meshes: geometric multigrid with semi-coarsening: an axis stops coarsening once it has ≤ 2 elements.
   - Unstructured meshes: p-multigrid (hex20/hex27 → hex8), then smoothed-aggregation AMG. AMG setup runs in pyamg on the host; the V-cycle runs on the device with a self-written block-ELL SpMV.
   - No `jax.experimental.sparse` in hot paths.
 - **Shells:** solid-shell elements (3 DOFs per node) following Klinkel–Gruttmann–Wagner (1999):
@@ -108,12 +117,20 @@ Status: planning. Review rounds 1–3 and the user's answers are incorporated.
   - Formula: dλ/dp = vᵀ(∂K/∂p − λ∂M/∂p)v / vᵀMv.
   - Computed as a chunked `vmap(grad(element energy))` pass with v held fixed, in fp64.
   - Accuracy: r ≤ 1e-8 in the PR 21 tests. Optimization runs use r ≤ max(1e-6, measured floor), and the sensitivity error is O(r·λ/gap).
-  - Clusters use the sensitivity matrix f_sk = v_sᵀ(K′ − λM′)v_k, built from the bilinear forms. In MMA, every mode of a cluster gets its own bound constraint with its diagonal gradient. This is valid because all modes of the cluster are bounded.
+  - Clusters use the sensitivity matrix f_sk = v_sᵀ(K′ − λM′)v_k, built from the bilinear forms. The optimization cluster tolerance is a relative gap of 1e-2, as in Du & Olhoff.
+  - In MMA, each cluster uses the Seyranian / Du & Olhoff conditions:
+    - diagonal constraints β ≤ λ̄ + f_ss·Δρ;
+    - off-diagonal constraints |f_sk·Δρ| ≤ ε_off (s < k), as paired inequalities.
+  - Per-mode diagonal constraints alone are invalid, because f_kk depends on the basis.
   - Deflation and masking leave the formula unchanged.
 - **Optimizer:** MMA implemented in JAX (~200 LOC). No OC, because eigenvalue sensitivities change sign.
-- **Scatter vs gather:** XLA:CPU scatter is effectively serial. PR 5 benchmarks scatter against an inverse-map gather (chunked by node range on an RCM-ordered mesh) on each backend, and the default may differ per backend.
+- **Scatter vs gather:** XLA:CPU scatter is effectively serial. PR 5 benchmarks scatter against an inverse-map gather on each backend, and the default may differ per backend.
+  - The gather runs on an RCM-ordered mesh (RCM is built in PR 5), chunked by node range.
+  - Element contributions go into a padded, fixed-size element window per range, which is counted in the estimator.
 - **Dependencies:**
-  - Core: `jax` (pinned minimum version), `numpy`, `scipy`, `meshio`, `pyamg`, `pymetis`, all with macOS arm64 wheels.
+  - Python 3.12.
+  - Core: `jax` (pinned minimum version), `numpy`, `scipy`, `meshio`, `pyamg`, all with macOS arm64 wheels.
+  - `pymetis` is an optional extra (only PR 19 needs it).
   - Versions are locked with `uv.lock`.
   - No SLEPc, CHOLMOD or pypardiso.
   - meshio's `.inp` reader doesn't handle parts or assemblies; a small custom reader is added only if needed.
@@ -128,7 +145,8 @@ All sizes are fp64.
 | Operator | Ke ≈ 1.2 GB | < 0.1 GB | Ke ≈ 11.7 GB (symmetric) or on-the-fly | < 1 GB |
 | LOBPCG, 9 blocks × m | m = 25: ≈ 1.8 GB | m = 15: ≈ 2.2 GB | m = 30: ≈ 22 GB | m = 10: ≈ 72 GB |
 | LOBPCG, 6 blocks | — | — | m = 30: ≈ 14 GB | m = 8: ≈ 38 GB |
-| Preconditioner workspace (≈ 4 blocks × m) | ≈ 0.8 GB | ≈ 1 GB | ≈ 10 GB | m = 8: ≈ 26 GB |
+| Rayleigh–Ritz update temporaries (≈ 2 blocks × m) | ≈ 0.4 GB | ≈ 0.5 GB | ≈ 5 GB | m = 8: ≈ 13 GB |
+| Preconditioner workspace (≈ 4 blocks × m) | ≈ 0.8 GB | ≈ 1 GB | ≈ 10 GB | m = 8: ≈ 26 GB (fp32: 13 GB) |
 | Multigrid | AMG ≈ 0.4 GB (device); pyamg peak 2–3 GB (host) | ≈ 0.2 GB | AMG ≈ 3–4 GB; pyamg peak ≈ 20+ GB (host) | ≈ 9.3 GB |
 | Gather path (if chosen) | chunked by node range | — | chunked by node range | — |
 | Locked modes / deflation basis | small | small | n × 0.08 GB (fp32: half) | n × 0.8 GB (fp32: half) |
@@ -139,7 +157,8 @@ All sizes are fp64.
   - An `np.memmap` is used only if the locked modes exceed RAM.
 - **80 GB GPU:**
   - 10M fits.
-  - 100M is tight: 6 blocks, m = 8, and a fp32 deflation basis come to ≈ 75 GB. Fall back to m = 6 if needed.
+  - 100M is tight: ≈ 70 GB with 6 blocks, m = 8 (nev = 3 per chunk), an fp32 preconditioner workspace and multigrid, and an fp32 deflation basis. That works, but takes many chunks.
+  - Larger blocks at 100M need multi-GPU (PR 19).
 - The PR 5/6/9/11/13 estimators reproduce this table and are validated against measured peaks where the estimate is ≥ 2 GB.
 
 ## Development environment
@@ -151,14 +170,22 @@ All sizes are fp64.
 - **GPU checks:** GPU acceptance criteria go into the "Deferred GPU checks" list and are run in PR 24 whenever a CUDA machine becomes available. They don't gate other milestones.
 - **Mac acceptance budgets:** the initial numbers below are fixed in PR 9, once matvec throughput has been measured.
 - **Benchmarks:**
-  - Each measurement runs in a fresh subprocess and reports peak RSS minus baseline RSS. `memory_stats()` is unavailable on CPU.
+  - Each measurement runs in a fresh subprocess and reports peak RSS minus baseline RSS.
+    - `memory_stats()` is unavailable on CPU.
+    - `ru_maxrss` is in bytes on macOS.
+    - For the 10M runs, `phys_footprint` is also recorded, because memory compression can make RSS undercount.
   - JSON results go to `benchmarks/results/` and record:
     - jax and jaxlib versions;
-    - multithreaded STREAM triad bandwidth (a jitted triad), with the method stated;
+    - STREAM triad bandwidth, both jitted and NumPy/C multithreaded, with the method stated;
+    - XLA thread count and P/E-core setup;
     - measured fp64 peak;
     - time, peak memory and compile time.
-- **Compilation cache:** the persistent compilation cache is enabled in tests.
-- **Multi-device tests:** they set `--xla_force_host_platform_device_count` before importing jax, so they run in their own pytest process.
+- **Compilation cache:**
+  - The persistent cache is enabled in tests, with `persistent_cache_min_compile_time_secs = 0`.
+  - It is disabled for compile-time tests (PRs 5, 9, 18).
+- **Multi-device tests:**
+  - They live in `tests/multidevice/`, which is in `collect_ignore`.
+  - A wrapper test re-runs them in a fresh subprocess with `XLA_FLAGS=--xla_force_host_platform_device_count=…` set before jax is imported.
 - **Data:**
   - Tiny test meshes live in `tests/data/`.
   - Large benchmark meshes are generated by scripts in `benchmarks/meshes/` and git-ignored.
@@ -199,6 +226,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
   - An fp32 path stays fp32 with x64 enabled.
   - Index arrays from `argsort`, `nonzero` and `arange` are cast back to int32.
   - The harness reports a stable RSS delta for a known allocation.
+  - Buffer donation works on CPU, with no "donated buffers were not usable" warning.
 
 ### PR 1: Mesh data model and parser
 - Contents:
@@ -253,7 +281,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
   - Masking and A_P.
 - Docs: `docs/operators.md`.
 - Tests:
-  - Distorted multi-element patch test, with linear displacement imposed by lifting inside the test: constant stress to 1e-10.
+  - Distorted multi-element patch test, with linear displacement imposed by lifting inside the test: constant stress to 1e-10 on straight-edged distortion (midside nodes at edge midpoints), and to 1e-6 on curved hex20/hex27.
   - Clamped model: no spurious eigenvalues compared with SciPy on the reduced matrices.
   - A_P is SPD on a clamped model, and Jacobi built on it has no zero divisions.
 
@@ -265,11 +293,12 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
   - `diag_K`, `diag_M`, nodal masses.
   - Memory estimator.
   - Node-local numbering.
+  - RCM node reordering (`scipy.sparse.csgraph.reverse_cuthill_mckee`) in `mesh/`.
 - Docs: `docs/operators.md`.
 - Tests:
   - Both modes match PR 4 to 1e-12 relative.
-  - The estimator is within 20% of the measured peak.
-  - Compile time doesn't depend on mesh size at a fixed shape.
+  - The estimator is within 20% of the measured peak at 2M hex20 DOFs.
+  - With the chunk size fixed and the cache disabled, compile time at 1M elements is ≤ 1.5× that at 10k elements.
 
 ### PR 6: Voxel stencil operator
 - Contents:
@@ -282,8 +311,8 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
 - Tests:
   - Matches PR 5 on the same mesh.
   - `jax.grad` with respect to s_K and s_M matches finite differences.
-  - Mac acceptance: the estimator is within 20% of the measured peak at 10M DOFs.
-  - Deferred GPU check (uses the PR 9 workspace estimator): a 100M matvec plus the LOBPCG and preconditioner workspace fits in 80 GB.
+  - Mac acceptance: for a matvec plus the 6-block LOBPCG workspace (m = 8) at 10M DOFs, the estimate is within 20% of the measured peak.
+  - Deferred GPU check (uses the PR 9 and PR 11 estimators): a 100M matvec plus the LOBPCG and preconditioner workspace fits in 80 GB.
 
 ### PR 7: Rigid body modes and deflation
 - Contents:
@@ -320,8 +349,9 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
   - **0.1% target:** sliding block, Visscher Ritz and Srinivas–Rao within 0.1% at stated hex20/hex27 meshes.
   - **NAFEMS:** within 1% of target, after first checking the gap between the target and a fine hex27 run.
   - **Convergence rates:**
-    - Measured against the exact sliding-block and Srinivas–Rao solutions on affine meshes: hex8 h², hex20/hex27 h⁴. Richardson extrapolation is used only to estimate errors, never to fit rates.
-    - Voxel Lamb sphere: fitted rate ≥ 0.8, with split clusters compared by their mean.
+    - Measured against the exact sliding-block and Srinivas–Rao solutions on affine meshes. Fitted rate ≥ 1.8 for hex8 and ≥ 3.6 for hex20/hex27, over ≥ 3 levels in the asymptotic range. Richardson extrapolation is used only to estimate errors, never to fit rates.
+    - Voxel Lamb sphere: fitted rate ≥ 0.8 over ≥ 4 levels, with split clusters compared by their mean.
+  - **Mode matching:** free bodies (Visscher, Lamb, FV12) are compared from mode 7 on. Modes are paired with Srinivas–Rao by MAC and by the (m, n, family) labels.
   - **Upper bound:** consistent-mass eigenvalues converge from above on meshes of parallelepiped elements.
 
 ### PR 9: Generalized LOBPCG and public API
@@ -336,11 +366,11 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
 - Docs: `docs/eigensolvers.md` (algorithm, convergence theory, memory model, measured floor).
 - Tests, at reference sizes against PR 8, run at tol = 1e-10:
   - Relative λ error ≤ 1e-8.
-  - Principal angles ≤ 1e-6. Clusters with relative gap < 1e-4 are compared by subspace.
+  - Principal angles: sin θ ≤ 10·r·λ/gap. Clusters with relative gap < 1e-4 are compared by subspace.
   - Exact multiplicities on a square-section beam and a cube.
   - Free-free: ‖RᵀMX‖ ≤ 1e-10.
   - Near-singular M (void mass ≈ 1e-12): converges to tol = 1e-8 within 500 iterations.
-  - The workspace estimator (9- and 6-block modes) is within 20% of the measured peak.
+  - The workspace estimator (9- and 6-block modes) is within 20% of the measured peak at 1M DOFs with m = 40.
   - The compiled step function compiles at most twice per solve.
 - **Milestone:** first end-to-end modes in pure JAX.
 
@@ -361,7 +391,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
 
 ### PR 11: Geometric multigrid for voxel meshes
 - Contents:
-  - Trilinear transfer operators, with semi-coarsening along axes that have few elements.
+  - Trilinear transfer operators, with semi-coarsening (an axis stops coarsening at ≤ 2 elements).
   - Galerkin coarse operators stored in block-ELL on levels ≥ 1.
   - Symmetric Chebyshev smoothing.
   - Dense Cholesky on the coarsest level.
@@ -400,14 +430,15 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
 
 ### PR 14: Eigenvalue counting and [0, f_max]
 - Contents:
-  - Deflated stochastic count with M-weighted probes and a Chebyshev–Jackson step polynomial.
+  - Deflated stochastic count with M-weighted probes and a Chebyshev–Jackson step polynomial (50 probes, fixed seed list).
+  - Cost-model strategy selection.
   - [0, f_max] mode reusing PR 9 chunking, stopping at λ > λ_max.
   - `solve_modes(..., band=(0, f_max))`.
 - Docs: `docs/eigensolvers.md` (estimator, variance, degree and cost).
 - Tests:
-  - With one mode deliberately left out of V, the count detects it in ≥ 99 of 100 seeds.
-  - With V complete, the estimate is < 0.5.
-  - Includes a κ ≥ 1e7 case.
+  - With one mode deliberately left out of V, the count detects it for ≥ 97 of a fixed list of 100 seeds. The test is deterministic.
+  - With V complete, the estimate (including Jackson bias) is < 0.5.
+  - A κ ≥ 1e7 case checks that inner-solve error and bias stay within the budget.
   - Counting cost (polynomial degree, wall time) vs mode index is reported.
   - No modes are missed compared with the dense inertia at reference sizes.
 
@@ -437,10 +468,15 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
 - Tests:
   - Flat patch test with lifting.
   - Exactly 6 zero eigenvalues after condensation.
-  - MacNeal–Harder in-plane and out-of-plane bending: normalized tip deflection ≥ 0.95 on the regular mesh, ≥ 0.9 on the distorted one.
-  - **0.1% target:** Srinivas–Rao (orthotropic and cross-ply, L/t = 10 and 100), and a clamped cylinder against a fine hex27 reference, all within 0.1% at stated meshes.
-  - No locking: at L/t = 1000 and L/t = 10, each error is measured against the reference at that same L/t, and the first is ≤ 1.5× the second.
-  - Distorted meshes: frequencies within 1% of the undistorted mesh at the same density.
+  - MacNeal–Harder:
+    - Each load case and mesh shape (regular, parallelogram, trapezoidal) is within 2% of the published KGW 1999 values.
+    - Trapezoidal in-plane bending is report-only, because all 4-node membrane elements that pass the patch test lock there (MacNeal 1987).
+  - **0.1% target (measured against 3D elasticity):**
+    - Srinivas–Rao at L/t = 100 with one layered solid-shell element.
+    - Srinivas–Rao at L/t = 10 with ≥ k stacked elements per ply (k stated in the docs).
+    - A clamped cylinder (R/t and L/R stated) against a fine hex27 reference.
+  - No locking: at L/t = 10 and 1000, the discretization error is measured against a converged solid-shell run at the same L/t. The error at L/t = 1000 is ≤ 1.5× the error at L/t = 10.
+  - Distorted meshes (parallelogram only): frequencies within 1% of the undistorted mesh at the same density.
   - `jax.grad` matches finite differences.
 
 ## M5: Postprocessing and performance
@@ -459,7 +495,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
 
 ### PR 18: Performance pass
 - Contents:
-  - RCM/Morton reordering.
+  - Morton reordering and reordering tuning.
   - Kernel fusion checks.
   - fp32 preconditioner validation.
   - Compile-time benchmark.
@@ -503,14 +539,15 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
 - Docs: `docs/optimization.md`.
 - Tests:
   - Central finite differences with a step-size sweep against dense `eigh` solved to ~1e-13 at small sizes, for coordinate, density, material and nodal-mass parameters. Error ≤ 1e-6·‖g‖_∞.
-  - Double eigenvalue (symmetric cube or plate): one-sided directional differences along d match the eigenvalues of Σ_e d_e f^e.
+  - Double eigenvalue (symmetric cube or plate): one-sided directional differences along d match the eigenvalues of Σ_e d_e f^e, with error ≤ 1e-4·‖g‖ and an O(h) step sweep.
+  - MMA with cluster constraints on a forced double eigenvalue: β is monotone (no oscillation).
 
 ### PR 22: FFD shape parametrization
 - Contents:
   - Bernstein lattice → node coordinates, in JAX.
-  - Nodes outside the lattice and BC nodes are frozen.
+  - Nodes outside the lattice, the outer control-point layer (for continuity at the lattice boundary) and BC nodes are frozen.
   - Constraint: a KS/p-norm aggregate of detJ/detJ₀ ≥ ε.
-  - Example: maximize the fundamental frequency at constant mass, using MMA.
+  - Example: maximize the fundamental frequency subject to mass ≤ M₀, using MMA.
 - Docs: `docs/optimization.md`.
 - Tests:
   - Control-point gradients pass the PR 21 finite-difference criterion.
@@ -518,19 +555,25 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
 
 ### PR 23: Topology optimization
 - Contents:
-  - SIMP: E = ρ^p E₀ with ρ ∈ [1e-3, 1], following Du & Olhoff.
-  - Mass interpolation m = ρ for ρ > 0.1, else c₁ρ⁶ + c₂ρ⁷ (c₁ = 6e5, c₂ = −5e6; C¹ at 0.1).
+  - Densities:
+    - Design ρ ∈ [0, 1].
+    - Filtered ρ̃.
+    - Physical ρ̄ = ρ_min + (1 − ρ_min)·H_β(ρ̃), with ρ_min = 1e-3. Without projection, H_β is the identity.
+  - SIMP: E = ρ̄^p E₀.
+  - Mass interpolation m(ρ̄) = ρ̄ for ρ̄ > 0.1, else c₁ρ̄⁶ + c₂ρ̄⁷ (c₁ = 6e5, c₂ = −5e6; C¹ at 0.1).
+  - Volume constraint Σ ρ̄_e v_e ≤ V*.
   - Non-structural mass via nodal masses.
   - Filters:
-    - Voxel meshes: a separable product of 1D hat filters, normalized at boundaries.
+    - Voxel meshes: radial cone filter by direct convolution, normalized at boundaries.
     - Unstructured meshes: a Helmholtz PDE filter with PCG.
-  - Heaviside projection with β-continuation.
+  - Optional Heaviside projection with β-continuation.
   - Bound formulation with MMA.
-- Docs: `docs/optimization.md`; `docs/verification.md` gets the full Du & Olhoff setup (example chosen from the paper, with table and figure numbers).
+- First step of the PR: choose the Du & Olhoff 2007 example (and its volume fraction) and record it in `docs/verification.md`. The benchmark's pass criteria below are then fixed to that example.
+- Docs: `docs/optimization.md`; `docs/verification.md` gets the full Du & Olhoff setup (table and figure numbers).
 - Tests:
   - End-to-end finite differences through filter → projection → interpolation → KS/bound.
   - Re-run of the PR 11 SIMP-contrast test on a PR 23 design.
-  - Benchmark: a Du & Olhoff 2007 beam, with the filter and projection settings as in the paper. The setup:
+  - Benchmark: the chosen Du & Olhoff 2007 example, with the paper's filter, and projection only if the paper uses it. The setup:
     - one element layer of thickness t ≤ h;
     - u_z = 0;
     - plane-stress-equivalent material E′ = E(1 + 2ν)/(1 + ν)², ν′ = ν/(1 + ν).
@@ -538,7 +581,7 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
     - ω₁ within 5% of the published value.
     - If the paper's example is bimodal: relative gap λ₂/λ₁ − 1 ≤ 1%.
     - Modes antisymmetric in z lie above the computed band.
-    - No localized modes (MAC and energy-fraction check).
+    - No localized modes: in each reported mode, the kinetic-energy fraction in elements with ρ̄ < 0.1 is < 5%.
 
 ## GPU validation
 
@@ -567,7 +610,7 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
 | 7 Rigid modes, deflation | 4 |
 | 8 Reference eigensolver | 4, 7 |
 | 9 LOBPCG, API | 5, 7, 8 |
-| 10 Linalg kernels, smoothers | 5, 6 |
+| 10 Linalg kernels, smoothers | 5 |
 | 11 Voxel GMG | 6, 9, 10 |
 | 12 p-MG | 5, 9, 10 |
 | 13 AMG | 12 |
@@ -583,6 +626,6 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
 | 23 Topology opt | 11, 20, 21 |
 | 24 GPU validation | CUDA hardware; the PRs in the deferred list |
 
-- **Critical path:** 0 → 1 → 3 → 4 → 7 → 8 → 9, with PR 5 in parallel with 7–8. This gives first modes in pure JAX.
+- **Critical path:** 0 → 1 → 3 → 4 → 7 → 8 → 9, with PR 2 in parallel with 1 and PR 5 in parallel with 7–8. This gives first modes in pure JAX.
 - **Biggest risk:** M3 (preconditioning).
 - **Parallel work:** PRs 2, 6 and 20 can proceed alongside the critical path. PRs 16 and 17 can proceed alongside M3.
