@@ -85,7 +85,7 @@ Status: plan approved; review rounds 1–5 incorporated. Implementation proceeds
 - **Frequency bands (PRs 14–15):**
   - **Strategy:** chosen by a cost model.
     - Bands whose upper mode index is ≲ 1200 are computed by chunked LOBPCG from 0, then filtered to the band.
-    - The stochastic count is on by default for shift-invert bands. For LOBPCG-from-0 bands it is opt-in (`verify=True`), because it can cost more than the solve itself.
+    - The stochastic count is on by default for shift-invert bands. For LOBPCG-from-0 bands it is opt-in (`verify=True`, implemented in PR 14), because it can cost more than the solve itself.
     - Higher bands use shift-invert. Near mode index 1000 (relative gap ~7e-4), shift-invert costs ~10³ MINRES iterations per Lanczos step, and counting costs d ~ 10³–10⁴ solves per probe block.
   - **[0, f_max]:** chunked LOBPCG until λ > λ_max.
   - **Interior bands [f₁, f₂]:**
@@ -543,7 +543,7 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
   - KS aggregation over complete clusters only: compute n + 2 modes and assert a gap at the cutoff.
 - Docs: `docs/optimization.md`.
 - Tests:
-  - Central finite differences with a step-size sweep against dense `eigh` solved to ~1e-13 at small sizes, for coordinate, density, material and nodal-mass parameters. Error ≤ 1e-6·‖g‖_∞. The test eigenvalues have relative gap ≥ 1e-3, and the test densities stay away from ρ̄ = 0.1 ± h, where the mass interpolation is only C¹.
+  - Central finite differences with a step-size sweep against dense `eigh` solved to ~1e-13 at small sizes, for coordinate, density, material and nodal-mass parameters. Error ≤ 1e-6·‖g‖_∞. The test eigenvalues have relative gap ≥ 1e-3. Density parameters enter through linear scaling (s_K = s_M = ρ); the PR 23 interpolations are tested there.
   - Double eigenvalue (symmetric cube or plate): one-sided directional differences along d match the eigenvalues of Σ_e d_e f^e. Both pairs are sorted before comparing, with error ≤ 1e-4·‖g‖_∞ and an O(h) step sweep.
 
 ### PR 22: FFD shape parametrization
@@ -576,7 +576,7 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
 - First step of the PR: choose the Du & Olhoff 2007 example (and its volume fraction) and record it in `docs/verification.md`. The benchmark's pass criteria below are then fixed to that example.
 - Docs: `docs/optimization.md`; `docs/verification.md` gets the full Du & Olhoff setup (table and figure numbers).
 - Tests:
-  - End-to-end finite differences through filter → projection → interpolation → KS/bound.
+  - End-to-end finite differences through filter → projection → interpolation → KS/bound, with test densities away from ρ̄ = 0.1 ± h, where the mass interpolation is only C¹.
   - Re-run of the PR 11 SIMP-contrast test on a PR 23 design.
   - MMA with the PR 21 cluster constraints on a forced double eigenvalue: β is non-decreasing (to 1e-3 relative) after iteration k₀, with no mode-switch oscillation.
   - Benchmark: the chosen Du & Olhoff 2007 example, with the paper's filter radius, and projection only if the paper uses it. The setup:
