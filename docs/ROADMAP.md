@@ -13,7 +13,7 @@ Large-scale 3D linear modal analysis (Kv = λMv) in JAX. The solver uses matrix-
 
 Package name: `jaxmodal`. License: MIT.
 
-Status: planning. Review rounds 1–16 incorporated. Implementation starts after three consecutive review rounds with all 5 reviewers satisfied.
+Status: planning. Review rounds 1–17 incorporated. Implementation starts after three consecutive review rounds with all 5 reviewers satisfied.
 
 ## Principles
 
@@ -90,7 +90,7 @@ Status: planning. Review rounds 1–16 incorporated. Implementation starts after
     - Near mode index 1000 (relative gap g ≈ 7e-4), shift-invert costs ~10³–10⁵ MINRES iterations per Lanczos step (worst case ∝ ln(1/τ)/δ, δ the relative distance from σ to the nearest eigenvalue; Krylov deflation of the few eigenvalues nearest σ moves it toward the low end; PR 15 calibrates this), and counting costs d ≈ 25/g ≈ 3.5e4 solves per probe block.
   - **[0, f_max]:** chunked LOBPCG until λ > λ_c, with the cutoff λ_c = (2πf_max)².
   - **Interior bands [f₁, f₂]:**
-    - Shift-invert Lanczos on (K − σM)⁻¹M with σ in the band, full M-reorthogonalization, and a final Rayleigh–Ritz with true residuals on (K, M).
+    - Block shift-invert Lanczos on (K − σM)⁻¹M with σ in the band, fixed block size b = 6 (≥ the largest expected multiplicity, so repeated eigenvalues are found), the same column masking as LOBPCG, full M-reorthogonalization, and a final Rayleigh–Ritz with true residuals on (K, M).
     - Inner MINRES with absolute-value preconditioning by the SPD multigrid of K + σM (Vecharynski–Knyazev 2013), with a fixed inner tolerance τ = 1e-8.
     - Slice widths come from the cost model (MINRES iterations ∝ ln(1/τ)/δ, with δ the relative distance from σ to the nearest eigenvalue, plus an outlier term for the few eigenvalues nearest σ; calibrated in PR 15). The cost model also counts deflation-basis memory (n_dof × number of vectors) and the predicted counting cost, and rejects strategies over the memory budget. Duplicate modes at slice edges are removed by M-orthogonalization.
     - Neither the Lanczos nor the counting steps need M⁻¹ beyond the one M-solve per probe. Consistent M costs nothing else extra there.
@@ -180,7 +180,7 @@ All sizes are fp64; GB = 10⁹ bytes.
 - **Benchmarks:**
   - Each measurement runs in a fresh subprocess and reports peak RSS minus baseline RSS.
     - `memory_stats()` is unavailable on CPU.
-    - `ru_maxrss` is in bytes on macOS.
+    - `ru_maxrss` is in bytes on macOS and KiB on Linux; the harness branches by platform. GPU runs use the `memory_stats()` peak.
     - For the 10M runs, the peak `phys_footprint` (`proc_pid_rusage`, field `ri_lifetime_max_phys_footprint`) is also recorded, because memory compression can make RSS undercount.
   - JSON results go to `benchmarks/results/` and record:
     - jax and jaxlib versions;
@@ -279,7 +279,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
   - Partition of unity.
   - Linear completeness.
   - Exactly 6 zero eigenvalues of Ke (|λ| < 1e-10·λ_max, with the 7th above 1e-6·λ_max), on distorted elements too: aspect ratio ≤ 2, ν ≤ 0.49, random nodal perturbations ≤ 20% of the edge for hex8 and ≤ 10% for hex20/hex27 (midside nodes included), with detJ > 0 at nodes and quadrature points. The 7th eigenvalue is a quantity of element shape, ~1e-4 of λ_max for hex20/hex27 even undistorted at aspect ratio 2, which is why the gate is 1e-6.
-  - On mildly distorted elements (bound stated in the docs, e.g. midside offsets ≤ 10% of the edge length), lumped masses are all > 0. Total mass equals ρV per direction, with V the quadrature volume.
+  - On mildly distorted elements (bound stated in the docs, e.g. midside offsets ≤ 5% of the edge length for hex27 row-sum), lumped masses are all > 0. Lumping raises an error when any lumped nodal mass is ≤ 0. Total mass equals ρV per direction, with V the quadrature volume.
   - Matches a NumPy reference implementation.
   - `jax.grad` of uᵀKe(X)u matches finite differences (rel. err. < 1e-6).
 
@@ -462,7 +462,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
 
 ### PR 15: Interior bands
 - Contents:
-  - Shift-invert Lanczos with MINRES inner solves, also used for [0, f_max] when the LOBPCG-from-0 basis does not fit.
+  - Block shift-invert Lanczos (b = 6) with MINRES inner solves, also used for [0, f_max] when the LOBPCG-from-0 basis does not fit.
   - Slicing with the cost model.
   - Removal of duplicate modes at slice edges.
   - Band-pass count deflated by the modes found in the band.
@@ -471,6 +471,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
 - Tests:
   - Matches SciPy `eigsh(sigma=...)` to relative error ≤ max(1e-8, 10·ε·λ̂_max/λ).
   - Each slice's count estimate is < 0.5.
+  - On a model with known repeated interior eigenvalues (cube double/triple modes, FV52 pairs), each cluster is found with its exact multiplicity.
   - With a memory budget too small for the LOBPCG-from-0 basis, the cost model switches to shift-invert.
 
 ## M4: Solid-shell element
@@ -595,7 +596,7 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
 - First step of the PR: choose the Du & Olhoff 2007 example (and its volume fraction) and record it in `docs/verification.md`. The benchmark's pass criteria below are then fixed to that example.
 - Docs: `docs/optimization.md`; `docs/verification.md` gets the full Du & Olhoff setup (table and figure numbers).
 - Tests:
-  - End-to-end finite differences through filter → projection → interpolation → KS/bound, with test densities away from ρ̄ = 0.1 ± h, where the mass interpolation is only C¹.
+  - End-to-end finite differences through filter → projection → interpolation → KS/bound, with test densities away from ρ̄ = 0.1 ± h, where the mass interpolation is only C¹, and relative gap ≥ 1e-2 for per-mode bound terms.
   - Re-run of the PR 11 SIMP-contrast test on a PR 23 design.
   - MMA with the PR 21 cluster constraints on a forced double eigenvalue, without projection (so no η-continuation): for k ≥ k₀ = 10 (fixed in the test), β_k ≥ max_{k₀≤j<k} β_j − 1e-2·|β_k| (MMA is not monotone; the tolerance absorbs asymptote adaptation), and over the last 5 iterates the 2-D cluster subspace is stable (cos² of both principal angles between consecutive iterates ≥ 0.9, in the M of the later iterate) and no third mode joins the cluster (λ₃/λ₂ − 1 > 1e-2). Individual modes inside the cluster are not tracked, since any basis of it is valid.
   - Benchmark: the chosen Du & Olhoff 2007 example, with the paper's filter radius, and projection only if the paper uses it. The setup:
