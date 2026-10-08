@@ -13,7 +13,7 @@ Large-scale 3D linear modal analysis (Kv = λMv) in JAX. The solver uses matrix-
 
 Package name: `jaxmodal`. License: MIT.
 
-Status: planning. Review rounds 1–14 incorporated. Implementation starts after three consecutive review rounds with all 5 reviewers satisfied.
+Status: planning. Review rounds 1–15 incorporated. Implementation starts after three consecutive review rounds with all 5 reviewers satisfied.
 
 ## Principles
 
@@ -278,7 +278,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
 - Tests:
   - Partition of unity.
   - Linear completeness.
-  - Exactly 6 zero eigenvalues of Ke (|λ| < 1e-10·λ_max, with the 7th above 1e-4·λ_max), on distorted elements too.
+  - Exactly 6 zero eigenvalues of Ke (|λ| < 1e-10·λ_max, with the 7th above 1e-4·λ_max), on distorted elements too (aspect ratio ≤ 2, nodal distortion ≤ 20% of the edge, ν ≤ 0.49; the 7th eigenvalue drops to ~1e-5·λ_max at aspect ratio 10).
   - On mildly distorted elements (bound stated in the docs, e.g. midside offsets ≤ 10% of the edge length), lumped masses are all > 0. Total mass equals ρV per direction, with V the quadrature volume.
   - Matches a NumPy reference implementation.
   - `jax.grad` of uᵀKe(X)u matches finite differences (rel. err. < 1e-6).
@@ -353,14 +353,14 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
     - The Srinivas–Rao exact 3D solution for thick orthotropic and cross-ply simply supported plates.
   - Published benchmarks:
     - NAFEMS FV52 (simply supported thick plate). The docs state where u_z = 0 is applied; modes 1–3 are in-plane rigid modes, which exercises the automatic partial rigid modes.
-    - NAFEMS FV12 (free thin plate), run with hex20/hex27 only, because hex8 locks at L/t = 200. The in-plane refinement for 1% is stated (≈ 40×40 hex20).
+    - NAFEMS FV12 (free thin plate), run with hex20/hex27 only, because hex8 locks at L/t = 200. The in-plane refinement is stated (≈ 20×20 hex20 is within 0.2% of converged for modes 7–13).
     - The Lamb sphere on voxel meshes.
 - Docs:
   - `docs/eigensolvers.md`.
   - `docs/verification.md`, with exact setups, sources and reference values. It also defines simply supported BCs on solids (used again in PR 16).
 - Tests:
   - **0.1% target:** sliding block, Visscher Ritz and Srinivas–Rao within 0.1% at stated hex20/hex27 meshes.
-  - **NAFEMS:** within 1% of target, after first checking the gap between the target and a fine hex27 run.
+  - **NAFEMS:** a mode is gated against its target (1%) only when a fine hex27 run is within 0.5% of it. Otherwise it is gated against the fine hex27 run (1%) and the gap to the target is recorded in `docs/verification.md` (e.g. FV12 modes 10–13 sit ≈ 1% below the quoted targets). For FV52, the docs fix the u_z = 0 placement that the fine hex27 run shows reproduces mode 4.
   - **Convergence rates:**
     - Measured against the exact sliding-block and Srinivas–Rao solutions on affine meshes. Element faces conform to ply interfaces. Fitted rate ≥ 1.8 for hex8 (sliding block and thick Srinivas–Rao, L/t = 10, only, because of locking) and ≥ 3.6 for hex20/hex27, over ≥ 3 levels in the asymptotic range. Richardson extrapolation is used only to estimate errors, never to fit rates.
     - Voxel Lamb sphere, against the exact solution for the sphere of equal (voxelized) volume, over ≥ 5 levels fixed in the docs: the max relative error over the two lowest 5-fold clusters (selected by cluster, not by index) drops by ≥ 2× from the coarsest to the finest level (staircase errors oscillate, so the least-squares rate is reported only), with split clusters compared by their mean.
@@ -406,7 +406,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
 - Contents:
   - Trilinear transfer operators, with semi-coarsening (an axis stops coarsening at ≤ 2 elements). An axis with an odd element count gets one coarse cell spanning a single fine element; transfers use the coarse nodal positions.
   - `solve_modes` dispatches voxel meshes to this operator and GMG, including the σ pre-estimate.
-  - Galerkin coarse operators of A_P on levels ≥ 1, built element-wise as Pᵀ(Σ_e m_e⊙(s_K,e·Ke + σ·s_M,e·Me)⊙m_e)P on the nested voxel hierarchy (Me consistent or lumped, matching the fine operator), plus σ·Pᵀ(m⊙m_nodal⊙m)P for nodal masses and Pᵀ s·(I − diag m)P for the constrained DOFs. The fine operator is never assembled. Stored in block-ELL.
+  - Galerkin coarse operators of A_P on levels ≥ 1, built element-wise as Pᵀ(Σ_e m_e⊙(s_K,e·Ke + σ·s_M,e·Me)⊙m_e)P on the nested voxel hierarchy (Me consistent or lumped, matching the fine operator), plus σ·Pᵀ(m⊙m_nodal⊙m)P for nodal masses and Pᵀ s·(I − diag m)P for the constrained DOFs. Coarse DOFs whose support holds no active fine DOF (occupancy-masked meshes) are masked the same way, with diagonal s, so the coarsest Cholesky stays SPD. The fine operator is never assembled. Stored in block-ELL.
   - Symmetric Chebyshev smoothing.
   - Dense Cholesky on the coarsest level.
   - Memory estimator.
@@ -596,7 +596,7 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
 - Tests:
   - End-to-end finite differences through filter → projection → interpolation → KS/bound, with test densities away from ρ̄ = 0.1 ± h, where the mass interpolation is only C¹.
   - Re-run of the PR 11 SIMP-contrast test on a PR 23 design.
-  - MMA with the PR 21 cluster constraints on a forced double eigenvalue, without projection (so no η-continuation): for k ≥ k₀ = 10 (fixed in the test), β_k ≥ max_{k₀≤j<k} β_j − 1e-2·|β_k| (MMA is not monotone; the tolerance absorbs asymptote adaptation), and the MAC-tracked identity of the two modes does not swap over the last 5 iterates.
+  - MMA with the PR 21 cluster constraints on a forced double eigenvalue, without projection (so no η-continuation): for k ≥ k₀ = 10 (fixed in the test), β_k ≥ max_{k₀≤j<k} β_j − 1e-2·|β_k| (MMA is not monotone; the tolerance absorbs asymptote adaptation), and over the last 5 iterates the 2-D cluster subspace is stable (cos² of both M-principal angles between consecutive iterates ≥ 0.9) and no third mode joins the cluster (λ₃/λ₂ − 1 > 1e-2). Individual modes inside the cluster are not tracked, since any basis of it is valid.
   - Benchmark: the chosen Du & Olhoff 2007 example, with the paper's filter radius, and projection only if the paper uses it. The setup:
     - one element layer of thickness t ≤ h;
     - u_z = 0 on all nodes;
