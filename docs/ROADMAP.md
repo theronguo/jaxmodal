@@ -13,7 +13,7 @@ Large-scale 3D linear modal analysis (Kv = λMv) in JAX. The solver uses matrix-
 
 Package name: `jaxmodal`. License: MIT.
 
-Status: planning. Review rounds 1–12 incorporated. Implementation starts after three consecutive review rounds with all 5 reviewers satisfied.
+Status: planning. Review rounds 1–13 incorporated. Implementation starts after three consecutive review rounds with all 5 reviewers satisfied.
 
 ## Principles
 
@@ -70,7 +70,7 @@ Status: planning. Review rounds 1–12 incorporated. Implementation starts after
   - Implicit product updates with periodic explicit recompute.
   - The deflation projector is re-applied every iteration.
   - The locked buffer is preallocated, with a count. A Python outer loop calls at most two compiled step variants (with and without P).
-  - A low-memory 6-block mode recomputes KX and MX instead of storing them.
+  - A low-memory 6-block mode stores X, W, P and three product temporaries, recomputing the K and M products as needed (about 3 extra K and M applies per iteration; PR 9 measures the cost).
 - **Convergence:**
   - Measured by the λ-scaled residual r = ‖Kx − λMx‖ / (|λ|‖Mx‖). This gives sin θ ≲ r·λ/gap and δλ/λ ≲ r²·λ/gap (heuristic, up to M conditioning; the rigorous form with the M⁻¹-norm residual is used in PR 9). The normwise backward error is only reported.
   - Default tol = 1e-6.
@@ -103,7 +103,7 @@ Status: planning. Review rounds 1–12 incorporated. Implementation starts after
     - q is a Chebyshev–Jackson step polynomial ([0, λ_c]) or band-pass polynomial (interior band, deflated by the modes found in the band).
     - The degree d is chosen numerically so that:
       - q² ≥ 0.95 on the in-band interval up to the last computed mode, [0, λ_c(1 − g/2)]; this sets d ≈ 25/g;
-      - the Jackson-tail bias Σ q(λ_i)² over the out-of-band spectrum is ≤ 0.05, estimated with a Weyl-law density N(λ) ∝ λ^{3/2} fitted to the computed modes. (Bounding n_dof·max q² instead would need d ≈ 75/g or more.)
+      - the Jackson-tail bias Σ q(λ_i)² over the out-of-band spectrum is ≤ 0.05, estimated with a Weyl-type density N(λ) ∝ λ^a, with a fitted to the computed modes (3/2 for bulky solids, smaller for thin structures). (Bounding n_dof·max q² instead would need d ≈ 75/g or more.)
     - A missed mode inside the gap next to the cutoff is detected with lower probability.
     - Inner PCG tolerance τ_c ≲ 0.01/(d·√n_dof). PR 14 measures how solve errors actually propagate through the recurrence (worst case O(d²), not O(d)). If τ_c is below the attainable PCG accuracy, `info` marks the count as unverifiable instead of passing it. At 10M DOFs near index 1000 (τ_c ≈ 1e-10) this is expected to happen often.
     - One missing mode makes the estimate behave like χ²ₙ/n. With 50 probes, P(missed mode undetected) ≈ 0.2%.
@@ -117,7 +117,7 @@ Status: planning. Review rounds 1–12 incorporated. Implementation starts after
 - **Shells:** solid-shell elements (3 DOFs per node) following Klinkel–Gruttmann–Wagner (1999):
   - ANS for transverse shear (Bathe–Dvorkin edge midpoints: γ_ξζ at (ξ, η) = (0, ±1), γ_ηζ at (±1, 0)).
   - ANS for the thickness strain at the 4 corner points.
-  - EAS built with the center Jacobian J₀, by default with 5 parameters: 1 thickness (linear in ζ) and 4 Simo–Rifai membrane parameters (a project choice within the KGW framework). ∫M dV = 0 holds for the patch test.
+  - EAS built with the center Jacobian J₀, by default with 5 parameters: 1 thickness (linear in ζ) and 4 Simo–Rifai membrane parameters (a project choice within the KGW framework). ∫_□ M(ξ) dξ = 0 in the parent domain holds for the patch test.
   - Laminates with n Gauss points per ply.
 - **Sensitivities:**
   - Formula: dλ/dp = vᵀ(∂K/∂p − λ∂M/∂p)v / vᵀMv.
@@ -184,7 +184,7 @@ All sizes are fp64; GB = 10⁹ bytes.
     - For the 10M runs, the peak `phys_footprint` (`proc_pid_rusage`, field `ri_lifetime_max_phys_footprint`) is also recorded, because memory compression can make RSS undercount.
   - JSON results go to `benchmarks/results/` and record:
     - jax and jaxlib versions;
-    - STREAM triad bandwidth, both jitted and a small multithreaded C/OpenMP triad;
+    - STREAM triad bandwidth, both jitted and a small multithreaded C triad using pthreads (Apple clang has no OpenMP by default);
     - XLA:CPU intra-op thread pool size (unless pinned) and P/E-core setup;
     - measured fp64 peak;
     - time, peak memory and compile time.
@@ -243,7 +243,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
   - `Mesh` dataclass: coordinates, element blocks keyed by type, node and element sets, material and orientation IDs.
   - meshio readers for Abaqus `.inp` (flat), Gmsh and VTU.
   - Per-format node-ordering maps for hex20/hex27.
-  - Structured voxel mesh generator.
+  - Structured voxel mesh generator, with an occupancy mask that drops inactive elements and nodes (e.g. a voxelized sphere). The `Mesh` carries grid size and spacing for voxel dispatch.
 - Docs: `docs/mesh.md`.
 - Tests:
   - Read → write → read round-trips.
@@ -379,7 +379,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
 - Docs: `docs/eigensolvers.md` (algorithm, convergence theory, memory model, measured floor).
 - Tests, at reference sizes against PR 8, run at tol = 1e-10 with an fp64 deflation basis:
   - Relative λ error ≤ max(1e-8, 10·ε·λ̂_max/λ), with λ̂_max from the power iteration (dimensionless, so independent of units).
-  - Principal angles: sin θ ≤ 10·r_M·λ/gap. Angles are in the M-inner product, the gap is absolute, and r_M is the λ-scaled residual in the M⁻¹-norm with x M-normalized (dense at reference sizes). Clusters with relative gap < 1e-4 are compared by subspace.
+  - Principal angles: sin θ ≤ 10·r_M·λ/gap, with the reference residual required to be ≥ 10× smaller than r_M. Angles are in the M-inner product, the gap is absolute, and r_M is the λ-scaled residual in the M⁻¹-norm with x M-normalized (dense at reference sizes). Clusters with relative gap < 1e-4 are compared by subspace.
   - Exact multiplicities on a square-section beam and a cube.
   - Free-free: ‖RᵀMX‖ ≤ 1e-10.
   - Near-singular M (void mass ≈ 1e-12, void stiffness ≈ 1e-9, SIMP-like): converges to max(1e-8, floor) within 500 iterations.
@@ -430,7 +430,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
 - Contents:
   - pyamg smoothed-aggregation setup on the assembled hex8 Galerkin A_P from PR 12, with the masked rigid modes as the near-null-space.
   - Hierarchy exported to block-ELL, with a V-cycle on the device.
-  - Combined with PR 12; pure hex8 and solid-shell meshes skip p-MG and run AMG on the assembled A_P. `solve_modes` dispatches unstructured meshes to this preconditioner.
+  - Combined with PR 12; pure hex8 meshes skip p-MG and run AMG on the assembled A_P (solid-shell meshes do the same from PR 18). `solve_modes` dispatches unstructured meshes to this preconditioner.
   - Memory ordering: setup → free the assembled A → allocate LOBPCG.
   - Option to reuse aggregates and recompute only the values.
   - Memory estimator.
@@ -507,7 +507,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
 - Contents:
   - Mode normalization.
   - MAC.
-  - Participation factors and effective modal mass.
+  - Participation factors and effective modal mass (with r masked and rigid modes included in the mode set for the sum rule).
   - Strain and stress recovery per mode.
   - VTU/XDMF export and a frequency table.
 - Docs: `docs/postprocessing.md`.
@@ -521,7 +521,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
   - Kernel fusion checks.
   - fp32 preconditioner validation.
   - Compile-time benchmark.
-  - AMG iteration counts vs L/t for solid-shell models.
+  - AMG on the assembled A_P for solid-shell meshes, and iteration counts vs L/t.
 - Docs: `docs/performance.md`.
 - Tests:
   - Roofline = min(bandwidth × arithmetic intensity, measured fp64 peak). The voxel stencil and stored-Ke matvecs are measured against jitted STREAM bandwidth. On the Mac (serial XLA:CPU scatter) the percentage is reported only; ≥ 50% at m = 1 is a deferred GPU check. For m > 1, the percentage is reported.
@@ -561,13 +561,13 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
 - Docs: `docs/optimization.md`.
 - Tests:
   - At ~5k DOFs (dense `eigh` still feasible), the gradient from LOBPCG modes (r ≤ 1e-8) matches the dense-`eigh` gradient within the O(r·λ/gap) bound.
-  - Central finite differences with a step-size sweep against dense `eigh` on coarse meshes (κ ≲ 1e4), for coordinate, density, material and nodal-mass parameters. Error ≤ 1e-6·‖g‖_∞. The test eigenvalues have relative gap ≥ 1e-2; the test checks per-mode gradients and bypasses cluster detection. Density parameters enter through linear scaling (s_K = s_M = ρ); the PR 23 interpolations are tested there.
+  - Central finite differences with a step-size sweep against dense `eigh` on coarse meshes (κ ≲ 1e4, at most a few hundred elements), for coordinate, density, material and nodal-mass parameters. Error ≤ 1e-6·‖g‖_∞. The test eigenvalues have relative gap ≥ 1e-2; the test checks per-mode gradients and bypasses cluster detection. Density parameters enter through linear scaling (s_K = s_M = ρ); the PR 23 interpolations are tested there.
   - Double eigenvalue (symmetric cube or plate): one-sided directional differences along a random ±1 direction d (a uniform d gives Σ_e d_e f^e = 0 when s_K = s_M = ρ) match the eigenvalues of Σ_e d_e f^e. Both pairs are sorted before comparing, with ‖d‖_∞ = 1 and error ≤ 1e-4·‖Σ_e d_e f^e‖₂ and an O(h) step sweep.
 
 ### PR 22: FFD shape parametrization
 - Contents:
   - Bernstein lattice → node coordinates, in JAX.
-  - Nodes outside the lattice, the two outer control-point layers (C¹ continuity at the lattice boundary) and BC nodes are frozen. BC regions must lie outside the lattice or in the frozen layers; this is checked.
+  - Nodes outside the lattice, the two outer control-point layers (C¹ continuity at the lattice boundary; so ≥ 5 control points per direction) and BC nodes are frozen. BC regions must lie outside the lattice or in the frozen layers; this is checked.
   - Constraint: a KS/p-norm aggregate of detJ/detJ₀ ≥ ε.
   - Example: maximize the fundamental frequency subject to mass ≤ M₀, using MMA, at small size with a Jacobi preconditioner.
 - Docs: `docs/optimization.md`.
@@ -596,10 +596,10 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
 - Tests:
   - End-to-end finite differences through filter → projection → interpolation → KS/bound, with test densities away from ρ̄ = 0.1 ± h, where the mass interpolation is only C¹.
   - Re-run of the PR 11 SIMP-contrast test on a PR 23 design.
-  - MMA with the PR 21 cluster constraints on a forced double eigenvalue, without projection (so no η-continuation): for k ≥ k₀ = 10 (fixed in the test), β_k ≥ max_{j<k} β_j − 1e-2·|β_k| (MMA is not monotone; the tolerance absorbs asymptote adaptation), and the ordering of the two modes does not oscillate over the last 5 iterates.
+  - MMA with the PR 21 cluster constraints on a forced double eigenvalue, without projection (so no η-continuation): for k ≥ k₀ = 10 (fixed in the test), β_k ≥ max_{k₀≤j<k} β_j − 1e-2·|β_k| (MMA is not monotone; the tolerance absorbs asymptote adaptation), and the ordering of the two modes does not oscillate over the last 5 iterates.
   - Benchmark: the chosen Du & Olhoff 2007 example, with the paper's filter radius, and projection only if the paper uses it. The setup:
     - one element layer of thickness t ≤ h;
-    - u_z = 0;
+    - u_z = 0 on all nodes;
     - plane-stress-equivalent material E′ = E(1 + 2ν)/(1 + ν)², ν′ = ν/(1 + ν).
   - Pass criteria for the benchmark:
     - ω₁ within 5% of the published value.
