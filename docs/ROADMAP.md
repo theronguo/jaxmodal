@@ -13,7 +13,7 @@ Large-scale 3D linear modal analysis (Kv = λMv) in JAX. The solver uses matrix-
 
 Package name: `jaxmodal`. License: MIT.
 
-Status: planning. Review rounds 1–15 incorporated. Implementation starts after three consecutive review rounds with all 5 reviewers satisfied.
+Status: planning. Review rounds 1–16 incorporated. Implementation starts after three consecutive review rounds with all 5 reviewers satisfied.
 
 ## Principles
 
@@ -34,7 +34,7 @@ Status: planning. Review rounds 1–15 incorporated. Implementation starts after
    - Material constructors are traceable.
    - Sensitivities are a separate pass over the element kernels. Solvers and preconditioners are never differentiated.
 6. **Memory-aware.**
-   - Elements (and voxel z-slabs) are processed in fixed-size chunks with `lax.map`/`scan`, the last chunk padded, adding into a donated output.
+   - Elements (and voxel z-slabs) are processed in fixed-size chunks with `scan`/`fori_loop`, the last chunk padded, accumulating into a donated output carried through the loop.
    - Indices are int32, with asserts that N_dof and every flattened index product used by an int32 gather/scatter (e.g. n_el × n_dof_e) stay below 2³¹. The asserts run in NumPy before casting.
    - Estimators include chunk temporaries and are checked against measured peaks.
 7. **Conventions** live in `docs/conventions.md` and are fixed in PR 0:
@@ -278,7 +278,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
 - Tests:
   - Partition of unity.
   - Linear completeness.
-  - Exactly 6 zero eigenvalues of Ke (|λ| < 1e-10·λ_max, with the 7th above 1e-4·λ_max), on distorted elements too (aspect ratio ≤ 2, nodal distortion ≤ 20% of the edge, ν ≤ 0.49; the 7th eigenvalue drops to ~1e-5·λ_max at aspect ratio 10).
+  - Exactly 6 zero eigenvalues of Ke (|λ| < 1e-10·λ_max, with the 7th above 1e-6·λ_max), on distorted elements too: aspect ratio ≤ 2, ν ≤ 0.49, random nodal perturbations ≤ 20% of the edge for hex8 and ≤ 10% for hex20/hex27 (midside nodes included), with detJ > 0 at nodes and quadrature points. The 7th eigenvalue is a quantity of element shape, ~1e-4 of λ_max for hex20/hex27 even undistorted at aspect ratio 2, which is why the gate is 1e-6.
   - On mildly distorted elements (bound stated in the docs, e.g. midside offsets ≤ 10% of the edge length), lumped masses are all > 0. Total mass equals ρV per direction, with V the quadrature volume.
   - Matches a NumPy reference implementation.
   - `jax.grad` of uᵀKe(X)u matches finite differences (rel. err. < 1e-6).
@@ -493,6 +493,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
     - On the parallelogram mesh: ≥ 0.9 for extension and out-of-plane shear.
     - Parallelogram in-plane shear, and twist on both meshes, are report-only.
     - Trapezoidal in-plane bending is report-only, because all 4-node membrane elements that pass the patch test lock there (MacNeal 1987).
+  - Discretization-error tests use the PR 8 `eigsh` shift-invert solve at reference sizes (Jacobi LOBPCG is impractical at κ ≈ 1e12).
   - **0.1% target (measured against 3D elasticity):**
     - Srinivas–Rao at L/t = 10 and 100 with ≥ k stacked elements per ply (k stated in the docs).
     - One layered element per laminate is reported, not gated.
@@ -596,7 +597,7 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
 - Tests:
   - End-to-end finite differences through filter → projection → interpolation → KS/bound, with test densities away from ρ̄ = 0.1 ± h, where the mass interpolation is only C¹.
   - Re-run of the PR 11 SIMP-contrast test on a PR 23 design.
-  - MMA with the PR 21 cluster constraints on a forced double eigenvalue, without projection (so no η-continuation): for k ≥ k₀ = 10 (fixed in the test), β_k ≥ max_{k₀≤j<k} β_j − 1e-2·|β_k| (MMA is not monotone; the tolerance absorbs asymptote adaptation), and over the last 5 iterates the 2-D cluster subspace is stable (cos² of both M-principal angles between consecutive iterates ≥ 0.9) and no third mode joins the cluster (λ₃/λ₂ − 1 > 1e-2). Individual modes inside the cluster are not tracked, since any basis of it is valid.
+  - MMA with the PR 21 cluster constraints on a forced double eigenvalue, without projection (so no η-continuation): for k ≥ k₀ = 10 (fixed in the test), β_k ≥ max_{k₀≤j<k} β_j − 1e-2·|β_k| (MMA is not monotone; the tolerance absorbs asymptote adaptation), and over the last 5 iterates the 2-D cluster subspace is stable (cos² of both principal angles between consecutive iterates ≥ 0.9, in the M of the later iterate) and no third mode joins the cluster (λ₃/λ₂ − 1 > 1e-2). Individual modes inside the cluster are not tracked, since any basis of it is valid.
   - Benchmark: the chosen Du & Olhoff 2007 example, with the paper's filter radius, and projection only if the paper uses it. The setup:
     - one element layer of thickness t ≤ h;
     - u_z = 0 on all nodes;
@@ -605,7 +606,7 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
     - ω₁ within 5% of the published value.
     - If the paper's example is bimodal: relative gap λ₂/λ₁ − 1 ≤ 1%.
     - Modes antisymmetric in z lie above the computed band.
-    - No localized modes: in each reported mode, the kinetic-energy fraction in elements with ρ̄ < 0.1 is < 5%.
+    - No localized modes: for each reported mode or cluster (relative gap < 1e-2), with an M-orthonormal basis V_c, the largest eigenvalue of V_cᵀ M_void V_c is < 5%, where M_void is M restricted to elements with ρ̄ < 0.1. This is the worst kinetic-energy fraction over the cluster subspace, so it does not depend on the basis returned.
 
 ## GPU validation
 
