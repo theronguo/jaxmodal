@@ -13,11 +13,11 @@ Large-scale 3D linear modal analysis (Kv = λMv) in JAX. The solver uses matrix-
 
 Package name: `jaxmodal`. License: MIT.
 
-Status: planning. Review rounds 1–20 incorporated. Implementation starts after three consecutive review rounds with all 5 reviewers satisfied.
+Status: planning. Review rounds 1–21 incorporated. Implementation starts after three consecutive review rounds with all 5 reviewers satisfied.
 
 ## Principles
 
-1. **Validate every fast path against a slow one.** References are SciPy, dense NumPy, or analytic or published values. Every acceptance criterion is quantitative.
+1. **Validate every fast path against a slow one.** References are SciPy, dense NumPy, or analytic or published values. Every acceptance criterion is quantitative. "a equals b to tol" means ‖a − b‖_∞ ≤ tol·‖b‖_∞ (for pointwise fields such as stress, the max over all points); absolute tolerances are used only for dimensionless quantities (e.g. VᵀMV − I).
 2. **One small interface.** Every discretization (unstructured, voxel) provides `apply_K`, `apply_M`, `diag_K`, `diag_M` and the rigid body modes (the interface is complete after PR 7). Each operator applies natively to blocks of shape `(n_dof, m)`, not via `vmap`. Solvers only see this interface plus `apply_P`.
 3. **Fixed shapes; everything else is a `jit` argument.**
    - Topology preprocessing (connectivity, DOF maps, sets) runs in NumPy.
@@ -76,7 +76,7 @@ Status: planning. Review rounds 1–20 incorporated. Implementation starts after
   - Measured by the λ-scaled residual r = ‖Kx − λMx‖ / (|λ|‖Mx‖). This gives sin θ ≲ r·λ/gap and δλ/λ ≲ r²·λ/gap (heuristic, up to M conditioning; the rigorous form with the M⁻¹-norm residual is used in PR 9). The normwise backward error is only reported.
   - Default tol = 1e-6.
   - Accept r ≤ max(tol, c·ε·(‖K‖ + |λ|‖M‖)‖x‖ / (|λ|‖Mx‖)), with c = 10 and ‖K‖, ‖M‖ estimated by power iteration. For accurate eigenvectors it does not blow up as M becomes singular. A stagnation exit is flagged in `info`.
-  - A cluster (for locking) is a set of eigenvalues whose relative gaps are < 100·tol. The PR 9 test threshold of 1e-4 differs on purpose: it only decides whether to compare by subspace.
+  - A cluster (for locking) is a set of eigenvalues whose relative gaps are < 100·tol. For shift-invert slices, tol here and in all slice-edge and band-edge rules is the slice acceptance tolerance r_acc = max(tol, 10·τ_eff·δ_max). The PR 9 test threshold of 1e-4 differs on purpose: it only decides whether to compare by subspace.
   - Block size m = nev + max(5, 0.2·nev).
   - Chunk and lock cutoffs must fall in a gap.
 - **Precision:**
@@ -93,7 +93,7 @@ Status: planning. Review rounds 1–20 incorporated. Implementation starts after
   - **Band edges:** every cluster (relative gap < 100·tol) that reaches into the band is returned whole. The counting edge (and σ for the [0, f_max] count) is placed at the middle of the gap between the last returned mode and the first computed mode beyond it, and g is that gap. The same applies to f₁ and f₂.
   - **Interior bands [f₁, f₂]:**
     - Block shift-invert Lanczos on (K − σM)⁻¹M with σ in the band, fixed block size b = 6 (≥ the largest expected multiplicity, so repeated eigenvalues are found), the same column masking as LOBPCG, full M-reorthogonalization, and a final Rayleigh–Ritz with true residuals on (K, M).
-    - Inner MINRES with absolute-value preconditioning by the SPD multigrid of K + σM (Vecharynski–Knyazev 2013), with a fixed inner tolerance τ = 1e-8 on the explicitly computed 2-norm residual ‖r_in‖₂ ≤ τ‖Mq‖₂ (checked at exit). The constrained diagonal of K − σM is mean diag(K) + σ·mean diag(M) over free DOFs (positive). The attainable outer λ-scaled residual is then ≈ τ·δ_max, with δ_max = max over the slice of |λ − σ|/|λ|; acceptance uses max(tol, 10·τ·δ_max).
+    - Inner MINRES with absolute-value preconditioning by the SPD multigrid of K + σM (Vecharynski–Knyazev 2013), with a fixed inner tolerance τ = 1e-8 on the explicitly computed 2-norm residual ‖r_in‖₂ ≤ τ‖Mq‖₂ (checked at exit). If the true residual stalls above τ, τ_eff is raised to the measured floor, carried into r_acc and flagged in `info`; PR 15 measures this floor. The constrained diagonal of K − σM is mean diag(K) + σ·mean diag(M) over free DOFs (positive). The attainable outer λ-scaled residual is then ≈ τ·δ_max, with δ_max = max over the slice of |λ − σ|/|λ|; acceptance uses r_acc = max(tol, 10·τ_eff·δ_max), with τ_eff = τ unless raised below.
     - Slice widths come from the cost model (MINRES iterations ∝ ln(1/τ)/δ, with δ the relative distance from σ to the nearest eigenvalue, plus an outlier term for the few eigenvalues nearest σ; calibrated in PR 15). The cost model also counts deflation-basis memory (n_dof × number of vectors) and the predicted counting cost, and rejects strategies over the memory budget. Slice edges, like lock cutoffs, are placed in a relative gap ≥ 100·tol of the computed spectrum, so each cluster belongs whole to one slice. Remaining duplicates at slice edges are removed by M-orthogonalization, dropping a vector whose projected M-norm (M-normalized) is < 0.5 (a new vector has ≈ 1, a duplicate ≲ 2·r·λ/gap). Kept vectors have their true residual recomputed and must meet the slice acceptance tolerance.
     - Neither the Lanczos nor the counting steps need M⁻¹ beyond the one M-solve per probe. Consistent M costs nothing else extra there.
     - MINRES needs a preconditioner that is symmetric up to rounding (symmetric smoother and transfer pairs). fp32 V-cycles are used only inside LOBPCG and PCG, never inside MINRES (fp32 asymmetry would floor τ near 1e-6).
@@ -107,7 +107,7 @@ Status: planning. Review rounds 1–20 incorporated. Implementation starts after
       - q² ≥ 0.95 on the in-band interval up to the last computed mode, [0, λ_c(1 − g/2)]; this sets d ≈ 25/g;
       - the Jackson-tail bias Σ q(λ_i)² over the out-of-band spectrum is ≤ 0.05, estimated with a Weyl-type density N(λ) ∝ λ^a, with a fitted to the computed modes (3/2 for bulky solids, smaller for thin structures). (Bounding n_dof·max q² instead would need d ≈ 75/g or more.)
     - A missed mode inside the gap next to the cutoff is detected with lower probability.
-    - Inner PCG tolerance τ_c ≲ 0.01/(d·√n_dof). PR 14 measures how solve errors actually propagate through the recurrence (worst case O(d²), not O(d)). If τ_c is below the attainable PCG accuracy, `info` marks the count as unverifiable instead of passing it. At 10M DOFs near index 1000 (τ_c ≈ 1e-10) this is expected to happen often.
+    - Inner PCG tolerance τ_c ≲ 0.01/(d·√n_dof). PR 14 measures how solve errors actually propagate through the recurrence (worst case O(d²), not O(d)). Counting solves use the fp64 V-cycle. If τ_c is below the attainable PCG accuracy, `info` marks the count as unverifiable instead of passing it. At 10M DOFs near index 1000 (τ_c ≈ 1e-10) this is expected to happen often.
     - One missing mode makes the estimate behave like χ²ₙ/n. With 50 probes, P(missed mode undetected) ≈ 0.2%.
     - A slice passes when its estimate is < 0.5.
   - **Exact count:** at reference sizes (≤ ~15k DOF), from the inertia of dense `scipy.linalg.ldl` of K − σM restricted to the free DOFs (the constrained diagonal of A_P could otherwise add spurious negative pivots).
@@ -131,7 +131,7 @@ Status: planning. Review rounds 1–20 incorporated. Implementation starts after
     - off-diagonal constraints |f_sk·Δρ| ≤ ε_off (s < k), as paired inequalities, with ε_off = 1e-2·|β_k| evaluated at the current iterate (so the constraint stays linear in the MMA subproblem). By Gershgorin, to first order, β can overshoot the true λ_min by at most (N − 1)·ε_off.
   - Per-mode diagonal constraints alone are invalid, because f_kk depends on the basis.
   - Deflation and masking leave the formula unchanged.
-- **Scaling:** β, KS and MMA work on λ/λ_ref (λ_ref = λ₁ of the initial design), so p and the MMA constants are dimensionless. Every MMA constraint is normalized: Σρ̄_e v_e/V* − 1 ≤ 0, mass/M₀ − 1 ≤ 0, eigenvalue constraints in λ/λ_ref, detJ constraints in detJ/detJ₀. FFD control-point boxes are fractions of the lattice size. β starts at 0.99·λ_min/λ_ref of the initial design (> 0) and has finite MMA box bounds [0, 100].
+- **Scaling:** β, KS and MMA work on λ/λ_ref (λ_ref = lowest elastic λ of the initial design), so p and the MMA constants are dimensionless. Every MMA constraint is normalized: Σρ̄_e v_e/V* − 1 ≤ 0, mass/M₀ − 1 ≤ 0, eigenvalue constraints in λ/λ_ref, detJ constraints in detJ/detJ₀. FFD control-point boxes are fractions of the lattice size. β starts at 0.99·λ_min/λ_ref of the initial design (> 0) and has finite MMA box bounds [0, 100].
 - **Optimizer:** MMA implemented in JAX (~200 LOC). No OC, because eigenvalue sensitivities change sign.
 - **Scatter vs gather:** XLA:CPU scatter is effectively serial. PR 5 benchmarks scatter against an inverse-map gather on each backend, and the default may differ per backend.
   - The gather runs on an RCM-ordered mesh (RCM is built in PR 5), chunked by node range.
@@ -154,7 +154,7 @@ All sizes are fp64; GB = 10⁹ bytes.
 | Operator | Ke ≈ 1.2 GB (symmetric) | < 0.1 GB | Ke ≈ 12.2 GB (symmetric) or on-the-fly | < 1 GB |
 | LOBPCG, 9 blocks × m | m = 25: ≈ 1.8 GB | m = 15: ≈ 2.2 GB | m = 30: ≈ 22 GB | m = 10: ≈ 72 GB (multi-GPU only) |
 | LOBPCG, 6 blocks | — | — | m = 30: ≈ 14 GB | m = 8: ≈ 38 GB |
-| Rayleigh–Ritz update temporaries (≈ 2 blocks × m) | ≈ 0.4 GB | ≈ 0.5 GB | ≈ 5 GB | m = 8: ≈ 13 GB |
+| Rayleigh–Ritz update temporaries (≈ 2 blocks × m; also hosts the (chunk + m)-block deflation-projector temporaries, chunk ≤ m) | ≈ 0.4 GB | ≈ 0.5 GB | ≈ 5 GB | m = 8: ≈ 13 GB |
 | Preconditioner workspace (≈ 4 blocks × m) | ≈ 0.8 GB | ≈ 1 GB | ≈ 10 GB | m = 8: ≈ 26 GB (fp32: 13 GB) |
 | Multigrid | AMG ≈ 0.4 GB (device); pyamg peak 2–3 GB (host) | ≈ 0.2 GB | AMG ≈ 3–4 GB; pyamg peak ≈ 20+ GB (host) | ≈ 9.3 GB |
 | Gather path (if chosen) | chunked by node range | — | chunked by node range | — |
@@ -371,7 +371,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
     - Measured against the exact sliding-block and Srinivas–Rao solutions on affine meshes. Element faces conform to ply interfaces. Fitted rate ≥ 1.8 for hex8 (sliding block and thick Srinivas–Rao, L/t = 10, only, because of locking) and ≥ 3.6 for hex20/hex27, over ≥ 3 levels in the asymptotic range. Richardson extrapolation is used only to estimate errors, never to fit rates.
     - Voxel Lamb sphere, against the exact solution for the sphere of equal (voxelized) volume, over ≥ 5 levels fixed in the docs: the max relative error over the two lowest 5-fold clusters (selected by cluster, not by index; torsional and spheroidal modes are told apart by their radial kinetic-energy fraction, ≈ 0 for torsional) drops by ≥ 2× from the coarsest to the finest level (staircase errors oscillate, so the least-squares rate is reported only), with split clusters compared by their mean.
   - **Mode matching:** free bodies (Visscher, Lamb, FV12) are compared from mode 7 on, FV52 from mode 4 on. Modes are paired with Srinivas–Rao by MAC and by the (m, n, family) labels; degenerate sets (e.g. (m, n)/(n, m) on a square plate) are paired by subspace (summed MAC over the set).
-  - **Upper bound:** consistent-mass eigenvalues converge from above on nested meshes of parallelepiped elements, with exact geometry and conforming essential BCs.
+  - **Upper bound:** consistent-mass eigenvalues converge from above on nested meshes of parallelepiped elements, with exact geometry and conforming essential BCs; checked as λ_k(fine) ≤ λ_k(coarse)·(1 + 10·ε·λ̂_max/λ_k), from mode 7 for free bodies.
 
 ### PR 9: Generalized LOBPCG and public API
 - Contents:
@@ -486,7 +486,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
   - Slicing with the cost model.
   - Removal of duplicate modes at slice edges.
   - Band-pass count deflated by the modes found in the band and the converged neighbours just outside each band edge.
-  - Test tolerances: outer Lanczos residual max(1e-10, 10·τ·δ_max) with inner MINRES τ = 1e-8.
+  - Test tolerances: outer Lanczos residual r_acc = max(1e-10, 10·τ_eff·δ_max) with inner MINRES τ = 1e-8; cluster, slice-edge and band-edge gaps use 100·r_acc.
   - `band=(f1, f2)`.
 - Docs: `docs/eigensolvers.md` (memory model for many modes).
 - Tests:
@@ -522,7 +522,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
     - Srinivas–Rao at L/t = 10 and 100 with ≥ k stacked elements per ply (k stated in the docs).
     - One layered element per laminate is reported, not gated.
     - A clamped cylinder (R/t and L/R stated) against a hex27 reference whose error, estimated from ≥ 3 nested levels (Richardson, estimate only), is ≤ 0.02% (1/5 of the gate), within the PR 8 `eigsh` limit; levels and estimate recorded in `docs/verification.md`.
-  - No locking (simply supported square plate, first 6 bending modes, same in-plane mesh and layer count at both L/t): at L/t = 10 and 1000, the discretization error is measured against a converged solid-shell run at the same L/t. The mesh keeps that error ≫ 1e-4, since κ ≈ 1e12 at L/t = 1000 limits eigenvalue accuracy to about 1e-4. The error at L/t = 1000 is ≤ 1.5× the error at L/t = 10.
+  - No locking (simply supported square plate, first 6 bending modes, picked by z-reflection antisymmetry, same in-plane mesh and layer count at both L/t): at L/t = 10 and 1000, the discretization error is measured against a converged solid-shell run at the same L/t. The mesh keeps that error ≫ 1e-4, since κ ≈ 1e12 at L/t = 1000 limits eigenvalue accuracy to about 1e-4. The error at L/t = 1000 is ≤ 1.5× the error at L/t = 10.
   - Distorted meshes (parallelogram only): a skew plate meshed with parallelograms at a stated skew angle and in-plane density; clamped edges, L/t stated; frequencies within 1% of a hex27 reference of the same skew plate whose estimated error (≥ 3 nested levels) is ≤ 0.2%.
   - `jax.grad` matches finite differences.
 
@@ -588,7 +588,7 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
   - KS aggregation over complete clusters only: n is extended to the end of the cluster at the cutoff, with 2 guard modes beyond; the run fails only when the guard modes run out.
 - Docs: `docs/optimization.md`.
 - Tests:
-  - At ~5k DOFs (dense `eigh` still feasible), the gradient from LOBPCG modes (r ≤ 1e-8) matches the dense-`eigh` gradient within 10·r·λ/gap·‖g‖_∞, for modes with relative gap ≥ 1e-2.
+  - At ~5k DOFs (dense `eigh` still feasible), the gradient from LOBPCG modes (r ≤ 1e-8) matches the dense-`eigh` gradient within 10·r_M·λ/gap·‖g‖_∞ (r_M as in PR 9), for modes with relative gap ≥ 1e-2.
   - KS aggregate and bound-constraint functions: central FD against dense `eigh` (relative gap ≥ 1e-2, error ≤ 1e-6·‖g‖_∞).
   - Cluster detection groups the double eigenvalue of the double-eigenvalue model below; the KS cutoff extends over it.
   - Central finite differences with a step-size sweep against dense `eigh` on coarse meshes (κ ≲ 1e4, at most a few hundred elements), for coordinate, density, material and nodal-mass parameters. Error ≤ 1e-6·‖g‖_∞, with each parameter type tested separately. The test eigenvalues have relative gap ≥ 1e-2; the test checks per-mode gradients and bypasses cluster detection. Density parameters enter through linear scaling (s_K = s_M = ρ); the PR 23 interpolations are tested there.
