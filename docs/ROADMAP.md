@@ -13,12 +13,12 @@ Large-scale 3D linear modal analysis (Kv = λMv) in JAX. The solver uses matrix-
 
 Package name: `jaxmodal`. License: MIT.
 
-Status: planning. Review rounds 1–27 incorporated. Implementation starts after three consecutive review rounds with all 5 reviewers satisfied.
+Status: planning. Review rounds 1–28 incorporated. Implementation starts after three consecutive review rounds with all 5 reviewers satisfied.
 
 ## Principles
 
 1. **Validate every fast path against a slow one.** References are SciPy, dense NumPy, or analytic or published values. Every acceptance criterion is quantitative. "a equals b to tol" means ‖a − b‖_∞ ≤ tol·‖b‖_∞ (for pointwise fields such as stress, the max over all points); absolute tolerances are used only for dimensionless quantities (e.g. VᵀMV − I).
-2. **One small interface.** Every discretization (unstructured, voxel) provides `apply_K`, `apply_M`, `diag_K`, `diag_M` and the rigid body modes (the interface is complete after PR 7). Each operator applies natively to blocks of shape `(n_dof, m)`, not via `vmap`. Solvers only see this interface plus `apply_P`.
+2. **One small interface.** Every discretization (unstructured, voxel) provides `apply_K`, `apply_M`, `diag_K`, `diag_M` and the rigid body modes (the interface is complete after PR 7, and for voxel meshes after PRs 6 and 7). Each operator applies natively to blocks of shape `(n_dof, m)`, not via `vmap`. Solvers only see this interface plus `apply_P`.
 3. **Fixed shapes; everything else is a `jit` argument.**
    - Topology preprocessing (connectivity, DOF maps, sets) runs in NumPy.
    - Every array is a pytree `jit` argument: int32 topology, geometry, densities, material parameters, nodal masses, stored Ke, multigrid/AMG matrices and rigid modes. Nothing is closed over.
@@ -41,7 +41,8 @@ Status: planning. Review rounds 1–27 incorporated. Implementation starts after
 7. **Conventions** live in `docs/conventions.md` and are fixed in PR 0:
    - VTK node ordering internally, converted at import.
    - Voigt order `[11, 22, 33, 23, 13, 12]` with engineering shear strains.
-   - fp64 by default, enabled through an explicit config call (no import side effects).
+   - fp64 by default, enabled through an explicit config call (no import side effects; PR 0 test: importing jaxmodal leaves `jax_enable_x64` unchanged).
+   - Loops that are differentiated (operator chunk loops) use static trip counts (`scan`, or `fori_loop` with Python-int bounds); traced bounds appear only in solvers, which are never differentiated.
    - Index arrays are always int32.
    - Iteration vectors, returned modes, Gram matrices and Rayleigh–Ritz are always fp64. fp32 is allowed only inside preconditioners and for the device-side deflation basis. Returned locked modes come from an fp64 host copy.
    - m always denotes the LOBPCG block size (nev plus guard vectors).
@@ -305,6 +306,8 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
   - Clamped model: the free-DOF block of the masked K and M equals SciPy's reduced matrices, so there are no spurious eigenvalues.
   - A_P is SPD on a clamped model, and Jacobi built on it has no zero divisions.
   - Nodal masses add to the diagonal of the SciPy M exactly.
+  - Rigid translation mass 1ᵀM_x1 = ρV + Σ nodal masses, for consistent and lumped M, to 1e-12 relative.
+  - The int32 asserts raise on fake sizes just above 2³¹.
 
 ### PR 5: Matrix-free unstructured operator
 - Contents:
@@ -383,7 +386,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
 ### PR 9: Generalized LOBPCG and public API
 - Contents:
   - LOBPCG as under Key design decisions, including fixed shapes, the 6-block mode and floor-aware acceptance.
-  - Jacobi on A_P, with the σ pre-estimate (a few Jacobi-LOBPCG iterations or a user hint).
+  - Jacobi on A_P, with the σ pre-estimate (a few Jacobi-LOBPCG iterations or a user hint; test: the pre-estimate is within 2× of λ₁ and a user hint skips it).
   - Chunked mode computation; the deflation basis is optionally fp32, returned modes are fp64.
   - LOBPCG workspace estimator.
   - Public API: `solve_modes(mesh, materials, bcs, n_modes, ...) → (λ, V, info)`.
@@ -407,7 +410,8 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
   - The compiled step function's `memory_analysis().temp_size_in_bytes` is unchanged between basis capacities differing by ≥ 4×.
   - The floor (attainable λ-scaled residual vs ε·λ̂_max/λ) is measured at reference sizes and recorded in `docs/eigensolvers.md`.
   - The 6-block mode's extra cost (time per iteration vs 9-block) is measured and recorded in `docs/eigensolvers.md`.
-  - The compiled step function compiles at most twice per solve (the σ pre-estimate is a separate Jacobi-only run, counted separately).
+  - The step function's `memory_analysis` temp (maximum over both `lax.cond` branches, including the explicit recompute) is within the PR 9 estimator.
+  - The compiled step function compiles at most twice per solve (counted with `jax.monitoring` compile events) (the σ pre-estimate is a separate Jacobi-only run, counted separately).
 - **Milestone:** first end-to-end modes in pure JAX.
 
 ## M3: Preconditioning (core of the project)
@@ -455,7 +459,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
 - Docs: `docs/preconditioners.md`.
 - Tests:
   - Iterations on hex20 grow ≤ 20% over 3 refinements.
-  - Prolongation reproduces a trilinear field exactly (1e-12); Pᵀ A_P P matches a SciPy triple product to 1e-12.
+  - Prolongation (hex20→hex8 and hex27→hex8) reproduces a trilinear field exactly (1e-12); Pᵀ A_P P matches a SciPy triple product to 1e-12.
 
 ### PR 13: AMG on the hex8 level
 - Contents:
@@ -471,7 +475,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
   - A clamped hex20 model where aggregates straddle the Dirichlet boundary sets up and the coarsest Cholesky succeeds.
   - PCG iterations on hex20 (p-MG + AMG) grow ≤ 20% over 3 refinements.
   - `solve_modes` on a hex20 and a pure hex8 mesh matches the PR 8 `eigsh` (PR 9 tolerances).
-  - Mac acceptance: a 1M-DOF hex20 modal solve, 20 modes, wall time ≤ 15 min, peak within 20% of the estimator.
+  - Mac acceptance: a 1M-DOF hex20 modal solve, 20 modes, wall time ≤ 15 min, peak within 20% of the PR 5 + PR 9 + PR 13 estimators (PR 13 covers the p-MG workspace).
   - Optional Mac benchmark: 10M DOFs.
   - Deferred GPU check: 10M DOFs on one GPU.
 
@@ -514,7 +518,8 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
   - An interior band strictly between two well-separated modes returns 0 modes with count < 0.5; with a mode planted in that band and left out of V, the count is ≥ 0.5.
   - A clamped model with band (0, f_max) forced onto shift-invert stops and matches `eigsh` (the λ = 0 edge needs no neighbour).
   - A band with f₁ below λ₁ is solved as [0, f₂], filtered, and matches `eigsh`.
-  - A slice with one in-band mode removed after convergence gives a count ≥ 0.5, sets the `info` flag and recovers the mode on restart.
+  - A slice with one in-band mode removed after convergence gives a count ≥ 0.5, sets the `info` flag and recovers the mode on restart; a slice whose count stays ≥ 0.5 (mode forcibly withheld) stops after 2 restarts with the count flagged.
+  - A forced edge failing the final r_acc re-check is widened or merged, and the result still matches `eigsh`; τ_eff forced to 1e-6 near a dense cluster sets the slice-collapse flag.
   - Each slice's count estimate is < 0.5.
   - With one in-band mode (not next to a band edge) left out of V, the band-pass count detects it for ≥ 97 of a fixed list of 100 seeds. With V complete, with τ_c = 1e-12, switching off neighbour deflation raises the estimate (same probes y_j) by the probe mean of Σ_i q(μ_i)²(v_iᵀM y_j)² over the converged out-of-band neighbours v_i, to 1e-8 relative; with it, the estimate is < 0.5.
   - On a model with known repeated interior eigenvalues (voxel cube double/triple modes), each cluster is found with its exact multiplicity.
@@ -534,13 +539,16 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
   - Thickness direction from a user-specified stack direction or a topological sweep; an error on ambiguity (test: a stacked plate is detected, an ambiguous cube block raises).
   - Until PR 18, `solve_modes` on solid-shell meshes uses Jacobi and is limited to the small M4 example; PR 16 accuracy tests use the PR 8 `eigsh`.
   - ANS and 5-parameter EAS as under Key design decisions.
-  - Static condensation, with condensed Ke stored. This adds to the PR 5 estimator (test: stored condensed-Ke matvec on a solid-shell mesh sized so the estimate is ≥ 2 GB, estimate within 20% of the measured peak).
+  - Static condensation, with condensed Ke stored (solid-shell blocks support stored Ke only; on-the-fly mode raises an error, tested). This adds to the PR 5 estimator (test: stored condensed-Ke matvec on a solid-shell mesh sized so the estimate is ≥ 2 GB, estimate within 20% of the measured peak).
   - Laminates with ply angles in the local shell frame.
   - Stress recovery function (ANS strains, recovered EAS parameters) in the element registry; `mass="lumped"` on solid-shell raises an error (tested).
   - Mass from the displacement interpolation. Consistent mass only; lumping is not supported for solid-shell elements.
   - Simply supported BCs on solids as defined in PR 8.
-- Docs: `docs/elements.md`.
+- Docs: `docs/elements.md`, `docs/operators.md` (condensed Ke), `docs/verification.md` (reference levels, elements per ply).
 - Tests:
+  - Stored condensed-Ke `apply_K`, `apply_M`, `diag_K` and `diag_M` match the PR 4 SciPy K and M to 1e-12 relative, on a solid-shell mesh and on a mesh mixing hex8 and solid-shell blocks, for m = 1 and m > 1, with random s_K/s_M.
+  - Jacobi `solve_modes` on the M4 example matches the PR 8 `eigsh` to the PR 9 tolerances.
+  - Postprocessor stress recovery (PR 17) on a solid-shell mesh under imposed linear displacement equals Cε to 1e-10 (owned by whichever of PR 16/17 merges last).
   - Flat patch test with lifting: constant stress to 1e-10 relative to ‖σ‖, also through the solid-shell recovery function (ANS strains, recovered EAS parameters).
   - Exactly 6 zero eigenvalues after condensation, on an element with h/t ≤ 2: six ≤ 1e-10·λ_max, the 7th > 1e-8·λ_max.
   - MacNeal–Harder (against the MacNeal–Harder 1985 reference values):
@@ -623,7 +631,7 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
 - Tests:
   - At ~5k DOFs (dense `eigh` still feasible), the gradient from LOBPCG modes (r ≤ 1e-8) matches the dense-`eigh` gradient within 10·r_M·λ/gap·‖g‖_∞ (r_M as in PR 9), for modes with relative gap ≥ 1e-2.
   - KS aggregate and bound-constraint functions: central FD against dense `eigh` (relative gap ≥ 1e-2, error ≤ 1e-6·‖g‖_∞).
-  - Cluster detection groups the double eigenvalue of the double-eigenvalue model below; the KS cutoff extends over it. With J set so the cutoff lands inside that double eigenvalue, the bound constraint set is extended over both copies. At a near cluster (relative gap ≈ 1e-3), F is symmetric and matches central FD of the reduced matrix B^{-1/2}AB^{-1/2} (A = V_cᵀKV_c, B = V_cᵀMV_c) to 1e-6·‖F‖. Running out of guard modes and β reaching its upper bound of 100 each raise an error.
+  - Cluster detection groups the double eigenvalue of the double-eigenvalue model below; the KS cutoff extends over it. With J set so the cutoff lands inside that double eigenvalue, the bound constraint set is extended over both copies. At a near cluster (relative gap ≈ 1e-3), F is symmetric and matches central FD of the reduced matrix B^{-1/2}AB^{-1/2} (A = V_cᵀKV_c, B = V_cᵀMV_c) to 1e-6·‖F‖. Running out of guard modes raises an error; the bound-formulation function raises when its β input reaches the upper bound of 100. V_c is held fixed at the base design's eigenvectors in the near-cluster FD.
   - Changing the cluster structure between calls (padded constraints) does not increase the compile count.
   - Central finite differences with a step-size sweep against dense `eigh` on coarse meshes (κ ≲ 1e4, at most a few hundred elements), for coordinate, density, material and nodal-mass parameters. Error ≤ 1e-6·‖g‖_∞, with each parameter type tested separately. The test eigenvalues have relative gap ≥ 1e-2; the test checks per-mode gradients and bypasses cluster detection. Density parameters enter through linear scaling (s_K = s_M = ρ); the PR 23 interpolations are tested there.
   - Double eigenvalue (a mode of multiplicity exactly 2, checked from dense `eigh` gaps, e.g. a square plate or a cantilevered cube): one-sided directional differences along a random ±1 direction d (a uniform d gives Σ_e d_e f^e = 0 when s_K = s_M = ρ) match the eigenvalues of Σ_e d_e f^e. Both pairs are sorted before comparing, with ‖d‖_∞ = 1 and error ≤ 1e-4·‖Σ_e d_e f^e‖₂ and an O(h) step sweep (the test passes at the best h of the sweep).
@@ -632,7 +640,7 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
 - Contents:
   - Bernstein lattice → node coordinates, in JAX.
   - Nodes outside the lattice, the two outer control-point layers (C¹ continuity at the lattice boundary; so ≥ 5 control points per direction) and BC nodes are frozen. BC regions must lie on or outside the lattice boundary; this is checked (test: frozen nodes and the two outer control-point layers have zero gradient and do not move).
-  - Constraint: a KS/p-norm aggregate of detJ/detJ₀ ≥ ε, with ε = 0.1 (recorded in `docs/optimization.md`).
+  - Constraint: a KS/p-norm aggregate of detJ/detJ₀ ≥ ε, with ε = 0.1 and p = 50 (recorded in `docs/optimization.md`). Both KS aggregates use a shifted logsumexp.
   - Example (unimodal fundamental mode with a large initial gap, e.g. first bending of a cantilever plate with L/t ≤ 20, checked by the PR 21 gap): maximize the fundamental frequency subject to mass ≤ M₀, using MMA with the PR 21 bound formulation (J ≥ 2), at small size with a Jacobi preconditioner.
 - Docs: `docs/optimization.md`.
 - Tests:
@@ -660,10 +668,10 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
 - First step of the PR: choose the Du & Olhoff 2007 example (and its volume fraction) and record it in `docs/verification.md`. The benchmark's pass criteria below are then fixed to that example.
 - Docs: `docs/optimization.md`; `docs/verification.md` gets the full Du & Olhoff setup (table and figure numbers).
 - Tests:
-  - End-to-end finite differences through filter → projection → interpolation → KS/bound, with test densities away from ρ̄ = 0.1 ± h, where the mass interpolation is only C¹, and relative gap ≥ 1e-2 for per-mode bound terms.
+  - End-to-end finite differences through filter → projection → interpolation → KS/bound, to the PR 21 criterion (central FD with step sweep, ≤ 1e-6·‖g‖_∞), with test densities in ρ̄ ∈ [0.2, 1] (so κ stays small) and away from ρ̄ = 0.1 ± h, where the mass interpolation is only C¹, and relative gap ≥ 1e-2 for per-mode bound terms.
   - Re-run of the PR 11 SIMP-contrast test on a PR 23 design.
   - Both filters preserve a constant density field (1e-12, Helmholtz PCG at 1e-12 tolerance); the Helmholtz filter VJP matches the dense transpose Fᵀc to 1e-10.
-  - MMA with the PR 21 cluster constraints on a forced double eigenvalue (a problem whose reference optimum is known to stay bimodal), without projection (so no η-continuation): for k ≥ k₀ = 10 (fixed in the test), β_k ≥ max_{k₀≤j<k} β_j − 1e-2·|β_k| (MMA is not monotone; the tolerance absorbs asymptote adaptation), and over the last 5 iterates the 2-D cluster subspace is stable (cos² of both principal angles between consecutive iterates ≥ 0.9, in the M of the later iterate) and no third mode joins the cluster (λ₃/λ₂ − 1 > 1e-2). Individual modes inside the cluster are not tracked, since any basis of it is valid.
+  - MMA with the PR 21 cluster constraints on a forced double eigenvalue (the bimodal example chosen in the PR's first step, or the Du & Olhoff clamped–clamped beam), without projection (so no η-continuation): for k ≥ k₀ = 10 (fixed in the test), β_k ≥ max_{k₀≤j<k} β_j − 1e-2·|β_k| (MMA is not monotone; the tolerance absorbs asymptote adaptation), and over the last 5 iterates the 2-D cluster subspace is stable (cos² of both principal angles between consecutive iterates ≥ 0.9, in the M of the later iterate) and no third mode joins the cluster (λ₃/λ₂ − 1 > 1e-2). Individual modes inside the cluster are not tracked, since any basis of it is valid.
   - Benchmark: the chosen Du & Olhoff 2007 example, with the paper's filter radius, and projection only if the paper uses it. The setup:
     - one element layer of thickness t ≤ h;
     - u_z = 0 on all nodes;
