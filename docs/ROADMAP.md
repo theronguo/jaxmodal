@@ -13,7 +13,7 @@ Large-scale 3D linear modal analysis (Kv = λMv) in JAX. The solver uses matrix-
 
 Package name: `jaxmodal`. License: MIT.
 
-Status: planning. Review rounds 1–29 incorporated. Implementation starts after three consecutive review rounds with all 5 reviewers satisfied.
+Status: final. Review rounds 1–30 incorporated (round 30: all 5 reviewers satisfied). Implementation proceeds PR by PR, each with its own reviewed plan in `docs/plans/`.
 
 ## Principles
 
@@ -91,7 +91,7 @@ Status: planning. Review rounds 1–29 incorporated. Implementation starts after
     - The stochastic count is controlled by `verify` (implemented in PR 14) for every strategy: `None` (default) lets the cost model enable it only when it is predicted to cost no more than the solve; `True`/`False` force it. The predicted cost is always reported in `info`.
     - Near mode index 1000 (relative gap g ≈ 7e-4), shift-invert costs ~10³–10⁵ MINRES iterations per Lanczos step (worst case ∝ ln(1/τ)/δ, δ the relative distance from σ to the nearest eigenvalue; Krylov deflation of the few eigenvalues nearest σ moves it toward the low end; PR 15 calibrates this), and counting costs d ≈ 25/g ≈ 3.5e4 solves per probe block.
   - **[0, f_max]:** chunked LOBPCG until λ > λ_c, with the cutoff λ_c = (2πf_max)².
-  - **Band edges:** every cluster (relative gap < 100·tol) that reaches into the band is returned whole. The counting edge (and σ for the [0, f_max] count) is placed at the middle of the gap between the last returned mode and the first computed mode beyond it, and g is that gap. The same applies to f₁ and f₂; an edge at λ = 0 has no counting edge (the step polynomial already covers it). When no mode is returned, each counting edge sits midway between its band edge (2πf)² and the nearest converged neighbour outside the band, and g is the smaller of the edge gaps.
+  - **Band edges:** every cluster (relative gap < 100·tol) that reaches into the band is returned whole. The counting edge (and σ for the [0, f_max] count) is placed at the middle of the gap between the last returned mode and the first computed mode beyond it, and g is that gap. The same applies to f₁ and f₂; an edge at λ = 0 has no counting edge (the step polynomial already covers it). When no mode is returned, each counting edge sits midway between its band edge (2πf)² and the nearest converged neighbour outside the band, and g is the smaller of the edge gaps. A neighbour within 100·r_acc of a band edge is returned (it reaches into the band); if d still exceeds the cost model's cap, the count is flagged unverifiable. A band edge above the largest computed eigenvalue raises an error.
   - **Interior bands [f₁, f₂]:**
     - Block shift-invert Lanczos on (K − σM)⁻¹M with σ in the band, fixed block size b = 6 (≥ the largest expected multiplicity, so repeated eigenvalues are found), the same column masking as LOBPCG, full M-reorthogonalization, and a final Rayleigh–Ritz with true residuals on (K, M).
     - Inner MINRES with absolute-value preconditioning by the SPD multigrid of K + σM (Vecharynski–Knyazev 2013), with a fixed inner tolerance τ = 1e-8 on the explicitly computed 2-norm residual ‖r_in‖₂ ≤ τ‖Mq‖₂ (checked at exit). MINRES keeps iterating until the explicit 2-norm residual meets τ or stagnates (no new minimum of the explicit residual over 5 consecutive checks, one check every 10 iterations; a hard iteration cap sets an `info` flag). If it stagnates above τ, τ_eff is raised to the measured floor, carried into r_acc and flagged in `info`; PR 15 measures this floor. The constrained diagonal of K − σM is mean diag(K) + σ·mean diag(M) over free DOFs (positive). The attainable outer λ-scaled residual is then ≈ τ·δ_max, with δ_max = max over the slice of |λ − σ|/|λ|; acceptance uses r_acc = max(tol, 10·τ_eff·δ_max), with τ_eff = τ unless raised below.
@@ -222,7 +222,7 @@ src/jaxmodal/
 tests/  benchmarks/  examples/  docs/  scripts/
 ```
 
-Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. PRs are numbered in execution order; the dependency table at the end is authoritative.
+Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. Every PR that changes the public API or installation also updates `README.md`. PRs are numbered in execution order; the dependency table at the end is authoritative.
 
 ## M0: Foundations
 
@@ -413,7 +413,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
   - The floor (attainable λ-scaled residual vs ε·λ̂_max/λ) is measured at reference sizes and recorded in `docs/eigensolvers.md`.
   - The 6-block mode's extra cost (time per iteration vs 9-block) is measured and recorded in `docs/eigensolvers.md`.
   - The step function's `memory_analysis` temp (maximum over both `lax.cond` branches, including the explicit recompute) is within the PR 9 estimator.
-  - The compiled step function compiles at most twice per solve (counted with `jax.monitoring` compile events) (the σ pre-estimate is a separate Jacobi-only run, counted separately).
+  - The compiled step function compiles at most twice per solve (counted with `jax.monitoring` compile events filtered by the step's `fun_name`, cache disabled) (the σ pre-estimate is a separate Jacobi-only run, counted separately).
 - **Milestone:** first end-to-end modes in pure JAX.
 
 ## M3: Preconditioning (core of the project)
@@ -508,7 +508,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
 
 ### PR 15: Interior bands
 - Contents:
-  - Lanczos basis capacity per slice from the PR 15 memory model; a slice that fills it before the stop rule holds is split at its largest gap (test: a forced small capacity splits the slice and still matches `eigsh`).
+  - Lanczos basis capacity per slice from the PR 15 memory model; a slice that fills it before the stop rule holds is split at its largest gap; a full slice without a gap ≥ 100·r_acc raises (test: a forced small capacity splits the slice and still matches `eigsh`).
   - Block shift-invert Lanczos (b = 6) with MINRES inner solves, also used for [0, f_max] when the LOBPCG-from-0 basis does not fit.
   - Slicing with the cost model.
   - Removal of duplicate modes at slice edges.
@@ -564,7 +564,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
     - Srinivas–Rao at L/t = 10 and 100 with ≥ k stacked elements per ply (k stated in the docs).
     - One layered element per laminate is reported, not gated.
     - A clamped cylinder (R/t and L/R stated) against a hex27 reference whose error, estimated from ≥ 3 nested levels (Richardson, estimate only), is ≤ 0.02% (1/5 of the gate), within the PR 8 `eigsh` limit; levels and estimate recorded in `docs/verification.md`.
-  - No locking (simply supported square plate, first 6 bending modes, picked by z-reflection antisymmetry, same in-plane mesh and layer count at both L/t): at L/t = 10 and 1000, the discretization error is measured against a converged solid-shell run at the same L/t. The mesh keeps that error ≫ 1e-4, since κ ≈ 1e12 at L/t = 1000 limits eigenvalue accuracy to about 1e-4. The error at L/t = 1000 is ≤ 1.5× the error at L/t = 10.
+  - No locking (simply supported square plate, first 6 bending modes, picked by z-reflection parity (u_z even, u_x and u_y odd), same in-plane mesh and layer count at both L/t): at L/t = 10 and 1000, the discretization error is measured against a converged solid-shell run at the same L/t. The mesh keeps that error ≫ 1e-4, since κ ≈ 1e12 at L/t = 1000 limits eigenvalue accuracy to about 1e-4. The error at L/t = 1000 is ≤ 1.5× the error at L/t = 10.
   - Distorted meshes (parallelogram only): a skew plate meshed with parallelograms at a stated skew angle and in-plane density; clamped edges, L/t stated; frequencies within 1% of a hex27 reference of the same skew plate whose estimated error (≥ 3 nested levels) is ≤ 0.2%.
   - `jax.grad` matches finite differences.
 
@@ -591,7 +591,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. P
   - Kernel fusion checks (HLO inspection, report-only, recorded in `docs/performance.md`).
   - fp32 option for p-MG and AMG (as in PR 11), modelled by the PR 13 estimator, and its validation.
   - Compile-time benchmark: full `solve_modes` compile time with GMG/AMG vs size, recorded in `docs/performance.md`.
-  - AMG on the assembled A_P for solid-shell meshes, and iteration counts vs L/t.
+  - AMG on the assembled A_P for solid-shell meshes, and iteration counts vs L/t (test: `solve_modes` with AMG on a solid-shell mesh matches the PR 8 `eigsh` to PR 9 tolerances).
 - Docs: `docs/performance.md`.
 - Tests:
   - Roofline = min(bandwidth × arithmetic intensity, measured fp64 peak). The voxel stencil and stored-Ke matvecs are measured against jitted STREAM bandwidth. On the Mac (serial XLA:CPU scatter) the percentage is reported only; ≥ 50% at m = 1 is a deferred GPU check. For m > 1, the percentage is reported.
@@ -647,7 +647,7 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
   - Example (unimodal fundamental mode with a large initial gap, e.g. first bending of a cantilever plate with L/t ≤ 20, checked by the PR 21 gap): maximize the fundamental frequency subject to mass ≤ M₀, using MMA with the PR 21 bound formulation (J ≥ 2), at small size with a Jacobi preconditioner.
 - Docs: `docs/optimization.md`.
 - Tests:
-  - Control-point gradients of the objective and of the detJ aggregate pass the PR 21 finite-difference criterion.
+  - Control-point gradients of the objective, the mass constraint and the detJ aggregate pass the PR 21 finite-difference criterion.
   - A BC region inside the lattice raises an error.
   - The example converges: relative objective change < 1e-4 over 5 iterations, λ₁ increased, no inverted elements.
   - Rescaling the example from m to mm (E and ρ converted) leaves the normalized iterates unchanged to 1e-8 relative; a power-of-two rescaling (length × 2¹⁰, E and ρ scaled by powers of two) leaves them unchanged to 1e-12.
@@ -665,7 +665,7 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
   - Filters:
     - Voxel meshes: radial cone density filter by direct convolution, normalized at boundaries.
     - The benchmark also uses a density filter, even if the paper used a sensitivity filter, so that gradients stay consistent. The 5% tolerance on ω₁ absorbs the difference.
-    - Unstructured meshes: a Helmholtz PDE filter with PCG. Its VJP is Tᵀ K_f⁻¹ T V⁻¹ c (T the element–node transfer, V the element volumes), still one symmetric `custom_linear_solve` with K_f, so the solver is not differentiated. The PR 23 finite-difference test runs it to a 1e-12 tolerance.
+    - Unstructured meshes: a Helmholtz PDE filter with PCG, length parameter r = R/(2√3) for cone radius R (recorded in `docs/optimization.md`). Its VJP is Tᵀ K_f⁻¹ T V⁻¹ c (T the element–node transfer, V the element volumes), still one symmetric `custom_linear_solve` with K_f, so the solver is not differentiated. The PR 23 finite-difference test runs it to a 1e-12 tolerance.
   - Optional Heaviside projection with η-continuation: H_η(x) = (tanh(η/2) + tanh(η(x − 1/2)))/(2·tanh(η/2)), so H_η(0) = 0 and H_η(1) = 1.
   - Voxel sensitivity pass (reference Ke and Me scaled per element by s_K, s_M) feeding the cone-filter VJP.
   - Bound formulation with MMA.
