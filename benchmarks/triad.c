@@ -50,6 +50,7 @@ static void *work(void *arg) {
 int main(int argc, char **argv) {
     if (argc < 2) return 1;
     nthreads = atoi(argv[1]);
+    if (nthreads < 1) return 1;
     a = malloc(N * sizeof(double));
     b = malloc(N * sizeof(double));
     c = malloc(N * sizeof(double));

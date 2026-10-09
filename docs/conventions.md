@@ -10,10 +10,11 @@ Fixed in PR 0 (roadmap Principle 7). Later PRs follow these without restating th
 
   ```python
   import jaxmodal.config
+
   jaxmodal.config.enable_x64()
   ```
 
-  Importing `jaxmodal` or any submodule changes no JAX setting (tested). fp32 inputs stay fp32 under x64.
+  Importing `jaxmodal` or any submodule changes neither the x64 nor the compilation-cache setting (tested). fp32 inputs stay fp32 under x64.
 - **Mixed precision:** iteration vectors, returned modes, Gram matrices and Rayleigh–Ritz are always fp64. fp32 is allowed only inside preconditioners and for the device-side deflation basis. Returned locked modes come from an fp64 host copy.
 - **Indices:** index arrays are int32. Under x64, `argsort`, `nonzero` and `arange` return int64, so they go through `config.index` (pass `jnp.nonzero(a)[0]`, not the tuple). `config.index` is an unchecked cast: values $\ge 2^{31}$ wrap. The overflow asserts come in PR 4 and run in NumPy before casting.
 - **Loops:** differentiated loops (operator chunk loops) use static trip counts (`scan`, or `fori_loop` with Python-int bounds). Traced bounds appear only in solvers, which are never differentiated.
@@ -44,13 +45,13 @@ with the max over all points for pointwise fields such as stress. Absolute toler
 `benchmarks/harness.py`:
 
 - `measure(code, setup)` runs `setup`, then `code`, in a fresh subprocess and returns `peak_bytes`, `rss_bytes` and `time_s` for `code`.
-- `python benchmarks/harness.py` writes the machine peaks to `benchmarks/results/system.json`. These are fp64 matmul GFLOP/s, jitted and pthread C STREAM triad GB/s, and versions. Later results reference this file instead of re-measuring.
+- `python benchmarks/harness.py` writes the machine peaks to `benchmarks/results/system.json`. These are fp64 matmul GFLOP/s, jitted and pthread C STREAM triad GB/s, and versions. The C triad runs at $P$ and $P+E$ threads (P/E cores; `os.cpu_count()` when unknown) and records the best run with its thread count. Later results reference this file instead of re-measuring.
 
 ### Peak definition
 
-On macOS,
+On macOS, `peak_bytes` is
 
-$$\texttt{peak\_bytes} = \max\left(F_{\max} - F_0,\; R_{\max} - R_0\right).$$
+$$\Delta = \max\left(F_{\max} - F_0,\ R_{\max} - R_0\right).$$
 
 - $F$ is `phys_footprint` from `proc_pid_rusage`. $F_{\max}$ is the interval maximum after `proc_reset_footprint_interval` (a private libSystem symbol), and $F_0$ is the footprint right after the reset.
 - $R$ is `ru_maxrss`, read at the same baseline point and after `code`. This $R$ delta is also returned as `rss_bytes`.
@@ -65,10 +66,11 @@ Each mechanism exists because of a measured failure, and each has a test that fa
 
 | Mechanism | Failure without it (measured) |
 |---|---|
-| `MallocLargeCache=0` in the child env (undocumented) | a 1.6 GB block freed in `setup` stays resident and is reused uncharged; an 0.8 GB allocation in `code` reads 0 |
+| `MallocLargeCache=0` in the child env (undocumented) | a 1.6 GB block freed in `setup` stays resident and is reused uncharged; a 0.8 GB allocation in `code` reads 0 |
 | `gc.collect()` after `setup` | cyclic garbage left by `setup` is freed during `code`; the allocation reads 0 |
-| footprint poll after `setup` (10 ms steps until it changes by < 1 MB; at least 50 ms, at most 2 s) | XLA:CPU frees executable temporaries on another thread after `block_until_ready`; 3.2e9 reads ≈ 2.1–2.4e9 |
+| footprint poll after `setup` (10 ms steps until it changes by < 1 MiB; at least 50 ms, at most 2 s) | XLA:CPU frees executable temporaries on another thread after `block_until_ready`; 3.2e9 reads ≈ 2.1–2.4e9 |
 | interval reset before the baseline | a 2 GB transient in `setup` inflates the peak to 2.0e9 |
+| interval maximum, not the current footprint | 0.8 GB allocated and freed in `code` after a higher `setup` mark reads 0 (`ru_maxrss` reads 0 too) |
 | max with the `ru_maxrss` delta | 800 × 1 MB allocated, freed, then 1600 × 1 MB allocated, all in `code`: footprint reads 0.82e9 instead of 1.6e9 |
 
 ### Rules
@@ -80,5 +82,5 @@ Each mechanism exists because of a measured failure, and each has a test that fa
 - `ru_maxrss` also counts library code pages first touched in `code`, so warm up the backend in `setup`.
 - Footprint counts compressed pages at their compressed size, so estimator checks use non-constant data.
 - On macOS `time_s` includes the page faults of fresh mmaps, since freed large blocks are unmapped.
-- The STREAM triad counts 24 B per element ($a = b + s\,c$; write-allocate traffic is not counted).
+- The STREAM triad counts 24 B per element ($a = b + s c$; write-allocate traffic is not counted).
 - `measure` records no compile time. Compile-time tests (PRs 5 and 18) time `jit(f).lower(...).compile()` in a fresh subprocess with the cache disabled.

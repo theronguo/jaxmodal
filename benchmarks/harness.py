@@ -61,14 +61,14 @@ t = time.perf_counter()
 exec(code, ns)
 dt = time.perf_counter() - t
 rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - rss0
-fp = rusage()[33] - base if darwin else None
+fp = (rusage()[33] - base) if darwin else None
 with open(out, "w") as f:
     json.dump({"fp": fp, "rss": rss, "time_s": dt}, f)
 """
 
 
-def maxrss_bytes(value, platform):
-    return value if platform == "darwin" else value * 1024
+def maxrss_bytes(value, sys_platform):
+    return value if sys_platform == "darwin" else value * 1024
 
 
 def measure(code, setup=""):
@@ -160,7 +160,7 @@ def system_info():
     m = 20_000_000
     b, c = jnp.ones(m), jnp.full(m, 2.0)
     triad = jax.jit(lambda b, c: b + 3.0 * c)
-    gbps = 24 * m / _best(triad, (b, c), 10) / 1e9  # STREAM convention: 24 B per element
+    gbps = 24 * m / _best(triad, (b, c), 50) / 1e9  # STREAM convention: 24 B per element
 
     ct = c_triad()
     return {
@@ -168,7 +168,6 @@ def system_info():
         "triad_gbps": gbps,
         "c_triad": ct,
         "c_triad_ratio": ct["gbps"] / gbps if isinstance(ct, dict) else None,
-        "versions": versions(),
     }
 
 

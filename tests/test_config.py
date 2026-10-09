@@ -19,8 +19,9 @@ def test_fp32_stays_fp32_under_x64():
 
 
 IMPORT_ALL = """
-import importlib, pkgutil, jax, jaxmodal
+import importlib, pkgutil, jax
 before = (jax.config.jax_enable_x64, jax.config.jax_compilation_cache_dir)
+import jaxmodal
 for m in pkgutil.walk_packages(jaxmodal.__path__, "jaxmodal."):
     importlib.import_module(m.name)
 assert (jax.config.jax_enable_x64, jax.config.jax_compilation_cache_dir) == before

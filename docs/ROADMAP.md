@@ -233,14 +233,14 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. E
   - `scripts/check.sh`.
   - `config.py` (an explicit x64 switch).
   - Persistent compilation cache.
-  - A benchmark harness (subprocess RSS, STREAM triad, fp64 peak, versions).
+  - A benchmark harness (subprocess peak memory and RSS, STREAM triad, fp64 peak, versions).
   - LICENSE (MIT), version 0.x.
 - Docs: `README.md`, `docs/conventions.md`.
 - Tests:
   - An fp32 path stays fp32 with x64 enabled.
   - Importing jaxmodal leaves `jax_enable_x64` unchanged.
   - Index arrays from `argsort`, `nonzero` and `arange` are cast back to int32.
-  - The harness reports a stable RSS delta for a known allocation.
+  - The harness reports a stable peak and RSS delta for a known allocation.
   - Buffer donation works on CPU: there is no "donated buffers were not usable" warning, and `x.is_deleted()` is true for the donated input. If the pinned jaxlib doesn't donate on CPU, the minimum version is raised; failing that, the estimators budget without donation.
   - The persistent cache stores entries on CPU (it does on jax 0.11.2); the test fails rather than skips if it stops, and the remedy is removing the `enable_cache` call in conftest.
 

@@ -9,12 +9,15 @@ import pytest
 
 import jaxmodal
 from benchmarks import harness
-from benchmarks.harness import maxrss_bytes, measure
 
 darwin = pytest.mark.skipif(sys.platform != "darwin", reason="peak_bytes is macOS-only in PR 0")
 GB = 1e9
 RNG = "rng = np.random.default_rng(0)"
 PLAIN = "a = rng.random(100_000_000)"  # 0.8 GB, incompressible
+MMAP = (  # touch and unmap a 2 GB transient
+    "import mmap; n = 488_281 * 4096; m = mmap.mmap(-1, n); m[::4096] = b'x' * (n // 4096); "
+    "m.close()"
+)
 
 
 def close(x, ref, tol=0.05):
@@ -24,7 +27,7 @@ def close(x, ref, tol=0.05):
 @pytest.mark.slow
 @darwin
 def test_plain_peak_is_stable():
-    runs = [measure(PLAIN, RNG) for _ in range(3)]
+    runs = [harness.measure(PLAIN, RNG) for _ in range(3)]
     for key in ("peak_bytes", "rss_bytes"):
         vals = [r[key] for r in runs]
         assert all(close(v, 0.8 * GB) for v in vals), vals
@@ -37,23 +40,31 @@ def test_plain_peak_is_stable():
     "setup",
     [
         # unmapped transient: without the interval reset this reads ~2.0e9
-        "import mmap; n = 488_281 * 4096; m = mmap.mmap(-1, n); m[::4096] = b'x' * (n // 4096); "
-        "m.close()",
+        MMAP,
         # malloc-freed transient: without MallocLargeCache=0 this reads ~0
         "t = rng.random(200_000_000); del t",
     ],
     ids=["mmap", "malloc"],
 )
 def test_setup_transients_dont_leak(setup):
-    assert close(measure(PLAIN, f"{RNG}; {setup}")["peak_bytes"], 0.8 * GB)
+    assert close(harness.measure(PLAIN, f"{RNG}; {setup}")["peak_bytes"], 0.8 * GB)
+
+
+@pytest.mark.slow
+@darwin
+def test_peak_freed_below_high_water():
+    # ru_maxrss reads 0 (setup's mmap set a higher mark); the current footprint reads 0 too.
+    r = harness.measure(f"{PLAIN}; del a", f"{RNG}; {MMAP}")
+    assert r["rss_bytes"] < 20e6
+    assert close(r["peak_bytes"], 0.8 * GB)
 
 
 @pytest.mark.slow
 @darwin
 def test_peak_controls():
-    assert measure("pass")["peak_bytes"] < 20e6
+    assert harness.measure("pass")["peak_bytes"] < 20e6
     # namespace isolation: user names can't shadow harness locals
-    r = measure("time = None", setup="json = os = sys = None")
+    r = harness.measure("time = None", setup="json = os = sys = None")
     assert all(isinstance(r[k], int | float) for k in ("peak_bytes", "rss_bytes", "time_s"))
 
 
@@ -66,7 +77,7 @@ def test_jax_cyclic_garbage():
         "f = jax.jit(lambda x: x * 2 + 1); c = [f(x0).block_until_ready()]; c.append(c); del c"
     )
     code = "import gc; gc.collect(); y = f(x0).block_until_ready()"
-    assert close(measure(code, setup)["peak_bytes"], 0.8 * GB)
+    assert close(harness.measure(code, setup)["peak_bytes"], 0.8 * GB)
 
 
 @pytest.mark.slow
@@ -77,7 +88,7 @@ def test_small_block_reuse():
         "L = [rng.random(125_000) for _ in range(800)]; del L; "
         "L = [rng.random(125_000) for _ in range(1600)]"
     )
-    assert close(measure(code, RNG)["peak_bytes"], 1.6 * GB)
+    assert close(harness.measure(code, RNG)["peak_bytes"], 1.6 * GB)
 
 
 @pytest.mark.slow
@@ -86,25 +97,27 @@ def test_xla_async_temporaries():
     # Without the settling poll the full warm-up reads ~2.1-2.4e9.
     g = "k = jax.random.key(0); g = jax.jit(lambda k: jax.random.uniform(k, (200_000_000,)))"
     code = "g(k).block_until_ready()"
-    full = measure(code, f"{g}; g(k).block_until_ready()")["peak_bytes"]
-    ref = measure(code, f"{g}; g.lower(k).compile()")["peak_bytes"]
+    full = harness.measure(code, f"{g}; g(k).block_until_ready()")["peak_bytes"]
+    ref = harness.measure(code, f"{g}; g.lower(k).compile()")["peak_bytes"]
     assert ref > 3 * GB
     assert close(full, ref)
 
 
 def test_maxrss_bytes():
-    assert maxrss_bytes(1024, "linux") == 1024**2
-    assert maxrss_bytes(1024, "darwin") == 1024
+    assert harness.maxrss_bytes(1024, "linux") == 1024**2
+    assert harness.maxrss_bytes(1024, "darwin") == 1024
 
 
 def test_measure_time_and_errors(monkeypatch):
-    assert 0.2 <= measure("import time; time.sleep(0.2)")["time_s"] < 0.5
-    assert set(measure("print('noise')")) == {"peak_bytes", "rss_bytes", "time_s"}
+    assert 0.2 <= harness.measure("import time; time.sleep(0.2)")["time_s"] < 0.5
+    assert set(harness.measure("print('noise')")) == {"peak_bytes", "rss_bytes", "time_s"}
     with pytest.raises(RuntimeError, match="boom"):
-        measure("raise ValueError('boom')")
+        harness.measure("raise ValueError('boom')")
     monkeypatch.setenv("JAX_ENABLE_X64", "1")
     monkeypatch.setenv("JAX_COMPILATION_CACHE_DIR", "/tmp/should-not-be-used")
-    measure("assert not jax.config.jax_enable_x64 and not jax.config.jax_compilation_cache_dir")
+    harness.measure(
+        "assert not (jax.config.jax_enable_x64 or jax.config.jax_compilation_cache_dir)"
+    )
 
 
 def test_write_result(tmp_path):
@@ -118,7 +131,7 @@ def test_versions(monkeypatch):
     assert v["xla_flags"] == "--xla_foo=1"
     assert v["jax_num_cpu_devices"] is True
     if sys.platform == "darwin":
-        assert v["p_cores"] > 0 and v["e_cores"] > 0
+        assert all(isinstance(v[k], int) and v[k] > 0 for k in ("p_cores", "e_cores"))
         assert v["p_cores"] + v["e_cores"] == os.cpu_count()
         assert harness.triad_threads(v) == [v["p_cores"], os.cpu_count()]
 

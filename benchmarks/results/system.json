@@ -1,11 +1,11 @@
 {
-  "fp64_matmul_gflops": 493.3870073992818,
-  "triad_gbps": 182.41413820144007,
+  "fp64_matmul_gflops": 489.88398967574955,
+  "triad_gbps": 184.91765980506537,
   "c_triad": {
-    "gbps": 188.605,
+    "gbps": 188.679,
     "threads": 12
   },
-  "c_triad_ratio": 1.0339384976383976,
+  "c_triad_ratio": 1.0203406218686724,
   "versions": {
     "jax": "0.11.2",
     "jaxlib": "0.11.2",

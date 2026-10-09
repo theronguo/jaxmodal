@@ -110,14 +110,14 @@ def index(x): return jnp.asarray(x, dtype=jnp.int32)
 
 - Calls `config.enable_x64()` and asserts that its arrays are float64.
 - fp64 peak: jitted 4096² matmul, arrays passed as arguments, warm-up first, `block_until_ready` in each timed run, best of 5, 2n³ flops.
-- Jitted STREAM triad: `a = b + s·c` on 2·10⁷ fp64 elements, same timing rules, best of 10, 24 B per element (STREAM convention; write-allocate traffic is not counted).
+- Jitted STREAM triad: `a = b + s·c` on 2·10⁷ fp64 elements, same timing rules, best of 50, 24 B per element (STREAM convention; write-allocate traffic is not counted).
 - C triad, `c_triad() -> {"gbps", "threads"} | str`:
   - `benchmarks/triad.c`, resolved as `Path(__file__).with_name("triad.c")` and built without a shell as `[os.environ.get("CC", "cc"), "-O3", "-pthread", ...]` into a temp dir with `capture_output=True`; the compiler is looked up with `shutil.which`; the binary takes the thread count as `argv[1]` and prints `<gbps> <checksum>`;
   - pthreads with a mutex-and-condition-variable barrier (macOS has no `pthread_barrier_t`), first-touch initialisation inside the threads, 2·10⁷ fp64 elements per array (as the jitted triad), best of 20; the last thread to reach each barrier records the timestamp under the mutex and each repetition is timed stamp to stamp (timing in thread 0 after its own wake-up over-reports up to 900 GB/s at 14–16 threads, measured), and the result is used so the loop can't be optimised away;
   - run at the thread counts from `triad_threads(versions())`; the best value and its thread count are reported;
   - a missing compiler gives `"skipped: no C compiler"`, a failed build `"skipped: compile failed"`;
   - the ratio to the jitted triad is recorded, not asserted.
-- Includes `versions()`.
+- `write_result` adds `versions()`.
 
 ### Results
 
