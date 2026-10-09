@@ -213,7 +213,7 @@ The VTK reference coordinates `REF[type]` are a literal table in the test file; 
    - hex20: rows 8–19 are the edge midpoints (0,1), (1,2), (2,3), (3,0), (4,5), (5,6), (6,7), (7,4), (0,4), (1,5), (2,6), (3,7).
    - hex27: rows 20–25 are the face means for $-x, +x, -y, +y, -z, +z$, row 26 is the origin, and the first 20 rows equal hex20.
 2. **Read orderings against hand-written files.**
-   - `tests/data/` holds one element per format and type:
+   - The test writes one element per format and type into `tmp_path` (text templates in the test file, so mutants are a one-line change):
      - Gmsh 4.1 ASCII for hex8, hex20 and hex27, with `$Entities`, physical tags and non-contiguous node tags;
      - Abaqus `C3D8`, `C3D8R` and `C3D20`;
      - VTU for hex8, hex20 and hex27.

@@ -13,7 +13,7 @@ Large-scale 3D linear modal analysis (Kv = λMv) in JAX. The solver uses matrix-
 
 Package name: `jaxmodal`. License: MIT.
 
-Status: final. Review rounds 1–30 incorporated (round 30: all 5 reviewers satisfied). Implementation proceeds PR by PR, each with its own reviewed plan in `docs/plans/`. PR 0 merged: jax pinned at ≥ 0.11.2; the persistent cache and CPU donation work; the `pymetis` extra is deferred to PR 19 (minimum 2025.1.1).
+Status: final. Review rounds 1–30 incorporated (round 30: all 5 reviewers satisfied). Implementation proceeds PR by PR, each with its own reviewed plan in `docs/plans/`. PR 0 merged: jax pinned at ≥ 0.11.2; the persistent cache and CPU donation work; the `pymetis` extra is deferred to PR 19 (minimum 2025.1.1). PR 1 merged: own flat-`.inp` reader, Gmsh 4.1 ASCII only, VTU is the only written format; host topology is int64 until PR 4.
 
 ## Principles
 
@@ -27,7 +27,7 @@ Status: final. Review rounds 1–30 incorporated (round 30: all 5 reviewers sati
    - Iterative solvers keep fixed shapes. Dropped or converged columns are masked, not removed.
 4. **Extensible element types.**
    - Each element type is one registry entry: node count, shape functions, quadrature rule and reference faces.
-   - Per-format node-ordering maps live in `mesh/io`, and the registry refers to them.
+   - Any per-format node permutation lives in `mesh/io`; none is needed today (meshio permutes Gmsh, Abaqus C3D20 = VTK).
    - Only hex types are implemented now; wedges and tets can be added later without touching operators or solvers.
 5. **Differentiable from day one.**
    - Element kernels are pure JAX functions of `(X_e, C_e, ρ_e)`: energies and bilinear forms uᵀKe w and uᵀMe w.
@@ -43,7 +43,7 @@ Status: final. Review rounds 1–30 incorporated (round 30: all 5 reviewers sati
    - Voigt order `[11, 22, 33, 23, 13, 12]` with engineering shear strains.
    - fp64 by default, enabled through an explicit config call (no import side effects; PR 0 test: importing jaxmodal leaves `jax_enable_x64` unchanged).
    - Loops that are differentiated (operator chunk loops) use static trip counts (`scan`, or `fori_loop` with Python-int bounds); traced bounds appear only in solvers, which are never differentiated.
-   - Index arrays are always int32.
+   - Index arrays passed to JAX are int32. Host-side NumPy topology is int64 until PR 4's overflow asserts and cast.
    - Iteration vectors, returned modes, Gram matrices and Rayleigh–Ritz are always fp64. fp32 is allowed only inside preconditioners and for the device-side deflation basis. Returned locked modes come from an fp64 host copy.
    - m always denotes the LOBPCG block size (nev plus guard vectors).
 
@@ -144,7 +144,7 @@ Status: final. Review rounds 1–30 incorporated (round 30: all 5 reviewers sati
   - `pymetis` is an optional extra, added in PR 19 (its only user) with minimum 2025.1.1, the oldest cp312 macOS arm64 wheel.
   - Versions are locked with `uv.lock`.
   - No SLEPc, CHOLMOD or pypardiso.
-  - meshio's `.inp` reader doesn't handle parts or assemblies; a small custom reader is added only if needed.
+  - meshio's `.inp` reader is unusable (see `docs/plans/pr-01-mesh.md`); PR 1 adds a flat-`.inp` reader. Gmsh input must be 4.1 ASCII.
 
 ## Memory budget
 
@@ -210,7 +210,7 @@ All sizes are fp64; GB = 10⁹ bytes.
 src/jaxmodal/
   config.py    dtype / x64 setup
   memory.py    memory estimators
-  mesh/        data model, io (incl. node-ordering maps), voxel generator, reordering, partition
+  mesh/        data model, io, voxel generator, reordering, partition
   materials/   anisotropic C, Bond rotations, orientations
   elements/    registry, quadrature, shape functions, hex8/20/27, solid-shell, element-wise Me Cholesky (for probes)
   operators/   dofmap, assembled (oracle), matrix-free, voxel stencil, constraints (masking, A_P, rigid modes, deflation)
@@ -247,12 +247,12 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. E
 ### PR 1: Mesh data model and parser
 - Contents:
   - `Mesh` dataclass: coordinates, element blocks keyed by type, node and element sets, material and orientation IDs.
-  - meshio readers for Abaqus `.inp` (flat), Gmsh and VTU.
-  - Per-format node-ordering maps for hex20/hex27.
-  - Structured voxel mesh generator, with an occupancy mask that drops inactive elements and nodes (e.g. a voxelized sphere). The `Mesh` carries grid size and spacing for voxel dispatch.
+  - meshio readers for Gmsh (4.1 ASCII) and VTU, plus an own flat-`.inp` reader; VTU writer.
+  - Node orderings: VTK internally; only meshio's Gmsh permutation is needed (Abaqus C3D20 = VTK).
+  - Structured voxel mesh generator, with an occupancy mask that drops inactive elements and nodes (e.g. a voxelized sphere). The `Mesh` carries grid shape, spacing, origin and grid↔mesh node/element maps for voxel dispatch.
 - Docs: `docs/mesh.md`.
 - Tests:
-  - Read → write → read round-trips.
+  - VTU read → write → read round trip.
   - Orderings match hand-built references for every format.
   - hex8 corner Jacobians are positive.
   - Voxelized sphere: element and node counts and volume match a NumPy count; no orphan nodes.
@@ -333,7 +333,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. E
 - Contents:
   - K matvec over z-slabs: `scan` + `dynamic_slice` with a 1-layer halo; per slab, 8 shifted corner slices → einsum with the reference Ke → shifted adds into a donated output.
   - Per-element scaling arrays s_K and s_M, as in PR 5.
-  - Occupancy-masked voxel meshes: inactive elements contribute zero; a grid↔mesh node map handles dropped nodes.
+  - Occupancy-masked voxel meshes: inactive elements contribute zero; PR 1's grid↔mesh node map handles dropped nodes, and PR 6 checks it against the geometry.
   - `apply_M` (consistent and lumped), `diag_K`, `diag_M`, nodal masses.
   - Memory estimator, including slab temporaries.
   - Restriction: one material and orientation per material ID (phase).

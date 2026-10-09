@@ -4,7 +4,7 @@ Fixed in PR 0 (roadmap Principle 7). Later PRs follow these without restating th
 
 ## Data and numerics
 
-- **Node ordering:** VTK internally. Other formats are converted at import (`mesh/io`).
+- **Node ordering:** VTK internally. Other formats are converted at import (`mesh/io`; only meshio's Gmsh permutation is needed today).
 - **Voigt order:** $[11, 22, 33, 23, 13, 12]$ with engineering shear strains, $\gamma_{ij} = 2\varepsilon_{ij}$.
 - **Precision:** fp64 by default, but only through an explicit call:
 
@@ -16,7 +16,7 @@ Fixed in PR 0 (roadmap Principle 7). Later PRs follow these without restating th
 
   Importing `jaxmodal` or any submodule changes neither the x64 nor the compilation-cache setting (tested). fp32 inputs stay fp32 under x64.
 - **Mixed precision:** iteration vectors, returned modes, Gram matrices and Rayleigh–Ritz are always fp64. fp32 is allowed only inside preconditioners and for the device-side deflation basis. Returned locked modes come from an fp64 host copy.
-- **Indices:** index arrays are int32. Under x64, `argsort`, `nonzero` and `arange` return int64, so they go through `config.index` (pass `jnp.nonzero(a)[0]`, not the tuple). `config.index` is an unchecked cast: values $\ge 2^{31}$ wrap. The overflow asserts come in PR 4 and run in NumPy before casting.
+- **Indices:** index arrays passed to JAX are int32. Host-side NumPy topology (`jaxmodal.mesh`) is int64 until PR 4's overflow asserts and cast. Under x64, `argsort`, `nonzero` and `arange` return int64, so they go through `config.index` (pass `jnp.nonzero(a)[0]`, not the tuple). `config.index` is an unchecked cast: values $\ge 2^{31}$ wrap. The overflow asserts come in PR 4 and run in NumPy before casting.
 - **Loops:** differentiated loops (operator chunk loops) use static trip counts (`scan`, or `fori_loop` with Python-int bounds). Traced bounds appear only in solvers, which are never differentiated.
 - **Block size:** $m$ always denotes the LOBPCG block size (nev plus guard vectors).
 
