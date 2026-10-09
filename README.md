@@ -14,7 +14,7 @@ uv sync --locked
 
 ## Usage
 
-Importing `jaxmodal` changes no JAX setting. Enable fp64 explicitly:
+Importing `jaxmodal` changes neither the x64 nor the compilation-cache setting. Enable fp64 explicitly:
 
 ```python
 import jaxmodal.config

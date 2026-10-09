@@ -46,6 +46,7 @@ with the max over all points for pointwise fields such as stress. Absolute toler
 
 - `measure(code, setup)` runs `setup`, then `code`, in a fresh subprocess and returns `peak_bytes`, `rss_bytes` and `time_s` for `code`.
 - `python benchmarks/harness.py` writes the machine peaks to `benchmarks/results/system.json`. These are fp64 matmul GFLOP/s, jitted and pthread C STREAM triad GB/s, and versions. The C triad runs at $P$ and $P+E$ threads (P/E cores; `os.cpu_count()` when unknown) and records the best run with its thread count. Later results reference this file instead of re-measuring.
+- `write_result(name, data, out_dir)` writes `<out_dir>/<name>.json` (default `benchmarks/results/`) with `data` plus `versions()`.
 
 ### Peak definition
 

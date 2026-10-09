@@ -78,7 +78,7 @@ def index(x): return jnp.asarray(x, dtype=jnp.int32)
    - `import numpy as np, jax, jax.numpy as jnp`;
    - x64 is off unless `setup` enables it.
 4. `setup` and `code` run with `exec` in their own dict, seeded with `np`, `jax`, `jnp`, so user names can't shadow harness locals. The child then runs `setup`, takes the baseline, runs and times `code`, and reads the peak.
-   - **Settling after `setup`:** call `gc.collect()` (jax leaves cyclic garbage that is otherwise freed during `code`), then poll `ri_phys_footprint` every 10 ms until two consecutive reads differ by < 1 MB, for at least 50 ms and at most 2 s (XLA:CPU frees executable temporaries on another thread ~10 ms after `block_until_ready`; a free delayed past the poll would end settling early). Measured without settling: a setup that runs `jax.random.uniform` (3.2 GB of temporaries) once makes the same `code` read 32 KB instead of 3.2e9.
+   - **Settling after `setup`:** call `gc.collect()` (jax leaves cyclic garbage that is otherwise freed during `code`), then poll `ri_phys_footprint` every 10 ms until two consecutive reads differ by < 1 MiB, for at least 50 ms and at most 2 s (XLA:CPU frees executable temporaries on another thread ~10 ms after `block_until_ready`; a free delayed past the poll would end settling early). Measured without settling: a setup that runs `jax.random.uniform` (3.2 GB of temporaries) once makes the same `code` read ≈ 2.1–2.4e9 instead of 3.2e9.
    - **macOS peak:**
      - after settling, call `proc_reset_footprint_interval(getpid())`, a private libSystem symbol, asserting that it exists and returns 0 (no silent fallback);
      - record `ri_phys_footprint` as the baseline;
@@ -204,7 +204,7 @@ Tests are fast unless marked `slow`. Every test that uses jit builds a fresh `ja
   - goal;
   - status;
   - install (`uv sync --locked`);
-  - usage note (`import jaxmodal; jaxmodal.config.enable_x64()`, since import has no side effects);
+  - usage note (`import jaxmodal.config; jaxmodal.config.enable_x64()`, since import has no side effects);
   - `scripts/check.sh` and the merge gate `uv run --locked pytest -m "not gpu"`;
   - license;
   - a link to `docs/ROADMAP.md`.
