@@ -1,6 +1,6 @@
 # PR 0 plan: project scaffold
 
-Branch `pr-00-scaffold`. The scope is exactly the roadmap's PR 0 (Contents, Docs, Tests) plus Principle 7 (conventions). No FEM code. Review rounds 1–2 are incorporated.
+Branch `pr-00-scaffold`. The scope is exactly the roadmap's PR 0 (Contents, Docs, Tests) plus Principle 7 (conventions). No FEM code. Review rounds 1–3 are incorporated.
 
 ## Measured facts (round-1 reviewers, this Mac)
 
@@ -68,21 +68,20 @@ def index(x): return jnp.asarray(x, dtype=jnp.int32)
 
 ## Benchmark harness (`benchmarks/harness.py`)
 
-### `measure(code, setup="") -> {"peak_bytes", "rss_bytes", "time_s"}`
+### `measure(code, setup="", peak=True) -> {"peak_bytes", "rss_bytes", "time_s"}`
 
-1. Runs `sys.executable -c <child>` with `capture_output=True`. On a nonzero exit it raises `RuntimeError(proc.stderr)`. The child's env drops `JAX_ENABLE_X64`.
+1. Runs `sys.executable -c <child>` with `capture_output=True`. On a nonzero exit it raises `RuntimeError(proc.stderr)`. The child's env drops `JAX_ENABLE_X64`. With `peak=True` it also sets `MallocLargeCache=0` (macOS; undocumented, not in `man malloc`), so large freed blocks are unmapped instead of being kept resident in libmalloc's large cache and reused uncharged. Measured: with the cache on, a 1.6 GB block freed in `setup` keeps the footprint at 1.62 GB and an 0.8 GB `code` allocation reads 0. `malloc_zone_pressure_relief` releases 0 bytes, so it is not used. With the cache off the reading is 0.800. `peak=False` keeps the cache for time-only runs, because fresh mmaps make repeated large allocations slower (20 × 800 MB alloc/free: 0.66 s vs 0.04 s).
 2. The child returns its results as JSON written to a temp file whose path is passed in argv, so prints in `code` can't corrupt the result.
 3. The child runs a fixed preamble:
    - `import numpy as np, jax, jax.numpy as jnp`;
    - x64 is off unless `setup` enables it.
-4. The child then runs `setup`, takes the baseline, runs and times `code`, and reads the peak.
+4. `setup` and `code` run with `exec` in their own dict, seeded with `np`, `jax`, `jnp`, so user names can't shadow harness locals. The child then runs `setup`, takes the baseline, runs and times `code`, and reads the peak.
    - **macOS peak:**
-     - after `setup`, call `malloc_zone_pressure_relief(None, 0)` from libSystem, so freed malloc regions are returned instead of being reused uncharged;
-     - then call `proc_reset_footprint_interval(getpid())`, a private libSystem symbol, asserting that it exists and returns 0 (no silent fallback);
+     - after `setup`, call `proc_reset_footprint_interval(getpid())`, a private libSystem symbol, asserting that it exists and returns 0 (no silent fallback);
      - record `ri_phys_footprint` as the baseline;
      - after `code`, `peak_bytes = ri_interval_max_phys_footprint − baseline`.
      - Fields are read from `proc_pid_rusage(pid, RUSAGE_INFO_V4)` as a 16-byte uuid followed by `c_uint64 * 35`, with indices taken from the SDK header `sys/resource.h`: `ri_phys_footprint` = 7, `ri_interval_max_phys_footprint` = 33.
-     - With pressure relief plus the interval reset, transients in `setup` (malloc-freed or unmapped) neither hide nor inflate the delta. Test 4 covers both kinds.
+     - `MallocLargeCache=0` stops freed `setup` blocks from hiding the delta; the interval reset stops `setup` transients from inflating it. Test 4 covers both.
      - It counts compressed pages, as the roadmap's 10M runs need.
    - **Linux peak:**
      - call `malloc_trim(0)` from libc after `setup`, then write `5` to `/proc/self/clear_refs`;
@@ -94,14 +93,16 @@ def index(x): return jnp.asarray(x, dtype=jnp.int32)
 5. Documented rules:
    - `code` must block on its results (`.block_until_ready()`), or `time_s` measures only dispatch.
    - Warm up in `setup` (backend start-up, compiles) whatever should not count toward `peak_bytes` or `time_s`.
-   - Memory still held by allocator caches or arenas after pressure relief can be reused by `code` uncharged.
+   - Small blocks still held by malloc's tiny/small zones can be reused by `code` uncharged; this is negligible against the GB-scale peaks the estimators check.
+   - Footprint counts compressed pages at their compressed size, so estimator checks use non-constant data.
+   - macOS `time_s` with `peak=True` includes page-fault costs of fresh mmaps; wall-time budgets use `peak=False`.
    - `rss_bytes` is the roadmap's plain RSS delta and inherits `ru_maxrss`'s high-water caveat; `peak_bytes` is the primary number.
    - Compile time is not recorded by `measure`. Compile-time tests (PRs 5, 18) time `jit(f).lower(...).compile()` in a fresh subprocess with the cache disabled, as the roadmap says.
 
 ### `versions() -> dict` (cheap)
 
 - jax/jaxlib/numpy versions, `platform.platform()` and `os.cpu_count()`;
-- P/E core counts from `sysctl hw.perflevel0/1.physicalcpu`, or `None` when unavailable (Linux);
+- P/E core counts from `sysctl hw.perflevel0/1.physicalcpu`, or `None` on a missing binary or nonzero exit (Linux); `c_triad` then uses `os.cpu_count()` threads;
 - `XLA_FLAGS` verbatim (or `None`) next to `os.cpu_count()`, XLA:CPU's default intra-op pool size;
 - whether `jax_num_cpu_devices` exists.
 
@@ -142,7 +143,8 @@ Tests are fast unless marked `slow`. Every test that uses jit builds a fresh `ja
    - Over 3 runs, max/min − 1 < 5%.
    - Control: `code="pass"` gives `peak_bytes` < 20 MB.
    - Unmapped transient: `setup` touches 2 GB in an mmap and closes it, then the same `code` gives 0.8e9 ± 5%. Without the interval reset this reads ≈ 2.0e9; with `ru_maxrss` it reads ≈ 0.
-   - Malloc-freed transient: `setup` also runs `t = rng.random(200_000_000); del t` (1.6 GB); the same `code` gives 0.8e9 ± 5%. Without pressure relief this reads ≈ 0.
+   - Malloc-freed transient: `setup` also runs `t = rng.random(200_000_000); del t` (1.6 GB); the same `code` gives 0.8e9 ± 5%. With `peak=False` (large cache on) the same case reads < 0.1e9, which shows `MallocLargeCache=0` is the working mechanism.
+   - JAX transient: `setup` creates and deletes a 0.8 GB jax array (blocked), then `code` creates a same-size jitted output: 0.8e9 ± 5%.
    - On darwin, `rss_bytes` of the plain case is 0.8e9 ± 5%.
    - `maxrss_bytes(1024, "linux") == 1024²` and `maxrss_bytes(1024, "darwin") == 1024`.
 5. **Wall time and results.**
@@ -155,7 +157,7 @@ Tests are fast unless marked `slow`. Every test that uses jit builds a fresh `ja
    - `c_triad()` with `CC=/nonexistent` gives `"skipped: no C compiler"`, and with `CC=false` gives `"skipped: compile failed"`.
 6. **Persistent cache.**
    - Each subprocess gets an env without `JAX_COMPILATION_CACHE_DIR`, calls `config.enable_cache(tmp)`, counts `/jax/compilation_cache/cache_hits` events with `jax.monitoring.register_event_listener`, then jits and runs a small function.
-   - Run 1: 0 hits and at least one file written. Run 2 (same dir and function): ≥ 1 hit.
+   - Run 1: 0 hits, ≥ 1 `cache_misses` event and at least one file written. Run 2 (same dir and function): ≥ 1 hit.
    - The roadmap allows skipping cache-dependent checks if the cache doesn't work. This plan deliberately fails instead, because the cache works on the pinned jax and a regression should be loud.
 7. **Donation on CPU.**
    - Inside `warnings.catch_warnings(record=True)` with `warnings.simplefilter("always")`, a fresh `jax.jit(lambda x: x.at[0].set(1.0), donate_argnums=0)` on a 1e6 fp64 array:
@@ -186,11 +188,11 @@ Tests are fast unless marked `slow`. Every test that uses jit builds a fresh `ja
   - Principle 6:
     - `jnp.int32` start indices for `dynamic_slice`/`dynamic_update_slice`;
     - capacity padding so neither ever clamps.
-  - Measured facts: jax 0.11.2, cache works (delete `.jax_cache/` after jax upgrades), donation works, `jax_num_cpu_devices` available.
+  - Measured facts: jax 0.11.2, cache works (delete `.jax_cache/` after jax upgrades; if a later jax stops storing entries, test 6 fails and the remedy is removing `enable_cache` from conftest), donation works, `jax_num_cpu_devices` available (a jax bump re-checks this test too).
   - Harness rules:
     - peak definition per platform;
     - `code` must block;
-    - pressure relief plus interval reset, and the remaining allocator-cache caveat;
+    - `MallocLargeCache=0` plus interval reset, `peak=False` for timing, and the small-block and compression caveats;
     - warm up in `setup`;
     - 24 B per triad element.
 - **`README.md`:**
@@ -201,7 +203,7 @@ Tests are fast unless marked `slow`. Every test that uses jit builds a fresh `ja
   - `scripts/check.sh` and the merge gate `uv run pytest -m "not gpu"`;
   - license;
   - a link to `docs/ROADMAP.md`.
-- **`docs/ROADMAP.md`:** the Development environment line on `ri_lifetime_max_phys_footprint` becomes the interval peak after `malloc_zone_pressure_relief` and `proc_reset_footprint_interval` (private libSystem symbols), recorded for every macOS measurement. The Dependencies bullet on pymetis says it is added in PR 19, minimum 2025.1.1. The status notes that PR 0 is merged, with the pinned jax 0.11.2; that the cache and donation work; and that the pymetis extra is deferred to PR 19 (minimum 2025.1.1).
+- **`docs/ROADMAP.md`:** the Development environment line on `ri_lifetime_max_phys_footprint` becomes the interval peak after `proc_reset_footprint_interval` (a private libSystem symbol) with `MallocLargeCache=0` (undocumented), recorded for every macOS measurement as the primary number, the RSS delta being secondary. The PR 0 Tests line and the Compilation cache bullet say the cache works on jax 0.11.2 and test 6 fails rather than skips if a later jax stops storing entries; the remedy is removing the `enable_cache` call in conftest. The Dependencies bullet on pymetis says it is added in PR 19, minimum 2025.1.1. The status notes that PR 0 is merged, with the pinned jax 0.11.2; that the cache and donation work; and that the pymetis extra is deferred to PR 19 (minimum 2025.1.1).
 
 ## scripts/check.sh
 
