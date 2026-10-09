@@ -1,6 +1,6 @@
 # PR 0 plan: project scaffold
 
-Branch `pr-00-scaffold`. The scope is exactly the roadmap's PR 0 (Contents, Docs, Tests) plus Principle 7 (conventions). No FEM code. Review round 1 is incorporated.
+Branch `pr-00-scaffold`. The scope is exactly the roadmap's PR 0 (Contents, Docs, Tests) plus Principle 7 (conventions). No FEM code. Review rounds 1–2 are incorporated.
 
 ## Measured facts (round-1 reviewers, this Mac)
 
@@ -70,34 +70,39 @@ def index(x): return jnp.asarray(x, dtype=jnp.int32)
 
 ### `measure(code, setup="") -> {"peak_bytes", "rss_bytes", "time_s"}`
 
-1. Runs `sys.executable -c <child>` with `check=True`. The child's stderr goes into the raised error.
+1. Runs `sys.executable -c <child>` with `capture_output=True`. On a nonzero exit it raises `RuntimeError(proc.stderr)`. The child's env drops `JAX_ENABLE_X64`.
 2. The child returns its results as JSON written to a temp file whose path is passed in argv, so prints in `code` can't corrupt the result.
 3. The child runs a fixed preamble:
    - `import numpy as np, jax, jax.numpy as jnp`;
    - x64 is off unless `setup` enables it.
 4. The child then runs `setup`, takes the baseline, runs and times `code`, and reads the peak.
    - **macOS peak:**
-     - after `setup`, call `proc_reset_footprint_interval(getpid())` from libSystem and record `ri_phys_footprint` as the baseline;
+     - after `setup`, call `malloc_zone_pressure_relief(None, 0)` from libSystem, so freed malloc regions are returned instead of being reused uncharged;
+     - then call `proc_reset_footprint_interval(getpid())`, a private libSystem symbol, asserting that it exists and returns 0 (no silent fallback);
+     - record `ri_phys_footprint` as the baseline;
      - after `code`, `peak_bytes = ri_interval_max_phys_footprint − baseline`.
-     - Fields are read from `proc_pid_rusage(pid, RUSAGE_INFO_V4)` as a 16-byte uuid followed by `c_uint64 * 35`. The field indices are named constants checked by test 4.
-     - Because the interval is reset, a large transient in `setup` neither hides nor inflates the delta.
+     - Fields are read from `proc_pid_rusage(pid, RUSAGE_INFO_V4)` as a 16-byte uuid followed by `c_uint64 * 35`, with indices taken from the SDK header `sys/resource.h`: `ri_phys_footprint` = 7, `ri_interval_max_phys_footprint` = 33.
+     - With pressure relief plus the interval reset, transients in `setup` (malloc-freed or unmapped) neither hide nor inflate the delta. Test 4 covers both kinds.
      - It counts compressed pages, as the roadmap's 10M runs need.
    - **Linux peak:**
-     - write `5` to `/proc/self/clear_refs` after `setup`;
-     - `peak_bytes = VmHWM − VmRSS(after setup)`.
+     - call `malloc_trim(0)` from libc after `setup`, then write `5` to `/proc/self/clear_refs`;
+     - `peak_bytes = VmHWM − VmRSS`, with VmRSS read after the clear.
      - This path is not exercised on the Mac. PR 24 runs it.
    - **`rss_bytes`:**
      - the plain `ru_maxrss` delta, recorded as the roadmap asks;
      - converted to bytes by `maxrss_bytes(value, platform)` (bytes on darwin, KiB elsewhere).
-5. Two documented rules:
+5. Documented rules:
    - `code` must block on its results (`.block_until_ready()`), or `time_s` measures only dispatch.
-   - Memory freed in `setup` can be reused by `code` without RSS growing, so setups should avoid large transients they don't need.
+   - Warm up in `setup` (backend start-up, compiles) whatever should not count toward `peak_bytes` or `time_s`.
+   - Memory still held by allocator caches or arenas after pressure relief can be reused by `code` uncharged.
+   - `rss_bytes` is the roadmap's plain RSS delta and inherits `ru_maxrss`'s high-water caveat; `peak_bytes` is the primary number.
+   - Compile time is not recorded by `measure`. Compile-time tests (PRs 5, 18) time `jit(f).lower(...).compile()` in a fresh subprocess with the cache disabled, as the roadmap says.
 
 ### `versions() -> dict` (cheap)
 
 - jax/jaxlib/numpy versions, `platform.platform()` and `os.cpu_count()`;
 - P/E core counts from `sysctl hw.perflevel0/1.physicalcpu`, or `None` when unavailable (Linux);
-- the XLA:CPU intra-op pool size: the `XLA_FLAGS` value if pinned, otherwise `os.cpu_count()` (XLA's default);
+- `XLA_FLAGS` verbatim (or `None`) next to `os.cpu_count()`, XLA:CPU's default intra-op pool size;
 - whether `jax_num_cpu_devices` exists.
 
 ### `system_info() -> dict`
@@ -105,18 +110,19 @@ def index(x): return jnp.asarray(x, dtype=jnp.int32)
 - Calls `config.enable_x64()` and asserts that its arrays are float64.
 - fp64 peak: jitted 4096² matmul, arrays passed as arguments, warm-up first, `block_until_ready` in each timed run, best of 5, 2n³ flops.
 - Jitted STREAM triad: `a = b + s·c` on 2·10⁷ fp64 elements, same timing rules, best of 10, 24 B per element (STREAM convention; write-allocate traffic is not counted).
-- C triad:
-  - `benchmarks/triad.c`, built with `${CC:-cc} -O3 -pthread` into a temp dir;
-  - pthreads with first-touch initialisation inside the threads, best of 20, and the result is used so the loop can't be optimised away;
-  - run with P-core and P+E-core thread counts, both recorded, best reported;
-  - a missing compiler gives `"skipped: no C compiler"`, a failed build `"skipped: compile failed"`.
+- C triad, `c_triad() -> {"gbps", "threads"} | str`:
+  - `benchmarks/triad.c`, built without a shell as `[os.environ.get("CC", "cc"), "-O3", "-pthread", ...]` into a temp dir; the compiler is looked up with `shutil.which`;
+  - pthreads with a mutex-and-condition-variable barrier (macOS has no `pthread_barrier_t`), first-touch initialisation inside the threads, best of 20, and the result is used so the loop can't be optimised away;
+  - run at the P-core and the P+E-core thread counts; the best value and its thread count are reported;
+  - a missing compiler gives `"skipped: no C compiler"`, a failed build `"skipped: compile failed"`;
+  - the ratio to the jitted triad is recorded, not asserted.
 - Includes `versions()`.
 
 ### Results
 
 - `write_result(name, data, out_dir="benchmarks/results")` writes `<out_dir>/<name>.json` with `data` plus `versions()`.
 - The peaks live only in `system.json`. Later results reference it instead of re-measuring.
-- `python benchmarks/harness.py` writes `system.json`.
+- `python benchmarks/harness.py [--out DIR]` writes `DIR/system.json`; `DIR` defaults to `benchmarks/results`.
 
 ## Tests
 
@@ -135,15 +141,22 @@ Tests are fast unless marked `slow`. Every test that uses jit builds a fresh `ja
    - `setup="rng = np.random.default_rng(0)"`, `code="a = rng.random(100_000_000)"` (800 MB, incompressible): `peak_bytes` = 0.8e9 ± 5%.
    - Over 3 runs, max/min − 1 < 5%.
    - Control: `code="pass"` gives `peak_bytes` < 20 MB.
-   - Transient case: `setup` touches 2 GB in an mmap and closes it, then the same `code` gives 0.8e9 ± 5%. Without the interval reset this reads ≈ 0.
+   - Unmapped transient: `setup` touches 2 GB in an mmap and closes it, then the same `code` gives 0.8e9 ± 5%. Without the interval reset this reads ≈ 2.0e9; with `ru_maxrss` it reads ≈ 0.
+   - Malloc-freed transient: `setup` also runs `t = rng.random(200_000_000); del t` (1.6 GB); the same `code` gives 0.8e9 ± 5%. Without pressure relief this reads ≈ 0.
    - On darwin, `rss_bytes` of the plain case is 0.8e9 ± 5%.
    - `maxrss_bytes(1024, "linux") == 1024²` and `maxrss_bytes(1024, "darwin") == 1024`.
 5. **Wall time and results.**
-   - `measure("import time; time.sleep(0.2)")` gives `time_s` = 0.2 ± 0.05.
+   - `measure("import time; time.sleep(0.2)")` gives 0.2 ≤ `time_s` < 0.5.
+   - `measure("print('noise')")` still returns all three fields.
+   - `measure("raise ValueError('boom')")` raises `RuntimeError` whose message contains `boom`.
+   - `measure("assert not jax.config.jax_enable_x64")` passes even with `JAX_ENABLE_X64=1` set in the parent (via monkeypatch).
    - `write_result("t", {"x": 1}, out_dir=tmp_path)` writes valid JSON with `x` and every `versions()` key.
+   - `versions()` values: on darwin, P and E counts are positive ints with P + E = `os.cpu_count()`. `XLA_FLAGS` is recorded verbatim under monkeypatch. `jax_num_cpu_devices` is `True` on 0.11.2.
+   - `c_triad()` with `CC=/nonexistent` gives `"skipped: no C compiler"`, and with `CC=false` gives `"skipped: compile failed"`.
 6. **Persistent cache.**
-   - A subprocess calls `config.enable_cache(tmp)`, then jits and runs a small function: at least one entry is written.
-   - A second subprocess with the same dir and function adds no new entries, so the cache is reused.
+   - Each subprocess gets an env without `JAX_COMPILATION_CACHE_DIR`, calls `config.enable_cache(tmp)`, counts `/jax/compilation_cache/cache_hits` events with `jax.monitoring.register_event_listener`, then jits and runs a small function.
+   - Run 1: 0 hits and at least one file written. Run 2 (same dir and function): ≥ 1 hit.
+   - The roadmap allows skipping cache-dependent checks if the cache doesn't work. This plan deliberately fails instead, because the cache works on the pinned jax and a regression should be loud.
 7. **Donation on CPU.**
    - Inside `warnings.catch_warnings(record=True)` with `warnings.simplefilter("always")`, a fresh `jax.jit(lambda x: x.at[0].set(1.0), donate_argnums=0)` on a 1e6 fp64 array:
      - emits no warning containing "donated buffers were not usable";
@@ -155,7 +168,7 @@ Tests are fast unless marked `slow`. Every test that uses jit builds a fresh `ja
    - Runs `python benchmarks/harness.py` with `--out` set to a temp dir.
    - All keys are present.
    - fp64 peak is in [10, 1e5] GFLOP/s and the jitted triad in [10, 2000] GB/s. This catches unit or flop-count errors of 10³.
-   - The C triad is either the skip string or within 3× of the jitted triad.
+   - The C triad is either a skip string or in [10, 2000] GB/s.
 
 ## Docs
 
@@ -177,7 +190,8 @@ Tests are fast unless marked `slow`. Every test that uses jit builds a fresh `ja
   - Harness rules:
     - peak definition per platform;
     - `code` must block;
-    - allocator-reuse caveat;
+    - pressure relief plus interval reset, and the remaining allocator-cache caveat;
+    - warm up in `setup`;
     - 24 B per triad element.
 - **`README.md`:**
   - goal;
@@ -187,13 +201,14 @@ Tests are fast unless marked `slow`. Every test that uses jit builds a fresh `ja
   - `scripts/check.sh` and the merge gate `uv run pytest -m "not gpu"`;
   - license;
   - a link to `docs/ROADMAP.md`.
-- **`docs/ROADMAP.md`:** status notes that PR 0 is merged, with the pinned jax 0.11.2; that the cache and donation work; and that the pymetis extra is deferred to PR 19 (minimum 2025.1.1).
+- **`docs/ROADMAP.md`:** the Development environment line on `ri_lifetime_max_phys_footprint` becomes the interval peak after `malloc_zone_pressure_relief` and `proc_reset_footprint_interval` (private libSystem symbols), recorded for every macOS measurement. The Dependencies bullet on pymetis says it is added in PR 19, minimum 2025.1.1. The status notes that PR 0 is merged, with the pinned jax 0.11.2; that the cache and donation work; and that the pymetis extra is deferred to PR 19 (minimum 2025.1.1).
 
 ## scripts/check.sh
 
 ```sh
 #!/usr/bin/env sh
 set -e
+cd "$(dirname "$0")/.."
 uv run ruff check .
 uv run ruff format --check .
 uv run pytest -m "not slow and not gpu" -q
