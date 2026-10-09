@@ -28,7 +28,7 @@ Branch `pr-01-mesh`, from `main` after PR 0. Scope: the roadmap's PR 1 (Contents
 ## Files
 
 ```
-src/jaxmodal/mesh/__init__.py   re-exports Mesh, Voxel, read, write, voxel_mesh, corner_jacobians
+src/jaxmodal/mesh/__init__.py   re-exports TYPES, Mesh, Voxel, read, write, voxel_mesh, corner_jacobians
 src/jaxmodal/mesh/model.py      Mesh, Voxel, corner_jacobians
 src/jaxmodal/mesh/io.py         read (Gmsh/VTU via meshio format modules; own flat-.inp reader), write (VTU)
 src/jaxmodal/mesh/voxel.py      voxel_mesh
@@ -115,7 +115,7 @@ class Mesh:
 
 ### Abaqus (own reader, flat `.inp` only)
 
-About 90 lines. It reads the whole file, then resolves labels.
+About 170 lines. It reads the whole file, then resolves labels.
 
 - **Lines:**
   - `**` lines are comments, including between continuation lines.
@@ -126,7 +126,7 @@ About 90 lines. It reads the whole file, then resolves labels.
   - the upper-cased value matching `re.fullmatch(r"C3D(8|20)[A-Z]*")` → `hex8`/`hex20`. Suffixes are ignored, since the project uses full integration; the docs say so.
   - Any other `C3D*` raises.
   - Other types (S4, CPS8, T3D3, DC3D8, SC8R, …) are skipped: their data lines are ignored, with one warning per type.
-  - Kept elements may span continuation lines; an element is complete at its node count. More entries than that, or an element cut off by the next keyword or end of file, raise.
+  - Kept elements may span continuation lines; an element is complete at its node count and must end at a line end. More entries than that, or an element cut off by the next keyword or end of file, raise (checked per section: the entry count, then the row ends against the line ends).
   - `ELSET=` adds the kept elements to that set; on a skipped section it is ignored (no set, no warning).
 - **`*NSET` / `*ELSET`:**
   - integer lists, or `GENERATE` (start, stop, optional step defaulting to 1); any non-integer token raises (this is how set-name references are rejected);
@@ -150,7 +150,7 @@ About 90 lines. It reads the whole file, then resolves labels.
 ### Gmsh (`meshio.gmsh.read`, 4.1 ASCII only)
 
 - **Version:** the `$MeshFormat` header is read first (binary mode); anything but `4.1` ASCII raises "save as Gmsh 4.1 ASCII (Mesh.MshFileVersion = 4.1, Mesh.Binary = 0)". 2.2 cannot be validated (see Measured facts).
-- **Own header parse** (about 20 lines, stops at `$EndEntities` or `$Nodes`):
+- **Own header parse** (about 20 lines, stops at `$Nodes`):
   - `$PhysicalNames` → `{(dim, tag): name}` (`split(maxsplit=2)`, quotes stripped; names may contain spaces);
   - `$PartitionedEntities` raises "save unpartitioned";
   - `$Entities` → `{(dim, entity): [physical tags]}`; a file without `$Entities` has no memberships.
@@ -305,7 +305,7 @@ The VTK reference coordinates `REF[type]` are a literal table in the test file; 
    - Truncated `.msh` (cut inside `$Elements`) and `.vtu` files raise an `Exception`, not `SystemExit`; an unknown extension raises `ValueError`; writing `.inp` raises.
    - `voxel_mesh` with bad shape (0, 2.5, `(True,)*3`; `np.int64` and int spacing accepted, normalized to `int`/`float`), spacing, origin, mask shape, an int or float mask, or an all-false mask.
    - Also tested: a 4.1 file without physical groups, and one without `$Entities` (meshio-written with `gmsh:physical = 5`), read with material 0.
-8. **Size.** A full 88³ voxel grid (about 2.1M DOFs) builds, validates and runs `corner_jacobians` in under 2 s, timing only the two calls (validation runs inside `voxel_mesh`; measured 0.3 s; catches a Python loop over elements). Not marked slow.
+8. **Size.** A full 88³ voxel grid (about 2.1M DOFs) builds, validates and runs `corner_jacobians` in under 2 s, timing only the two calls (validation runs inside `voxel_mesh`; measured 0.13 s; catches a Python loop over elements). Not marked slow.
 
 ## Docs
 

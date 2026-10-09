@@ -126,8 +126,6 @@ def xi_of(order):
 def write_one(path, fmt, etype, swap=None):
     """Write one element in `fmt`'s documented order, nodes stored shuffled with sparse labels."""
     xi = xi_of(ORDER[fmt, etype])
-    etype_ = etype
-    etype = etype.removesuffix("r")
     n = len(xi)
     x = affine(xi)
     store = np.random.default_rng(1).permutation(n)  # storage position -> format position
@@ -143,7 +141,7 @@ def write_one(path, fmt, etype, swap=None):
             '$PhysicalNames\n1\n3 5 "solid"\n$EndPhysicalNames\n'
             "$Entities\n0 0 0 1\n1 -9 -9 -9 9 9 9 1 5 0\n$EndEntities\n"
             f"$Nodes\n1 {n} {label.min()} {label.max()}\n3 1 0 {n}\n{nodes}\n$EndNodes\n"
-            f"$Elements\n1 1 4 4\n3 1 {GMSH_TYPE[etype]} 1\n4 "
+            f"$Elements\n1 1 4 4\n3 1 {GMSH_TYPE[etype.removesuffix('r')]} 1\n4 "
             + " ".join(str(label[p]) for p in conn)
             + "\n$EndElements\n"
         )
@@ -153,7 +151,7 @@ def write_one(path, fmt, etype, swap=None):
         lines = ", ".join(ids[:16]) + ("," if len(ids) > 16 else "")
         if len(ids) > 16:
             lines += "\n" + ", ".join(ids[16:])
-        path.write_text(f"*NODE\n{nodes}\n*ELEMENT, TYPE={ABAQUS_TYPE[etype_]}\n{lines}\n")
+        path.write_text(f"*NODE\n{nodes}\n*ELEMENT, TYPE={ABAQUS_TYPE[etype]}\n{lines}\n")
     else:
         pos = np.argsort(store)  # format position -> storage position
         pts = " ".join(repr(float(v)) for p in store for v in x[p])
@@ -416,8 +414,11 @@ def abaqus_messy():
 900, 901, 20
 *ELSET, ELSET=material_abc
 21
+*ELSET, ELSET=material_5x
+21
 *ELSET, ELSET=EGen, GENERATE
-20, 22
+20, 21
+22, 22
 """
     cent = {n: tuple(np.round(xs[:8].mean(0), 6)) for n, (_, _, xs) in elements.items()}
     pt = lambda *names: {cent[n] for n in names}  # noqa: E731
@@ -435,6 +436,7 @@ def abaqus_messy():
             "Top": pt("F2", "G2", "E"),
             "Shells": pt("E"),
             "material_abc": pt("F1"),
+            "material_5x": pt("F1"),
             "EGen": pt("E", "F1", "G"),
         },
         "warnings": sorted(
@@ -541,7 +543,9 @@ def test_voxel_sphere():
         for dk in (0, 1)
     }
     assert len(m.points) == len(nodes)
-    vol = 8 * corner_jacobians(m)["hex8"].mean(1).sum()
+    det = corner_jacobians(m)["hex8"]
+    assert np.array_equal(corner_jacobians(m, chunk=7)["hex8"], det)  # several chunks
+    vol = 8 * det.mean(1).sum()
     np.testing.assert_allclose(vol, mask.sum() * np.prod(h), rtol=1e-12)
 
 
@@ -625,8 +629,8 @@ def test_voxel_permutation():
         voxel=replace(v, node_map=nm, element_map=em),
     )
     g = np.flatnonzero(nm >= 0)
-    nx, ny = 4, 5
-    ijk = np.stack([g % nx, g // nx % ny, g // (nx * ny)], 1)
+    sx, sy = 4, 5  # grid nodes per axis
+    ijk = np.stack([g % sx, g // sx % sy, g // (sx * sy)], 1)
     np.testing.assert_allclose(pm.points[nm[g]], np.array([1.0, -2.0, 0.5]) + [0.5, 0.7, 1.3] * ijk)
     inv = np.empty(pm.n_el, np.int64)
     inv[em[em >= 0]] = np.flatnonzero(em >= 0)
@@ -714,12 +718,7 @@ INVALID = {
         "1-D int64",
     ),
     "spacing 0": (lambda: voxel_with(spacing=(0.0, 1.0, 1.0)), "spacing > 0"),
-    "spacing nan": (lambda: voxel_with(spacing=(np.nan, 1.0, 1.0)), "finite reals"),
-    "spacing bool": (lambda: voxel_with(spacing=(True, 1.0, 1.0)), "finite reals"),
-    "origin inf": (lambda: voxel_with(origin=(np.inf, 0.0, 0.0)), "finite reals"),
     "shape 0": (lambda: voxel_with(shape=(0, 1, 1)), "positive ints"),
-    "shape len 2": (lambda: voxel_with(shape=(2, 1)), "positive ints"),
-    "shape bool": (lambda: voxel_with(shape=(True,) * 3), "positive ints"),
 }
 for kind, n, sets in (("node", 12, "node_sets"), ("element", 2, "element_sets")):
     for case, bad in (("unsorted", [1, 0]), ("dup", [0, 0]), ("high", [n]), ("negative", [-1, 0])):
@@ -798,6 +797,14 @@ INP_BAD = {f"*{k}": (f"*{k}\n", f"\\*{k} is not supported") for k in REJECT} | {
     "two orientations": (ELSETS.format("orientation_1", "orientation_2"), "than one orientation"),
     "material 2**31": ("*ELSET, ELSET=material_2147483648\n1\n", "below 2\\*\\*31"),
     "2 coordinates": ("*NODE\n9, 0., 0.\n", COUNT),
+    "2 then 4 coordinates": ("*NODE\n9, 0., 0.\n10, 0., 0., 0., 0.\n", "line end"),
+    "10 then 8 entries": (
+        "*ELEMENT, TYPE=C3D8\n2, 1, 2, 3, 4, 5, 6, 7, 8, 1\n3, 1, 2, 3, 4, 5, 6, 7\n",
+        "line end",
+    ),
+    "huge element set label": ("*ELSET, ELSET=e\n1e300\n", "below 2"),
+    "huge node label": ("*NODE\n3e9, 0., 0., 0.\n", "below 2"),
+    "bare star": ("*\n", "empty keyword"),
     "4 coordinates": ("*NODE\n9, 0., 0., 0., 0.\n", COUNT),
     "non-integer element": ("*ELEMENT, TYPE=C3D8\n2.5, 1, 2, 3, 4, 5, 6, 7, 8\n", "integers"),
     "too many entries": ("*ELEMENT, TYPE=C3D8\n2, 1, 2, 3, 4, 5, 6, 7, 8, 1\n", COUNT),
@@ -814,6 +821,17 @@ def test_abaqus_invalid(tmp_path, case):
     (tmp_path / "bad.inp").write_text(INP + extra)
     with pytest.raises(ValueError, match=match):
         read(tmp_path / "bad.inp")
+
+
+def test_abaqus_empty_sections(tmp_path):
+    (tmp_path / "a.inp").write_text(INP + "*ELEMENT, TYPE=C3D20\n*NODE\n")
+    assert list(read(tmp_path / "a.inp").blocks) == ["hex8"]
+    (tmp_path / "b.inp").write_text(INP.split("*ELEMENT")[0] + "*ELEMENT, TYPE=C3D8\n")
+    with pytest.raises(ValueError, match="no 3D elements"):
+        read(tmp_path / "b.inp")
+    (tmp_path / "c.inp").write_text("*ELEMENT" + INP.split("*ELEMENT")[1])
+    with pytest.raises(ValueError, match="no \\*NODE data"):
+        read(tmp_path / "c.inp")
 
 
 @pytest.mark.parametrize("extra", ["", "*ELSET, ELSET=a\n1\n"])

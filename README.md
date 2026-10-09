@@ -28,7 +28,7 @@ Read a mesh (flat Abaqus `.inp`, Gmsh 4.1 ASCII `.msh`, or `.vtu`), or build a v
 import numpy as np
 from jaxmodal.mesh import read, voxel_mesh, write
 
-mesh = read("part.inp")
+mesh = read("tests/data/gmsh_pair.msh")  # any .inp, .msh or .vtu
 x, y, z = np.meshgrid(*[np.arange(40) - 19.5] * 3, indexing="ij")
 sphere = voxel_mesh((40, 40, 40), spacing=(0.5, 0.5, 0.5), mask=x**2 + y**2 + z**2 < 400)
 write("sphere.vtu", sphere)

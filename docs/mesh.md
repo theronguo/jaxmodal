@@ -70,7 +70,7 @@ This is the exact trilinear derivative at a corner. For an affine element $x = A
 
 ## Formats
 
-`read(path)` dispatches on the extension. Every reader raises `ValueError` when no 3D element is kept, removes orphan nodes (keeping the order of the rest), restricts node sets to surviving nodes (warning) and drops sets that end up empty (warning). Blocks are put in `TYPES` order; labels follow their rows.
+`read(path)` dispatches on the extension. Every reader raises `ValueError` on 3D cell types other than hex8/hex20/hex27 (tet, wedge, ...) and when no 3D element is kept, removes orphan nodes (keeping the order of the rest), restricts node sets to surviving nodes (warning) and drops sets that end up empty (warning). Blocks are put in `TYPES` order; labels follow their rows.
 
 ### Abaqus `.inp` (flat files only)
 
@@ -80,8 +80,8 @@ meshio's `.inp` reader is unusable (wrong `ELSET=` blocks, repeated sets replace
 - **Types:** `C3D8*` → `hex8` and `C3D20*` → `hex20`. Suffixes (R, H, ...) are ignored because jaxmodal uses full integration. Other `C3D*` types raise. Non-solid types (S4, CPS8, T3D3, DC3D8, ...) are skipped with one warning per type; `ELSET=` on a skipped section is ignored, and element-set labels of skipped elements are dropped with a warning.
 - **Materials and orientations** come from element sets named `material_<k>` / `orientation_<k>` (any case; $k$ a non-negative integer below $2^{31}$, so `material_007` is label 7). Elements in none get 0; an element in two sets of a kind raises. These sets are removed from `element_sets`.
 - **Not read:** `*MATERIAL`, `*SOLID SECTION`, `*ORIENTATION` and other keywords are skipped with their data lines. Real section assignments are not used.
-- **Rejected:** Abaqus/CAE structure (`*PART`, `*INSTANCE`, `*ASSEMBLY`, `*INCLUDE`), generated geometry (`*NGEN`, `*NFILL`, `*NCOPY`, `*NMAP`, `*ELGEN`, `*ELCOPY`, `*SYSTEM`), set names inside sets, `*NSET, ELSET=`, duplicate node or element labels, undefined node labels (in elements or node sets), malformed data lines. Element-set labels that name no solid element (skipped or undefined) are dropped with a warning.
-- **Parsing:** each section's data lines are parsed in bulk, so an error names the section, not the line.
+- **Rejected:** Abaqus/CAE structure (`*PART`, `*INSTANCE`, `*ASSEMBLY`, `*INCLUDE`), generated geometry (`*NGEN`, `*NFILL`, `*NCOPY`, `*NMAP`, `*ELGEN`, `*ELCOPY`, `*SYSTEM`), set names inside sets, `*NSET, ELSET=`, `*ELEMENT` without `TYPE=`, `*NSET`/`*ELSET` without a name, labels of $2^{31}$ or more in magnitude, duplicate node or element labels, undefined node labels (in elements or node sets), malformed data lines. Element-set labels that name no solid element (skipped or undefined) are dropped with a warning.
+- **Parsing:** each section's data lines are parsed in bulk, so an error names the section, not the line. A node or element may continue over lines but must end at a line end; all three node coordinates are required. Empty sections are ignored.
 
 ### Gmsh `.msh` (4.1 ASCII only)
 

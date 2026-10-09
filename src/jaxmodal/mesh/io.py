@@ -108,7 +108,10 @@ LABEL_SET = re.compile(r"(MATERIAL|ORIENTATION)_(\d+)")
 
 
 def _numbers(lines, what, width=1, integral=True):
-    """Parse comma-separated data lines into an (n, width) array in one call."""
+    """Parse comma-separated data lines into an (n, width) array in one call.
+
+    Rows may continue over lines but must end at a line end.
+    """
     with warnings.catch_warnings():
         warnings.simplefilter("error")  # fromstring only warns on a bad token
         try:
@@ -117,10 +120,14 @@ def _numbers(lines, what, width=1, integral=True):
             raise ValueError(f"{what}: unexpected non-numeric entry") from None
     if len(a) % width:
         raise ValueError(f"{what}: {len(a)} entries is not a multiple of {width}")
+    if width > 1:
+        ends = np.cumsum([len(line.replace(",", " ").split()) for line in lines])
+        if not np.isin(np.arange(width, len(a) + 1, width), ends).all():
+            raise ValueError(f"{what}: an entry row does not end at a line end")
     a = a.reshape(-1, width)
     col = a if integral else a[:, :1]
-    if not (col == np.round(col)).all():
-        raise ValueError(f"{what}: labels must be integers")
+    if not ((col == np.round(col)) & (np.abs(col) < LABEL_MAX)).all():
+        raise ValueError(f"{what}: labels must be integers below 2**31 in magnitude")
     return a
 
 
@@ -139,6 +146,8 @@ def _read_inp(path):
         mode, name = sec[0], sec[1]
         if mode == "node":
             a = _numbers(lines, "*NODE (label + 3 coordinates per line)", 4, integral=False)
+            if len(a) == 0:
+                return
             nlab.append(a[:, 0].astype(np.int64))
             xyz.append(a[:, 1:])
             if name:
@@ -147,6 +156,8 @@ def _read_inp(path):
             etype, n = sec[2], NODES[sec[2]] + 1
             a = _numbers(lines, f"*ELEMENT {etype} (element cut off or too many entries)", n)
             a = a.astype(np.int64)
+            if len(a) == 0:
+                return
             elab.append(a[:, 0])
             runs.append((etype, a[:, 1:]))
             if name:
@@ -174,6 +185,8 @@ def _read_inp(path):
             flush(sec, lines)
             sec, lines = (None, None), []
             parts = [p.strip() for p in s[1:].split(",") if p.strip()]
+            if not parts:
+                raise ValueError("empty keyword line '*'")
             kw, opt = parts[0].upper(), {}
             for p in parts[1:]:
                 k, _, v = p.partition("=")
@@ -204,12 +217,10 @@ def _read_inp(path):
     flush(sec, lines)
     if not runs:
         raise ValueError("no 3D elements in file")
+    if not nlab:
+        raise ValueError("no *NODE data in file")
 
     def lookup(labels, query, what, strict):
-        if len(labels) == 0:
-            if strict and len(query):
-                raise ValueError(f"undefined {what} label {query[0]}")
-            return np.zeros(len(query), np.int64), np.zeros(len(query), bool)
         order = np.argsort(labels)
         i = np.searchsorted(labels, query, sorter=order).clip(0, len(labels) - 1)
         found = labels[order[i]] == query
@@ -217,7 +228,7 @@ def _read_inp(path):
             raise ValueError(f"undefined {what} label {query[~found][0]}")
         return order[i], found
 
-    nlab = np.concatenate(nlab) if nlab else np.zeros(0, np.int64)
+    nlab = np.concatenate(nlab)
     elab = np.concatenate(elab)
     for labels, what in ((nlab, "node"), (elab, "element")):
         if len(np.unique(labels)) < len(labels):
@@ -252,7 +263,7 @@ def _read_inp(path):
         if (count > 1).any():
             raise ValueError(f"an element is in more than one {kind.lower()}_<k> set")
         out[kind] = lab
-    points = np.concatenate(xyz) if xyz else np.zeros((0, 3))
+    points = np.concatenate(xyz)
     return _build(points, cells, out["MATERIAL"], out["ORIENTATION"], node_sets, element_sets)
 
 
