@@ -13,7 +13,7 @@ Large-scale 3D linear modal analysis (Kv = λMv) in JAX. The solver uses matrix-
 
 Package name: `jaxmodal`. License: MIT.
 
-Status: final. Review rounds 1–30 incorporated (round 30: all 5 reviewers satisfied). Implementation proceeds PR by PR, each with its own reviewed plan in `docs/plans/`.
+Status: final. Review rounds 1–30 incorporated (round 30: all 5 reviewers satisfied). Implementation proceeds PR by PR, each with its own reviewed plan in `docs/plans/`. PR 0 merged: jax pinned at ≥ 0.11.2; the persistent cache and CPU donation work; the `pymetis` extra is deferred to PR 19 (minimum 2025.1.1).
 
 ## Principles
 
@@ -141,7 +141,7 @@ Status: final. Review rounds 1–30 incorporated (round 30: all 5 reviewers sati
 - **Dependencies:**
   - Python 3.12.
   - Core: `jax` (pinned minimum version), `numpy`, `scipy`, `meshio`, `pyamg`, all with macOS arm64 wheels.
-  - `pymetis` is an optional extra (only PR 19 needs it), pinned to a version with macOS arm64 wheels.
+  - `pymetis` is an optional extra, added in PR 19 (its only user) with minimum 2025.1.1, the oldest cp312 macOS arm64 wheel.
   - Versions are locked with `uv.lock`.
   - No SLEPc, CHOLMOD or pypardiso.
   - meshio's `.inp` reader doesn't handle parts or assemblies; a small custom reader is added only if needed.
@@ -183,18 +183,18 @@ All sizes are fp64; GB = 10⁹ bytes.
 - **GPU checks:** GPU acceptance criteria go into the "Deferred GPU checks" list and are run in PR 24 whenever a CUDA machine becomes available. They don't gate other milestones.
 - **Mac acceptance budgets:** the numbers below are provisional; PR 9 finalizes them once matvec throughput has been measured, and later PRs use the PR 9 values.
 - **Benchmarks:**
-  - Each measurement runs in a fresh subprocess and reports peak RSS minus baseline RSS.
+  - Each measurement runs in a fresh subprocess and reports the peak minus baseline (macOS: `peak_bytes`, see below).
     - `memory_stats()` is unavailable on CPU.
     - `ru_maxrss` is in bytes on macOS and KiB on Linux; the harness branches by platform. GPU runs use the `memory_stats()` peak.
-    - For the 10M runs, the peak `phys_footprint` (`proc_pid_rusage`, field `ri_lifetime_max_phys_footprint`) is also recorded, because memory compression can make RSS undercount.
+    - On macOS every measurement records `peak_bytes` = max(interval `phys_footprint` delta, `ru_maxrss` delta) as the primary number: the interval peak is read after `proc_reset_footprint_interval` (a private libSystem symbol), with `MallocLargeCache=0` (undocumented) in the child. Footprint counts compressed pages, which RSS can undercount; `ru_maxrss` catches reused small malloc blocks, which footprint misses. Details in `docs/conventions.md`.
   - JSON results go to `benchmarks/results/` and record:
     - jax and jaxlib versions;
     - STREAM triad bandwidth, both jitted and a small multithreaded C triad using pthreads (Apple clang has no OpenMP by default), skipped and recorded as skipped when no C compiler is found;
     - XLA:CPU intra-op thread pool size (unless pinned) and P/E-core setup;
     - measured fp64 peak;
-    - time, peak memory and compile time.
+    - time and peak memory; compile time is recorded by the PRs that measure it (5, 18).
 - **Compilation cache:**
-  - The persistent cache is enabled in tests, with `jax_persistent_cache_min_compile_time_secs = 0` and `jax_persistent_cache_min_entry_size_bytes = -1` (no size restriction). PR 0 checks and records whether it actually stores entries on CPU. If it doesn't, the cache is disabled and the tests don't depend on it.
+  - The persistent cache is enabled in tests, with `jax_persistent_cache_min_compile_time_secs = 0` and `jax_persistent_cache_min_entry_size_bytes = -1` (no size restriction). It stores entries on CPU with jax 0.11.2 (PR 0). PR 0's cache test fails rather than skips if a later jax stops storing entries; the remedy is removing the `enable_cache` call in `tests/conftest.py`. Nothing depends on the cache for correctness.
   - Compile-time tests (PRs 5 and 18; PR 9 only counts compiles) run in a fresh subprocess with the cache disabled and time `jit(f).lower(...).compile()`.
 - **Multi-device tests:**
   - They live in `tests/multidevice/`, which is in `collect_ignore`. `jax_num_cpu_devices` is used if the pinned jax supports it, set before the backend initializes.
@@ -233,16 +233,16 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. E
   - `scripts/check.sh`.
   - `config.py` (an explicit x64 switch).
   - Persistent compilation cache.
-  - A benchmark harness (subprocess RSS, STREAM triad, fp64 peak, versions).
+  - A benchmark harness (subprocess peak memory and RSS, STREAM triad, fp64 peak, versions).
   - LICENSE (MIT), version 0.x.
 - Docs: `README.md`, `docs/conventions.md`.
 - Tests:
   - An fp32 path stays fp32 with x64 enabled.
   - Importing jaxmodal leaves `jax_enable_x64` unchanged.
   - Index arrays from `argsort`, `nonzero` and `arange` are cast back to int32.
-  - The harness reports a stable RSS delta for a known allocation.
+  - The harness reports a stable peak and RSS delta for a known allocation.
   - Buffer donation works on CPU: there is no "donated buffers were not usable" warning, and `x.is_deleted()` is true for the donated input. If the pinned jaxlib doesn't donate on CPU, the minimum version is raised; failing that, the estimators budget without donation.
-  - Whether the persistent cache stores entries on CPU is recorded; if not, the cache is disabled and cache-dependent checks are skipped.
+  - The persistent cache stores entries on CPU (it does on jax 0.11.2); the test fails rather than skips if it stops, and the remedy is removing the `enable_cache` call in conftest.
 
 ### PR 1: Mesh data model and parser
 - Contents:
@@ -701,6 +701,7 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
 - PR 5: scatter vs gather benchmark on GPU; sets the GPU default.
 - PR 18: matvec ≥ 50% of roofline at m = 1.
 - PR 19: weak scaling.
+- PR 24: harness Linux and GPU peak paths, checked with the PR 0 harness test cases.
 
 ## Dependencies
 
