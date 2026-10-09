@@ -834,8 +834,9 @@ def test_abaqus_invalid(tmp_path, case):
 
 
 def test_abaqus_empty_sections(tmp_path):
-    (tmp_path / "a.inp").write_text(INP + "*ELEMENT, TYPE=C3D20\n*NODE\n")
-    assert list(read(tmp_path / "a.inp").blocks) == ["hex8"]
+    (tmp_path / "a.inp").write_text(INP + "*ELEMENT, TYPE=C3D20\n*NODE\n*NSET, NSET=g, GENERATE\n")
+    m, w = record(read, tmp_path / "a.inp")
+    assert list(m.blocks) == ["hex8"] and w == ["node set 'g' is empty after reading; dropped"]
     (tmp_path / "b.inp").write_text(INP.split("*ELEMENT")[0] + "*ELEMENT, TYPE=C3D8\n")
     with pytest.raises(ValueError, match="no 3D elements"):
         read(tmp_path / "b.inp")

@@ -28,7 +28,7 @@ class Mesh:
 - **Global element index:** blocks in `TYPES` order, rows in order within a block. `mesh.offsets[t]` is the first global index of block `t` (present types only), and `mesh.n_el` the total.
 - **Labels:** `material` and `orientation` are labels (any int64, possibly negative or non-contiguous, e.g. Gmsh physical tags), not table indices. PR 2/6 map them to materials and orientations. Label 0 is the default.
 - **dtypes are strict:** the arrays must be `np.ndarray` with exactly these dtypes, or construction raises `ValueError`. Nothing is cast silently, so there are no hidden copies at 100M-node scale.
-- **Validation** (in `__post_init__`, O(n)): shapes and dtypes; at least one element and no empty block; node counts per type; node indices in range; no orphan nodes; sets sorted, unique and in range (empty sets are allowed); label lengths; the voxel fields below.
+- **Validation** (in `__post_init__`, O(n)): shapes and dtypes; finite points; at least one element and no empty block; node counts per type; node indices in range; no orphan nodes; sets sorted, unique and in range (empty sets are allowed); label lengths; the voxel fields below.
 - **Not checked:** degenerate elements (repeated nodes) construct; `corner_jacobians` shows 0 at the collapsed corners.
 - **Immutability:** treat every field, including the dicts, as immutable. Change a mesh with `dataclasses.replace`, which validates again.
 - **Orphan rule:** every node belongs to an element. A mesh derived from another (e.g. PR 12's hex8 corner mesh of a hex20 mesh) must compact its nodes.
@@ -81,7 +81,7 @@ meshio's `.inp` reader is unusable (wrong `ELSET=` blocks, repeated sets replace
 - **Materials and orientations** come from element sets named `material_<k>` / `orientation_<k>` (any case; $k$ a non-negative integer below $2^{31}$, so `material_007` is label 7). Elements in none get 0; an element in two sets of a kind raises. These sets are removed from `element_sets`.
 - **Not read:** `*MATERIAL`, `*SOLID SECTION`, `*ORIENTATION` and other keywords are skipped with their data lines. Real section assignments are not used.
 - **Rejected:** Abaqus/CAE structure (`*PART`, `*INSTANCE`, `*ASSEMBLY`, `*INCLUDE`), generated geometry (`*NGEN`, `*NFILL`, `*NCOPY`, `*NMAP`, `*ELGEN`, `*ELCOPY`, `*SYSTEM`), set names inside sets, `*NSET, ELSET=`, `*ELEMENT` without `TYPE=`, `*NSET`/`*ELSET` without a name, labels of $2^{31}$ or more in magnitude, duplicate node or element labels, undefined node labels (in elements or node sets), malformed data lines. Element-set labels that name no solid element (skipped or undefined) are dropped with a warning.
-- **Parsing:** each section's data lines are parsed in bulk, so an error names the section, not the line. A node or element may continue over lines but must end at a line end; all three node coordinates are required. Empty `*NODE`/`*ELEMENT` sections are ignored; an empty set is dropped with the usual warning.
+- **Parsing:** each section's data lines are parsed in bulk, so an error names the section, not the line. A node or element may continue over lines but must end at a line end; all three node coordinates are required, and empty fields (`1,,2`) are not supported. Empty `*NODE`/`*ELEMENT` sections are ignored; an empty set is dropped with the usual warning.
 
 ### Gmsh `.msh` (4.1 ASCII only)
 

@@ -246,7 +246,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. E
 
 ### PR 1: Mesh data model and parser
 - Contents:
-  - `Mesh` dataclass: coordinates, element blocks keyed by type, node and element sets, material and orientation IDs.
+  - `Mesh` dataclass: coordinates, element blocks keyed by type, node and element sets, material and orientation labels.
   - meshio readers for Gmsh (4.1 ASCII) and VTU, plus an own flat-`.inp` reader; VTU writer.
   - Node orderings: VTK internally; only meshio's Gmsh permutation is needed (Abaqus C3D20 = VTK).
   - Structured voxel mesh generator, with an occupancy mask that drops inactive elements and nodes (e.g. a voxelized sphere). The `Mesh` carries grid shape, spacing, origin and grid↔mesh node/element maps for voxel dispatch.

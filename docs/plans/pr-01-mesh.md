@@ -115,7 +115,7 @@ class Mesh:
 
 ### Abaqus (own reader, flat `.inp` only)
 
-About 170 lines. It reads the whole file, then resolves labels.
+About 135 lines. It reads the whole file, then resolves labels.
 
 - **Lines:**
   - `**` lines are comments, including between continuation lines.

@@ -169,6 +169,7 @@ def _read_inp(path):
             if not sec[3]:
                 add(sec[2], name, _numbers(lines, what).ravel())
                 return
+            add(sec[2], name, [])  # registers a GENERATE set without lines too
             for line in lines:  # GENERATE: start, stop[, step] per line
                 g = _numbers([line], what).ravel().astype(np.int64)
                 if len(g) not in (2, 3) or (len(g) == 3 and g[2] <= 0):
