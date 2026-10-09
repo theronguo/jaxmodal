@@ -93,7 +93,7 @@ class Mesh:
   - mesh → grid nodes: `inv = np.empty(n, np.int64); inv[m[m >= 0]] = np.flatnonzero(m >= 0)`, and the same for elements (PR 23 scatters densities this way);
   - mask: `(element_map >= 0).reshape(shape, order="F")`.
 - **What `Mesh` does not check:** whether the voxel maps agree with `points` and the connectivity. PR 6 checks that before dispatching to the stencil, as the first consumer that relies on regular geometry.
-- **Degenerate elements** (repeated nodes) are not rejected by `Mesh`; `corner_jacobians` shows them as 0.
+- **Degenerate elements** (repeated nodes) are not rejected by `Mesh`; `corner_jacobians` shows 0 at the collapsed corners.
 - **Immutability:** fields, including the dicts, are treated as immutable; change them with `dataclasses.replace`, which re-validates (documented; arrays are not made read-only, since that would flip the caller's flag).
 - **Orphan rule:** a mesh derived from another, e.g. PR 12's hex8 corner mesh from a hex20 mesh, must compact its nodes. This is by design and noted in the docs.
 - **Voxel BCs:** voxel meshes have no sets. A clamp set is added with `replace(mesh, node_sets={"clamp": ...})`, as shown in the docs.
@@ -121,7 +121,7 @@ About 170 lines. It reads the whole file, then resolves labels.
   - `**` lines are comments, including between continuation lines.
   - Keywords and parameters are case-insensitive, with whitespace around `=` and quotes around names stripped. A missing `TYPE=` raises `ValueError`.
   - Empty tokens from trailing commas are dropped.
-- **`*NODE`:** any number of sections; an optional `NSET=` adds the section's nodes to that set; every data line has a label and exactly 3 coordinates.
+- **`*NODE`:** any number of sections; an optional `NSET=` adds the section's nodes to that set; every node has a label and exactly 3 coordinates; it may continue over lines but must end at a line end.
 - **`*ELEMENT, TYPE=`:**
   - the upper-cased value matching `re.fullmatch(r"C3D(8|20)[A-Z]*")` → `hex8`/`hex20`. Suffixes are ignored, since the project uses full integration; the docs say so.
   - Any other `C3D*` raises.

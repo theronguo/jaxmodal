@@ -802,6 +802,16 @@ INP_BAD = {f"*{k}": (f"*{k}\n", f"\\*{k} is not supported") for k in REJECT} | {
         "*ELEMENT, TYPE=C3D8\n2, 1, 2, 3, 4, 5, 6, 7, 8, 1\n3, 1, 2, 3, 4, 5, 6, 7\n",
         "line end",
     ),
+    "bad second row": (
+        "*ELEMENT, TYPE=C3D8\n2, 1, 2, 3, 4, 5, 6, 7, 8\n3, 1, 2, 3, 4, 5, 6, 7, 8, 1\n"
+        "4, 1, 2, 3, 4, 5, 6, 7\n",
+        "line end",
+    ),
+    "non-integer node reference": (
+        "*ELEMENT, TYPE=C3D8\n2, 1.5, 2, 3, 4, 5, 6, 7, 8\n",
+        "integers",
+    ),
+    "blank set line": ("*NSET, NSET=a\n,\n*NSET, NSET=b\n99\n", "undefined node label 99"),
     "huge element set label": ("*ELSET, ELSET=e\n1e300\n", "below 2"),
     "huge node label": ("*NODE\n3e9, 0., 0., 0.\n", "below 2"),
     "bare star": ("*\n", "empty keyword"),
@@ -829,9 +839,10 @@ def test_abaqus_empty_sections(tmp_path):
     (tmp_path / "b.inp").write_text(INP.split("*ELEMENT")[0] + "*ELEMENT, TYPE=C3D8\n")
     with pytest.raises(ValueError, match="no 3D elements"):
         read(tmp_path / "b.inp")
-    (tmp_path / "c.inp").write_text("*ELEMENT" + INP.split("*ELEMENT")[1])
-    with pytest.raises(ValueError, match="no \\*NODE data"):
-        read(tmp_path / "c.inp")
+    for head in ("", "*NODE\n"):  # no *NODE section, or an empty one
+        (tmp_path / "c.inp").write_text(head + "*ELEMENT" + INP.split("*ELEMENT")[1])
+        with pytest.raises(ValueError, match="no \\*NODE data"):
+            read(tmp_path / "c.inp")
 
 
 @pytest.mark.parametrize("extra", ["", "*ELSET, ELSET=a\n1\n"])

@@ -114,8 +114,9 @@ def _numbers(lines, what, width=1, integral=True):
     """
     with warnings.catch_warnings():
         warnings.simplefilter("error")  # fromstring only warns on a bad token
-        try:
-            a = np.fromstring(" ".join(lines).replace(",", " "), sep=" ")
+        text = " ".join(lines).replace(",", " ")
+        try:  # fromstring("  ") gives [-1.]
+            a = np.fromstring(text, sep=" ") if text.strip() else np.zeros(0)
         except (DeprecationWarning, ValueError):
             raise ValueError(f"{what}: unexpected non-numeric entry") from None
     if len(a) % width:
@@ -163,7 +164,8 @@ def _read_inp(path):
             if name:
                 add("element", name, a[:, 0])
         elif mode == "set":
-            what = f"*{sec[2].upper()}SET {name!r} (only integer labels are supported)"
+            kw = "NSET" if sec[2] == "node" else "ELSET"
+            what = f"*{kw} {name!r} (only integer labels are supported)"
             if not sec[3]:
                 add(sec[2], name, _numbers(lines, what).ravel())
                 return
