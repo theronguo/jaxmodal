@@ -43,7 +43,8 @@ if darwin:
 
     def rusage():
         r = RUsage()
-        assert lib.proc_pid_rusage(os.getpid(), 4, ctypes.byref(r)) == 0
+        if lib.proc_pid_rusage(os.getpid(), 4, ctypes.byref(r)):
+            raise OSError("proc_pid_rusage failed")
         return r.f
 
     # XLA frees executable temporaries asynchronously; wait until the footprint is flat.
@@ -54,7 +55,8 @@ if darwin:
         if abs(cur - prev) < 2**20 and time.perf_counter() - t0 >= 0.05:
             break
         prev = cur
-    assert lib.proc_reset_footprint_interval(os.getpid()) == 0
+    if lib.proc_reset_footprint_interval(os.getpid()):  # not asserts: they vanish under -O
+        raise OSError("proc_reset_footprint_interval failed")
     base = rusage()[7]
 rss0 = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 t = time.perf_counter()

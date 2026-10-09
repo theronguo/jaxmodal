@@ -169,4 +169,8 @@ def test_system_info(tmp_path):
     assert 10 <= data["fp64_matmul_gflops"] <= 1e5
     assert 10 <= data["triad_gbps"] <= 2000
     ct = data["c_triad"]
-    assert ct.startswith("skipped:") if isinstance(ct, str) else 10 <= ct["gbps"] <= 2000
+    if isinstance(ct, str):
+        assert ct.startswith("skipped:")
+    else:
+        assert 10 <= ct["gbps"] <= 2000
+        assert data["c_triad_ratio"] == pytest.approx(ct["gbps"] / data["triad_gbps"])

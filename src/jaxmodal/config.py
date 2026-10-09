@@ -15,5 +15,5 @@ def enable_cache(path):
 
 
 def index(x):
-    """Cast an index array to int32. Unchecked: values >= 2**31 wrap."""
+    """Cast an index array to int32. Unchecked: array values >= 2**31 wrap."""
     return jnp.asarray(x, dtype=jnp.int32)
