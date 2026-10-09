@@ -1,6 +1,6 @@
 # PR 0 plan: project scaffold
 
-Branch `pr-00-scaffold`. The scope is exactly the roadmap's PR 0 (Contents, Docs, Tests) plus Principle 7 (conventions). No FEM code. Review rounds 1–4 are incorporated.
+Branch `pr-00-scaffold`. The scope is exactly the roadmap's PR 0 (Contents, Docs, Tests) plus Principle 7 (conventions). No FEM code. Review rounds 1–5 are incorporated.
 
 ## Measured facts (round-1 reviewers, this Mac)
 
@@ -76,11 +76,11 @@ def index(x): return jnp.asarray(x, dtype=jnp.int32)
    - `import numpy as np, jax, jax.numpy as jnp`;
    - x64 is off unless `setup` enables it.
 4. `setup` and `code` run with `exec` in their own dict, seeded with `np`, `jax`, `jnp`, so user names can't shadow harness locals. The child then runs `setup`, takes the baseline, runs and times `code`, and reads the peak.
-   - **Settling after `setup`:** call `gc.collect()` (jax leaves cyclic garbage that is otherwise freed during `code`), then poll `ri_phys_footprint` every 10 ms until two consecutive reads differ by < 1 MB, for at most 2 s (XLA:CPU frees executable temporaries on another thread ~10 ms after `block_until_ready`). Measured without settling: a setup that runs `jax.random.uniform` (3.2 GB of temporaries) once makes the same `code` read 32 KB instead of 3.2e9.
+   - **Settling after `setup`:** call `gc.collect()` (jax leaves cyclic garbage that is otherwise freed during `code`), then poll `ri_phys_footprint` every 10 ms until two consecutive reads differ by < 1 MB, for at least 50 ms and at most 2 s (XLA:CPU frees executable temporaries on another thread ~10 ms after `block_until_ready`; a free delayed past the poll would end settling early). Measured without settling: a setup that runs `jax.random.uniform` (3.2 GB of temporaries) once makes the same `code` read 32 KB instead of 3.2e9.
    - **macOS peak:**
      - after settling, call `proc_reset_footprint_interval(getpid())`, a private libSystem symbol, asserting that it exists and returns 0 (no silent fallback);
      - record `ri_phys_footprint` as the baseline;
-     - after `code`, `peak_bytes = ri_interval_max_phys_footprint − baseline`.
+     - after `code`, `peak_bytes = max(ri_interval_max_phys_footprint − baseline, rss_bytes)`. Both are lower bounds: footprint does not recharge freed malloc tiny/small/medium blocks (≤ 2 MB) when they are reused, so in `code` alone "allocate 800 × 1 MB, free, allocate 1600 × 1 MB" reads 0.82e9 by footprint but 1.62e9 by `ru_maxrss` (measured); `ru_maxrss` misses peaks below an earlier high-water mark, which footprint catches.
      - Fields are read from `proc_pid_rusage(pid, RUSAGE_INFO_V4)` as a 16-byte uuid followed by `c_uint64 * 35`, with indices taken from the SDK header `sys/resource.h`: `ri_phys_footprint` = 7, `ri_interval_max_phys_footprint` = 33.
      - `MallocLargeCache=0` and settling stop freed `setup` memory from hiding the delta; the interval reset stops `setup` transients from inflating it. Test 4 covers each.
      - It counts compressed pages, as the roadmap's 10M runs need.
@@ -90,11 +90,11 @@ def index(x): return jnp.asarray(x, dtype=jnp.int32)
      - converted to bytes by `maxrss_bytes(value, platform)` (bytes on darwin, KiB elsewhere).
 5. Documented rules:
    - `code` must block on its results (`.block_until_ready()`), or `time_s` measures only dispatch.
-   - Warm up in `setup` (backend start-up, compiles, even a full run of the measured function) whatever should not count toward `peak_bytes` or `time_s`; settling makes this safe.
-   - Small blocks still held by malloc's tiny/small zones can be reused by `code` uncharged; this is negligible against the GB-scale peaks the estimators check.
+   - Warm up in `setup` with compiles only (`f.lower(...).compile()`, backend start-up), which gives the same peak as a full warm-up run (test 4, XLA case). A full run of the measured function in `setup` is allowed only when its buffers are > 2 MB: blocks ≤ 2 MB freed in `setup` are reused by `code` uncharged by both footprint and `ru_maxrss` (measured: 800 MB of 64 KB or 1 MB numpy blocks, or 1600 × 0.5 MB JAX arrays, freed in `setup` hide an identical 0.8 GB allocation in `code` completely).
+   - `setup` must block on its results (`block_until_ready`), so no async work spills into `code`.
    - Footprint counts compressed pages at their compressed size, so estimator checks use non-constant data.
    - macOS `time_s` includes page-fault costs of fresh mmaps (`MallocLargeCache=0`).
-   - `rss_bytes` is the roadmap's plain RSS delta and inherits `ru_maxrss`'s high-water caveat; `peak_bytes` is the primary number.
+   - `rss_bytes` is the roadmap's plain RSS delta and inherits `ru_maxrss`'s high-water caveat; `peak_bytes` (the max of both) is the primary number.
    - Compile time is not recorded by `measure`. Compile-time tests (PRs 5, 18) time `jit(f).lower(...).compile()` in a fresh subprocess with the cache disabled, as the roadmap says.
 
 ### `versions() -> dict` (cheap)
@@ -142,8 +142,9 @@ Tests are fast unless marked `slow`. Every test that uses jit builds a fresh `ja
    - Control: `code="pass"` gives `peak_bytes` < 20 MB.
    - Unmapped transient: `setup` touches 2 GB in an mmap and closes it, then the same `code` gives 0.8e9 ± 5%. Without the interval reset this reads ≈ 2.0e9; with `ru_maxrss` it reads ≈ 0.
    - Malloc-freed transient: `setup` also runs `t = rng.random(200_000_000); del t` (1.6 GB); the same `code` gives 0.8e9 ± 5%. Without `MallocLargeCache=0` it reads ≈ 0 (measured), so this case guards the mechanism.
-   - JAX garbage: `setup` builds `x0 = jnp.asarray(rng.random(200_000_000, np.float32))` (blocked) and `f = jax.jit(lambda x: x * 2 + 1)`, runs `f(x0)` once and deletes the result; `code` is `y = f(x0).block_until_ready()`: 0.8e9 ± 5%. Without `gc.collect()` this reads ≈ 0–0.4e9 (measured).
-   - XLA async temporaries: `setup` runs `g = jax.jit(lambda k: jax.random.uniform(k, (200_000_000,)))` once and deletes the result; `code` runs `g` again. `peak_bytes` is within 5% of the same `code` measured with only `g.lower(k).compile()` in `setup` (≈ 3.2e9). Without the settling poll this reads ≈ 0.
+   - JAX cyclic garbage: `setup` builds `x0 = jnp.asarray(rng.random(200_000_000, np.float32))` (blocked) and `f = jax.jit(lambda x: x * 2 + 1)`, then `c = [f(x0).block_until_ready()]; c.append(c); del c`; `code` is `import gc; gc.collect(); y = f(x0).block_until_ready()`: 0.8e9 ± 5%. Without the harness's `gc.collect()` this reads ≈ 0 (measured), so the case guards it.
+   - Small-block reuse in `code`: `code="L = [rng.random(125_000) for _ in range(800)]; del L; L = [rng.random(125_000) for _ in range(1600)]"` gives `peak_bytes` ≥ 1.55e9. Footprint alone reads ≈ 0.82e9 (measured), so this case guards the max with `rss_bytes`.
+   - XLA async temporaries: `setup` runs `g = jax.jit(lambda k: jax.random.uniform(k, (200_000_000,)))` once and deletes the result; `code` runs `g` again. `peak_bytes` is within 5% of the same `code` measured with only `g.lower(k).compile()` in `setup` (≈ 3.2e9). Without the settling poll this reads ≈ 2.2–2.4e9 (measured), failing the 5% check.
    - Namespace isolation: `measure("time = None", setup="json = os = sys = None")` returns all three numeric fields.
    - On darwin, `rss_bytes` of the plain case is 0.8e9 ± 5%.
    - `maxrss_bytes(1024, "linux") == 1024²` and `maxrss_bytes(1024, "darwin") == 1024`.
@@ -194,8 +195,8 @@ Tests are fast unless marked `slow`. Every test that uses jit builds a fresh `ja
   - Harness rules:
     - peak definition per platform;
     - `code` must block;
-    - `MallocLargeCache=0`, settling (`gc.collect()` plus footprint poll) and the interval reset, with the measured failure each prevents; the small-block and compression caveats;
-    - warm up in `setup`;
+    - `MallocLargeCache=0`, settling (`gc.collect()` plus footprint poll) and the interval reset, with the measured failure each prevents; the max with `rss_bytes` and why; the small-block, setup-blocking and compression caveats;
+    - warm up in `setup` with compiles only (full runs only for buffers > 2 MB);
     - 24 B per triad element.
 - **`README.md`:**
   - goal;
@@ -205,7 +206,7 @@ Tests are fast unless marked `slow`. Every test that uses jit builds a fresh `ja
   - `scripts/check.sh` and the merge gate `uv run pytest -m "not gpu"`;
   - license;
   - a link to `docs/ROADMAP.md`.
-- **`docs/ROADMAP.md`:** the Development environment line on `ri_lifetime_max_phys_footprint` becomes the interval peak after `proc_reset_footprint_interval` (a private libSystem symbol) with `MallocLargeCache=0` (undocumented), recorded for every macOS measurement as the primary number, the RSS delta being secondary. The PR 0 Tests line and the Compilation cache bullet say the cache works on jax 0.11.2 and test 6 fails rather than skips if a later jax stops storing entries; the remedy is removing the `enable_cache` call in conftest. The Dependencies bullet on pymetis says it is added in PR 19, minimum 2025.1.1. The Deferred GPU checks list gains "PR 24: harness Linux and GPU peak paths, checked with the test 4 cases". The status notes that PR 0 is merged, with the pinned jax 0.11.2; that the cache and donation work; and that the pymetis extra is deferred to PR 19 (minimum 2025.1.1).
+- **`docs/ROADMAP.md`:** the Development environment line on `ri_lifetime_max_phys_footprint` becomes the interval peak after `proc_reset_footprint_interval` (a private libSystem symbol) with `MallocLargeCache=0` (undocumented), and `peak_bytes = max(interval footprint delta, ru_maxrss delta)` recorded for every macOS measurement as the primary number. The PR 0 Tests line and the Compilation cache bullet say the cache works on jax 0.11.2 and test 6 fails rather than skips if a later jax stops storing entries; the remedy is removing the `enable_cache` call in conftest. The Dependencies bullet on pymetis says it is added in PR 19, minimum 2025.1.1. The Deferred GPU checks list gains "PR 24: harness Linux and GPU peak paths, checked with the test 4 cases". The status notes that PR 0 is merged, with the pinned jax 0.11.2; that the cache and donation work; and that the pymetis extra is deferred to PR 19 (minimum 2025.1.1).
 
 ## scripts/check.sh
 
