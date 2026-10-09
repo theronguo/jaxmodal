@@ -16,13 +16,27 @@ PAIRS = (
 )
 
 
-def _array(name, a, dtype, ndim):
+def _check_array(name, a, dtype, ndim):
     if not isinstance(a, np.ndarray) or a.dtype != dtype or a.ndim != ndim:
         raise ValueError(f"{name} must be a {ndim}-D {np.dtype(dtype)} np.ndarray")
 
 
+def check_grid(shape, spacing, origin):
+    """shape: 3 positive ints; spacing, origin: 3 finite reals, spacing > 0 (bools rejected)."""
+
+    def ok(x, kind):
+        return np.shape(x) == (3,) and all(
+            isinstance(a, kind) and not isinstance(a, bool) and np.isfinite(a) for a in x
+        )
+
+    if not ok(shape, numbers.Integral) or min(shape) <= 0:
+        raise ValueError(f"voxel shape must be 3 positive ints, got {shape!r}")
+    if not ok(spacing, numbers.Real) or not ok(origin, numbers.Real) or min(spacing) <= 0:
+        raise ValueError("voxel spacing/origin must be 3 finite reals, spacing > 0")
+
+
 def _check_bijection(name, m, size, n):
-    _array(name, m, np.int64, 1)
+    _check_array(name, m, np.int64, 1)
     if len(m) != size:
         raise ValueError(f"{name} has length {len(m)}, expected {size}")
     used = m[m >= 0]
@@ -61,18 +75,18 @@ class Mesh:
         return sum(len(c) for c in self.blocks.values())
 
     def __post_init__(self):
-        _array("points", self.points, np.float64, 2)
+        _check_array("points", self.points, np.float64, 2)
         if self.points.shape[1] != 3 or not np.isfinite(self.points).all():
             raise ValueError("points must be (n_nodes, 3) and finite")
         n = len(self.points)
-        if not self.blocks:
+        if not isinstance(self.blocks, dict) or not self.blocks:
             raise ValueError("mesh has no elements")
         keys = list(self.blocks)
         if not set(keys) <= set(TYPES) or keys != sorted(keys, key=TYPES.index):
             raise ValueError(f"block keys {keys} must be in TYPES order {TYPES}")
         seen = np.zeros(n, bool)
         for t, c in self.blocks.items():
-            _array(f"blocks[{t!r}]", c, np.int64, 2)
+            _check_array(f"blocks[{t!r}]", c, np.int64, 2)
             if c.shape[1] != NODES[t] or len(c) == 0:
                 raise ValueError(f"blocks[{t!r}] must have shape (n > 0, {NODES[t]})")
             if c.min() < 0 or c.max() >= n:
@@ -82,15 +96,17 @@ class Mesh:
             raise ValueError(f"{(~seen).sum()} orphan nodes (unused by any element)")
         all_sets = (("node", self.node_sets, n), ("element", self.element_sets, self.n_el))
         for kind, sets, size in all_sets:
+            if not isinstance(sets, dict):
+                raise ValueError(f"{kind}_sets must be a dict")
             for k, s in sets.items():
                 if not isinstance(k, str):
                     raise ValueError(f"{kind} set key {k!r} must be a str")
-                _array(f"{kind} set {k!r}", s, np.int64, 1)
+                _check_array(f"{kind} set {k!r}", s, np.int64, 1)
                 if len(s) and (s[0] < 0 or s[-1] >= size or (np.diff(s) <= 0).any()):
                     raise ValueError(f"{kind} set {k!r} must be sorted, unique, in [0, {size})")
         for name in ("material", "orientation"):
             a = getattr(self, name)
-            _array(name, a, np.int64, 1)
+            _check_array(name, a, np.int64, 1)
             if len(a) != self.n_el:
                 raise ValueError(f"{name} has length {len(a)}, expected n_el = {self.n_el}")
         if self.voxel is not None:
@@ -102,38 +118,30 @@ class Mesh:
             raise ValueError("voxel must be a Voxel")
         if list(self.blocks) != ["hex8"]:
             raise ValueError("a voxel mesh has exactly one hex8 block")
-        ok_shape = len(v.shape) == 3 and all(
-            isinstance(s, numbers.Integral) and not isinstance(s, bool) and s > 0 for s in v.shape
-        )
-        ok_real = all(
-            len(x) == 3 and all(isinstance(a, numbers.Real) and np.isfinite(a) for a in x)
-            for x in (v.spacing, v.origin)
-        )
-        if not ok_shape or not ok_real or min(v.spacing) <= 0:
-            raise ValueError("voxel shape must be 3 positive ints, spacing/origin 3 finite reals")
+        check_grid(v.shape, v.spacing, v.origin)
         nx, ny, nz = v.shape
         _check_bijection("node_map", v.node_map, (nx + 1) * (ny + 1) * (nz + 1), len(self.points))
         _check_bijection("element_map", v.element_map, nx * ny * nz, self.n_el)
 
 
-def corner_jacobians(mesh):
+def corner_jacobians(mesh, chunk=1 << 20):
     """Trilinear Jacobian determinant at the 8 corners of every element: type -> (n_el_type, 8).
 
     Column d of J at corner a is (x[a_d+] - x[a_d-]) / 2. For hex20/hex27 this uses the corner
-    hex only (a sign/orientation check).
+    hex only (a sign/orientation check). Rows go in chunks to bound temporaries.
     """
+    pairs = [[next(p for p in axis if a in p) for axis in PAIRS] for a in range(8)]
     out = {}
     for t, c in mesh.blocks.items():
-        x = [mesh.points[c[:, :8], i] for i in range(3)]  # 3 x (n, 8)
         det = np.empty((len(c), 8))
-        for a in range(8):
-            cols = []
-            for pairs in PAIRS:
-                lo, hi = next(p for p in pairs if a in p)
-                cols.append([(xi[:, hi] - xi[:, lo]) / 2 for xi in x])
-            (a0, a1, a2), (b0, b1, b2), (c0, c1, c2) = cols
-            det[:, a] = (
-                a0 * (b1 * c2 - b2 * c1) - a1 * (b0 * c2 - b2 * c0) + a2 * (b0 * c1 - b1 * c0)
-            )
+        for s in range(0, len(c), chunk):
+            x = [mesh.points[c[s : s + chunk, :8], i] for i in range(3)]  # 3 x (rows, 8)
+            for a, axes in enumerate(pairs):
+                (a0, a1, a2), (b0, b1, b2), (c0, c1, c2) = (
+                    [(xi[:, hi] - xi[:, lo]) / 2 for xi in x] for lo, hi in axes
+                )
+                det[s : s + chunk, a] = (
+                    a0 * (b1 * c2 - b2 * c1) - a1 * (b0 * c2 - b2 * c0) + a2 * (b0 * c1 - b1 * c0)
+                )
         out[t] = det
     return out

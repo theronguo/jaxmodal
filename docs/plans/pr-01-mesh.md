@@ -202,7 +202,7 @@ def voxel_mesh(shape, spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0), mask=None
   - a wrong mask shape or dtype;
   - an all-false mask.
 - **Mask** must be `dtype == bool` (after `np.asarray`); 0/1 int masks raise.
-- **Performance** (measured in a prototype): 88³ (2.1M DOFs) builds in 0.03 s, validates in 0.01 s, `corner_jacobians` 0.3 s. 320³ (99M DOFs): build about 2 s, `corner_jacobians` about 10 s, peak about 13–14 GB.
+- **Performance** (measured on the implementation): 88³ (2.1M DOFs) builds in 0.04 s, `corner_jacobians` 0.09 s. 320³ (99M DOFs): build 1.8 s, `corner_jacobians` 3.8 s (chunked rows), peak 7.9 GB.
 
 ## Tests (`tests/test_mesh.py`)
 

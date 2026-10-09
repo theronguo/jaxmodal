@@ -73,6 +73,11 @@ build("gmsh_nogroups", lambda *_: [])
 build("gmsh_vol_two_groups", lambda *_: [(3, [1, 2], 7, ""), (3, [1], 8, "")])
 build("gmsh_untagged_volume", lambda x0, *_: [(3, [1], 7, ""), (2, x0, 3, "clamp")])
 build("gmsh_saveall", lambda x0, *_: [(3, [1], 7, ""), (2, x0, 3, "clamp")], saveall=True)
+build(
+    "gmsh_saveall_surface",
+    lambda x0, *_: [(3, [1, 2], 7, ""), (2, x0, 3, "clamp")],
+    saveall=True,
+)
 build("gmsh_surfaces_only", lambda x0, *_: [(2, x0, 3, "clamp")])
 build(
     "gmsh_dup_name",

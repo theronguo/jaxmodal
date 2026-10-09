@@ -45,7 +45,9 @@ VTK_FACES = [(0, 3, 7, 4), (1, 2, 6, 5), (0, 1, 5, 4), (3, 2, 6, 7), (0, 1, 2, 3
 GMSH_EDGES = [(0, 1), (0, 3), (0, 4), (1, 2), (1, 5), (2, 3), (2, 6), (3, 7),
               (4, 5), (4, 7), (5, 6), (6, 7)]  # fmt: skip
 GMSH_FACES = [(0, 1, 2, 3), (0, 1, 4, 5), (0, 3, 4, 7), (1, 2, 5, 6), (2, 3, 6, 7), (4, 5, 6, 7)]
-ABAQUS_EDGES = VTK_EDGES  # Abaqus C3D20 = VTK hex20
+# Abaqus manual, C3D20 figure: 9-12 bottom, 13-16 top, 17-20 vertical (1-based).
+ABAQUS_EDGES = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4),
+                (0, 4), (1, 5), (2, 6), (3, 7)]  # fmt: skip
 CORNERS = [(a,) for a in range(8)]
 ORDER = {
     ("vtu", "hex8"): CORNERS,
@@ -56,10 +58,11 @@ ORDER = {
     ("msh", "hex27"): CORNERS + GMSH_EDGES + GMSH_FACES + [tuple(range(8))],
     ("inp", "hex8"): CORNERS,
     ("inp", "hex20"): CORNERS + ABAQUS_EDGES,
+    ("inp", "hex8r"): CORNERS,  # suffixes are ignored
 }
 GMSH_TYPE = {"hex8": 5, "hex20": 17, "hex27": 12}
 VTK_TYPE = {"hex8": 12, "hex20": 25, "hex27": 29}
-ABAQUS_TYPE = {"hex8": "C3D8", "hex20": "C3D20"}
+ABAQUS_TYPE = {"hex8": "C3D8", "hex20": "C3D20", "hex8r": "c3d8r"}
 
 ROT = np.linalg.qr(np.random.default_rng(0).normal(size=(3, 3)))[0]
 ROT *= np.sign(np.linalg.det(ROT))
@@ -79,17 +82,16 @@ def record(f, *args):
     return out, sorted(str(x.message) for x in w)
 
 
-def mesh_of(points, blocks, material=None, orientation=None, **kw):
+def mesh_of(points, blocks, material=None, orientation=None):
     n = sum(len(c) for c in blocks.values())
     zero = np.zeros(n, np.int64)
     return Mesh(
         points=np.asarray(points, float),
         blocks={t: np.asarray(c, np.int64) for t, c in blocks.items()},
-        node_sets=kw.pop("node_sets", {}),
-        element_sets=kw.pop("element_sets", {}),
+        node_sets={},
+        element_sets={},
         material=zero if material is None else np.asarray(material, np.int64),
         orientation=zero if orientation is None else np.asarray(orientation, np.int64),
-        **kw,
     )
 
 
@@ -124,6 +126,8 @@ def xi_of(order):
 def write_one(path, fmt, etype, swap=None):
     """Write one element in `fmt`'s documented order, nodes stored shuffled with sparse labels."""
     xi = xi_of(ORDER[fmt, etype])
+    etype_ = etype
+    etype = etype.removesuffix("r")
     n = len(xi)
     x = affine(xi)
     store = np.random.default_rng(1).permutation(n)  # storage position -> format position
@@ -149,7 +153,7 @@ def write_one(path, fmt, etype, swap=None):
         lines = ", ".join(ids[:16]) + ("," if len(ids) > 16 else "")
         if len(ids) > 16:
             lines += "\n" + ", ".join(ids[16:])
-        path.write_text(f"*NODE\n{nodes}\n*ELEMENT, TYPE={ABAQUS_TYPE[etype]}\n{lines}\n")
+        path.write_text(f"*NODE\n{nodes}\n*ELEMENT, TYPE={ABAQUS_TYPE[etype_]}\n{lines}\n")
     else:
         pos = np.argsort(store)  # format position -> storage position
         pts = " ".join(repr(float(v)) for p in store for v in x[p])
@@ -172,6 +176,7 @@ def write_one(path, fmt, etype, swap=None):
 @pytest.mark.parametrize("fmt, etype", list(ORDER))
 def test_read_ordering(tmp_path, fmt, etype):
     m = read(write_one(tmp_path / f"e.{fmt}", fmt, etype))
+    etype = etype.removesuffix("r")
     assert list(m.blocks) == [etype]
     np.testing.assert_allclose(m.points[m.blocks[etype][0]], affine(REF[etype]), rtol=0, atol=1e-12)
     assert m.material.tolist() == [5 if fmt == "msh" else 0]
@@ -376,7 +381,7 @@ def abaqus_messy():
 *ELEMENT, TYPE=S4, ELSET=ShellSec
 900, {ln(stray[0], stray[1], (0.0, 1.0, 0.0), (0.0, 0.0, 0.0))}
 901, {ln(*stray)}
-*ELEMENT, TYPE=C3D20R
+*ELEMENT, TYPE=C3D20RH
 {elem("G")}
 {elem("G2")}
 *Orientation, name=ori
@@ -385,7 +390,7 @@ def abaqus_messy():
 950, {ln(*(tuple(x) for x in unit8 + [1, 0, 0]))}
 *ELEMENT, TYPE=S4
 902, {ln((0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 1.0, 1.0), (0.0, 0.0, 1.0))}
-*ELEMENT, TYPE=C3D8
+*ELEMENT, TYPE=C3D8IH
 {elem("F2")}
 *Nset, nset = "Fix"
 {", ".join(map(str, e_face[:5]))},
@@ -417,7 +422,7 @@ def abaqus_messy():
     cent = {n: tuple(np.round(xs[:8].mean(0), 6)) for n, (_, _, xs) in elements.items()}
     pt = lambda *names: {cent[n] for n in names}  # noqa: E731
     expect = {
-        "points": np.array(coord_in_file_order(first + second, stray)),
+        "points": np.array([x for x in first + second if x not in stray]),
         "elements": {cent[n]: xs for n, (_, _, xs) in elements.items()},
         "material": {cent["E"]: 3, cent["F1"]: 5, cent["G"]: 7, cent["G2"]: 7, cent["F2"]: 0},
         "orientation": {cent["G"]: 2, cent["F2"]: 2},
@@ -443,10 +448,6 @@ def abaqus_messy():
         ),  # fmt: skip
     }
     return text, expect
-
-
-def coord_in_file_order(xs, stray):
-    return [x for x in xs if x not in stray]
 
 
 def test_abaqus_messy(tmp_path):
@@ -514,7 +515,9 @@ def test_corner_jacobians_oracle():
     assert (corner_jacobians(mirrored)["hex8"] < 0).all()
 
 
-@pytest.mark.parametrize("name", ["gmsh_messy.msh", "gmsh_pair.msh", "gmsh_pair.inp"])
+@pytest.mark.parametrize(
+    "name", ["gmsh_messy.msh", "gmsh_pair.msh", "gmsh_pair.inp", "gmsh_nogroups.msh"]
+)
 def test_corner_jacobians_data_positive(name):
     m, _ = record(read, DATA / name)
     assert all((d > 0).all() for d in corner_jacobians(m).values())
@@ -641,109 +644,105 @@ def plain():
     return replace(base(), voxel=None)
 
 
-def two_hex8():
-    m = plain()
-    return m, m.blocks["hex8"]
-
-
 def mutate_map(which, how):
-    m = base()
+    """Break one bijection condition alone; the masked base has -1 entries in both maps."""
+    m = voxel_mesh((2, 2, 1), mask=np.array([[[True], [True]], [[True], [False]]]))
     a = getattr(m.voxel, which).copy()
     n = len(m.points) if which == "node_map" else m.n_el
-    first, second = np.flatnonzero(a >= 0)[:2]
-    if how == "n":
-        a[first] = n
-    elif how == "-2":
-        a[first] = -2
-    elif how == "missing":
-        a[first] = -1
-    else:  # duplicate plus missing
-        a[first] = a[second]
+    used, unused = np.flatnonzero(a >= 0), np.flatnonzero(a < 0)
+    if how == "n":  # out of range, count still n, no duplicate
+        a[used[0]] = n
+    elif how == "-2":  # below -1 in a slot that holds -1
+        a[unused[0]] = -2
+    elif how == "missing":  # count n - 1
+        a[used[0]] = -1
+    else:  # duplicate: count n, an entry twice
+        a[used[0]], a[unused[0]] = -1, a[used[1]]
     return replace(m, voxel=replace(m.voxel, **{which: a}))
 
 
-C = two_hex8()[1]
-INVALID = (
-    {
-        "int points": lambda: replace(plain(), points=plain().points.astype(np.int64)),
-        "jax points": lambda: replace(plain(), points=jnp.asarray(plain().points)),
-        "2-col points": lambda: replace(plain(), points=plain().points[:, :2].copy()),
-        "nan points": lambda: replace(
-            plain(), points=np.where(np.arange(36).reshape(12, 3) == 0, np.nan, plain().points)
-        ),  # fmt: skip
-        "int32 conn": lambda: replace(plain(), blocks={"hex8": C.astype(np.int32)}),
-        "float conn": lambda: replace(plain(), blocks={"hex8": C.astype(float)}),
-        "float labels": lambda: replace(plain(), material=np.zeros(2)),
-        "7 columns": lambda: replace(plain(), blocks={"hex8": C[:, :7].copy()}),
-        "no blocks": lambda: replace(plain(), blocks={}),
-        "zero rows": lambda: replace(
-            plain(), blocks={"hex8": C, "hex20": np.zeros((0, 20), np.int64)}
-        ),
-        "unknown key": lambda: replace(plain(), blocks={"tet4": C}),
-        "key order": lambda: Mesh(
-            np.zeros((20, 3)) + np.arange(20)[:, None],
-            {"hex20": np.arange(20)[None], "hex8": np.arange(8)[None]},
-            {},
-            {},
-            np.zeros(2, np.int64),
-            np.zeros(2, np.int64),
-        ),  # fmt: skip
-        "index -1": lambda: replace(plain(), blocks={"hex8": np.where(C == 11, -1, C)}),
-        "index n": lambda: replace(plain(), blocks={"hex8": np.where(C == 11, 12, C)}),
-        "orphan": lambda: replace(plain(), points=np.vstack([plain().points, [[9.0, 9, 9]]])),
-        "set key": lambda: replace(plain(), node_sets={1: np.array([0])}),
-        "2-D set": lambda: replace(plain(), node_sets={"a": np.array([[0]])}),
-        "voxel type": lambda: replace(base(), voxel="grid"),
-        "node set unsorted": lambda: replace(plain(), node_sets={"a": np.array([2, 1])}),
-        "node set duplicate": lambda: replace(plain(), node_sets={"a": np.array([1, 1])}),
-        "node set range": lambda: replace(plain(), node_sets={"a": np.array([12])}),
-        "element set unsorted": lambda: replace(plain(), element_sets={"a": np.array([1, 0])}),
-        "element set duplicate": lambda: replace(plain(), element_sets={"a": np.array([0, 0])}),
-        "element set range": lambda: replace(plain(), element_sets={"a": np.array([2])}),
-        "material length": lambda: replace(plain(), material=np.zeros(3, np.int64)),
-        "orientation length": lambda: replace(plain(), orientation=np.zeros(1, np.int64)),
-        "voxel hex20": lambda: replace(three_type_mesh(), voxel=base().voxel),
-        "voxel map length": lambda: replace(
-            base(), voxel=replace(base().voxel, node_map=np.zeros(3, np.int64))
-        ),
-        "voxel float map": lambda: replace(
-            base(), voxel=replace(base().voxel, element_map=base().voxel.element_map.astype(float))
-        ),  # fmt: skip
-        "spacing 0": lambda: replace(base(), voxel=replace(base().voxel, spacing=(0.0, 1.0, 1.0))),
-        "spacing nan": lambda: replace(
-            base(), voxel=replace(base().voxel, spacing=(np.nan, 1.0, 1.0))
-        ),
-        "origin inf": lambda: replace(
-            base(), voxel=replace(base().voxel, origin=(np.inf, 0.0, 0.0))
-        ),
-        "shape len 2": lambda: replace(base(), voxel=replace(base().voxel, shape=(2, 1))),
-        "shape bool": lambda: replace(base(), voxel=replace(base().voxel, shape=(True,) * 3)),
-    }
-    | {
-        f"{w} {h}": (lambda w=w, h=h: mutate_map(w, h))
-        for w in ("node_map", "element_map")
-        for h in ("n", "-2", "missing", "dup")
-    }
-)
+def with_nan(m):
+    p = m.points.copy()
+    p[0, 0] = np.nan
+    return replace(m, points=p)
 
 
-MATCH = {
-    "points": "points must be", "conn": "must be a 2-D int64", "labels": "material must be",
-    "columns": "must have shape", "no blocks": "no elements", "zero rows": "must have shape",
-    "key": "TYPES order", "index": "outside", "orphan": "orphan", "set key": "must be a str",
-    "2-D set": "1-D int64", "voxel type": "must be a Voxel", "node set": "sorted, unique",
-    "element set": "sorted, unique", "length": "expected n_el", "voxel hex20": "one hex8 block",
-    "voxel map length": "has length 3", "voxel float map": "1-D int64", "spacing": "positive ints",
-    "origin": "positive ints", "shape": "positive ints", "_map": "not a bijection",
-}  # fmt: skip
+def voxel_with(**kw):
+    return replace(base(), voxel=replace(base().voxel, **kw))
+
+
+C = plain().blocks["hex8"]
+HEX20 = mesh_of(REF["hex20"], {"hex20": [np.arange(20)]})
+INVALID = {
+    "int points": (lambda: replace(plain(), points=plain().points.astype(np.int64)), "points must"),
+    "jax points": (lambda: replace(plain(), points=jnp.asarray(plain().points)), "points must"),
+    "2-col points": (lambda: replace(plain(), points=plain().points[:, :2].copy()), "(n_nodes, 3)"),
+    "nan points": (lambda: with_nan(plain()), "finite"),
+    "int32 conn": (lambda: replace(plain(), blocks={"hex8": C.astype(np.int32)}), "2-D int64"),
+    "float conn": (lambda: replace(plain(), blocks={"hex8": C.astype(float)}), "2-D int64"),
+    "float labels": (lambda: replace(plain(), material=np.zeros(2)), "material must be"),
+    "7 columns": (lambda: replace(plain(), blocks={"hex8": C[:, :7].copy()}), "must have shape"),
+    "no blocks": (lambda: replace(plain(), blocks={}), "no elements"),
+    "blocks list": (lambda: replace(plain(), blocks=[C]), "no elements"),
+    "zero rows": (
+        lambda: replace(plain(), blocks={"hex8": C, "hex20": np.zeros((0, 20), np.int64)}),
+        "must have shape",
+    ),
+    "unknown key": (lambda: replace(plain(), blocks={"tet4": C}), "TYPES order"),
+    "key order": (
+        lambda: mesh_of(
+            np.arange(60.0).reshape(20, 3), {"hex20": [np.arange(20)], "hex8": [np.arange(8)]}
+        ),
+        "TYPES order",
+    ),
+    "index -1": (lambda: replace(plain(), blocks={"hex8": np.where(C == 11, -1, C)}), "outside"),
+    "index n": (lambda: replace(plain(), blocks={"hex8": np.where(C == 11, 12, C)}), "outside"),
+    "orphan": (
+        lambda: replace(plain(), points=np.vstack([plain().points, [[9.0, 9, 9]]])),
+        "orphan",
+    ),
+    "sets list": (lambda: replace(plain(), node_sets=[np.array([0])]), "must be a dict"),
+    "set key": (lambda: replace(plain(), node_sets={1: np.array([0])}), "must be a str"),
+    "2-D set": (lambda: replace(plain(), node_sets={"a": np.array([[0]])}), "1-D int64"),
+    "int32 set": (lambda: replace(plain(), node_sets={"a": np.array([0], np.int32)}), "1-D int64"),
+    "voxel type": (lambda: replace(base(), voxel="grid"), "must be a Voxel"),
+    "voxel hex20": (lambda: replace(HEX20, voxel=base().voxel), "one hex8 block"),
+    "voxel two blocks": (lambda: replace(three_type_mesh(), voxel=base().voxel), "one hex8 block"),
+    "voxel map length": (lambda: voxel_with(node_map=np.zeros(3, np.int64)), "has length 3"),
+    "voxel float map": (
+        lambda: voxel_with(element_map=base().voxel.element_map.astype(float)),
+        "1-D int64",
+    ),
+    "spacing 0": (lambda: voxel_with(spacing=(0.0, 1.0, 1.0)), "spacing > 0"),
+    "spacing nan": (lambda: voxel_with(spacing=(np.nan, 1.0, 1.0)), "finite reals"),
+    "spacing bool": (lambda: voxel_with(spacing=(True, 1.0, 1.0)), "finite reals"),
+    "origin inf": (lambda: voxel_with(origin=(np.inf, 0.0, 0.0)), "finite reals"),
+    "shape 0": (lambda: voxel_with(shape=(0, 1, 1)), "positive ints"),
+    "shape len 2": (lambda: voxel_with(shape=(2, 1)), "positive ints"),
+    "shape bool": (lambda: voxel_with(shape=(True,) * 3), "positive ints"),
+}
+for kind, n, sets in (("node", 12, "node_sets"), ("element", 2, "element_sets")):
+    for case, bad in (("unsorted", [1, 0]), ("dup", [0, 0]), ("high", [n]), ("negative", [-1, 0])):
+        INVALID[f"{kind} set {case}"] = (
+            lambda sets=sets, bad=bad: replace(plain(), **{sets: {"a": np.array(bad)}}),
+            "sorted, unique",
+        )  # fmt: skip
+for name, n in (("material", 3), ("orientation", 1)):
+    INVALID[f"{name} length"] = (
+        lambda name=name, n=n: replace(plain(), **{name: np.zeros(n, np.int64)}),
+        "expected n_el",
+    )
+for which in ("node_map", "element_map"):
+    for how in ("n", "-2", "missing", "dup"):
+        INVALID[f"{which} {how}"] = (lambda w=which, h=how: mutate_map(w, h), "not a bijection")
 
 
 @pytest.mark.parametrize("case", list(INVALID))
 def test_mesh_invalid(case):
     plain()  # the base constructs
-    match = next(v for k, v in reversed(MATCH.items()) if k in case)
+    factory, match = INVALID[case]
     with pytest.raises(ValueError, match=match):
-        INVALID[case]()
+        factory()
 
 
 def test_mesh_valid_edge_cases():
@@ -752,9 +751,11 @@ def test_mesh_valid_edge_cases():
     pts = np.vstack([REF["hex8"], REF["hex27"] + [3, 0, 0]])
     mixed = mesh_of(pts, {"hex8": [np.arange(8)], "hex27": [np.arange(8, 35)]})
     assert mixed.offsets == {"hex8": 0, "hex27": 1} and mixed.n_el == 2
+    m = voxel_mesh((2, 2, 1), mask=np.array([[[True], [True]], [[True], [False]]]))  # map base
+    assert (m.voxel.node_map < 0).any() and (m.voxel.element_map < 0).any()
 
 
-# Abaqus raise cases: the base file reads; each case appends or replaces lines.
+# Abaqus raise cases: the base file reads; each case appends lines.
 INP = """*NODE
 1, 0., 0., 0.
 2, 1., 0., 0.
@@ -779,9 +780,13 @@ DUP_ACROSS_TYPES = (
 REJECT = ("PART", "INSTANCE", "ASSEMBLY", "INCLUDE", "NGEN", "NFILL", "NCOPY", "NMAP", "ELGEN")
 REJECT += ("ELCOPY", "SYSTEM")
 ELSETS = "*ELSET, ELSET={}\n1\n*ELSET, ELSET={}\n1\n"
+COUNT = "not a multiple of"
 INP_BAD = {f"*{k}": (f"*{k}\n", f"\\*{k} is not supported") for k in REJECT} | {
     "nset elset": ("*NSET, NSET=a, ELSET=b\n1\n", "ELSET= is not supported"),
-    "set reference": ("*ELSET, ELSET=a\n1\n*ELSET, ELSET=b\na\n", "only integer labels"),
+    "nset without name": ("*NSET\n1\n", "without NSET="),
+    "set reference": ("*ELSET, ELSET=a\n1\n*ELSET, ELSET=b\na\n", "non-numeric"),
+    "generate one entry": ("*NSET, NSET=a, GENERATE\n1\n", "GENERATE needs"),
+    "generate step 0": ("*NSET, NSET=a, GENERATE\n1, 3, 0\n", "GENERATE needs"),
     "C3D27": ("*ELEMENT, TYPE=C3D27\n", "unsupported solid element type"),
     "missing TYPE": ("*ELEMENT\n", "without TYPE"),
     "undefined node in element": ("*ELEMENT, TYPE=C3D8\n2, 1, 2, 3, 4, 5, 6, 7, 99\n", "undefined"),
@@ -791,12 +796,13 @@ INP_BAD = {f"*{k}": (f"*{k}\n", f"\\*{k} is not supported") for k in REJECT} | {
     "two materials": (ELSETS.format("material_1", "material_2"), "more than one material"),
     "material 7 and 007": (ELSETS.format("material_7", "MATERIAL_007"), "more than one material"),
     "two orientations": (ELSETS.format("orientation_1", "orientation_2"), "than one orientation"),
-    "huge material": ("*ELSET, ELSET=material_99999999999\n1\n", "below 2\\*\\*31"),
-    "2 coordinates": ("*NODE\n9, 0., 0.\n", "3 coordinates"),
-    "4 coordinates": ("*NODE\n9, 0., 0., 0., 0.\n", "3 coordinates"),
-    "too many entries": ("*ELEMENT, TYPE=C3D8\n2, 1, 2, 3, 4, 5, 6, 7, 8, 1\n", "too many entries"),
-    "cut by keyword": ("*ELEMENT, TYPE=C3D8\n2, 1, 2, 3, 4\n*NSET, NSET=a\n1\n", "by a keyword"),
-    "cut by eof": ("*ELEMENT, TYPE=C3D8\n2, 1, 2, 3, 4\n", "cut off by end of file"),
+    "material 2**31": ("*ELSET, ELSET=material_2147483648\n1\n", "below 2\\*\\*31"),
+    "2 coordinates": ("*NODE\n9, 0., 0.\n", COUNT),
+    "4 coordinates": ("*NODE\n9, 0., 0., 0., 0.\n", COUNT),
+    "non-integer element": ("*ELEMENT, TYPE=C3D8\n2.5, 1, 2, 3, 4, 5, 6, 7, 8\n", "integers"),
+    "too many entries": ("*ELEMENT, TYPE=C3D8\n2, 1, 2, 3, 4, 5, 6, 7, 8, 1\n", COUNT),
+    "cut by keyword": ("*ELEMENT, TYPE=C3D8\n2, 1, 2, 3, 4\n*NSET, NSET=a\n1\n", COUNT),
+    "cut by eof": ("*ELEMENT, TYPE=C3D8\n2, 1, 2, 3, 4\n", COUNT),
 }
 
 
@@ -810,8 +816,9 @@ def test_abaqus_invalid(tmp_path, case):
         read(tmp_path / "bad.inp")
 
 
-def test_abaqus_only_skipped_types(tmp_path):
-    (tmp_path / "s.inp").write_text(INP.replace("C3D8", "DC3D8"))
+@pytest.mark.parametrize("extra", ["", "*ELSET, ELSET=a\n1\n"])
+def test_abaqus_only_skipped_types(tmp_path, extra):
+    (tmp_path / "s.inp").write_text(INP.replace("C3D8", "DC3D8") + extra)
     with (
         pytest.raises(ValueError, match="no 3D elements"),
         pytest.warns(UserWarning, match="DC3D8"),
@@ -823,6 +830,7 @@ GMSH_BAD = {
     "gmsh_vol_two_groups.msh": "exactly one physical group",
     "gmsh_untagged_volume.msh": "exactly one physical group",
     "gmsh_saveall.msh": "exactly one physical group",
+    "gmsh_saveall_surface.msh": "exactly one physical group",  # meshio's error, translated
     "gmsh_v22.msh": "save as Gmsh 4.1 ASCII",
     "gmsh_v40.msh": "save as Gmsh 4.1 ASCII",
     "gmsh_binary.msh": "save as Gmsh 4.1 ASCII",
@@ -835,7 +843,6 @@ GMSH_BAD = {
 
 @pytest.mark.parametrize("name", list(GMSH_BAD))
 def test_gmsh_invalid(name):
-    read(DATA / "gmsh_messy.msh")
     with pytest.raises(ValueError, match=GMSH_BAD[name]):
         read(DATA / name)
 
@@ -858,18 +865,17 @@ def vtu_with(tmp_path, cells, **cell_data):
 
 def test_vtu_invalid_and_float_labels(tmp_path):
     hexa = [("hexahedron", np.arange(8)[None])]
-    tet = [("tetra", np.arange(4)[None])]
-    quad = [("quad", np.arange(4)[None])]
     m = read(vtu_with(tmp_path, hexa + [("quad", np.arange(8, 12)[None])], material=[[3.0], [0.0]]))
     assert m.material.dtype == np.int64 and m.material.tolist() == [3]
     with pytest.raises(ValueError, match="unsupported 3D cell type tetra"):
-        read(vtu_with(tmp_path, hexa + tet))
+        read(vtu_with(tmp_path, hexa + [("tetra", np.arange(4)[None])]))
     with pytest.raises(ValueError, match="no 3D elements"):
-        read(vtu_with(tmp_path, quad))
+        read(vtu_with(tmp_path, [("quad", np.arange(4)[None])]))
     with pytest.raises(ValueError, match="integral"):
         read(vtu_with(tmp_path, hexa, material=[[1.5]]))
-    with pytest.raises(ValueError, match="below 2"):
-        read(vtu_with(tmp_path, hexa, material=[[1e30]]))
+    for big in (2**31, 1e30):
+        with pytest.raises(ValueError, match="below 2"):
+            read(vtu_with(tmp_path, hexa, material=[[big]]))
 
 
 def test_io_errors(tmp_path):
@@ -877,15 +883,9 @@ def test_io_errors(tmp_path):
     (tmp_path / "t.msh").write_text(msh[: msh.index("$Elements") + 40])
     vtu = vtu_with(tmp_path, [("hexahedron", np.arange(8)[None])]).read_text()
     (tmp_path / "t.vtu").write_text(vtu[: len(vtu) // 2])
-    for name in ("t.msh", "t.vtu"):
-        try:
+    for name in ("t.msh", "t.vtu"):  # SystemExit is not an Exception, so it would fail the test
+        with pytest.raises(Exception):  # noqa: B017
             read(tmp_path / name)
-        except SystemExit:  # pragma: no cover
-            pytest.fail("reader called sys.exit")
-        except Exception:
-            pass
-        else:  # pragma: no cover
-            pytest.fail("truncated file read without error")
     with pytest.raises(ValueError, match="unsupported mesh file extension"):
         read(tmp_path / "m.stl")
     with pytest.raises(ValueError, match="only .vtu"):
@@ -893,26 +893,28 @@ def test_io_errors(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "kw",
+    "kw, match",
     [
-        {"shape": (0, 1, 1)},
-        {"shape": (2.5, 1, 1)},
-        {"shape": (True, True, True)},
-        {"shape": (2, 1)},
-        {"spacing": (1.0, 1.0)},
-        {"spacing": (0.0, 1.0, 1.0)},
-        {"origin": (0.0, 0.0)},
-        {"origin": (np.inf, 0.0, 0.0)},
-        {"mask": np.ones((2, 2, 1), bool)},
-        {"mask": np.ones((2, 1, 1), int)},
-        {"mask": np.ones((2, 1, 1), float)},
-        {"mask": np.zeros((2, 1, 1), bool)},
+        ({"shape": (0, 1, 1)}, "positive ints"),
+        ({"shape": (2.5, 1, 1)}, "positive ints"),
+        ({"shape": (True, True, True)}, "positive ints"),
+        ({"shape": (2, 1)}, "positive ints"),
+        ({"shape": 2}, "positive ints"),
+        ({"spacing": (1.0, 1.0)}, "finite reals"),
+        ({"spacing": 1.0}, "finite reals"),
+        ({"spacing": (0.0, 1.0, 1.0)}, "spacing > 0"),
+        ({"spacing": (np.nan, 1.0, 1.0)}, "finite reals"),
+        ({"origin": (0.0, 0.0)}, "finite reals"),
+        ({"origin": (np.inf, 0.0, 0.0)}, "finite reals"),
+        ({"mask": np.ones((2, 2, 1), bool)}, "bool array of shape"),
+        ({"mask": np.ones((2, 1, 1), int)}, "bool array of shape"),
+        ({"mask": np.ones((2, 1, 1), float)}, "bool array of shape"),
+        ({"mask": np.zeros((2, 1, 1), bool)}, "no active cells"),
     ],
 )
-def test_voxel_invalid(kw):
-    args = {"shape": (2, 1, 1)} | kw
-    with pytest.raises(ValueError):
-        voxel_mesh(**args)
+def test_voxel_invalid(kw, match):
+    with pytest.raises(ValueError, match=match):
+        voxel_mesh(**({"shape": (2, 1, 1)} | kw))
 
 
 def test_voxel_normalizes_scalars():
@@ -929,4 +931,4 @@ def test_voxel_size():
     m = voxel_mesh((88, 88, 88))
     corner_jacobians(m)
     assert time.perf_counter() - t < 2.0
-    assert 3 * len(m.points) == 3 * 89**3
+    assert len(m.points) == 89**3 and m.n_el == 88**3

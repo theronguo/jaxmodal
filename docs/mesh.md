@@ -38,7 +38,7 @@ class Mesh:
 Grid order is not an invariant, so node and element permutations (PR 5 RCM, PR 18 Morton) are legal if they update every dependent field:
 
 - **Node permutation** $p$ (new → old): `points[p]`; connectivity through $p^{-1}$; `node_sets` mapped through $p^{-1}$ and re-sorted; non-negative `voxel.node_map` entries mapped through $p^{-1}$.
-- **Element permutation** $q$ within one block (the global index is fixed by `TYPES` order): block rows, `material`, `orientation`, `element_sets` (re-sorted) and `voxel.element_map`.
+- **Element permutation** $q$ (new → old) within one block (the global index is fixed by `TYPES` order): block rows, `material` and `orientation` indexed by $q$; `element_sets` mapped through $q^{-1}$ and re-sorted; non-negative `voxel.element_map` entries mapped through $q^{-1}$.
 
 ## Node ordering
 
@@ -76,11 +76,12 @@ This is the exact trilinear derivative at a corner. For an affine element $x = A
 
 meshio's `.inp` reader is unusable (wrong `ELSET=` blocks, repeated sets replace instead of append, crashes on a second `*NODE` and on lowercase or unknown types), so jaxmodal has its own reader.
 
-- **Supported:** `*NODE` (any number, optional `NSET=`), `*ELEMENT, TYPE=` (optional `ELSET=`, continuation lines), `*NSET`/`*ELSET` (integer lists or `GENERATE`; repeated names append), `**` comments, case-insensitive keywords and set names (the first spelling becomes the key), non-contiguous labels in any order.
+- **Supported:** `*NODE` (any number, optional `NSET=`), `*ELEMENT, TYPE=` (optional `ELSET=`, continuation lines), `*NSET`/`*ELSET` (integer lists or `GENERATE`; repeated names append), `**` comments, case-insensitive keywords and set names (the first spelling becomes the key), non-contiguous labels in any order. Keyword lines cannot continue onto the next line.
 - **Types:** `C3D8*` → `hex8` and `C3D20*` → `hex20`. Suffixes (R, H, ...) are ignored because jaxmodal uses full integration. Other `C3D*` types raise. Non-solid types (S4, CPS8, T3D3, DC3D8, ...) are skipped with one warning per type; `ELSET=` on a skipped section is ignored, and element-set labels of skipped elements are dropped with a warning.
 - **Materials and orientations** come from element sets named `material_<k>` / `orientation_<k>` (any case; $k$ a non-negative integer below $2^{31}$, so `material_007` is label 7). Elements in none get 0; an element in two sets of a kind raises. These sets are removed from `element_sets`.
 - **Not read:** `*MATERIAL`, `*SOLID SECTION`, `*ORIENTATION` and other keywords are skipped with their data lines. Real section assignments are not used.
-- **Rejected:** Abaqus/CAE structure (`*PART`, `*INSTANCE`, `*ASSEMBLY`, `*INCLUDE`), generated geometry (`*NGEN`, `*NFILL`, `*NCOPY`, `*NMAP`, `*ELGEN`, `*ELCOPY`, `*SYSTEM`), set names inside sets, `*NSET, ELSET=`, undefined or duplicate labels, malformed data lines.
+- **Rejected:** Abaqus/CAE structure (`*PART`, `*INSTANCE`, `*ASSEMBLY`, `*INCLUDE`), generated geometry (`*NGEN`, `*NFILL`, `*NCOPY`, `*NMAP`, `*ELGEN`, `*ELCOPY`, `*SYSTEM`), set names inside sets, `*NSET, ELSET=`, duplicate node or element labels, undefined node labels (in elements or node sets), malformed data lines. Element-set labels that name no solid element (skipped or undefined) are dropped with a warning.
+- **Parsing:** each section's data lines are parsed in bulk, so an error names the section, not the line.
 
 ### Gmsh `.msh` (4.1 ASCII only)
 
@@ -93,7 +94,7 @@ Save with `Mesh.MshFileVersion = 4.1` and `Mesh.Binary = 0`. Other versions rais
 
 ### VTU `.vtu`
 
-- **Read:** `material` / `orientation` cell data (integer, or float with integral values) become the labels, defaulting to 0. VTU carries no sets.
+- **Read:** `material` / `orientation` cell data (integer, or float with integral values, below $2^{31}$ in magnitude) become the labels, defaulting to 0. VTU carries no sets.
 - **Write:** points, blocks and the two label arrays (int64). Sets and voxel metadata are not written.
 
 ## Voxel meshes
@@ -120,4 +121,4 @@ mesh = voxel_mesh(shape=(nx, ny, nz), spacing=(hx, hy, hz), origin=(ox, oy, oz),
   mesh = dataclasses.replace(mesh, node_sets={"clamp": clamp})
   ```
 
-- **Cost** (M-series laptop): $88^3$ cells (2.1M DOFs) build in 0.03 s and `corner_jacobians` takes 0.3 s. $320^3$ (99M DOFs) builds in about 2 s with `corner_jacobians` about 10 s, peaking at about 13–14 GB.
+- **Cost** (M-series laptop): $88^3$ cells (2.1M DOFs) build in 0.04 s and `corner_jacobians` takes 0.09 s. $320^3$ (99M DOFs) builds in 1.8 s and `corner_jacobians` takes 3.8 s (rows in chunks of $2^{20}$); peak memory is 7.9 GB.
