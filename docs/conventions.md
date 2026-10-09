@@ -76,6 +76,7 @@ Each mechanism exists because of a measured failure, and each has a test that fa
 
 ### Rules
 
+- The child starts with x64 off (`JAX_ENABLE_X64` is dropped from its env); fp64 benchmarks call `jax.config.update("jax_enable_x64", True)` in `setup`.
 - `setup` and `code` block on their results (`.block_until_ready()`). Otherwise async work spills into `code`, and `time_s` measures only dispatch.
 - Warm up in `setup` with compiles only (`f.lower(...).compile()`) plus backend start-up. This gives the same peak as a full warm-up run.
   - Run the full function in `setup` only when its buffers are larger than 2 MB. Blocks of 2 MB or less freed in `setup` are reused by `code` uncharged by both footprint and `ru_maxrss`. Measured: 0.8 GB of 1 MB blocks freed in `setup` hide an identical allocation in `code` completely.
