@@ -1,6 +1,6 @@
 # PR 0 plan: project scaffold
 
-Branch `pr-00-scaffold`. The scope is exactly the roadmap's PR 0 (Contents, Docs, Tests) plus Principle 7 (conventions). No FEM code. Review rounds 1–6 are incorporated.
+Branch `pr-00-scaffold`. The scope is exactly the roadmap's PR 0 (Contents, Docs, Tests) plus Principle 7 (conventions). No FEM code. Review rounds 1–7 are incorporated (round 7: all 5 reviewers satisfied).
 
 ## Measured facts (round-1 reviewers, this Mac)
 
@@ -112,7 +112,7 @@ def index(x): return jnp.asarray(x, dtype=jnp.int32)
 - fp64 peak: jitted 4096² matmul, arrays passed as arguments, warm-up first, `block_until_ready` in each timed run, best of 5, 2n³ flops.
 - Jitted STREAM triad: `a = b + s·c` on 2·10⁷ fp64 elements, same timing rules, best of 10, 24 B per element (STREAM convention; write-allocate traffic is not counted).
 - C triad, `c_triad() -> {"gbps", "threads"} | str`:
-  - `benchmarks/triad.c`, resolved as `Path(__file__).with_name("triad.c")` and built without a shell as `[os.environ.get("CC", "cc"), "-O3", "-pthread", ...]` into a temp dir; the compiler is looked up with `shutil.which`;
+  - `benchmarks/triad.c`, resolved as `Path(__file__).with_name("triad.c")` and built without a shell as `[os.environ.get("CC", "cc"), "-O3", "-pthread", ...]` into a temp dir with `capture_output=True`; the compiler is looked up with `shutil.which`; the binary takes the thread count as `argv[1]` and prints `<gbps> <checksum>`;
   - pthreads with a mutex-and-condition-variable barrier (macOS has no `pthread_barrier_t`), first-touch initialisation inside the threads, 2·10⁷ fp64 elements per array (as the jitted triad), best of 20; the last thread to reach each barrier records the timestamp under the mutex and each repetition is timed stamp to stamp (timing in thread 0 after its own wake-up over-reports up to 900 GB/s at 14–16 threads, measured), and the result is used so the loop can't be optimised away;
   - run at the thread counts from `triad_threads(versions())`; the best value and its thread count are reported;
   - a missing compiler gives `"skipped: no C compiler"`, a failed build `"skipped: compile failed"`;
@@ -138,9 +138,9 @@ Tests are fast unless marked `slow`. Every test that uses jit builds a fresh `ja
 3. **int32 index casts.**
    - Under x64, the raw `jnp.argsort`, `jnp.nonzero(a)[0]` and `jnp.arange` results are int64. This checks the premise.
    - `config.index` of each is int32 with equal values.
-4. **Harness peak and RSS.** Marked `slow`.
+4. **Harness peak and RSS.** Marked `slow`; the peak cases are `skipif(sys.platform != "darwin")`, the `maxrss_bytes` check runs everywhere.
    - `setup="rng = np.random.default_rng(0)"`, `code="a = rng.random(100_000_000)"` (800 MB, incompressible): `peak_bytes` = 0.8e9 ± 5%.
-   - Over 3 runs, max/min − 1 < 5% for both `peak_bytes` and (darwin) `rss_bytes`.
+   - Over 3 runs of the plain case, max/min − 1 < 5% for both `peak_bytes` and `rss_bytes`.
    - Control: `code="pass"` gives `peak_bytes` < 20 MB.
    - Unmapped transient: `setup` touches 2 GB in an mmap and closes it, then the same `code` gives 0.8e9 ± 5%. Without the interval reset this reads ≈ 2.0e9; with `ru_maxrss` it reads ≈ 0.
    - Malloc-freed transient: `setup` also runs `t = rng.random(200_000_000); del t` (1.6 GB); the same `code` gives 0.8e9 ± 5%. Without `MallocLargeCache=0` it reads ≈ 0 (measured), so this case guards the mechanism.
@@ -154,7 +154,7 @@ Tests are fast unless marked `slow`. Every test that uses jit builds a fresh `ja
    - `measure("import time; time.sleep(0.2)")` gives 0.2 ≤ `time_s` < 0.5.
    - `measure("print('noise')")` still returns all three fields.
    - `measure("raise ValueError('boom')")` raises `RuntimeError` whose message contains `boom`.
-   - `measure("assert not jax.config.jax_enable_x64")` passes even with `JAX_ENABLE_X64=1` set in the parent (via monkeypatch).
+   - `measure("assert not jax.config.jax_enable_x64 and not jax.config.jax_compilation_cache_dir")` passes even with `JAX_ENABLE_X64=1` and `JAX_COMPILATION_CACHE_DIR` set in the parent (via monkeypatch).
    - `write_result("t", {"x": 1}, out_dir=tmp_path)` writes valid JSON with `x` and every `versions()` key.
    - `versions()` values: on darwin, P and E counts are positive ints with P + E = `os.cpu_count()`. `XLA_FLAGS` is recorded verbatim under monkeypatch. `jax_num_cpu_devices` is `True` on 0.11.2.
    - `versions()` with `sysctl` failing (monkeypatched `subprocess.run` raising, and returning nonzero) gives P/E = `None`, and `triad_threads(versions)` then returns `[os.cpu_count()]` (otherwise `[P, P + E]`).
@@ -193,7 +193,7 @@ Tests are fast unless marked `slow`. Every test that uses jit builds a fresh `ja
   - Principle 6:
     - `jnp.int32` start indices for `dynamic_slice`/`dynamic_update_slice`;
     - capacity padding so neither ever clamps.
-  - Measured facts: jax 0.11.2, cache works (delete `.jax_cache/` after jax upgrades; if a later jax stops storing entries, test 6 fails and the remedy is removing `enable_cache` from conftest), donation works, `jax_num_cpu_devices` available (a jax bump re-checks this test too).
+  - Measured facts: jax 0.11.2, cache works (`.jax_cache/` is unbounded; delete it after jax upgrades; if a later jax stops storing entries, test 6 fails and the remedy is removing `enable_cache` from conftest), donation works, `jax_num_cpu_devices` available (a jax bump re-checks this test too).
   - Harness rules:
     - peak definition per platform;
     - `code` must block;
@@ -208,7 +208,7 @@ Tests are fast unless marked `slow`. Every test that uses jit builds a fresh `ja
   - `scripts/check.sh` and the merge gate `uv run --locked pytest -m "not gpu"`;
   - license;
   - a link to `docs/ROADMAP.md`.
-- **`docs/ROADMAP.md`:** the Development environment line on `ri_lifetime_max_phys_footprint` becomes the interval peak after `proc_reset_footprint_interval` (a private libSystem symbol) with `MallocLargeCache=0` (undocumented), and the line "reports peak RSS minus baseline RSS" becomes "reports the peak minus baseline (macOS: `peak_bytes`, see below)", with `peak_bytes = max(interval footprint delta, ru_maxrss delta)` recorded for every macOS measurement as the primary number. The PR 0 Tests line and the Compilation cache bullet say the cache works on jax 0.11.2 and test 6 fails rather than skips if a later jax stops storing entries; the remedy is removing the `enable_cache` call in conftest. The Dependencies bullet on pymetis says it is added in PR 19, minimum 2025.1.1. The Deferred GPU checks list gains "PR 24: harness Linux and GPU peak paths, checked with the test 4 cases". The status notes that PR 0 is merged, with the pinned jax 0.11.2; that the cache and donation work; and that the pymetis extra is deferred to PR 19 (minimum 2025.1.1).
+- **`docs/ROADMAP.md`:** the Development environment line on `ri_lifetime_max_phys_footprint` becomes the interval peak after `proc_reset_footprint_interval` (a private libSystem symbol) with `MallocLargeCache=0` (undocumented), and the line "reports peak RSS minus baseline RSS" becomes "reports the peak minus baseline (macOS: `peak_bytes`, see below)", with `peak_bytes = max(interval footprint delta, ru_maxrss delta)` recorded for every macOS measurement as the primary number. The PR 0 Tests line and the Compilation cache bullet say the cache works on jax 0.11.2 and test 6 fails rather than skips if a later jax stops storing entries; the remedy is removing the `enable_cache` call in conftest. The Benchmarks bullet notes compile time is recorded by the PRs that measure it (5, 18). The Dependencies bullet on pymetis says it is added in PR 19, minimum 2025.1.1. The Deferred GPU checks list gains "PR 24: harness Linux and GPU peak paths, checked with the test 4 cases". The status notes that PR 0 is merged, with the pinned jax 0.11.2; that the cache and donation work; and that the pymetis extra is deferred to PR 19 (minimum 2025.1.1).
 
 ## scripts/check.sh
 
@@ -226,4 +226,5 @@ uv run --locked pytest -m "not slow and not gpu" -q
 - `scripts/check.sh` passes in under 5 minutes.
 - `uv run --locked pytest -m "not gpu"` passes.
 - The code review rounds per CLAUDE.md come back clean.
+- `README.md`, `docs/` and the ROADMAP edits applied; memory updated.
 - Merge with `git merge --no-ff`.
