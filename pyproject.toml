@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jaxmodal"
+description = "Matrix-free large-scale 3D linear modal analysis in JAX"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+dynamic = ["version"]
+dependencies = ["jax>=0.11.2", "numpy", "scipy", "meshio", "pyamg"]
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+
+[tool.hatch.version]
+path = "src/jaxmodal/__init__.py"
+
+[tool.uv]
+required-environments = ["sys_platform == 'darwin' and platform_machine == 'arm64'"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = ["slow: long-running", "gpu: needs a CUDA device"]
+addopts = "--strict-markers"

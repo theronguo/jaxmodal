@@ -1,0 +1,20 @@
+{
+  "fp64_matmul_gflops": 493.3870073992818,
+  "triad_gbps": 182.41413820144007,
+  "c_triad": {
+    "gbps": 188.605,
+    "threads": 12
+  },
+  "c_triad_ratio": 1.0339384976383976,
+  "versions": {
+    "jax": "0.11.2",
+    "jaxlib": "0.11.2",
+    "numpy": "2.5.3",
+    "platform": "macOS-27.2-arm64-arm-64bit",
+    "cpu_count": 16,
+    "p_cores": 12,
+    "e_cores": 4,
+    "xla_flags": null,
+    "jax_num_cpu_devices": true
+  }
+}
