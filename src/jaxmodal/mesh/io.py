@@ -196,6 +196,8 @@ def _read_inp(path):
                 opt[k.strip().upper()] = v.strip().strip('"')
             if kw in REJECT:
                 raise ValueError(f"*{kw} is not supported (flat .inp files only)")
+            if kw in ("NODE", "ELEMENT") and {"SYSTEM", "INPUT"} & opt.keys():
+                raise ValueError(f"*{kw} with SYSTEM= or INPUT= is not supported")
             if kw == "NODE":
                 sec = ("node", opt.get("NSET"))
             elif kw == "ELEMENT":

@@ -815,6 +815,8 @@ INP_BAD = {f"*{k}": (f"*{k}\n", f"\\*{k} is not supported") for k in REJECT} | {
     "huge element set label": ("*ELSET, ELSET=e\n1e300\n", "below 2"),
     "huge node label": ("*NODE\n3e9, 0., 0., 0.\n", "below 2"),
     "bare star": ("*\n", "empty keyword"),
+    "node system": ("*NODE, SYSTEM=C\n9, 1., 90., 0.\n", "SYSTEM= or INPUT="),
+    "element input": ("*ELEMENT, TYPE=C3D8, INPUT=e.inp\n", "SYSTEM= or INPUT="),
     "4 coordinates": ("*NODE\n9, 0., 0., 0., 0.\n", COUNT),
     "non-integer element": ("*ELEMENT, TYPE=C3D8\n2.5, 1, 2, 3, 4, 5, 6, 7, 8\n", "integers"),
     "too many entries": ("*ELEMENT, TYPE=C3D8\n2, 1, 2, 3, 4, 5, 6, 7, 8, 1\n", COUNT),
