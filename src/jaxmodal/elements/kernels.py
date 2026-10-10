@@ -12,9 +12,9 @@ from ..materials.rotation import VOIGT
 from .registry import ELEMENTS, _det3
 
 # eps_v = S[v, i, j] du_i/dx_j with engineering shear.
-_S = np.zeros((6, 3, 3))
+S = np.zeros((6, 3, 3))
 for _v, (_i, _j) in enumerate(VOIGT):
-    _S[_v, _i, _j] = _S[_v, _j, _i] = 1.0
+    S[_v, _i, _j] = S[_v, _j, _i] = 1.0
 
 
 def jacobian(name, X):
@@ -36,7 +36,7 @@ def gradients(name, invJ):
 
 def bmatrix(G):
     """Strain-displacement matrix (..., nq, 6, 3n), Voigt rows, node-major columns."""
-    B = jnp.einsum("vij,...qaj->...qvai", jnp.asarray(_S, G.dtype), G)
+    B = jnp.einsum("vij,...qaj->...qvai", jnp.asarray(S, G.dtype), G)
     return B.reshape(*B.shape[:-2], -1)
 
 
@@ -84,7 +84,7 @@ def lumped_mass(name, X, rho):
 def _strain(G, u):
     U = u.reshape(*u.shape[:-1], -1, 3)
     H = jnp.einsum("...ai,...qaj->...qij", U, G)  # displacement gradient
-    return jnp.einsum("vij,...qij->...qv", jnp.asarray(_S, H.dtype), H)
+    return jnp.einsum("vij,...qij->...qv", jnp.asarray(S, H.dtype), H)
 
 
 def stiffness_form(name, X, C, u, w):

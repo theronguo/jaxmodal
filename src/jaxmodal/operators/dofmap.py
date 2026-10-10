@@ -14,7 +14,9 @@ def element_dofs(mesh):
     """type -> (n_el_type, 3n) int32 global DOFs 3 conn[:, a] + i (node-major, as the kernels)."""
     sizes = {f"{t}_dofs": 3 * c.size for t, c in mesh.blocks.items()}
     check_int32(n_dof=3 * len(mesh.points), **sizes)
-    return {
-        t: (3 * c[:, :, None] + np.arange(3)).reshape(len(c), -1).astype(np.int32)
-        for t, c in mesh.blocks.items()
-    }
+    return {t: conn_dofs(c) for t, c in mesh.blocks.items()}
+
+
+def conn_dofs(conn):
+    """(n_el, n) connectivity -> (n_el, 3n) int32 DOFs 3 conn[:, a] + i."""
+    return (3 * conn[:, :, None] + np.arange(3)).reshape(len(conn), -1).astype(np.int32)

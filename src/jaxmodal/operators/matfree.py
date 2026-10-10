@@ -13,7 +13,7 @@ from jax import lax
 
 from ..elements import ELEMENTS, check_elements, kernels
 from ..materials import check_materials, phase_table, phases
-from .dofmap import check_int32
+from .dofmap import check_int32, conn_dofs
 
 DEFAULT_PATH = {"cpu": "scatter", "gpu": "scatter"}  # CPU from benchmarks/scatter_gather.py
 CHUNK_BYTES = 32 * 2**20  # default chunk: largest power of two with c k^2 8 B <= this
@@ -30,6 +30,8 @@ def _pow2_ceil(x):
 
 def default_chunk(t, n_el):
     k = 3 * ELEMENTS[t].N.shape[1]
+    # capped at pow2ceil(n_el) so the padded size stays a power of two (an explicit chunk is
+    # capped at n_el instead)
     return min(_pow2_floor(CHUNK_BYTES // (8 * k * k)), _pow2_ceil(n_el))
 
 
@@ -104,12 +106,11 @@ def layout(mesh, path=None, chunk=None, range_nodes=None):
         conn = mesh.blocks[b["type"]]
         e, a = np.divmod(np.arange(conn.size), conn.shape[1])
         n = conn.ravel()
-        for r, keep in (
-            (n // R, None),
-            (np.full(n.shape, nr - 1), (n >= n_nodes - R) & (n // R < nr - 1)),
+        for sel, r in (
+            (np.ones(n.shape, bool), n // R),
+            ((n >= n_nodes - R) & (n // R < nr - 1), nr - 1),
         ):
-            sel = slice(None) if keep is None else keep
-            rr = r[sel]
+            rr = np.broadcast_to(r, n.shape)[sel]
             rs.append(rr)
             nl.append(n[sel] - np.minimum(rr * R, n_nodes - R))
             val.append(boff + (e[sel] - starts[rr]) * b["k"] + 3 * a[sel])
@@ -275,9 +276,7 @@ def unstructured(
         stored = mode == "stored"
         blocks.append(
             Block(
-                dofs=jnp.asarray(3 * conn[:, :, None] + np.arange(3), jnp.int32).reshape(
-                    len(conn), -1
-                ),
+                dofs=jnp.asarray(conn_dofs(conn)),
                 phase=jnp.asarray(ph),
                 Ke=out[0] if stored else None,
                 wdet=out[1] if stored else None,
@@ -323,7 +322,7 @@ def _k_apply(op, b, d, v):
         return d["s_K"][:, None, None] * jnp.einsum("eab,ebm->eam", Ke, u)
     c, k, m = u.shape
     G = kernels.gradients(b.type, d["geo"][..., :9].reshape(c, -1, 3, 3))  # (c, nq, n, 3)
-    S = jnp.asarray(kernels._S)
+    S = jnp.asarray(kernels.S)
     H = jnp.einsum("eaim,eqaj->eqijm", u.reshape(c, k // 3, 3, m), G)
     sig = jnp.einsum("evw,wij,eqijm->eqvm", op.C[d["phase"]], S, H)
     T = jnp.einsum("vij,eqvm,eq->eqijm", S, sig, d["geo"][..., 9])

@@ -158,17 +158,20 @@ $u_e = v[\text{dofs}_e]$ is $(c, k, m)$ with $k = 3n$.
 | hex8 $69^3$ | stored | grid | 0.042 s | 0.050 s | 0.126 s | 0.196 s | 32768 |
 | hex8 $69^3$ | stored | RCM | 0.042 s | 0.066 s | 0.128 s | 0.244 s | 32768 |
 | hex8 $69^3$ | otf | grid | 0.095 s | 0.114 s | 0.450 s | 0.555 s | 32768 |
+| hex8 $69^3$ | otf | RCM | 0.094 s | 0.150 s | 0.453 s | 0.723 s | 32768 |
 | hex20 $44^3$ | stored | grid | 0.062 s | 0.083 s | 0.122 s | 0.192 s | 32768 |
 | hex20 $44^3$ | stored | RCM | 0.062 s | 0.113 s | 0.127 s | 0.253 s | 32768 |
 | hex20 $44^3$ | otf | grid | 0.167 s | 0.217 s | 0.501 s | 0.688 s | 32768 |
+| hex20 $44^3$ | otf | RCM | 0.182 s | 0.333 s | 0.504 s | 0.948 s | 32768 |
 | hex27 $35^3$ | stored | grid | 0.060 s | 0.086 s | 0.102 s | 0.175 s | 32768 |
 | hex27 $35^3$ | stored | RCM | 0.058 s | 0.112 s | 0.108 s | 0.228 s | 32768 |
 | hex27 $35^3$ | otf | grid | 0.122 s | 0.162 s | 0.259 s | 0.427 s | 32768 |
+| hex27 $35^3$ | otf | RCM | 0.121 s | 0.245 s | 0.290 s | 0.590 s | 32768 |
 
 - Scatter wins all 24 default comparisons (both orders, both modes, $m = 1, 16$), so `DEFAULT_PATH["cpu"] = "scatter"`. The apply is kernel-bound ($K_e$ unpack and contraction, 11–16% of the 185 GB/s triad in Ke traffic); the scatter itself is a small part of it, and gather adds window redundancy. RCM order widens the gather windows on boxes (grid order is narrower), so gather is slower after RCM there; scatter does not care.
 - otf is 2–4× slower than stored.
 - The chunk rule is within 10% of the best of $c/4$, $c$, $4c$ for every type and $m$ (`chunk_rule_ok` in the JSON; a fast test checks it and the default path). $R/2$ and $2R$ are recorded for information.
-- Compile time of apply_K is 0.03–0.08 s.
+- Compile time of apply_K is 0.03–0.10 s.
 
 ### Memory estimator
 
@@ -186,7 +189,7 @@ Call it on the mesh that will be used (after `rcm`, if any), with the same keywo
 - `storage`: every leaf, from `layout` (padded counts, $W_b$, valence).
 - `vectors`: $3 \cdot 8\,n_\text{dof} m$: $v$ and two outputs (XLA frees an apply's output asynchronously, so it can overlap the next apply's).
 - `workspace`: the apply temporaries. Scatter, stored: $8c(2km + k^2)$ ($u_e$, $y_e$, unpacked $K_e$). Otf: a fitted per-element envelope of apply_K, $c(a_t + b_t(m-1))$ (XLA's fusion of the strain and stress fields varies with $m$), or `diag_K`'s $B$ matrices, $c\,t_t^\text{stored}$, whichever is larger. Gather: $8\sum_b W_b k_b m$ plus the larger of the gathered rows $8\cdot 3R\cdot\text{valence}\cdot m$ (XLA does not fuse the gather with the sum) and the chunk temporaries (they are never live together).
-- `build`: the padded connectivity and phase on the host (and the int64 inverse map) plus one chunk of the build kernel's XLA temporaries, $c\,t_t$, with $t$ per element exactly linear in $c$:
+- `build`: the padded connectivity and phase on the host, the phase index (and the int64 inverse map) plus one chunk of the build kernel's XLA temporaries, $c\,t_t$, with $t$ per element exactly linear in $c$:
 
   | | hex8 | hex20 | hex27 |
   |---|---|---|---|
@@ -194,8 +197,10 @@ Call it on the mesh that will be used (after `rcm`, if any), with the same keywo
   | otf build $t$ | 1.22 KB | 4.10 KB | 4.10 KB |
   | otf apply_K $a_t$, $b_t$ | 6.1, 1.28 KB | 41.0, 3.17 KB | 54.6, 2.55 KB |
 
-- `overhead`: 10 MB, the only calibrated constant (measured on hex20 $30^3$ and hex8 $60^3$; the formulas match `memory_analysis` without factors).
+- `overhead`: 10 MB, the only constant fitted to measured peaks ($t$, $a$, $b$ come from `memory_analysis`; measured on hex20 $30^3$ and hex8 $60^3$; the formulas match `memory_analysis` without factors).
 - `total = overhead + storage + max(build, vectors + workspace)`.
+- Not counted: `layout`'s host transient (≈ 4× the int64 inverse map while it is built, e.g. 0.55 GB at hex20 $55^3$ gather). It is freed before any device leaf exists, so it does not set the peak of `unstructured`, but an estimator that composes this one with live device memory should add it.
+- The estimate costs as much as `layout` (0.3 s at 1M DOF gather).
 - **Composition:** later estimators (PR 9/11/13/14/15) add PR 5's `storage + workspace` and count `overhead` once; they count their own vectors.
 
 ## Validation

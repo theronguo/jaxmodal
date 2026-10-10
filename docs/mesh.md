@@ -1,6 +1,6 @@
 # Mesh
 
-`jaxmodal.mesh` holds the host-side mesh: a NumPy data model, file readers, a VTU writer, voxel and box generators and corner Jacobians. There is no JAX here (a test imports it in a fresh interpreter and checks that `jax` is not loaded); `element_dofs` casts topology to int32 for the device (`docs/operators.md`).
+`jaxmodal.mesh` holds the host-side mesh: a NumPy data model, file readers, a VTU writer, voxel and box generators, corner Jacobians and renumbering (`renumber`, `rcm`). There is no JAX here (a test imports it in a fresh interpreter and checks that `jax` is not loaded); `element_dofs` casts topology to int32 for the device (`docs/operators.md`).
 
 ```python
 from jaxmodal.mesh import read, write, voxel_mesh, corner_jacobians

@@ -159,7 +159,7 @@ All sizes are fp64; GB = 10⁹ bytes.
 | Rayleigh–Ritz update temporaries (≈ 2 blocks × m; also hosts the (chunk + m)-block deflation-projector temporaries, chunk ≤ m) | ≈ 0.4 GB | ≈ 0.5 GB | ≈ 5 GB | m = 8: ≈ 13 GB |
 | Preconditioner workspace (≈ 4 blocks × m) | ≈ 0.8 GB | ≈ 1 GB | ≈ 10 GB | m = 8: ≈ 26 GB (fp32: 13 GB) |
 | Multigrid | AMG ≈ 0.4 GB (device); pyamg peak 2–3 GB (host) | ≈ 0.2 GB | AMG ≈ 3–4 GB; pyamg peak ≈ 20+ GB (host) | ≈ 9.9 GB incl. int32 indices (fp32: ≈ 5.2 GB) |
-| Gather path (if chosen) | window ≈ 0.3 GB at m = 16, R per mesh | — | ≈ 3–5 GB at m = 30 | — |
+| Gather path (if chosen) | ≤ 2 vectors × m (the $R$ cap): ≤ 0.4 GB at m = 25 | — | ≤ 4.8 GB at m = 30 | — |
 | Locked modes / deflation basis | small | small | n × 0.08 GB (fp32: half) | n × 0.8 GB (fp32: half) |
 | Max locked modes (fp32 basis; 6 blocks, fp32 preconditioner and multigrid) | > 2000 | > 2000 | ≈ 900 (stored Ke) – 1200 (on the fly), with fp32 AMG from PR 18 | ≲ 8 |
 
@@ -702,7 +702,7 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
 - PR 11: 100M matvec + LOBPCG and preconditioner workspace fits in the usable pool (≈ 76 GB).
 - PR 11: 100M voxel modal solve.
 - PR 13: 10M hex20 modal solve on one GPU.
-- PR 5: scatter vs gather benchmark on GPU; sets the GPU default.
+- PR 5: scatter vs gather benchmark on GPU; sets the GPU default and re-tunes the $R$ rule (the CPU cap of 2 vectors gives $R = 32768$ at 1M DOF).
 - PR 18: matvec ≥ 50% of roofline at m = 1.
 - PR 19: weak scaling.
 - PR 24: harness Linux and GPU peak paths, checked with the PR 0 harness test cases.

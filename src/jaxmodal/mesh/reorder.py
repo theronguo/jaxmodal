@@ -73,7 +73,7 @@ def rcm(mesh):
     )
     cols = np.concatenate([c.ravel() for c in conn])
     E = sp.csr_array(
-        (np.ones(len(rows), np.int8), (rows, cols)), shape=(mesh.n_el, len(mesh.points))
+        (np.ones(len(rows), np.int32), (rows, cols)), shape=(mesh.n_el, len(mesh.points))
     )
     A = (E.T @ E).tocsr()
     p = reverse_cuthill_mckee(A, symmetric_mode=True).astype(np.int64)
