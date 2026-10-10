@@ -108,7 +108,7 @@ def test_assembly_matches_dense_loop(mass):
         K, M = assemble(m, MATERIALS, {1: R}, mass=mass, chunk=chunk)
         assert rel(K.toarray(), Kref) < 1e-14 and rel(M.toarray(), Mref) < 1e-14
         for A in (K, M):
-            assert nnz_diff(A, A.T) == 0 and A.indices.dtype == np.int32
+            assert nnz_diff(A, A.T) == 0 and A.indices.dtype == A.indptr.dtype == np.int32
 
 
 # ---------------------------------------------------------------- 4: patch test
@@ -191,8 +191,9 @@ def test_a_p():
     assert (a_p(A, free, s=3.0).diagonal()[~free] == 3.0).all()
     with pytest.raises(ValueError, match="no free DOF"):
         a_p(A, np.zeros_like(free))
-    with pytest.raises(ValueError, match="<= 0"):
-        a_p(-A, free)
+    for neg in (-A, A - sp.diags_array(A.diagonal())):  # s < 0 and s = 0
+        with pytest.raises(ValueError, match="<= 0"):
+            a_p(neg, free)
     for bad in (free.astype(int), free[:-1], list(free)):
         with pytest.raises(ValueError, match="bool"):
             a_p(A, bad)
@@ -226,7 +227,7 @@ def test_rigid_translation_mass(t, curved, mass):
     expect = 1.7 * 27 + mn.sum()  # boundary nodes fixed: V = 3^3 exactly
     for d in range(3):
         assert abs(tr[d] @ M @ tr[d] - expect) / expect < 1e-12
-    assert tr[0] @ M @ tr[1] == 0
+    assert tr[0] @ M @ tr[1] == tr[0] @ M @ tr[2] == tr[1] @ M @ tr[2] == 0
 
 
 # ---------------------------------------------------------------- 9: BC masks
