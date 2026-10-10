@@ -1,13 +1,12 @@
 # PR 2 plan: materials
 
-Branch `pr-02-materials`, from `main` after PR 1. Scope: the roadmap's PR 2 (Contents, Docs, Tests), plus the mapping from PR 1's `material`/`orientation` labels to a per-phase property table, which `docs/mesh.md` promises to PR 2/6. Review round 1 is incorporated.
+Branch `pr-02-materials`, from `main` after PR 1. Scope: the roadmap's PR 2 (Contents, Docs, Tests), plus the mapping from PR 1's `material`/`orientation` labels to a per-phase property table, which `docs/mesh.md` promises to PR 2/6. Review rounds 1–2 are incorporated (round 2: 5/5 satisfied).
 
 ## Measured facts (prototype, jax 0.11.2, fp64)
 
 - Orthotropic $C = S^{-1}$ via `jnp.linalg.inv`: $\|C^{-1} - S\|_\infty / \|S\|_\infty$ is 5e-18 (carbon/epoxy, $\kappa(C) = 42$) and 4e-17 (a stiff orthotropic set, $\kappa = 5$).
 - Bond rotation $M C M^\top$ vs. `einsum` rotation of the 4th-order tensor: 3e-17 and 1.4e-16 relative.
 - Isotropic $C$ under a random rotation: 1.5e-15 relative.
-
 - Central finite differences of $\sum W \odot MCM^\top$ (carbon/epoxy in GPa, best of three steps): 1.5e-10 relative over the gradient for the constants, 1.3e-9 for the Euler angles.
 - `rotate` under `jit` differs from eager by 1.5e-18 relative (not bitwise).
 
@@ -61,8 +60,7 @@ bond_strain(R) -> N              # (..., 6, 6): eps_g = N eps_l (engineering she
 rotate(C, R) -> M C M^T          # local -> global stiffness, batched over leading axes
 ```
 
-- **from_euler:** $R = R_z(\varphi_1)\,R_x(\Phi)\,R_z(\varphi_2)$ (intrinsic z–x′–z″, Bunge). Columns are the local axes.
-- **from_euler** equals SciPy's `Rotation.from_euler("ZXZ", angles).as_matrix()` (intrinsic). Note: with columns as local axes, $R$ is the transpose of the texture-analysis matrix $g$ (rows = crystal axes); the docs say so.
+- **from_euler:** $R = R_z(\varphi_1)\,R_x(\Phi)\,R_z(\varphi_2)$ (intrinsic z–x′–z″, Bunge). Columns are the local axes. It equals SciPy's `Rotation.from_euler("ZXZ", angles).as_matrix()` (intrinsic). Note: with columns as local axes, $R$ is the transpose of the texture-analysis matrix $g$ (rows = crystal axes); the docs say so.
 - **from_vectors** (Abaqus `*ORIENTATION, SYSTEM=RECTANGULAR` convention): $e_1' = a/|a|$, $e_3' = (a \times b)/|a \times b|$, $e_2' = e_3' \times e_1'$. $b$ is any vector in the local 1–2 plane, not parallel to $a$. Parallel or zero vectors give NaN, and gradients are undefined there (traceable code cannot raise); `check_materials` checks every $R$ for finiteness, $\max|R^\top R - I| \le 10^{-12}$ and $\det R > 0$.
 - **Per-element orientations** need no extra API: `from_euler`, `from_vectors` and `rotate` are batched, so an (n_el, 3, 3) $R$ field rotates an (n_el, 6, 6) $C$ field directly. Only the label route below is per phase.
 - **Bond matrices:** for the Voigt pair $(i,j)$ (row) and $(k,l)$ (column), $M_{(ij),(kl)} = R_{ik}R_{jl}$ if $k = l$, else $R_{ik}R_{jl} + R_{il}R_{jk}$. With $D = \mathrm{diag}(1,1,1,2,2,2)$ (engineering shear), $N = D M D^{-1}$; this equals $M^{-\top}$ because $R$ is orthogonal (tested, not assumed). $M$ is built by indexing $R$ with a static (6, 2) Voigt index table, so both are vectorized over leading axes.

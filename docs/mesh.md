@@ -26,7 +26,7 @@ class Mesh:
 
 - **Types:** `TYPES = ("hex8", "hex20", "hex27")`. Blocks appear in this order.
 - **Global element index:** blocks in `TYPES` order, rows in order within a block. `mesh.offsets[t]` is the first global index of block `t` (present types only), and `mesh.n_el` the total.
-- **Labels:** `material` and `orientation` are labels (any int64, possibly negative or non-contiguous, e.g. Gmsh physical tags), not table indices. PR 2/6 map them to materials and orientations. Label 0 is the default.
+- **Labels:** `material` and `orientation` are labels (any int64, possibly negative or non-contiguous, e.g. Gmsh physical tags), not table indices. `jaxmodal.materials.phases` and `phase_table` map them to materials and orientations (`docs/materials.md`). Label 0 is the default.
 - **dtypes are strict:** the arrays must be `np.ndarray` with exactly these dtypes, or construction raises `ValueError`. Nothing is cast silently, so there are no hidden copies at 100M-node scale.
 - **Validation** (in `__post_init__`, O(n)): shapes and dtypes; finite points; at least one element and no empty block; node counts per type; node indices in range; no orphan nodes; sets sorted, unique and in range (empty sets are allowed); label lengths; the voxel fields below.
 - **Not checked:** degenerate elements (repeated nodes) construct; `corner_jacobians` shows 0 at the collapsed corners.

@@ -13,7 +13,7 @@ Large-scale 3D linear modal analysis (Kv = λMv) in JAX. The solver uses matrix-
 
 Package name: `jaxmodal`. License: MIT.
 
-Status: final. Review rounds 1–30 incorporated (round 30: all 5 reviewers satisfied). Implementation proceeds PR by PR, each with its own reviewed plan in `docs/plans/`. PR 0 merged: jax pinned at ≥ 0.11.2; the persistent cache and CPU donation work; the `pymetis` extra is deferred to PR 19 (minimum 2025.1.1). PR 1 merged: own flat-`.inp` reader, Gmsh 4.1 ASCII only, VTU is the only written format; host topology is int64 until PR 4.
+Status: final. Review rounds 1–30 incorporated (round 30: all 5 reviewers satisfied). Implementation proceeds PR by PR, each with its own reviewed plan in `docs/plans/`. PR 0 merged: jax pinned at ≥ 0.11.2; the persistent cache and CPU donation work; the `pymetis` extra is deferred to PR 19 (minimum 2025.1.1). PR 1 merged: own flat-`.inp` reader, Gmsh 4.1 ASCII only, VTU is the only written format; host topology is int64 until PR 4. PR 2 merged: phases are (material, orientation) label pairs; `phases` (host) is split from the traceable `phase_table`, so PR 21 can differentiate it; PR 6 builds one reference Ke per phase.
 
 ## Principles
 
@@ -262,7 +262,8 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. E
   - Traceable 6×6 C constructors: isotropic, transversely isotropic, orthotropic (ν_ij/E_i = ν_ji/E_j convention), full anisotropic.
   - Positive-definiteness check, relative: λ_min(C) > 1e-12·λ_max(C).
   - Stress and strain Bond matrices.
-  - Orientations: local material axes per element, from Euler angles or two direction vectors (test: both give the same rotation for equivalent input).
+  - Orientations: local material axes per orientation label, from Euler angles or two direction vectors (test: both give the same rotation for equivalent input); per-element R fields through the batched functions.
+  - Phases: mesh labels → (index, pairs) on the host; a traceable per-phase table of rotated C and ρ.
   - Density.
 - Docs: `docs/materials.md`.
 - Tests:
@@ -336,11 +337,11 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. E
   - Occupancy-masked voxel meshes: inactive elements contribute zero; PR 1's grid↔mesh node map handles dropped nodes, and PR 6 checks it against the geometry.
   - `apply_M` (consistent and lumped), `diag_K`, `diag_M`, nodal masses.
   - Memory estimator, including slab temporaries.
-  - Restriction: one material and orientation per material ID (phase).
+  - Restriction: one reference Ke per phase, a (material, orientation) pair (PR 2).
 - Docs: `docs/operators.md`.
 - Tests:
   - `apply_K`, `apply_M` (consistent and lumped), `diag_K`, `diag_M` and nodal masses match PR 5 on the same mesh, for a full block and for the PR 1 voxelized sphere.
-  - Two materials or orientations in one phase raise an error.
+  - A two-phase voxel mesh (two materials, or one material in two orientations; labels set with `dataclasses.replace(mesh, material=..., orientation=...)`) matches PR 5.
   - `jax.grad` with respect to s_K and s_M matches finite differences.
   - Mac acceptance: for a matvec plus six preallocated (n_dof, 24) fp64 arrays (≈ 2.3 GB) at 2M DOFs, the estimate is within 20% of the measured peak.
 
@@ -390,7 +391,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. E
   - Jacobi on A_P, with the σ pre-estimate (a few Jacobi-LOBPCG iterations or a user hint; test: the pre-estimate is within 2× of λ₁ and a user hint skips it).
   - Chunked mode computation; the deflation basis is optionally fp32, returned modes are fp64.
   - LOBPCG workspace estimator.
-  - Public API: `solve_modes(mesh, materials, bcs, n_modes, ...) → (λ, V, info)`.
+  - Public API: `solve_modes(mesh, materials, bcs, n_modes, orientations=None, ...) → (λ, V, info)`.
   - `examples/` script per milestone, also run as a smoke test.
   - Fixes the Mac acceptance budgets.
 - Docs: `docs/eigensolvers.md` (algorithm, convergence theory, memory model, measured floor).
