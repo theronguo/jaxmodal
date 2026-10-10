@@ -17,16 +17,11 @@ for _v, (_i, _j) in enumerate(VOIGT):
     _S[_v, _i, _j] = _S[_v, _j, _i] = 1.0
 
 
-def _tables(name, X):
-    el = ELEMENTS[name]
-    dt = jnp.result_type(X, float)
-    return el, jnp.asarray(X, dt), dt
-
-
 def jacobian(name, X):
     """J^-1 (..., nq, 3, 3) and w det J (..., nq) at the quadrature points (closed form)."""
-    el, X, dt = _tables(name, X)
-    J = jnp.einsum("...ai,qaj->...qij", X, jnp.asarray(el.dN, dt))
+    el = ELEMENTS[name]
+    dt = jnp.result_type(X, float)
+    J = jnp.einsum("...ai,qaj->...qij", jnp.asarray(X, dt), jnp.asarray(el.dN, dt))
     a, b, c = J[..., 0, :], J[..., 1, :], J[..., 2, :]
     det = _det3(J)
     inv = jnp.stack([jnp.cross(b, c), jnp.cross(c, a), jnp.cross(a, b)], -1) / det[..., None, None]

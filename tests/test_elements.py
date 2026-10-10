@@ -371,8 +371,9 @@ def test_check_passes_on_valid_meshes():
 def test_check_raises_on_mirrored_element(name):
     X = unit(name) * [1, 1, -1]
     assert np.asarray(jacobian(name, X)[1]).max() < 0
-    with pytest.raises(ValueError, match=rf"element 0 \({name}\): det J"):
-        check_elements(one_mesh({name: [X]}))
+    for mass_kind in ("consistent", "lumped"):  # det J is reported before any mass sign
+        with pytest.raises(ValueError, match=rf"element 0 \({name}\): det J"):
+            check_elements(one_mesh({name: [X]}), mass=mass_kind)
 
 
 def test_check_raises_on_flat_element():
@@ -471,8 +472,9 @@ def test_faces(name):
         assert all(frozenset(p) in edges for p in zip(c, c[1:] + c[:1], strict=True))
         p = VTK[list(c)]
         assert np.cross(p[2] - p[0], p[3] - p[1])[d] * s > 0  # outward
-        for k in range(4 * (len(nodes) > 4)):
-            assert np.array_equal(x[4 + k], (p[k] + p[(k + 1) % 4]) / 2)
+        if len(nodes) > 4:
+            for k in range(4):
+                assert np.array_equal(x[4 + k], (p[k] + p[(k + 1) % 4]) / 2)
         if len(nodes) == 9:
             assert nodes[8] == 20 + f
     small = {"hex20": "hex8", "hex27": "hex20"}.get(name)
