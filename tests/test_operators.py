@@ -104,7 +104,7 @@ def test_check_int32():
 def test_assembly_matches_dense_loop(mass):
     m = mixed_mesh(np.random.default_rng(1))
     Kref, Mref = dense_reference(m, mass == "lumped")
-    for chunk in (7, 4096):  # several chunks with a padded last one; one chunk > n_el
+    for chunk in (1, 7, 4096):  # one element per chunk; padded last chunk; one chunk > n_el
         K, M = assemble(m, MATERIALS, {1: R}, mass=mass, chunk=chunk)
         assert rel(K.toarray(), Kref) < 1e-14 and rel(M.toarray(), Mref) < 1e-14
         for A in (K, M):
@@ -208,10 +208,11 @@ def test_a_p():
 def test_nodal_mass(mass):
     m = mixed_mesh(np.random.default_rng(4))
     mn = np.random.default_rng(5).uniform(0, 2, len(m.points))
+    mn[::2] = 0  # most nodes carry no point mass
     _, M0 = assemble(m, MATERIALS, {1: R}, mass=mass)
     _, M1 = assemble(m, MATERIALS, {1: R}, mass=mass, nodal_mass=mn)
     assert nnz_diff(M1, M0 + sp.diags_array(np.repeat(mn, 3))) == 0
-    for bad in (-mn, np.where(mn > 1, np.nan, mn), mn[:-1]):
+    for bad in (-mn - 1, np.where(mn > 1, np.nan, mn), np.where(mn > 1, np.inf, mn), mn[:-1]):
         with pytest.raises(ValueError, match="nodal_mass"):
             assemble(m, MATERIALS, {1: R}, mass=mass, nodal_mass=bad)
 

@@ -70,7 +70,7 @@ def test_box_raises():
     with pytest.raises(ValueError, match="type must be"):
         box_mesh(SHAPE, type="hex9")
     for args in [((0, 1, 1),), ((1, 1, 1), (1.0, -1.0, 1.0)), ((1, 1), (1.0, 1.0, 1.0))]:
-        with pytest.raises(ValueError, match="shape|spacing"):
+        with pytest.raises(ValueError, match="^(shape|spacing)"):
             box_mesh(*args)
 
 
