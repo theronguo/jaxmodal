@@ -28,9 +28,7 @@ def box_mesh(shape, spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0), type="hex8"
     return Mesh(
         points=np.asarray(origin, float) + np.asarray(spacing, float) * (ijk / 2),
         blocks={type: conn.reshape(len(e), -1)},
-        node_sets={
-            k: v for d in range(3) for k, v in face_sets(d, ijk[:, d], 2 * shape[d]).items()
-        },
+        node_sets=sets,
         element_sets={},
         material=np.zeros(len(e), np.int64),
         orientation=np.zeros(len(e), np.int64),
