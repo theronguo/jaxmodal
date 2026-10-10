@@ -25,7 +25,7 @@ def _chunked(kernel, t, X, conn, p, chunk):
     return np.concatenate(out)
 
 
-def assemble(mesh, materials, orientations=None, mass="consistent", nodal_mass=None, chunk=4096):
+def assemble(mesh, materials, orientations=None, mass="consistent", nodal_mass=None, chunk=1024):
     """Global K and M as symmetrized scipy.sparse.csr_array (n_dof, n_dof), float64, int32 indices.
 
     nodal_mass: None or (n_nodes,) non-negative point masses, added to the 3 DOFs of each node.

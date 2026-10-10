@@ -23,26 +23,27 @@ AP = a_p(K + sigma * M, free)  # SPD reference for preconditioners and linear so
 ## Assembled reference (`assemble`)
 
 ```python
-K, M = assemble(mesh, materials, orientations=None, mass="consistent", nodal_mass=None, chunk=4096)
+K, M = assemble(mesh, materials, orientations=None, mass="consistent", nodal_mass=None, chunk=1024)
 ```
 
 1. **Host checks:** x64 must be on (`jaxmodal.config.enable_x64()`), else `ValueError`, so the oracle is never silently fp32. Then `phases(mesh)`, `check_materials` and `check_elements(mesh, mass)`, and the `nodal_mass` checks below.
-2. **Element matrices:** per block, in chunks of $c = \min(\text{chunk}, n_\text{el})$ elements, the jitted PR 3 kernels `stiffness` and `mass` (or `lumped_mass`) with the rotated per-phase $C$ and $\rho$ from `phase_table`. The last chunk is padded with its first element and sliced off, so a block compiles once per (type, $c$). `chunk` bounds the $K_e$ temporaries, not total memory.
+2. **Element matrices:** per block, in chunks of $c = \min(\text{chunk}, n_\text{el})$ elements, the jitted PR 3 kernels `stiffness` and `mass` (or `lumped_mass`) with the rotated per-phase $C$ and $\rho$ from `phase_table`. The last chunk is padded with its first element and sliced off, so a block compiles once per (type, $c$). `chunk` bounds the $K_e$ temporaries and the XLA workspace, not total memory; 1024 is as fast as 4096 and peaks about 0.5 GB lower for hex20/hex27.
 3. **Global matrices:** COO triplets with int32 rows/cols from `element_dofs` → `csr_array` (duplicates summed) → $\tfrac12(A + A^\top)$. Each $K_e$ is exactly symmetric, but the summed CSR is symmetric only to ~1e-16 (summation order of duplicates), so the result is symmetrized and then satisfies `(K != K.T).nnz == 0`. K is built before M, so only one matrix's triplets are alive at a time.
 4. **Lumped mass** (`mass="lumped"`): a diagonal M from the PR 3 lumped diagonals (row-sum for hex8/hex27, HRZ for hex20).
 5. **Nodal (point) masses:** `nodal_mass` is `None` or a finite, non-negative `(n_nodes,)` array, isotropic: after symmetrization,
    $$M \leftarrow M + \mathrm{diag}(\mathrm{repeat}(m, 3)),$$
    for consistent and lumped M alike. Every later PR (5, 6, 9, 11, 14, 21) uses the same kwarg and shape.
 
-**Size.** `assemble` is the oracle for PRs 5–8 and 12 at reference sizes, up to about $10^5$ DOF. That limit comes from PR 8's sparse factorization, not from assembly: on hex20 $20^3$ (107k DOF), `splu(K - σM)` took 241 s with a 16.5 GB peak. Assembly peaks at about 50 B per element-matrix entry (about 9, 15 and 13 KB per DOF for hex8, hex20 and hex27), so about 1.5 GB at $10^5$ DOF. `assemble` is the oracle only: PR 13's production hex8 $A_P$ for AMG needs its own chunked assembler into a precomputed CSR pattern (about 1 GB per matrix per 1M hex8 DOF; `assemble` would need about 90 GB at 10M DOF).
+**Size.** `assemble` is the oracle for PRs 5–8 and 12 at reference sizes, up to about $10^5$ DOF. That limit comes from PR 8's sparse factorization, not from assembly: on hex20 $20^3$ (107k DOF), `splu(K - σM)` took 241 s with a 16.5 GB peak. Assembly is far cheaper: whole-process peak RSS is 2.5 GB for hex20 $20^3$ (107k DOF), 2.6 GB for hex27 $16^3$ (108k DOF) and 2.5 GB for hex8 $40^3$ (207k DOF), i.e. about 24 KB per DOF for hex20/hex27 and 12 KB per DOF for hex8. The NumPy part is 44–66 B per element-matrix entry (triplets, CSR and symmetrization); the rest is the JAX baseline and the per-chunk XLA workspace. `assemble` is the oracle only: PR 13's production hex8 $A_P$ for AMG needs its own chunked assembler into a precomputed CSR pattern (about 1 GB per matrix per 1M hex8 DOF; `assemble` would need about 120 GB at 10M DOF).
 
 **Cost** (M3 Max, fp64, isotropic $C$, warm):
 
 | mesh | DOF | nonzeros of K | K and M (warm) | whole-process peak RSS |
 |---|---|---|---|---|
-| hex8 $30^3$ | 89k | 6.8M | 0.55 s | 1.3 GB |
-| hex20 $15^3$ | 47k | 7.4M | 0.47 s | 1.9 GB |
-| hex27 $12^3$ | 47k | 8.2M | 0.44 s | 1.7 GB |
+| hex8 $30^3$ | 89k | 6.8M | 0.59 s | 1.3 GB |
+| hex20 $15^3$ | 47k | 7.4M | 0.50 s | 1.4 GB |
+| hex27 $12^3$ | 47k | 8.2M | 0.46 s | 1.5 GB |
+| hex20 $20^3$ | 107k | 17.3M | 1.16 s | 2.5 GB |
 
 ## Dirichlet conditions and masks
 
@@ -64,7 +65,7 @@ which puts the scalar $s$ on the constrained diagonal:
 
 `tests/test_operators.py`:
 
-- **Assembly** equals a dense Python loop (explicit DOF lists, per-element `rotate(material, orientation)`, no `phases`/`element_dofs`) to 1e-14 on a distorted two-block mesh: hex20 and hex8 glued at a shared face, with two materials (one orthotropic, different $\rho$) and two orientations mixed in each block, for `chunk=7` and `chunk=4096`, consistent and lumped.
+- **Assembly** equals a dense Python loop (explicit DOF lists, per-element `rotate(material, orientation)`, no `phases`/`element_dofs`) to 1e-14 on a distorted two-block mesh: hex20 and hex8 glued at a shared face, with two materials (one orthotropic, different $\rho$) and two orientations mixed in each block, for `chunk=7` (several chunks, padded last one) and `chunk=4096` (one chunk), consistent and lumped.
 - **Patch test:** on a $3^3$ box per type, rotated orthotropic $C$, interior corner nodes moved per component by $\le 15\%$ of the edge, all boundary nodes prescribed $u = Ax + b$, the interior solved with `spsolve`. The stress is constant at every quadrature point to 1e-10 relative to $\|\sigma\|_\infty$; measured 1.2e-15 (hex8), 1.0e-14 (hex20), 1.3e-14 (hex27) for straight edges (non-corner nodes on the trilinear map of the corners), and 6.4e-15 (hex20), 1.6e-14 (hex27) for curved elements (non-corner interior nodes additionally offset per component by $\le 5\%$ of the edge).
 - **Rigid translation mass:** $t_x^\top M t_x = \rho V + \sum m_n$ with the analytic volume, consistent and lumped, straight and curved; $t_x^\top M t_y = 0$.
 - **Masks and $A_P$:** expected constrained DOFs from node coordinates; exact free blocks; $A_P$ SPD (Cholesky), constrained diagonal $= s$, exact scaling by $2^{20}$, all-free mask gives $A$.

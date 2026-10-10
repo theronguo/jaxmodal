@@ -14,7 +14,8 @@ def box_mesh(shape, spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0), type="hex8"
     check_grid(shape, spacing, origin)
     if type not in NODES:
         raise ValueError(f"type must be one of {tuple(NODES)}, got {type!r}")
-    nx, ny, nz = (int(s) for s in shape)
+    shape = tuple(int(s) for s in shape)
+    nx, ny, nz = shape
     gx, gy = 2 * nx + 1, 2 * ny + 1
     e = np.arange(nx * ny * nz)
     cell = np.stack([e % nx, e // nx % ny, e // (nx * ny)], 1)
@@ -24,7 +25,9 @@ def box_mesh(shape, spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0), type="hex8"
     return Mesh(
         points=np.asarray(origin, float) + np.asarray(spacing, float) * (ijk / 2),
         blocks={type: conn.reshape(len(e), -1)},
-        node_sets=face_sets(ijk, (2 * nx, 2 * ny, 2 * nz)),
+        node_sets={
+            k: v for d in range(3) for k, v in face_sets(d, ijk[:, d], 2 * shape[d]).items()
+        },
         element_sets={},
         material=np.zeros(len(e), np.int64),
         orientation=np.zeros(len(e), np.int64),

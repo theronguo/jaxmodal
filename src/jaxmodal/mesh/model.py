@@ -52,13 +52,10 @@ def check_grid(shape, spacing, origin):
         raise ValueError("spacing/origin must be 3 finite reals, spacing > 0")
 
 
-def face_sets(ijk, top):
-    """Node sets "xmin" ... "zmax": nodes whose integer grid index ijk[:, d] is 0 or top[d]."""
-    return {
-        f"{a}{side}": np.flatnonzero(ijk[:, d] == (0 if side == "min" else top[d]))
-        for d, a in enumerate("xyz")
-        for side in ("min", "max")
-    }
+def face_sets(d, idx, top):
+    """Node sets "<axis>min", "<axis>max" of axis d: nodes whose integer grid index is 0 or top."""
+    a = "xyz"[d]
+    return {f"{a}min": np.flatnonzero(idx == 0), f"{a}max": np.flatnonzero(idx == top)}
 
 
 def _check_bijection(name, m, size, n):

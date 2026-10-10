@@ -471,7 +471,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. E
   - Hierarchy exported to block-ELL, with a V-cycle on the device. Zero tentative-prolongator columns (aggregates of fully constrained DOFs) are dropped, so every coarse matrix stays SPD and the coarsest dense Cholesky succeeds.
   - Combined with PR 12; pure hex8 meshes skip p-MG and run AMG on the assembled A_P (solid-shell meshes do the same from PR 18). `solve_modes` dispatches unstructured meshes to this preconditioner.
   - Memory ordering: setup → free the assembled A → allocate LOBPCG.
-  - PR 4's `assemble` is the oracle only (≈ 90 GB at 10M hex8 DOF); the production hex8 A_P needs its own chunked assembler into a precomputed CSR pattern (≈ 1 GB per matrix per 1M hex8 DOF).
+  - PR 4's `assemble` is the oracle only (≈ 120 GB at 10M hex8 DOF); the production hex8 A_P needs its own chunked assembler into a precomputed CSR pattern (≈ 1 GB per matrix per 1M hex8 DOF).
   - Option to reuse aggregates and recompute only the values (test: on a perturbed-density model, PCG iterations within 20% of a fresh setup).
   - Memory estimator.
 - Docs: `docs/preconditioners.md`.

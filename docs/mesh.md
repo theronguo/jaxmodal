@@ -124,7 +124,7 @@ mesh = voxel_mesh(shape=(nx, ny, nz), spacing=(hx, hy, hz), origin=(ox, oy, oz),
   mesh = dataclasses.replace(mesh, node_sets={**mesh.node_sets, "clamp": clamp})
   ```
 
-- **Cost** (M-series laptop): $88^3$ cells (2.1M DOFs) build in 0.04 s and `corner_jacobians` takes 0.09 s. $320^3$ (99M DOFs) builds in 1.8 s and `corner_jacobians` takes 3.8 s (rows in chunks of $2^{20}$); peak memory is 7.9 GB.
+- **Cost** (M-series laptop): $88^3$ cells (2.1M DOFs) build in 0.04 s and `corner_jacobians` takes 0.09 s. $320^3$ (99M DOFs) builds in 2.0 s and `corner_jacobians` takes 4.0 s (rows in chunks of $2^{20}$); peak memory is 7.9 GiB. Coordinates and face sets are computed one axis at a time to keep temporaries bounded.
 
 ## Box meshes
 
@@ -137,4 +137,4 @@ mesh = box_mesh(shape=(nx, ny, nz), spacing=(hx, hy, hz), origin=(ox, oy, oz), t
 - **Sets:** the six face node sets as for voxel meshes; no element sets; labels 0; no `voxel` metadata. The hex8 box equals the unmasked `voxel_mesh` on points, connectivity and node sets.
 - **Validation:** `shape`, `spacing` and `origin` as for `voxel_mesh` (`check_grid`); an unknown `type` raises.
 - **Spacing** is uniform per axis. Graded meshes (PR 8's NAFEMS runs) will take per-axis node-coordinate arrays rather than remapping points, which would move midside nodes off the edge midpoints.
-- **Cost** (M3 Max): hex8 $100^3$ (3.1M DOF) 0.44 s, hex20 $60^3$ (2.7M DOF) 0.22 s, hex27 $40^3$ (1.6M DOF) 0.11 s.
+- **Cost** (M3 Max): hex8 $100^3$ (3.1M DOF) 0.44 s and 0.8 GB, hex20 $60^3$ (2.7M DOF) 0.22 s, hex27 $40^3$ (1.6M DOF) 0.11 s. It sorts all (element, node) grid indices (`np.unique`), so it is O(N log N) and about 6× slower than `voxel_mesh` for hex8; fine for test meshes, while a used-node bitmask as in `voxel_mesh` would be the route above ~10M DOF.
