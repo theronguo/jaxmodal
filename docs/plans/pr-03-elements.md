@@ -109,7 +109,7 @@ With $J_{ij} = \partial x_i/\partial\xi_j = \sum_a X_{ai}\,\partial N_a/\partial
 ## `check.py` (host NumPy)
 
 ```python
-check_elements(mesh, mass="consistent", chunk=65536)    # raises ValueError
+check_elements(mesh, mass="consistent", chunk=65536)  # raises ValueError
 ```
 
 - Per block, in chunks of `chunk` elements (points gathered per chunk, never a full `(n_el, n, 3)` array), it computes in NumPy fp64 (independent of the x64 flag) only $J = $ `np.einsum(..., optimize=True)` (the default `optimize=False` is 30× slower), $\det J$ = `_det3(J)` (shared with `jacobian`; `np.linalg.det` is 25× slower), and for `mass="lumped"` with row-sum types, $\bar m = (w \det J)\,N$. It raises naming the global element index (`mesh.offsets[t]` + chunk start + row) and the type for the first element with
