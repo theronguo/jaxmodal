@@ -151,14 +151,33 @@ $u_e = v[\text{dofs}_e]$ is $(c, k, m)$ with $k = 3n$.
 - `chunk=None`: per block, the largest power of two with $c\,k^2 \cdot 8 \le 32$ MB of unpacked $K_e$ (hex8 4096, hex20 1024, hex27 512), capped at the block size rounded up to a power of two. An explicit `chunk` is capped at the block size.
 - `path=None`: `DEFAULT_PATH = {"cpu": "scatter", "gpu": "scatter"}`. The GPU entry is provisional until the deferred GPU benchmark (`docs/ROADMAP.md`, Deferred GPU checks).
 
-BENCH_SECTION
+**CPU benchmark** (`benchmarks/scatter_gather.py`, results in `benchmarks/results/scatter_gather.json`; M3 Max, fp64, jax 0.11.2, ≈ 1M DOF boxes, isotropic $C$; apply_K time, min of 5, each configuration in a fresh subprocess; default chunk and $R$):
+
+| mesh | mode | order | scatter m = 1 | gather m = 1 | scatter m = 16 | gather m = 16 | $R$ |
+|---|---|---|---|---|---|---|---|
+| hex8 $69^3$ | stored | grid | 0.042 s | 0.050 s | 0.126 s | 0.196 s | 32768 |
+| hex8 $69^3$ | stored | RCM | 0.042 s | 0.066 s | 0.128 s | 0.244 s | 32768 |
+| hex8 $69^3$ | otf | grid | 0.095 s | 0.114 s | 0.450 s | 0.555 s | 32768 |
+| hex20 $44^3$ | stored | grid | 0.062 s | 0.083 s | 0.122 s | 0.192 s | 32768 |
+| hex20 $44^3$ | stored | RCM | 0.062 s | 0.113 s | 0.127 s | 0.253 s | 32768 |
+| hex20 $44^3$ | otf | grid | 0.167 s | 0.217 s | 0.501 s | 0.688 s | 32768 |
+| hex27 $35^3$ | stored | grid | 0.060 s | 0.086 s | 0.102 s | 0.175 s | 32768 |
+| hex27 $35^3$ | stored | RCM | 0.058 s | 0.112 s | 0.108 s | 0.228 s | 32768 |
+| hex27 $35^3$ | otf | grid | 0.122 s | 0.162 s | 0.259 s | 0.427 s | 32768 |
+
+- Scatter wins all 24 default comparisons (both orders, both modes, $m = 1, 16$), so `DEFAULT_PATH["cpu"] = "scatter"`. The apply is kernel-bound ($K_e$ unpack and contraction, 11–16% of the 185 GB/s triad in Ke traffic); the scatter itself is a small part of it, and gather adds window redundancy. RCM order widens the gather windows on boxes (grid order is narrower), so gather is slower after RCM there; scatter does not care.
+- otf is 2–4× slower than stored.
+- The chunk rule is within 10% of the best of $c/4$, $c$, $4c$ for every type and $m$ (`chunk_rule_ok` in the JSON; a fast test checks it and the default path). $R/2$ and $2R$ are recorded for information.
+- Compile time of apply_K is 0.03–0.08 s.
 
 ### Memory estimator
 
 ```python
 from jaxmodal.memory import unstructured_memory
 
-est = unstructured_memory(mesh, m, mode="stored", mass="consistent", path=None, chunk=None, range_nodes=None)
+est = unstructured_memory(
+    mesh, m, mode="stored", mass="consistent", path=None, chunk=None, range_nodes=None
+)
 # {storage, vectors, workspace, build, overhead, total} in bytes
 ```
 

@@ -123,7 +123,9 @@ Both take a per-block element kernel `f(block data slice, u_e) -> y_e` and retur
 ## Reordering (`mesh/reorder.py`)
 
 ```python
-mesh2 = renumber(mesh, p, q)  # p: (n_nodes,) new -> old nodes; q: (n_el,) new -> old global elements
+mesh2 = renumber(
+    mesh, p, q
+)  # p: (n_nodes,) new -> old nodes; q: (n_el,) new -> old global elements
 mesh2, p, q = rcm(mesh)
 ```
 
