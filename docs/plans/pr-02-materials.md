@@ -8,9 +8,10 @@ Branch `pr-02-materials`, from `main` after PR 1. Scope: the roadmap's PR 2 (Con
 - Bond rotation $M C M^\top$ vs. `einsum` rotation of the 4th-order tensor: 3e-17 and 1.4e-16 relative.
 - Isotropic $C$ under a random rotation: 1.5e-15 relative.
 
-So the 1e-14 tolerances below hold with about one order of margin (reviewers measured up to 1.5e-15).
 - Central finite differences of $\sum W \odot MCM^\top$ (carbon/epoxy in GPa, best of three steps): 1.5e-10 relative over the gradient for the constants, 1.3e-9 for the Euler angles.
 - `rotate` under `jit` differs from eager by 1.5e-18 relative (not bitwise).
+
+So the 1e-14 tolerances below hold with about one order of margin (reviewers measured up to 1.5e-15).
 
 ## Files
 
@@ -27,7 +28,7 @@ docs/materials.md
 - Voigt order $[11, 22, 33, 23, 13, 12]$, engineering shear strains (`docs/conventions.md`). $\sigma = C\varepsilon$.
 - **Rotation $R$** (3×3, proper orthogonal): its columns are the local material axes $e_1', e_2', e_3'$ in global coordinates, so $x_\text{global} = R\,x_\text{local}$ and $\sigma_\text{global} = R\,\sigma_\text{local}R^\top$.
 - Units are the caller's (consistent SI recommended). Nothing is non-dimensionalized.
-- Constructors, rotations and `phase_table` are pure `jax.numpy` functions: traceable, differentiable, `jit`/`vmap`-able. They cast inputs with `jnp.asarray(x, float)` so integer or Python-scalar inputs give floating arrays. Validation that needs concrete values lives in the host functions `check_stiffness`, `check_materials` and `phases`.
+- Constructors, rotations and `phase_table` are pure `jax.numpy` functions: traceable, differentiable, `jit`/`vmap`-able. They cast inputs with `jnp.asarray(x, float)` so integer or Python-scalar inputs give floating arrays. Material data is therefore always in the default float (fp64 under x64, also for fp32 inputs); `docs/materials.md` notes this exception to "fp32 inputs stay fp32". Validation that needs concrete values lives in the host functions `check_stiffness`, `check_materials` and `phases`.
 
 ## `elastic.py`
 
@@ -96,10 +97,10 @@ Tolerances follow Principle 1 (relative $\|\cdot\|_\infty$ over entries).
    - Physical check by hand: `rotate(C_l, from_euler((π/2, 0, 0)))[1, 1] == C_l[0, 0]` for carbon/epoxy (the fiber, local 1, lies along global y).
    - Batched shapes: (n, 3) inputs give (n, 3, 3), equal to a loop; `rotate` on (n, 6, 6) and (n, 3, 3) equals a loop.
 6. **Phases:**
-   - A mesh with `material = [5, -1, 5, 0]`, `orientation = [0, 2, 2, 0]` gives `pairs = [[5, 0], [-1, 2], [5, 2], [0, 0]]` and `index = [0, 1, 2, 3]`; with `[5, 5, -1, 5]`, `[0, 0, 2, 0]` it gives 2 phases and `index = [0, 0, 1, 0]`. `C[index[e]]` equals `rotate(materials[m_e].C, R_{o_e})` per element.
+   - A mesh with `material = [5, -1, 5, 0]`, `orientation = [0, 2, 2, 0]` gives `pairs == ((5, 0), (-1, 2), (5, 2), (0, 0))` and `index = [0, 1, 2, 3]`; with `[5, 5, -1, 5]`, `[0, 0, 2, 0]` it gives 2 phases and `index = [0, 0, 1, 0]`. `C[index[e]]` equals `rotate(materials[m_e].C, R_{o_e})` per element.
    - Orientation default: a dict without key 0 gives unrotated $C$ for label-0 elements and `check_materials` accepts it; `orientations=None` with orientation label 2 present raises in `check_materials`.
    - `check_materials` raises on: missing material label (message names it), missing orientation label ≠ 0, non-PD material, `rho = 0`, `rho = nan`, a reflection $R$ ($\det = -1$), NaN $R$ (from parallel vectors). `phase_table` raises `KeyError` for a missing label.
-   - Real meshes: `tests/data/gmsh_messy.msh` (material labels 7 and 8) and an inline flat `.inp` with `material_<k>` and `orientation_<k>` sets (written in the test) give the expected pairs.
+   - Real meshes: `tests/data/gmsh_messy.msh` (material labels 7 and 8, orientation 0) and an inline flat `.inp` with `material_<k>` and `orientation_<k>` sets (written in the test) give `pairs` equal to the first-appearance order of `zip(m.material, m.orientation)` computed in the test with a Python loop, and the matching `index`.
    - `jax.jit(phase_table, static_argnames="pairs")` equals eager to 1e-15, and changing an angle does not retrace (jit cache size stays 1); a `Material` passes through `jax.jit` as a pytree; `jax.vmap(isotropic)` over (n,) constants gives (n, 6, 6) equal to a loop.
 7. **Gradients:** central finite differences (step $h\max(|x|, 1)$ per parameter, $h \in \{10^{-4}, 10^{-5}, 10^{-6}\}$, best taken) of $f = \sum W \odot C_g$ (fixed random $W$), error $\|g_\text{fd} - g\|_\infty / \|g\|_\infty$ over the whole gradient vector, with respect to:
    - $(E, \nu)$ of `isotropic` and all 9 constants of `orthotropic` (constants in GPa, so all are $O(0.1$–$100)$);
@@ -113,14 +114,15 @@ Tolerances follow Principle 1 (relative $\|\cdot\|_\infty$ over entries).
 - `README.md`: status line and a short materials snippet (run in a test, like PR 1's).
 - `docs/ROADMAP.md`, on the branch before the merge:
   - PR 2 Contents: "Orientations: local material axes per orientation label, from Euler angles or two direction vectors; per-element $R$ fields through the batched functions" and "Phases: mesh labels → (index, pairs) on the host; a traceable per-phase table of rotated C and ρ".
-  - PR 6: "Restriction: one reference Ke per phase, a (material, orientation) pair", and its test "two materials or orientations in one phase raise" becomes "a two-phase voxel mesh (two materials, or one material in two orientations) matches PR 5".
+  - PR 6: "Restriction: one reference Ke per phase, a (material, orientation) pair", and its test "two materials or orientations in one phase raise" becomes "a two-phase voxel mesh (two materials, or one material in two orientations; labels set with `dataclasses.replace(mesh, material=..., orientation=...)`) matches PR 5".
   - PR 9: `solve_modes(mesh, materials, bcs, n_modes, orientations=None, ...)`.
   - Status note "PR 2 merged: ..." written just before the merge.
 - `docs/mesh.md`: the "PR 2/6 map them" sentence points to `phases`/`phase_table`.
 
 ## Out of scope
 
-- A mesh-level API for per-element orientation fields: the batched functions already rotate per element; wiring such a field into the operators comes with the first example that needs it (PR 16/23).
+- A mesh-level API for per-element orientation fields: the batched functions already rotate per element; wiring such a field into the unstructured operator (PR 5 gathers per-element $C_e$) comes with the first example that needs it. The voxel stencil (PR 6) stays one reference Ke per phase.
+- Laminate ply angles (PR 16): $R = R_\text{shell}R_\text{ply}$ is a plain matmul of PR 2 rotations, left to PR 16.
 - Reading Abaqus `*MATERIAL`/`*ORIENTATION` cards (PR 1 reads only labels).
 - Damping, temperature dependence, nonlinearity.
 
