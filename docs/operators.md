@@ -7,9 +7,8 @@ from jaxmodal.mesh import box_mesh
 from jaxmodal.operators import a_p, assemble, dof_mask, masked
 
 mesh = box_mesh((4, 2, 2), spacing=(0.25, 0.25, 0.25), type="hex20")
-K, M = assemble(
-    mesh, materials
-)  # materials as in docs/materials.md; scipy.sparse.csr_array, float64, int32 indices
+# materials: label -> Material, as in docs/materials.md
+K, M = assemble(mesh, materials)  # scipy.sparse.csr_array, float64, int32 indices
 free = dof_mask(mesh, {"xmin": "xyz"})  # (n_dof,) bool, True = free
 Km, Mm = masked(K, free), masked(M, free)  # eigen-operator form, constrained rows/cols zero
 AP = a_p(K + sigma * M, free)  # SPD reference for preconditioners and linear solves
