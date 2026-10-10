@@ -207,7 +207,7 @@ Random $s_K, s_M \in [0.1, 2]$ with one $s = 0$, random nodal masses with zeros.
 - `docs/ROADMAP.md`: status line; the "Scatter vs gather" key decision ("XLA:CPU scatter is effectively serial") is replaced by the measured CPU outcome (kernel-bound; scatter wins) and the chosen default (pointer to `docs/operators.md`); the PR 18 roofline note "(serial XLA:CPU scatter)" is corrected to the measurement; the key-decision sub-bullet "The gather runs on an RCM-ordered mesh" is reworded (the gather works for any order; RCM or grid order keeps windows narrow); the memory-budget row "Gather path" gets the window cost; PR 6 is noted to provide the same method interface (`stencil`, `Stencil`, `stencil_memory`); the deferred GPU scatter-vs-gather check stays.
 - README: status, and a snippet (box → `unstructured` → `op.apply_K`), executed by `tests/test_readme.py`.
 
-Known equivalent mutants (code review): the overlap bound `n_nodes - R + 1`, `r0 = r R` without the `min` (`dynamic_update_slice` clamps to the same start), and the transposed packed build index (symmetric $K_e$).
+Known equivalent mutants (code review): `r0 = r R` without the `min` (`dynamic_update_slice` clamps to the same start), and the transposed packed build index (symmetric $K_e$).
 
 ## Not covered
 

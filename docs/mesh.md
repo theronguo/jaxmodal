@@ -45,7 +45,7 @@ Grid order is not an invariant, so node and element permutations (PR 5 RCM, PR 1
 - Node order: reverse Cuthill–McKee (`scipy.sparse.csgraph.reverse_cuthill_mckee`, `symmetric_mode=True`, which handles disconnected meshes) of the node graph $A = E^\top E$, with $E$ the sparse element–node incidence of all blocks.
 - Element order: within each block, stably sorted by the element's min (new) node index.
 - **When it helps:** for arbitrarily ordered meshes (Gmsh, Abaqus). The grid order of `box_mesh` and `voxel_mesh` is already narrower: node-graph bandwidth on a hex8 $20^3$ box is 463 in grid order, 1261 after RCM and 9235 randomly shuffled. Neither the matrix-free operator nor its gather path requires RCM (`docs/operators.md`).
-- **Cost:** at 10M hex20 DOF, $A$ has 196M nonzeros (2.35 GB on the host) and RCM takes about 3 s.
+- **Cost:** at 10M hex20 DOF, $A$ has 196M nonzeros (≈ 1.6 GB on the host: int32 values and column indices) and RCM takes about 3 s.
 - User arrays follow the new numbering: per-element arrays as `a[q]`, per-node arrays as `a[p]`.
 
 ## Node ordering
