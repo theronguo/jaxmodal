@@ -1,6 +1,6 @@
 # Mesh
 
-`jaxmodal.mesh` holds the host-side mesh: a NumPy data model, file readers, a VTU writer, voxel and box generators and corner Jacobians. There is no JAX here (a test imports it in a fresh interpreter and checks that `jax` is not loaded); `element_dofs` casts topology to int32 for the device (`docs/operators.md`).
+`jaxmodal.mesh` holds the host-side mesh: a NumPy data model, file readers, a VTU writer, voxel and box generators, corner Jacobians and renumbering (`renumber`, `rcm`). There is no JAX here (a test imports it in a fresh interpreter and checks that `jax` is not loaded); `element_dofs` casts topology to int32 for the device (`docs/operators.md`).
 
 ```python
 from jaxmodal.mesh import read, write, voxel_mesh, corner_jacobians
@@ -39,6 +39,14 @@ Grid order is not an invariant, so node and element permutations (PR 5 RCM, PR 1
 
 - **Node permutation** $p$ (new → old): `points[p]`; connectivity through $p^{-1}$; `node_sets` mapped through $p^{-1}$ and re-sorted; non-negative `voxel.node_map` entries mapped through $p^{-1}$.
 - **Element permutation** $q$ (new → old) within one block (the global index is fixed by `TYPES` order): block rows, `material` and `orientation` indexed by $q$; `element_sets` mapped through $q^{-1}$ and re-sorted; non-negative `voxel.element_map` entries mapped through $q^{-1}$.
+
+`renumber(mesh, p, q)` applies both rules (`p`: `(n_nodes,)`, `q`: `(n_el,)` global, both new → old) and returns a new, validated `Mesh`; it raises if `q` moves an element out of its block. `rcm(mesh)` returns `(mesh, p, q)`:
+
+- Node order: reverse Cuthill–McKee (`scipy.sparse.csgraph.reverse_cuthill_mckee`, `symmetric_mode=True`, which handles disconnected meshes) of the node graph $A = E^\top E$, with $E$ the sparse element–node incidence of all blocks.
+- Element order: within each block, stably sorted by the element's min (new) node index.
+- **When it helps:** for arbitrarily ordered meshes (Gmsh, Abaqus). The grid order of `box_mesh` and `voxel_mesh` is already narrower: node-graph bandwidth on a hex8 $20^3$ box is 463 in grid order, 1261 after RCM and 9235 randomly shuffled. Neither the matrix-free operator nor its gather path requires RCM (`docs/operators.md`).
+- **Cost:** at 10M hex20 DOF, $A$ has 196M nonzeros (≈ 1.6 GB on the host: int32 values and column indices) and RCM takes about 3 s.
+- User arrays follow the new numbering: per-element arrays as `a[q]`, per-node arrays as `a[p]`.
 
 ## Node ordering
 

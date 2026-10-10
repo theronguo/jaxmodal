@@ -13,7 +13,7 @@ Large-scale 3D linear modal analysis (Kv = λMv) in JAX. The solver uses matrix-
 
 Package name: `jaxmodal`. License: MIT.
 
-Status: final. Review rounds 1–30 incorporated (round 30: all 5 reviewers satisfied). Implementation proceeds PR by PR, each with its own reviewed plan in `docs/plans/`. PR 0 merged: jax pinned at ≥ 0.11.2; the persistent cache and CPU donation work; the `pymetis` extra is deferred to PR 19 (minimum 2025.1.1). PR 1 merged: own flat-`.inp` reader, Gmsh 4.1 ASCII only, VTU is the only written format; host topology is int64 until PR 4's `check_int32` and cast. PR 2 merged: phases are (material, orientation) label pairs; `phases` (host) is split from the traceable `phase_table`, so PR 21 can differentiate it; PR 6 builds one reference Ke per phase. PR 3 merged: the element type is a static name and per-type tables are embedded constants (per-element arrays stay arguments); element DOF order is $3a + i$; `check_elements` is the host Jacobian/lumping check (PR 4 and PR 9 call it); `jacobian` gives PR 5's invJ and w·detJ. PR 4 merged: DOF $3n + i$; BCs are `{node_set: "xyz"}` (parsed only by `dof_mask`; PR 9 takes the same dict); masks are bool, True = free; `nodal_mass` is `(n_nodes,)`, isotropic (×3 per DOF); `assemble` returns symmetrized SciPy CSR with int32 indices (oracle, x64 only, ≤ ~10⁵ DOF); `box_mesh` (hex8/hex20/hex27) and `voxel_mesh` have face sets `xmin`…`zmax`; later PRs cast their own device index arrays through `check_int32`; `a_p` takes an explicit `s` for indefinite $K - \sigma M$.
+Status: final. Review rounds 1–30 incorporated (round 30: all 5 reviewers satisfied). Implementation proceeds PR by PR, each with its own reviewed plan in `docs/plans/`. PR 0 merged: jax pinned at ≥ 0.11.2; the persistent cache and CPU donation work; the `pymetis` extra is deferred to PR 19 (minimum 2025.1.1). PR 1 merged: own flat-`.inp` reader, Gmsh 4.1 ASCII only, VTU is the only written format; host topology is int64 until PR 4's `check_int32` and cast. PR 2 merged: phases are (material, orientation) label pairs; `phases` (host) is split from the traceable `phase_table`, so PR 21 can differentiate it; PR 6 builds one reference Ke per phase. PR 3 merged: the element type is a static name and per-type tables are embedded constants (per-element arrays stay arguments); element DOF order is $3a + i$; `check_elements` is the host Jacobian/lumping check (PR 4 and PR 9 call it); `jacobian` gives PR 5's invJ and w·detJ. PR 4 merged: DOF $3n + i$; BCs are `{node_set: "xyz"}` (parsed only by `dof_mask`; PR 9 takes the same dict); masks are bool, True = free; `nodal_mass` is `(n_nodes,)`, isotropic (×3 per DOF); `assemble` returns symmetrized SciPy CSR with int32 indices (oracle, x64 only, ≤ ~10⁵ DOF); `box_mesh` (hex8/hex20/hex27) and `voxel_mesh` have face sets `xmin`…`zmax`; later PRs cast their own device index arrays through `check_int32`; `a_p` takes an explicit `s` for indefinite $K - \sigma M$. PR 5 merged: `unstructured(...)` returns a pytree operator whose methods `apply_K`, `apply_M`, `diag_K`, `diag_M`, `scaled` are the solver interface (PR 6's `stencil(...) -> Stencil`, with estimator `stencil_memory`, provides the same five); unused leaves are `None` (stored mode has no `C`: rebuild to change materials); Ke is packed upper-triangle and built on the device; the CPU default path is scatter (the apply is kernel-bound, scatter is a small part); gather windows do not depend on element order; `rcm`/`renumber` live in `mesh/`; the estimator returns storage/vectors/workspace/build/overhead (later PRs add `storage + workspace`, count `overhead` once).
 
 ## Principles
 
@@ -135,8 +135,8 @@ Status: final. Review rounds 1–30 incorporated (round 30: all 5 reviewers sati
   - Deflation and masking leave the formula unchanged.
 - **Scaling:** β, KS and MMA work on λ/λ_ref (λ_ref = lowest elastic λ of the initial design), so p (KS parameter p = 50, fixed per example and recorded in `docs/optimization.md`) and the MMA constants are dimensionless. Every MMA constraint is normalized: Σρ̄_e v_e/V* − 1 ≤ 0, mass/M₀ − 1 ≤ 0, eigenvalue constraints in λ/λ_ref, detJ constraints in detJ/detJ₀. FFD control-point boxes are fractions of the lattice size. β starts at 0.99·λ_min/λ_ref of the initial design (> 0) and has finite MMA box bounds [0, 100]; reaching the upper bound is an error.
 - **Optimizer:** MMA implemented in JAX (~200 LOC). No OC, because eigenvalue sensitivities change sign.
-- **Scatter vs gather:** XLA:CPU scatter is effectively serial. PR 5 benchmarks scatter against an inverse-map gather on each backend, and the default may differ per backend.
-  - The gather runs on an RCM-ordered mesh (RCM is built in PR 5), chunked by node range.
+- **Scatter vs gather:** PR 5 benchmarks scatter against an inverse-map gather on each backend, and the default may differ per backend. On the Mac CPU the apply is kernel-bound (the $K_e$ unpack and contraction), and the scatter is a small part of it, so scatter wins and is the CPU default (`docs/operators.md`); the GPU default is set by the deferred GPU check.
+  - The gather is chunked by node range and works for any element order; RCM (or grid order) keeps the windows narrow.
   - Element contributions go into a padded, fixed-size element window per range, which is counted in the estimator.
 - **Dependencies:**
   - Python 3.12.
@@ -159,7 +159,7 @@ All sizes are fp64; GB = 10⁹ bytes.
 | Rayleigh–Ritz update temporaries (≈ 2 blocks × m; also hosts the (chunk + m)-block deflation-projector temporaries, chunk ≤ m) | ≈ 0.4 GB | ≈ 0.5 GB | ≈ 5 GB | m = 8: ≈ 13 GB |
 | Preconditioner workspace (≈ 4 blocks × m) | ≈ 0.8 GB | ≈ 1 GB | ≈ 10 GB | m = 8: ≈ 26 GB (fp32: 13 GB) |
 | Multigrid | AMG ≈ 0.4 GB (device); pyamg peak 2–3 GB (host) | ≈ 0.2 GB | AMG ≈ 3–4 GB; pyamg peak ≈ 20+ GB (host) | ≈ 9.9 GB incl. int32 indices (fp32: ≈ 5.2 GB) |
-| Gather path (if chosen) | chunked by node range | — | chunked by node range | — |
+| Gather path (if chosen) | ≤ 2 vectors × m (the $R$ cap): ≤ 0.4 GB at m = 25 | — | ≤ 4.8 GB at m = 30 | — |
 | Locked modes / deflation basis | small | small | n × 0.08 GB (fp32: half) | n × 0.8 GB (fp32: half) |
 | Max locked modes (fp32 basis; 6 blocks, fp32 preconditioner and multigrid) | > 2000 | > 2000 | ≈ 900 (stored Ke) – 1200 (on the fly), with fp32 AMG from PR 18 | ≲ 8 |
 
@@ -334,6 +334,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. E
 ### PR 6: Voxel stencil operator
 - Contents:
   - K matvec over z-slabs: `scan` + `dynamic_slice` with a 1-layer halo; per slab, 8 shifted corner slices → einsum with the reference Ke → shifted adds into a donated output.
+  - Interface: `stencil(...) -> Stencil` with PR 5's methods (`apply_K`, `apply_M`, `diag_K`, `diag_M`, `scaled`); estimator `stencil_memory`.
   - Per-element scaling arrays s_K and s_M, as in PR 5.
   - Occupancy-masked voxel meshes: inactive elements contribute zero; PR 1's grid↔mesh node map handles dropped nodes, and PR 6 checks it against the geometry.
   - `apply_M` (consistent and lumped), `diag_K`, `diag_M`, nodal masses.
@@ -597,7 +598,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. E
   - AMG on the assembled A_P for solid-shell meshes, and iteration counts vs L/t (test: `solve_modes` with AMG on a solid-shell mesh matches the PR 8 `eigsh` to PR 9 tolerances).
 - Docs: `docs/performance.md`.
 - Tests:
-  - Roofline = min(bandwidth × arithmetic intensity, measured fp64 peak). The voxel stencil and stored-Ke matvecs are measured against jitted STREAM bandwidth. On the Mac (serial XLA:CPU scatter) the percentage is reported only; ≥ 50% at m = 1 is a deferred GPU check. For m > 1, the percentage is reported.
+  - Roofline = min(bandwidth × arithmetic intensity, measured fp64 peak). The voxel stencil and stored-Ke matvecs are measured against jitted STREAM bandwidth. On the Mac (kernel-bound stored-Ke apply, PR 5) the percentage is reported only; ≥ 50% at m = 1 is a deferred GPU check. For m > 1, the percentage is reported.
   - With the fp32 preconditioner, the same convergence tolerance is reached.
   - The PR 13 1M hex20 Mac acceptance run with fp32 p-MG/AMG has peak within 20% of the PR 13 estimator.
   - After Morton reordering, apply_K and apply_M equal the permuted original to 1e-12.
@@ -701,7 +702,7 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
 - PR 11: 100M matvec + LOBPCG and preconditioner workspace fits in the usable pool (≈ 76 GB).
 - PR 11: 100M voxel modal solve.
 - PR 13: 10M hex20 modal solve on one GPU.
-- PR 5: scatter vs gather benchmark on GPU; sets the GPU default.
+- PR 5: scatter vs gather benchmark on GPU; sets the GPU default and re-tunes the $R$ rule (the CPU cap of 2 vectors gives $R = 32768$ at 1M DOF).
 - PR 18: matvec ≥ 50% of roofline at m = 1.
 - PR 19: weak scaling.
 - PR 24: harness Linux and GPU peak paths, checked with the PR 0 harness test cases.

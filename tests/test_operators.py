@@ -4,67 +4,22 @@ import jax
 import numpy as np
 import pytest
 import scipy.sparse as sp
-from helpers import rel
+from helpers import MATERIALS, ORTHO, R, dense_reference, distort, mixed_mesh, rel
 from scipy.sparse.linalg import spsolve
 
-from jaxmodal.elements import bmatrix, check_elements, gradients, jacobian, kernels
-from jaxmodal.materials import Material, from_euler, isotropic, orthotropic, rotate
+from jaxmodal.elements import bmatrix, gradients, jacobian
+from jaxmodal.materials import Material, isotropic, rotate
 from jaxmodal.materials.rotation import VOIGT
 from jaxmodal.mesh import Mesh, box_mesh
 from jaxmodal.operators import a_p, assemble, check_int32, dof_mask, dofmap, element_dofs, masked
 
 TYPES = ["hex8", "hex20", "hex27"]
-ORTHO = orthotropic(10.0, 4.0, 2.0, 0.3, 0.2, 0.25, 1.5, 1.2, 0.8)
-R = np.asarray(from_euler(np.array([0.3, 1.1, -0.7])))
-MATERIALS = {0: Material(isotropic(3.0, 0.3), 2.0), 1: Material(ORTHO, 0.7)}
 FACES = [f"{a}{s}" for a in "xyz" for s in ("min", "max")]
 DISTORTIONS = [(t, False) for t in TYPES] + [("hex20", True), ("hex27", True)]
 
 
 def nnz_diff(A, B):
     return (sp.csr_array(A) != sp.csr_array(B)).nnz
-
-
-def mixed_mesh(rng):
-    """hex8 and hex20 2x2x2 boxes glued at x = 2 (shared nodes; the interface is deliberately
-    nonconforming and only exercises DOFs shared across blocks), nodes perturbed <= 5%."""
-    a, b = (
-        box_mesh((2, 2, 2), type="hex8", origin=(2.0, 0.0, 0.0)),
-        box_mesh((2, 2, 2), type="hex20"),
-    )
-    pts = np.vstack([a.points, b.points])
-    key, first, inv = np.unique(np.rint(2 * pts), axis=0, return_index=True, return_inverse=True)
-    inv = inv.ravel()
-    points = pts[first] + rng.uniform(-0.05, 0.05, (len(first), 3))
-    m = Mesh(
-        points=points,
-        blocks={"hex8": inv[a.blocks["hex8"]], "hex20": inv[len(a.points) + b.blocks["hex20"]]},
-        node_sets={},
-        element_sets={},
-        material=np.array([0, 1, 1, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0]),
-        orientation=np.array([1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 1, 0, 1, 0, 0, 0]),
-    )
-    check_elements(m, mass="lumped")
-    return m
-
-
-def dense_reference(m, lumped):
-    n = 3 * len(m.points)
-    K, M = np.zeros((n, n)), np.zeros((n, n))
-    e = 0
-    for t, conn in m.blocks.items():
-        for row in conn:
-            mat = MATERIALS[m.material[e]]
-            C = rotate(mat.C, R if m.orientation[e] == 1 else np.eye(3))
-            X = m.points[row]
-            d = [3 * a + i for a in row for i in range(3)]
-            K[np.ix_(d, d)] += kernels.stiffness(t, X, C)
-            if lumped:
-                M[d, d] += kernels.lumped_mass(t, X, mat.rho)
-            else:
-                M[np.ix_(d, d)] += kernels.mass(t, X, mat.rho)
-            e += 1
-    return K, M
 
 
 # ---------------------------------------------------------------- 2: DOF map
@@ -112,23 +67,6 @@ def test_assembly_matches_dense_loop(mass):
 
 
 # ---------------------------------------------------------------- 4: patch test
-
-
-def distort(m, curved, rng):
-    """Interior corner nodes moved per component <= 15% of the edge; other nodes on the
-    trilinear map of the corners (straight), plus <= 5% for non-corner interior nodes (curved)."""
-    ijk = np.rint(2 * m.points).astype(int)  # unit spacing, origin 0
-    top = ijk.max(0)
-    P = (np.indices(top // 2 + 1).transpose(1, 2, 3, 0)).astype(float)
-    inner = np.zeros(P.shape[:3], bool)
-    inner[1:-1, 1:-1, 1:-1] = True
-    P[inner] += rng.uniform(-0.15, 0.15, (inner.sum(), 3))
-    lo, hi = ijk // 2, (ijk + 1) // 2
-    pts = np.mean([P[tuple(np.where(np.array(s), hi, lo).T)] for s in np.ndindex(2, 2, 2)], 0)
-    interior = ((ijk > 0) & (ijk < top)).all(1) & (ijk % 2).any(1)
-    if curved:
-        pts[interior] += rng.uniform(-0.05, 0.05, (interior.sum(), 3))
-    return Mesh(pts, m.blocks, m.node_sets, m.element_sets, m.material, m.orientation)
 
 
 def element_stresses(m, t, u, C):
