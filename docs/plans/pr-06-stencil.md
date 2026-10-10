@@ -33,10 +33,10 @@ Branch `pr-06-stencil`, from `main` after PR 5. Scope: the roadmap's PR 6 (Conte
 
 ```
 src/jaxmodal/operators/common.py       register, check_x64, check_nodal_mass, check_v, scaled (shared by PR 5 and PR 6)
-src/jaxmodal/operators/stencil.py      Stencil (pytree with methods), stencil, reference, slab loop
+src/jaxmodal/operators/voxel.py        Stencil (pytree with methods), stencil, reference_element, slab loop (module named like matfree.py, so `operators.stencil` stays the function)
 src/jaxmodal/operators/matfree.py      uses common.py (no behaviour change)
 src/jaxmodal/operators/assembled.py    uses check_nodal_mass
-src/jaxmodal/operators/__init__.py     + Stencil, stencil
+src/jaxmodal/operators/__init__.py     + Stencil, stencil, reference_element
 src/jaxmodal/memory.py                 + stencil_memory
 benchmarks/stencil_slab.py             slab-rule benchmark -> benchmarks/results/stencil_slab.json
 tests/test_stencil.py
@@ -58,14 +58,14 @@ PR 5's tests must pass unchanged after the move.
 ## API
 
 ```python
-from jaxmodal.operators import stencil
+from jaxmodal.operators import reference_element, stencil
 
 op = stencil(mesh, materials, orientations=None, mass="consistent", nodal_mass=None, slab=None)
 op = op.scaled(s_K=s_K, s_M=s_M)  # (n_el,), default ones
 y = op.apply_K(v)  # (n_dof, m) -> (n_dof, m)
 y = op.apply_M(v)
 dK, dM = op.diag_K(), op.diag_M()
-Ke, me = reference(op)  # (P, 24, 24) per phase, (8, 8) scalar mass per unit density
+Ke, me = reference_element(op)  # (P, 24, 24) per phase, (8, 8) scalar mass per unit density
 ```
 
 - Same interface and conventions as PR 5 (`docs/operators.md`): methods call module-level jitted functions of `(op, v)`; `v` is 2-D `(n_dof, m)`; `scaled` checks shapes only and is traceable; `s = 0` allowed; properties `n_dof` ($3 n_\text{nodes}$) and `n_el`; DOF $3n + i$ in mesh node order, so results compare directly with `unstructured` and `assemble` on the same mesh. The duck-typed solver interface (PR 7/9) is the five methods plus `n_dof`, stated in `docs/operators.md`.
@@ -95,9 +95,9 @@ Frozen dataclass `Stencil`, registered with `common.register`. Leaves:
 - `spacing` `(3,)` float64 (geometry is a jit argument, Principle 3);
 - `s_K`, `s_M` `(n_el,)` default ones; `nodal` `(n_dof,)` (as PR 5).
 
-Static: `slab`, `shifts` (the 8 corner offsets in the transposed grid order), `mass`, `n_nodes`, `n_el`, `n_phases`. $L$ is the smallest multiple of `slab` ≥ the layer count; padded layers are inactive.
+Static: `slab`, `axes` (the permutation from grid axes (x, y, z) to stored order, scan axis first), `layers` (the unpadded layer count), `mass`, `n_nodes`, `n_el`. $L$ is the smallest multiple of `slab` ≥ `layers`; padded layers are inactive. The 8 corner shifts are derived at trace time from the one $\{0,1\}$ table $(\text{CORNERS} + 1)/2$ permuted by `axes`; the phase count is `rho.shape[0]` (no duplicate static). Sentinels are `n_nodes`/`n_el`, not 0, because fill and drop act only on out-of-range ids (a padding id of 0 would be harmless only because $s = 0$ there).
 
-- **`reference(op)`** (module-level, traceable): $K_e^p$ = `kernels.stiffness("hex8", X, C)` and $m_e = \sum_q w_q\det J_q N_q N_q^\top$ from `jacobian` on the reference cell $X = \text{spacing} \odot (\text{CORNERS} + 1)/2$ (VTK order, the same $\{0,1\}$ table as the shifts and the geometry check). The kernels call it on each apply (a few µs), so `C`, `rho` and `spacing` are ordinary leaves: changing them never rebuilds or recompiles, and gradients with respect to them exist. PR 11 (Galerkin coarse operators) and PR 23 (voxel sensitivities) build on `reference` and the `node`/`cell` grids, documented in `docs/operators.md`.
+- **`reference_element(op)`** (module-level, traceable): $K_e^p$ = `kernels.stiffness("hex8", X, C)` and $m_e = \sum_q w_q\det J_q N_q N_q^\top$ from `jacobian` on the reference cell $X = \text{spacing} \odot (\text{CORNERS} + 1)/2$ (VTK order, the same $\{0,1\}$ table as the shifts and the geometry check). The kernels call it on each apply (a few µs), so `C`, `rho` and `spacing` are ordinary leaves: changing them never rebuilds or recompiles, and gradients with respect to them exist. PR 11 (Galerkin coarse operators) and PR 23 (voxel sensitivities) build on `reference_element` and the `node`/`cell` grids, documented in `docs/operators.md`.
 - int32: `check_int32(n_dof=..., node=node.size, cell=cell.size, phase=P)` before casting.
 
 ## Slab loop
@@ -143,7 +143,7 @@ Same keys and composition rule as `unstructured_memory`:
 - `overhead`: PR 5's 10 MB.
 - `total = overhead + storage + max(build, vectors + workspace)`.
 
-At 100M voxel DOF (a ≈ $322^3$ cube): storage ≈ 1.7 GB (index grids and `phase` 0.4 GB, $s_K$ + $s_M$ 0.53 GB, `nodal` 0.8 GB), inside the roadmap's 3–4 GB allowance for operator, diagonals, scalings and nodal masses; workspace ≈ 0.6 GB at m = 8.
+At 100M voxel DOF (a ≈ $322^3$ cube): storage ≈ 1.7 GB (index grids and `phase` 0.4 GB, $s_K$ + $s_M$ 0.53 GB, `nodal` 0.8 GB), inside the roadmap's 3–4 GB allowance for operator, diagonals, scalings and nodal masses; workspace (one 104k-cell layer per slab) ≈ 0.3 GB (P = 1) or 0.5 GB (P ≥ 2) at m = 8.
 
 ## Benchmark (`benchmarks/stencil_slab.py`)
 
@@ -154,35 +154,35 @@ Full $87^3$ box, P = 1, $m \in \{1, 16\}$, slab ∈ {rule/4, rule, 4·rule}, eac
 Tolerances per Principle 1. Every mesh has anisotropic spacing (axis-order and diagonal-layout mutants survive on cubes). Meshes:
 
 - **F:** full voxel box $5 \times 4 \times 3$, spacing $(0.5, 1.0, 0.75)$, origin $(1, -2, 0.5)$ (scan axis x);
-- **S:** the PR 1 voxelized sphere (the `test_voxel_sphere` mask and spacing $(0.5, 0.4, 0.3)$) at a small size;
-- **T:** a $4 \times 5 \times 6$ grid (scan axis z), spacing $(0.5, 1.0, 0.75)$, with a seeded mask; the test asserts that the mask has a dropped grid node in a halo layer for slab 1 and slab 4, an inactive cell next to an active one across a slab boundary, and a corner-only contact. Two phases, two variants: two materials (one orthotropic, different $\rho$); one material in two orientations (PR 4's rotation); labels set with `dataclasses.replace`;
+- **S:** the PR 1 voxelized sphere (the `test_voxel_sphere` mask formula and spacing $(0.5, 0.4, 0.3)$) on a $10 \times 12 \times 11$ grid (scan axis y, the only y-scan mesh);
+- **T:** a $4 \times 5 \times 6$ grid (scan axis z), spacing $(0.5, 1.0, 0.75)$, with a seeded mask; the test asserts that the mask has a dropped grid node in a halo layer for slab 1 and slab 4, an inactive cell next to an active one across a slab boundary, and a corner-only contact. Three variants, labels set with `dataclasses.replace`: two materials (one orthotropic, different $\rho$); one material in two orientations (PR 4's rotation); materials and orientations mixed independently (P = 4);
 - **R:** mesh T after `rcm` (node and element order no longer grid order).
 
 Random $s_K, s_M \in [0.1, 2]$ with one zero, nodal masses with zeros. Slab ∈ {1, 4 (∤ 6 on T, ∤ 5 on F: padding), None (one slab)} on every mesh in tests 1 and 2.
 
-1. **apply vs SciPy and PR 5:** `apply_K`, `apply_M` (consistent, lumped), $m \in \{1, 5\}$, equal the scaled PR 4 `assemble` product to 1e-12 and PR 5's `unstructured` on the same mesh to 1e-12, on F, S, T (both variants), R.
+1. **apply vs SciPy and PR 5:** `apply_K`, `apply_M` (consistent, lumped), $m \in \{1, 5\}$, equal the scaled PR 4 `assemble` product to 1e-12 and PR 5's `unstructured` on the same mesh to 1e-12, on F, S, T (all three variants), R.
 2. **Diagonals:** `diag_K`, `diag_M` (consistent, lumped) equal the SciPy diagonals to 1e-12, same meshes and slabs.
-3. **Gradients:** on T, `jax.grad` of $w^\top K v$ with respect to $s_K$, and of $w^\top M v$ with respect to $s_M$ (consistent and lumped), $\rho$ and one entry of $C$, equal central finite differences along one random direction (step 1e-3; linear in $s$, $\rho$, $C$, so to 1e-8); the $s_K$ gradient also equals the per-element $w_e^\top K_e v_e$ from SciPy element matrices to 1e-12.
-4. **No recompile:** one compiled executable gives the new SciPy products after replacing `s_K`, `s_M`, `C`, `rho`, `spacing`, `nodal`, for consistent and lumped mass (catches a cached lumped $d$).
+3. **Gradients:** on T, `jax.grad` of $w^\top K v$ with respect to $s_K$, and of $w^\top M v$ with respect to $s_M$ (consistent and lumped), $\rho$ and one entry of $C$, equal central finite differences along one random direction (step 1e-3; linear in $s$, $\rho$, $C$, so to 1e-8); the gradient of $w^\top K v$ and $w^\top M v$ with respect to `spacing` equals central differences (step 1e-5) of the SciPy `assemble` products on the mesh with rescaled points, to 1e-7 (the probe gives 5e-10); the $s_K$ gradient also equals the per-element $w_e^\top K_e v_e$ from SciPy element matrices to 1e-12.
+4. **No recompile:** one compiled executable gives the new SciPy products after replacing `s_K`, `s_M`, `C`, `rho`, `spacing`, `nodal`, for consistent and lumped mass (catches a cached lumped $d$); for `spacing` the reference is `assemble` on the mesh with correspondingly rescaled points (the operator then acts as the uniformly rescaled grid; `mesh` itself is not updated).
 5. **Geometry check:** `pytest.raises(ValueError, match="voxel grid")` for one point moved by 1e-6; one cell's corners cyclically rotated as `[1, 2, 3, 0, 5, 6, 7, 4]` (same node set, positive det J, wrong VTK order); a non-voxel mesh (`box_mesh`) raises; a renumbered mesh passes (R).
 6. **Inputs:** unknown `mass`, `slab=0`, bad `nodal_mass`, x64 off, wrong-shape `scaled` arrays, 1-D or wrong-length `v` raise; `slab` above the layer count is capped.
 7. **int32:** a monkeypatched `check_int32` records `n_dof`, `node`, `cell`, `phase`; index leaves are int32.
-8. **reference:** `reference(op)` equals `kernels.stiffness` and the scalar part of `kernels.mass` on one cell of F (both phases on T).
+8. **reference_element and axes:** `reference_element(op)` equals `kernels.stiffness` and the scalar part of `kernels.mass` on one cell of F (both phases on T); `axes` puts x first on F, y on S and z on T, and `layers` equals the grid's extent along it.
 9. **Estimator:** `storage` equals the leaf bytes minus `C`, `rho`, `spacing` exactly (F, S, T); (slow) `memory_analysis().temp_size_in_bytes` of `apply_K` and `apply_M` within 10% of `workspace` at $87^3$ for $m \in \{1, 4, 16, 24\}$, P ∈ {1, 2}.
-10. **Mac acceptance** (slow, darwin): full $87^3$ voxel box (2.04M DOF), via `harness.measure`: **setup** imports and a warm-up run, freed; **code** builds `op`, allocates six `(n_dof, 24)` fp64 arrays filled with `jax.random.normal` (≈ 2.35 GB; zero pages would not be resident, `docs/conventions.md`) and $v$ `(n_dof, 24)`, runs `apply_K` and `apply_M`, blocks. Estimate: `total` plus the six arrays (≈ 3.9 GB); within 20% of the measured peak, and ≥ 2e9.
+10. **Mac acceptance** (slow, darwin): full $87^3$ voxel box (2.04M DOF), via `harness.measure`: **setup** imports and a warm-up run, freed; **code** builds `op`, allocates six `(n_dof, 24)` fp64 arrays filled with `jax.random.normal` (≈ 2.35 GB; zero pages would not be resident, `docs/conventions.md`) and $v$ `(n_dof, 24)`, runs `apply_K` and `apply_M`, blocks. Estimate: `total` plus the six arrays (≈ 4.1 GB: arrays 2.35, vectors 1.18, workspace 0.56 GB); within 20% of the measured peak, and ≥ 2e9.
 11. **Benchmark:** a fast test asserts the recorded `slab_rule_ok` in `benchmarks/results/stencil_slab.json`; a slow smoke run of `main(sizes=...)` on one tiny configuration (no file written).
 12. **PR 5 refactor:** PR 5's tests pass unchanged after the move to `common.py`.
 
-Known equivalent mutants: padding layers holding node 0 instead of `n_nodes`, and the scatter with `mode="clip"` instead of `"drop"` (both only add zeros, since $s = 0$ on those cells).
+Known equivalent mutants: padding layers holding node 0 instead of `n_nodes`, and the scatter with `mode="clip"` instead of `"drop"` (both only add zeros, since $s = 0$ on those cells); shift-permutation mutants on z-scan meshes (identity permutation) and the inverse instead of the forward permutation when it is a swap (its own inverse).
 
 ## Docs
 
-- `docs/operators.md`: line 3 (the voxel stencil is here, PR 6); a voxel stencil section: API, restriction (cost ∝ P), geometry check, leaves (including the `node`/`cell` grids with their sentinels and `reference`, for PR 11 and PR 23), scan axis and slab rule (one-layer floor), the slab loop and kernels, why gather/GEMM/scatter (no full-grid vectors, one path for full and masked grids, fill/drop saves two vectors of temporaries), the benchmark table, the estimator with 2M and 100M figures, validation; cost per apply at m = 1 (bytes moved: index grids, gathered $v$, scatter; flops: $2 \cdot 24^2$ per cell per phase), as PR 18's roofline starting point; the duck-typed interface is the five methods plus `n_dof`.
+- `docs/operators.md`: line 3 (the voxel stencil is here, PR 6); a voxel stencil section: API, restriction (cost ∝ P), geometry check, leaves (including the `node`/`cell` grids with their sentinels and `reference_element`, for PR 11 and PR 23), scan axis and slab rule (one-layer floor), the slab loop and kernels, why gather/GEMM/scatter (no full-grid vectors, one path for full and masked grids, fill/drop saves two vectors of temporaries), the benchmark table, the estimator with 2M and 100M figures, validation; cost per apply at m = 1 (bytes moved: index grids, gathered $v$, scatter; flops: $2 \cdot 24^2$ per cell per phase), as PR 18's roofline starting point; the duck-typed interface is the five methods plus `n_dof`; the grid description for PR 11/PR 23 (`node`/`cell` transposed by `axes`, padded to $L$ layers with sentinels `n_nodes`/`n_el`, `layers`, `reference_element`).
 - `docs/mesh.md`: the voxel paragraph's "PR 6 checks that they agree with the geometry" becomes a description of the check (pointer to `docs/operators.md`).
-- `docs/ROADMAP.md`: PR 6 status line; the PR 6 Contents line ("8 shifted corner slices → einsum with the reference Ke → shifted adds into a donated output") reworded to the measured gather/GEMM/scatter design with a pointer to `docs/operators.md`; the memory-budget operator row confirmed with the estimator's 2M (< 0.1 GB) and 100M (≈ 1.7 GB incl. scalings and nodal masses, inside the 3–4 GB allowance) values.
+- `docs/ROADMAP.md`: PR 6 status line; Principle 6's "(and voxel z-slabs)" becomes "(and voxel slabs along the longest grid axis)"; the PR 6 Contents line ("8 shifted corner slices → einsum with the reference Ke → shifted adds into a donated output") reworded to the measured gather/GEMM/scatter design with a pointer to `docs/operators.md`; the memory-budget "Operator" cells confirmed for the operator alone (index grids and `phase`: < 0.1 GB at 2M, ≈ 0.4 GB at 100M); $s_K$, $s_M$ and `nodal` (≈ 1.3 GB at 100M) stay under the 3–4 GB allowance for operator, mask, diagonals, scalings and nodal masses.
 - README: status and a short `stencil` snippet (executed by `tests/test_readme.py`).
 
 ## Not covered
 
-- Rigid body modes for voxel meshes (PR 7); multigrid (PR 11); the voxel sensitivity pass (PR 23; `jax.grad` through the operator works already).
+- Rigid body modes for voxel meshes (PR 7); multigrid (PR 11); the voxel sensitivity pass (PR 23; `jax.grad` through the operator works already; PR 21's element-kernel pass can use `reference_element` too).
 - Distorted voxel meshes and hex20/hex27 grids (use `unstructured`); sub-layer chunking of very large cross-sections.
