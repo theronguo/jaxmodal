@@ -1,6 +1,6 @@
 # PR 3 plan: element registry and hex elements
 
-Branch `pr-03-elements`, from `main` after PR 2. Scope: the roadmap's PR 3 (Contents, Docs, Tests). Element kernels follow Principle 5: pure `jax.numpy` functions of $(X_e, C_e, \rho_e)$. Review rounds 1–2 are incorporated.
+Branch `pr-03-elements`, from `main` after PR 2. Scope: the roadmap's PR 3 (Contents, Docs, Tests). Element kernels follow Principle 5: pure `jax.numpy` functions of $(X_e, C_e, \rho_e)$. Review rounds 1–3 are incorporated (round 3: 5/5 satisfied).
 
 ## Measured facts (prototype and reviewer probes, jax 0.11.2, fp64, M3 Max CPU)
 
@@ -25,7 +25,7 @@ Shape functions built from the inverse Vandermonde matrix of a monomial space (b
 
 ```
 src/jaxmodal/elements/__init__.py   re-exports the public names below
-src/jaxmodal/elements/registry.py   gauss, Element, ELEMENTS (hex8, hex20, hex27), det3; NumPy only
+src/jaxmodal/elements/registry.py   gauss, Element, ELEMENTS (hex8, hex20, hex27), private _det3; NumPy only
 src/jaxmodal/elements/kernels.py    jacobian, gradients, bmatrix, stiffness, mass, lumped_mass, the two forms; pure jnp
 src/jaxmodal/elements/check.py      check_elements (host NumPy)
 tests/helpers.py                    tensor() moved here from tests/test_materials.py (shared)
@@ -65,7 +65,7 @@ class Element:
 
 ELEMENTS = {"hex8": ..., "hex20": ..., "hex27": ...}
 
-det3(J) -> det (...)   # explicit 3x3 determinant; indexing and arithmetic only, so it works on NumPy and jax arrays
+_det3(J) -> det (...)   # private; explicit 3x3 determinant; indexing and arithmetic only, so it works on NumPy and jax arrays
 ```
 
 - **Shape functions** come from a monomial space $\{\xi^p\eta^q\zeta^r : (p, q, r) \in E\}$ and the node coordinates: with $V_{bk} = m_k(\xi_b)$, $N(\xi) = m(\xi)\,V^{-1}$, so $N_a(\xi_b) = \delta_{ab}$ by construction. Derivatives differentiate the monomials ($p\,\xi^{\max(p-1, 0)}$, no $0 \cdot \infty$ at $\xi = 0$).
@@ -92,7 +92,7 @@ mass_form(name, X, rho, u, w) -> u^T Me w (...)
 
 With $J_{ij} = \partial x_i/\partial\xi_j = \sum_a X_{ai}\,\partial N_a/\partial\xi_j$ at each quadrature point $q$:
 
-- **`jacobian`:** $\det J$ = `det3(J)` $= a\cdot(b \times c)$ and $J^{-1} = \mathrm{cof}(J)^\top/\det J$ in closed form (rows $a, b, c$ of $J$; the columns of $J^{-1}$ are $(b \times c, c \times a, a \times b)/\det J$), and $\mathrm{wdet}_q = w_q\det J_q$. $\det J$ and $\mathrm{cof}(J)$ are polynomial in $J$; $J^{-1}$ (and $G$, $K_e$ and their gradients) is finite only for $\det J \ne 0$, which `check_elements` guarantees ($\det J > 0$). No sign check here (traceable). $(J^{-1}, \mathrm{wdet})$ is the Jacobian-level data (10 floats per point) that PR 5's on-the-fly mode stores ("invJ·detJ per quadrature point"); it rebuilds $G$ with `gradients`.
+- **`jacobian`:** $\det J$ = `_det3(J)` $= a\cdot(b \times c)$ and $J^{-1} = \mathrm{cof}(J)^\top/\det J$ in closed form (rows $a, b, c$ of $J$; the columns of $J^{-1}$ are $(b \times c, c \times a, a \times b)/\det J$), and $\mathrm{wdet}_q = w_q\det J_q$. $\det J$ and $\mathrm{cof}(J)$ are polynomial in $J$; $J^{-1}$ (and $G$, $K_e$ and their gradients) is finite only for $\det J \ne 0$, which `check_elements` guarantees ($\det J > 0$). No sign check here (traceable). $(J^{-1}, \mathrm{wdet})$ is the Jacobian-level data (10 floats per point) that PR 5's on-the-fly mode stores ("invJ·detJ per quadrature point"); it rebuilds $G$ with `gradients`.
 - **`gradients`:** $G_{qa} = J_q^{-\top}\nabla_\xi N_a(\xi_q)$, i.e. `einsum` of the tabulated `dN` with `invJ`.
 - **`bmatrix`:** $\varepsilon_v = \sum_{i,j} S_{vij}\,\partial u_i/\partial x_j$ with the constant selector $S_{vij} = 1$ if $\{i, j\}$ is the Voigt pair $v$ (both orderings), else 0, so shear rows give $\gamma_{ij} = u_{i,j} + u_{j,i}$. $B = \texttt{einsum}(S, G)$ reshaped with node axis before component axis (DOF $3a + i$).
 - **`stiffness`:** $K_e = \sum_q \mathrm{wdet}_q\,B_q^\top C B_q$ (one 4-operand `einsum`), then $\tfrac12(K_e + K_e^\top)$, exactly symmetric (PR 5 stores one triangle; SciPy references stay symmetric). Temporaries are 6–8× the output (measured facts); `docs/elements.md` states this for PR 5's chunking and estimator.
@@ -112,7 +112,7 @@ With $J_{ij} = \partial x_i/\partial\xi_j = \sum_a X_{ai}\,\partial N_a/\partial
 check_elements(mesh, mass="consistent", chunk=65536)    # raises ValueError
 ```
 
-- Per block, in chunks of `chunk` elements (points gathered per chunk, never a full `(n_el, n, 3)` array), it computes in NumPy fp64 (independent of the x64 flag) only $J = $ `np.einsum(..., optimize=True)` (the default `optimize=False` is 30× slower), $\det J$ = `det3(J)` (shared with `jacobian`; `np.linalg.det` is 25× slower), and for `mass="lumped"` with row-sum types, $\bar m = (w \det J)\,N$. It raises naming the global element index (`mesh.offsets[t]` + chunk start + row) and the type for the first element with
+- Per block, in chunks of `chunk` elements (points gathered per chunk, never a full `(n_el, n, 3)` array), it computes in NumPy fp64 (independent of the x64 flag) only $J = $ `np.einsum(..., optimize=True)` (the default `optimize=False` is 30× slower), $\det J$ = `_det3(J)` (shared with `jacobian`; `np.linalg.det` is 25× slower), and for `mass="lumped"` with row-sum types, $\bar m = (w \det J)\,N$. It raises naming the global element index (`mesh.offsets[t]` + chunk start + row) and the type for the first element with
   - $\det J_q \le 0$ at any quadrature point (the Jacobian check), or
   - with `mass="lumped"`: a row-sum lumped nodal mass $\le 0$ ($\rho = 1$; the sign does not depend on $\rho > 0$). HRZ masses are positive whenever $\det J > 0$, so they need no extra check.
 - `mass` other than `"consistent"`/`"lumped"` raises.
@@ -129,7 +129,7 @@ References are independent of the implementation: hand-typed VTK reference coord
 1. **Quadrature:** `gauss(n)` integrates $\xi^p\eta^q\zeta^r$ exactly (1e-14) for $p, q, r \le 2n - 1$, $n = 2, 3$; weights sum to 8.
 2. **Shape functions vs hand-typed formulas** at 50 random points per type: $N$ and $\partial N/\partial\xi$ to 1e-14. `Element.nodes` equals the hand-typed coordinates. Tabulated `N`/`dN` equal `shape`/`grad` at `points`.
 3. **Partition of unity and completeness** at random points: $\sum_a N_a = 1$, $\sum_a \nabla N_a = 0$; linear completeness $\sum_a \xi_a N_a = \xi$, $\sum_a \xi_a \otimes \nabla N_a = I$; quadratic completeness ($\xi^2$, $\xi\eta$) for hex20/hex27. All to 1e-14.
-4. **NumPy reference:** `jacobian`, `gradients`, `stiffness`, `mass` and `lumped_mass` on 5 distorted elements per type match the loop reference to 1e-12. The closed-form `jacobian` also matches `np.linalg.inv` (1e-12) and `np.linalg.det` (1e-14) on well-conditioned random $J = I + 0.3\,\mathcal N(0, 1)$, and `check.py`'s $\det J$ equals `wdet / w` from `jacobian` on the distorted elements to 1e-14 (no drift between the host and traced paths).
+4. **NumPy reference:** `jacobian`, `gradients`, `stiffness`, `mass` and `lumped_mass` on 5 distorted elements per type match the loop reference to 1e-12. The closed-form `jacobian` also matches `np.linalg.inv` (1e-12) and `np.linalg.det` (1e-14) on well-conditioned random $J = I + 0.3\,\mathcal N(0, 1)$ (asserting cond $J < 10$; Principle 1 norms over the whole batch, not per matrix), and `check.py`'s $\det J$ equals `wdet / w` from `jacobian` on the distorted elements to 1e-14 (no drift between the host and traced paths).
 5. **Patch energy (independent of Voigt):** for an affine $u = Hx$ with random $H$ on distorted elements (rotated orthotropic $C$), $u^\top K_e u = V\,\varepsilon_{ij}C_{ijkl}\varepsilon_{kl}$ with $\varepsilon = \mathrm{sym}(H)$ and $V = \sum_q \mathrm{wdet}_q$, to 1e-12, every type. Catches a tensor-shear factor, a row-order mismatch with $C$, a wrong selector and a transposed $J$.
 6. **Zero modes:** on 20 distorted elements per type and per material, the six smallest $|\lambda|$ of $K_e$ are < 1e-10·$\lambda_\max$ and the 7th > 1e-6·$\lambda_\max$ (`np.linalg.eigvalsh`). Also $\|K_e R\|_\infty \le 10^{-12}\|K_e\|_\infty\|R\|_\infty$ for the 6 analytic rigid modes.
 7. **Lumping:**
