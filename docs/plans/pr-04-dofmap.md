@@ -15,7 +15,10 @@ Branch `pr-04-dofmap`, from `main` after PR 3. Scope: the roadmap's PR 4 (Conten
 
 ```
 src/jaxmodal/mesh/box.py                 box_mesh (structured hex8/hex20/hex27 with face node sets)
-src/jaxmodal/mesh/model.py               + REFERENCE_NODES, EDGES (moved from elements/registry.py)
+src/jaxmodal/mesh/model.py               + CORNERS, EDGES, FACE_CORNERS, REFERENCE_NODES (moved from
+                                         elements/registry.py), face_sets (shared by box and voxel)
+src/jaxmodal/mesh/voxel.py               voxel_mesh gains the same face node sets
+src/jaxmodal/elements/registry.py        imports the tables; nodes = REFERENCE_NODES[:n]
 src/jaxmodal/operators/__init__.py       re-exports the public names below
 src/jaxmodal/operators/dofmap.py         check_int32, element_dofs
 src/jaxmodal/operators/assembled.py      assemble (SciPy CSR K, M; the oracle)
@@ -28,7 +31,10 @@ docs/operators.md
 ## Conventions
 
 - **Global DOF numbering:** DOF $3n + i$ is component $i$ of node $n$; `n_dof = 3 * len(mesh.points)`. Element DOFs follow PR 3's node-major order $3a + i$, so the element DOF array is $3\,\text{conn}[:, a] + i$.
-- **Host vs device:** everything here is host NumPy/SciPy. PR 4 produces the int32 arrays that later device code takes (`element_dofs`) and the assembled reference matrices that later PRs compare against.
+- **Host vs device:** `element_dofs`, the masks and $A_P$ are host NumPy/SciPy. `assemble` evaluates the jitted PR 3 kernels per chunk and assembles on the host; it requires x64 (`jax.config.jax_enable_x64`) and raises `ValueError` otherwise, so the oracle is never silently fp32. PR 4 produces the int32 element DOF arrays and the assembled reference matrices that later PRs compare against.
+- **int32 casts:** `check_int32` is the one overflow assert. PR 4 applies it to `element_dofs`; every later PR that sends a host index array to the device (PR 5: the element → phase `index`; PR 6: the voxel maps) passes its sizes through `check_int32` and casts there. `docs/conventions.md` and `docs/materials.md` are updated to say so.
+- **BC format:** `bcs = {node_set: "xyz"}` everywhere; `dof_mask` is the single place it is parsed, and PR 9's `solve_modes(mesh, materials, bcs, ...)` takes the same dict.
+- **Nodal masses** everywhere (PRs 5, 6, 9, 11, 14, 21) are the kwarg `nodal_mass`, a `(n_nodes,)` array, isotropic: repeated ×3 onto the node's DOFs.
 - **Masks** are bool arrays of length `n_dof`, `True` = free (as in the roadmap's $m \odot \cdot$).
 
 ## `mesh/box.py`
@@ -37,10 +43,12 @@ docs/operators.md
 box_mesh(shape, spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0), type="hex8") -> Mesh
 ```
 
-- A structured block of `nx × ny × nz` elements of type `hex8`, `hex20` or `hex27`. Shared nodes, VTK order (connectivity from `ELEMENTS[type].nodes`, so it is one generic code path).
+- A structured block of `nx × ny × nz` elements of type `hex8`, `hex20` or `hex27`. Shared nodes, VTK order.
 - Nodes are the points of a half-spacing grid $(2n_x+1)\times(2n_y+1)\times(2n_z+1)$ used by at least one element (hex8: even indices; hex20: at most one odd index; hex27: all), in grid order (x fastest). Elements in grid order (x fastest), like `voxel_mesh`.
-- Node sets `"xmin"`, `"xmax"`, `"ymin"`, `"ymax"`, `"zmin"`, `"zmax"` (the boundary faces); no element sets; labels 0; no `voxel` metadata. `shape`/`spacing`/`origin` are validated by PR 1's `check_grid`; an unknown `type` raises.
-- Lives in `jaxmodal.mesh`, which stays free of jax (`docs/mesh.md`). The VTK reference node coordinates (corners, edge midpoints, face centres, centre: `REFERENCE_NODES`, (27, 3)) and the edge list `EDGES` move from `elements/registry.py` to `mesh/model.py`, which owns node ordering; the registry imports them from there (mesh → elements, never the reverse). Connectivity is `grid_index(2·cell + REFERENCE_NODES[:n] + 1)`, one code path for all types.
+- Node sets `"xmin"`, `"xmax"`, `"ymin"`, `"ymax"`, `"zmin"`, `"zmax"` (the boundary faces, from the integer grid index, so exact) via `face_sets(ijk, top)` in `mesh/model.py`; no element sets; labels 0; no `voxel` metadata. `shape`/`spacing`/`origin` are validated by PR 1's `check_grid`; an unknown `type` raises.
+- Lives in `jaxmodal.mesh`, which stays free of jax (`docs/mesh.md`); importing `jaxmodal.elements` would pull in jax through `kernels`. So `CORNERS`, `EDGES`, `FACE_CORNERS` and the new `REFERENCE_NODES` ((27, 3): corners, edge midpoints, face centres, centre, VTK order) move from `elements/registry.py` to `mesh/model.py`, which already owns node ordering. The registry imports them (elements → mesh, never the reverse), keeps `FACE_CORNERS` for `faces`, and takes `nodes = REFERENCE_NODES[:n]`. Connectivity is `grid_index(2·cell + REFERENCE_NODES[:n] + 1)`, one code path for all types.
+- `voxel_mesh` gets the same six face sets (grid-plane nodes that survive the occupancy mask) through `face_sets`, so clamped voxel models (PRs 6, 11, 14, 23) need no hand-built node sets.
+- Uniform spacing only. PR 8's graded NAFEMS meshes extend `spacing` to per-axis node-coordinate arrays (remapping points afterwards would move midside nodes off the edge midpoints).
 
 ## `operators/dofmap.py`
 
@@ -56,27 +64,28 @@ element_dofs(mesh) -> dict  # type -> (n_el_type, 3 n) int32 global DOFs, VTK no
 
 ```python
 assemble(mesh, materials, orientations=None, mass="consistent", nodal_mass=None, chunk=4096)
+# imports the PR 3 kernels as a module (`kernels.mass`), since the `mass=` argument shadows the name
     -> (K, M)   # scipy.sparse.csr_array, (n_dof, n_dof), float64
 ```
 
-- Host checks first: `phases(mesh)`, `check_materials(pairs, materials, orientations)`, `check_elements(mesh, mass)` (the roadmap's PR 3/PR 4 contract), and `nodal_mass` (below).
-- Per block, in chunks of `chunk` elements (the last chunk padded by repeating its first element and sliced off, so a block compiles once per chunk shape): `X = points[conn]`, the phase table `C, rho = phase_table(pairs, materials, orientations)` gathered per element (`C[index]`, `rho[index]`), and the jitted PR 3 kernels `stiffness`, `mass` or `lumped_mass`.
-- COO triplets (rows/cols from `element_dofs`, as int64 for SciPy) → `csr_array` (duplicates summed) → $\tfrac12(A + A^\top)$ (exactly symmetric).
+- Host checks first: x64 on, `phases(mesh)`, `check_materials(pairs, materials, orientations)`, `check_elements(mesh, mass)` (the roadmap's PR 3/PR 4 contract), and `nodal_mass` (below).
+- Per block, in chunks of `c = min(chunk, n_el_type)` elements (the last chunk padded by repeating its first element and sliced off), so all test meshes share one compile per (type, c) and small blocks are not padded to 4096; `chunk` bounds the $K_e$ temporaries, not total memory (the COO triplets of the whole mesh dominate above ~10⁵ DOF): `X = points[conn]`, the phase table `C, rho = phase_table(pairs, materials, orientations)` gathered per element with this block's slice of `index` (`index[offsets[t] + s : ...]`), and the jitted PR 3 kernels `stiffness`, `mass` or `lumped_mass`.
+- Rows/cols are built once as int32 from `element_dofs` (safe after `check_int32(n_dof)`; SciPy keeps int32 CSR indices, 12 B per nonzero instead of 16). Then K and M are built **one at a time**: values → COO → `csr_array` (duplicates summed) → $\tfrac12(A + A^\top)$ (exactly symmetric) → free temporaries. Measured on a hex8 60³ prototype: peak 6.1 GB instead of 10.4 GB with int64 indices and both matrices alive (≈ 50 B per element-matrix entry), same wall time (4.6 s).
 - `mass="lumped"` gives a diagonal M from the PR 3 lumped diagonals (row-sum or HRZ per type).
-- **Nodal (point) masses:** `nodal_mass` is `None` or a finite, non-negative `(n_nodes,)` array; mass $m_n$ is added to the three diagonal entries of node $n$ (isotropic point mass), for consistent and lumped M alike. Wrong shape, non-finite or negative values raise `ValueError`.
-- It is the reference for PRs 5–8 and 12 at reference sizes (≤ ~10⁵ DOF), not a production path. Per-element scalings $s_K$, $s_M$ are added by PR 5, whose tests need them.
+- **Nodal (point) masses:** `nodal_mass` is `None` or a finite, non-negative `(n_nodes,)` array; after symmetrization, `M + diags(repeat(m, 3))` adds $m_n$ to the three diagonal entries of node $n$ (isotropic point mass), for consistent and lumped M alike. Adding last makes `M(nodal) == M(none) + diags(...)` exact. Wrong shape, non-finite or negative values raise `ValueError`.
+- It is the reference for PRs 5–8 and 12 at reference sizes (≤ ~10⁵ DOF), not a production path. The limit comes from PR 8's `splu`, not assembly: on hex20 20³ (107k DOF), `splu(K − σM)` took 241 s with a 16.5 GB peak, while assembly at 10⁵ DOF needs ≈ 1.5 GB (≈ 9/15/13 KB per DOF for hex8/hex20/hex27). `assemble` is the oracle only; PR 13's production hex8 $A_P$ for AMG needs its own chunked assembler into a precomputed CSR pattern (≈ 1 GB per matrix per 1M hex8 DOF; `assemble` would need ≈ 90 GB at 10M DOF). The roadmap's PR 13 entry gets this sentence. Per-element scalings $s_K$, $s_M$ are added by PR 5, whose tests need them.
 
 ## `operators/constraints.py`
 
 ```python
 dof_mask(mesh, bcs) -> np.ndarray (n_dof,) bool, True = free
 masked(A, mask) -> D A D                         # SciPy, D = diag(mask)
-a_p(A, mask) -> D A D + s (I - D)                # s = mean of diag(A) over free DOFs
+a_p(A, mask, s=None) -> D A D + s (I - D)        # default s = mean of diag(A) over free DOFs
 ```
 
 - **BCs** (roadmap: zero displacement per component in global axes on node sets): `bcs` maps a node-set name to its constrained components, a non-empty string of distinct letters from `"xyz"`, e.g. `{"xmin": "xyz", "ymin": "y"}`. Sets may overlap (the union is constrained). An unknown set name or invalid components raise `ValueError`; `bcs = {}` means free-free (all `True`).
 - **`masked`** is the eigen-operator form $m \odot A(m \odot v)$ as a matrix: constrained rows and columns are exactly zero, the free block equals $A_{ff}$.
-- **`a_p`** is the roadmap's $A_P = mAm + s(I - \mathrm{diag}\,m)$ with $s$ the mean of $\mathrm{diag}(A)$ over free DOFs: SPD whenever $A_{ff}$ is (the constrained block is $sI$), unit-independent. Used by every preconditioner and linear solve from PR 10 on; PR 4 provides the assembled version as their reference. A mask with no free DOF raises.
+- **`a_p`** is the roadmap's $A_P = mAm + s(I - \mathrm{diag}\,m)$ with $s$ the mean of $\mathrm{diag}(A)$ over free DOFs: SPD whenever $A_{ff}$ is (the constrained block is $sI$), unit-independent. Used by every preconditioner and linear solve from PR 10 on; PR 4 provides the assembled version as their reference. A mask with no free DOF raises. The default $s$ is for SPD $A = K + \sigma M$; for indefinite shift-invert $K - \sigma M$ (PRs 10, 15) the roadmap fixes $s = \overline{\mathrm{diag} K} + \sigma\,\overline{\mathrm{diag} M}$ over free DOFs, which the caller passes as `s` (documented in `docs/operators.md`).
 
 ## Tests
 
@@ -84,32 +93,35 @@ Fixed seeds per test. Tolerances are Principle 1's $\|a - b\|_\infty \le \mathrm
 
 `tests/test_box.py`:
 
-1. Node and element counts per type ($(n_x+1)(n_y+1)(n_z+1)$ corners; hex20 adds edge nodes only; hex27 has $(2n_x+1)(2n_y+1)(2n_z+1)$); `check_elements(mesh, mass="lumped")` passes; every element's nodes equal `origin + spacing * (cell + (ELEMENTS[t].nodes + 1) / 2)` (affine reference map); the hex8 box equals `voxel_mesh` on points and connectivity; face sets hold exactly the nodes on each boundary plane; no orphan nodes (the `Mesh` constructor checks); unknown type and bad grids raise.
+1. Grid order of nodes (x fastest) and elements (cell index $i + n_x(j + n_y k)$); node and element counts per type ($(n_x+1)(n_y+1)(n_z+1)$ corners; hex20 adds edge nodes only; hex27 has $(2n_x+1)(2n_y+1)(2n_z+1)$); `check_elements(mesh, mass="lumped")` passes; every element's nodes equal `origin + spacing * (cell + (ELEMENTS[t].nodes + 1) / 2)` (affine reference map); the hex8 box equals `voxel_mesh` on points, connectivity and node sets; face sets hold exactly the nodes whose coordinate equals the boundary plane (computed from `points` in the test), for box meshes and a masked voxel mesh; no orphan nodes (the `Mesh` constructor checks); unknown type and bad grids raise; `import jaxmodal.mesh` in a subprocess leaves `"jax"` out of `sys.modules`.
 
 `tests/test_operators.py`:
 
-2. **DOF map:** `element_dofs` values equal $3\,\text{conn}[:, a] + i$ in node-major order, dtype int32, one array per block. `check_int32(n_dof=2**31 - 1)` passes; `check_int32(n_dof=2**31)` and `check_int32(n_dof=5, hex20_dofs=2**31)` raise, naming the offending size.
-3. **Assembly vs a dense loop reference:** on a small two-block mesh (hex8 + hex20 sharing no nodes, or two box meshes merged), with two materials and an orientation label, $K$ and $M$ (consistent and lumped) equal a dense NumPy assembly (`np.add.at` per element, per-element $C$ from `phase_table` and `index`) to 1e-14; exact symmetry (`(K != K.T).nnz == 0`); padding: a block size that is not a multiple of `chunk` (e.g. `chunk=7`) gives the same matrices.
+2. **DOF map:** `element_dofs` values equal $3\,\text{conn}[:, a] + i$ in node-major order, dtype int32, one array per block. `check_int32(n_dof=2**31 - 1)` passes; `check_int32(n_dof=2**31)`, `check_int32(n_dof=2**31 + 1)` and `check_int32(n_dof=5, hex20_dofs=2**31, hex8_dofs=2**32)` raise, naming every offending size and not the passing one. A monkeypatched `check_int32` records that `element_dofs` calls it with `n_dof` and `<type>_dofs = n_el_type · 3n` for every block.
+3. **Assembly vs a dense loop reference:** a two-block mesh built in the test from a 2×2×2 hex20 `box_mesh` and a 2×2×2 hex8 `box_mesh` glued at a shared face (points merged by grid coordinate, so the blocks share nodes), all nodes perturbed per component by ≤ 10% of the edge; labels mixed within each block in a non-periodic pattern: two materials with different $\rho$ (one anisotropic) and two orientations (identity and a non-trivial rotation). The reference is a dense Python loop with explicit per-element DOF lists `[3n + i for n in conn for i in range(3)]` and per-element $C$ = `rotate(material, orientation)` (not `phases`, `phase_table` or `element_dofs`), PR 3 kernels per element, `+=` into a dense matrix. $K$ and $M$ (consistent and lumped) agree to 1e-14 for `chunk=7` (several chunks and a padded last one) and `chunk=4096` (> n_el); exact symmetry (`(K != K.T).nnz == 0`); K and M have int32 indices.
 4. **Patch test** (distorted multi-element, lifting inside the test), per type, rotated orthotropic $C$, on a 3×3×3 `box_mesh` with interior corner nodes perturbed by ≤ 15% of the edge:
    - straight-edged distortion (non-corner nodes on the trilinear map of the element corners): constant stress at every quadrature point to 1e-10 relative to $\|\sigma\|_\infty$;
    - curved hex20/hex27: non-corner interior nodes additionally offset by ≤ 5% of the edge (stated in `docs/operators.md`); constant stress at every quadrature point to 1e-10.
    - Lifting: all boundary-face nodes prescribed $u = Ax + b$ (random $A$, $b$); interior DOFs from `spsolve` of $K_{ff}u_f = -K_{fc}u_c$; stresses from PR 3's `bmatrix` and the element displacements.
-5. **Clamped model:** with `bcs = {"xmin": "xyz"}`, `masked(K, m)` and `masked(M, m)` have exactly zero constrained rows and columns, and their free blocks equal SciPy's reduced `K[free][:, free]` and `M[free][:, free]` exactly (so no spurious eigenvalues enter through the mask).
-6. **$A_P$:** for $A = K + \sigma M$ ($\sigma$ = 0.1·mean diag ratio) on the clamped model, $A_P$ is SPD (dense `np.linalg.cholesky` succeeds and `eigvalsh` min > 0), $\mathrm{diag}(A_P) > 0$ (Jacobi divides by no zero), constrained diagonal equals $s$ = mean of $\mathrm{diag}(A)$ over free DOFs; scaling $A$ by $10^6$ scales $A_P$ by $10^6$ (unit independence). A mask with no free DOF raises.
-7. **Nodal masses:** $M(\text{nodal}) - M(\text{none})$ equals $\mathrm{diag}(\text{repeat}(m_n, 3))$ exactly (`==`), consistent and lumped. Negative, non-finite or wrongly shaped `nodal_mass` raises.
-8. **Rigid translation mass:** $t_x^\top M t_x = \rho V + \sum m_n$ (and $y$, $z$) for consistent and lumped M on a distorted box with nodal masses, $V = \sum_e\sum_q \mathrm{wdet}_q$, to 1e-12.
-9. **BC masks:** components per set, overlapping sets, `{}` all free; unknown set, empty or invalid components (`"xw"`, `"xx"`) raise.
-10. **Host checks are called:** `assemble(..., mass="lumped")` on the PR 3 hex27 counterexample raises the lumped-mass error; a missing material label raises the `check_materials` error.
+5. **Clamped model:** with `bcs = {"xmin": "xyz"}` (expected constrained DOFs computed from `points[:, 0] == 0`), `masked(K, m)` and `masked(M, m)` have exactly zero constrained rows and columns, and their free blocks equal SciPy's reduced `K[free][:, free]` and `M[free][:, free]` exactly (so no spurious eigenvalues enter through the mask).
+6. **$A_P$:** for $A = K + \sigma M$ ($\sigma$ = 0.1·mean diag ratio) on the clamped model, $A_P$ is SPD (dense `np.linalg.cholesky` succeeds and `eigvalsh` min > 0), $\mathrm{diag}(A_P) > 0$ (Jacobi divides by no zero), constrained diagonal equals $s$ = mean of $\mathrm{diag}(A)$ over the coordinate-based free set; scaling $A$ by $2^{20}$ scales $A_P$ by exactly $2^{20}$ (unit independence); an all-True mask gives $A$ exactly; an explicit `s` sets the constrained diagonal to `s`. A mask with no free DOF raises.
+7. **Nodal masses:** with random $m_n \ge 0$, `M(nodal) == M(none) + diags(repeat(m, 3))` exactly (no nonzero differences), consistent and lumped. Negative, non-finite or wrongly shaped `nodal_mass` raises.
+8. **Rigid translation mass:** per type, on a box with interior nodes perturbed (straight and, for hex20/hex27, curved; boundary nodes fixed so $V = L_xL_yL_z$ analytically) and nodal masses, $t_x^\top M t_x = \rho L_xL_yL_z + \sum m_n$ (and $y$, $z$) for consistent and lumped M to 1e-12, and $t_x^\top M t_y = 0$.
+9. **BC masks:** expected masks from node coordinates; components per set, overlapping sets, `{}` all free; unknown set, empty or invalid components (`"xw"`, `"xx"`) raise.
+10. **Host checks are called:** `assemble(..., mass="lumped")` on the PR 3 hex27 counterexample raises the lumped-mass error; a missing material label raises the `check_materials` error. With x64 disabled (`jax.config.update` inside the test, restored after), `assemble` raises.
 
 ## Docs
 
-- `docs/operators.md` (new): global DOF numbering, `element_dofs` and the int32 asserts, `assemble` (phases, chunking, symmetrization, nodal masses), BCs and masks, `masked`, $A_P$ with the formula and why (SPD, unit-independent), the patch-test bounds, measured assembly cost, and the oracle's intended size.
-- `docs/mesh.md`: `box_mesh`.
+- `docs/operators.md` (new): global DOF numbering, `element_dofs` and the int32 asserts, `assemble` (phases, chunking, symmetrization, nodal masses), BCs and masks, `masked`, $A_P$ with the formula and why (SPD, unit-independent), the patch-test bounds, measured assembly cost and peak memory (≈ 50 B per element-matrix entry), and the oracle's size limit (set by `splu`) with the PR 13 note.
+- `docs/mesh.md`: `box_mesh`, voxel face sets, "Node ordering" names `CORNERS`, `EDGES`, `FACE_CORNERS`, `REFERENCE_NODES` in `mesh/model.py`; the intro's int32 sentence points to `element_dofs`.
+- `docs/elements.md`: the Registry bullet says the reference node tables come from `jaxmodal.mesh.model`.
+- `docs/conventions.md` (Indices) and `docs/materials.md` (`phases`): the int32 rule above, pointing to `check_int32` in `docs/operators.md`.
 - README: status line and a short snippet (box mesh → `assemble` → mask → `a_p`), executed by `tests/test_readme.py`.
-- `docs/ROADMAP.md` status line: "PR 4 merged: DOF $3n + i$; BCs are `{node_set: "xyz"}`; masks are bool, True = free; `assemble` returns symmetrized SciPy CSR (oracle); `box_mesh` (hex8/hex20/hex27 with face sets) for tests; PR 5 adds $s_K$, $s_M$ to `assemble`."
+- `docs/ROADMAP.md`: status line "PR 4 merged: DOF $3n + i$; BCs are `{node_set: "xyz"}` (parsed only by `dof_mask`; PR 9 takes the same dict); masks are bool, True = free; `nodal_mass` is `(n_nodes,)`, isotropic (×3 per DOF); `assemble` returns symmetrized SciPy CSR (oracle, x64 only); `box_mesh` (hex8/hex20/hex27) and `voxel_mesh` have face sets `xmin`…`zmax`; later PRs cast their own device index arrays through `check_int32`." PR 5 Contents gains "add $s_K$, $s_M$ to PR 4's `assemble`"; the package layout lists the box generator.
 
 ## Not covered
 
 - Device operators (PR 5, PR 6), rigid modes and deflation (PR 7), the eigen-solves (PR 8).
 - $s_K$, $s_M$ in the oracle (PR 5).
+- Graded box meshes (PR 8).
 - Skew or non-zero Dirichlet conditions (never; roadmap).
