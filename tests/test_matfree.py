@@ -23,6 +23,8 @@ from jaxmodal.operators import assemble, matfree, unstructured
 ORIENT = {1: R}
 MODES, PATHS, MASSES = ("stored", "otf"), ("scatter", "gather"), ("consistent", "lumped")
 SMALL = dict(chunk=5, range_nodes=23)  # chunk 5 pads 8- and 27-element blocks; 23 ∤ n_nodes
+# E: narrow windows, two ranges with a large overlap (exercises the last range's overlap pass)
+SIZES = {"E": dict(chunk=4, range_nodes=203)}
 
 
 def scalings(m, seed):
@@ -56,6 +58,8 @@ def case(name):
         return m, s_K[q], s_M[q], nodal[p], (m0, s_K, s_M, nodal, p, q)
     if name == "B":
         m = rcm(distort(box_mesh((3, 3, 3), type="hex27"), True, rng))[0]
+    elif name == "E":
+        m = rcm(box_mesh((12, 2, 2), type="hex20"))[0]
     else:  # D: asymmetric masked voxel mesh, mixed labels
         mask = np.ones((4, 3, 3), bool)
         mask[2:, 1:, 2] = mask[0, 2, :2] = mask[3, 0, 0] = False
@@ -74,8 +78,9 @@ def oracle(name, mass):
 
 
 @functools.cache
-def operator(name, mode, path, mass, chunk=5, range_nodes=23):
+def operator(name, mode, path, mass, **kw):
     m, s_K, s_M, nodal, _ = case(name)
+    kw = SIZES.get(name, SMALL) | kw
     op = unstructured(
         m,
         MATERIALS,
@@ -84,8 +89,7 @@ def operator(name, mode, path, mass, chunk=5, range_nodes=23):
         mass=mass,
         nodal_mass=nodal,
         path=path,
-        chunk=chunk,
-        range_nodes=range_nodes,
+        **kw,
     )
     return op.scaled(s_K=s_K, s_M=s_M)
 
@@ -124,11 +128,11 @@ def test_assemble_scalings(mass):
 
 CASES = [
     (n, mode, path, mass)
-    for n in "ABCD"
+    for n in "ABCDE"
     for mode in MODES
     for path in PATHS
     for mass in MASSES
-    if n != "C" or path == "gather"
+    if n not in "CE" or path == "gather"
 ]
 
 
@@ -275,10 +279,10 @@ def covering(n, R, n_nodes, nr):
     return out
 
 
-@pytest.mark.parametrize("name", "ABCD")
+@pytest.mark.parametrize("name", "ABCDE")
 def test_gather_layout(name):
     m = case(name)[0]
-    lay = matfree.layout(m, "gather", **SMALL)
+    lay = matfree.layout(m, "gather", **SIZES.get(name, SMALL))
     R, nr, inv, n = lay["R"], lay["n_ranges"], lay["inv"], len(m.points)
     offs = np.cumsum([0] + [b["W"] * b["k"] for b in lay["blocks"]])
     assert lay["window"] == offs[-1]
@@ -310,11 +314,24 @@ def test_gather_layout(name):
         for ai in range(3 * a, 3 * a + 3)
     }
     assert set(found) == expected and set(found.values()) == {1}
-    if name in "AB":
+    if name == "E":  # narrow windows, so a missing overlap pass is visible
+        assert nr == 2 and lay["blocks"][0]["W"] < m.n_el
+    if name in "ABE":
         assert n % R and nr * R > n  # the last range overlaps its predecessor
     if name == "A":
         assert empty
     assert matfree.layout(m, "gather")["R"] == n  # tiny mesh: the only candidate is n_nodes
+
+
+@pytest.mark.parametrize("name", "ABD")
+def test_estimator_storage(name):
+    """storage counts exactly the per-element and per-node leaves (rho and C are tiny)."""
+    for mode in MODES:
+        for path in PATHS:
+            op = operator(name, mode, path, "consistent")
+            est = unstructured_memory(case(name)[0], 1, mode, path=path, **SMALL)["storage"]
+            small = op.rho.nbytes + (op.C.nbytes if op.C is not None else 0)
+            assert est == sum(x.nbytes for x in jax.tree.leaves(op)) - small
 
 
 def brute_windows(conn, R, n, c):
@@ -379,6 +396,7 @@ b = op.blocks[0]
 n_pad = -(-n_el // b.chunk) * b.chunk
 S = jax.ShapeDtypeStruct
 size = {b.dofs.shape[0]: n_pad, op.n_el: n_el, op.n_dof: 3 * n_nodes, op.n_ranges: n_ranges}
+assert len(size) == 4  # distinct leading sizes, so no leaf is remapped by mistake
 sds = lambda a: S((size.get(a.shape[0], a.shape[0]),) + a.shape[1:], a.dtype)
 block = dataclasses.replace(jax.tree.map(sds, b), n_el=n_el)
 op = dataclasses.replace(jax.tree.map(sds, op), blocks=(block,), n_nodes=n_nodes, n_ranges=n_ranges)
