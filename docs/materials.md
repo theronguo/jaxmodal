@@ -25,7 +25,7 @@ C_p, rho_p = phase_table(pairs, {7: Material(C, 1600.0)}, {2: from_euler((0.5, 0
 
 ## Constructors
 
-All return a (6, 6) local stiffness $C$.
+All take scalar constants and return a (6, 6) local stiffness $C$; use `jax.vmap` for batches of constants.
 
 - **`isotropic(E, nu)`:** $C = \lambda\,\mathbf{1}\mathbf{1}^\top + \mu\,\mathrm{diag}(2, 2, 2, 1, 1, 1)$, with $\mathbf{1} = (1, 1, 1, 0, 0, 0)^\top$ and
 
@@ -60,7 +60,7 @@ Constructors don't call it (traced values can't raise). For orthotropic constant
 
 $$1 - \nu_{12}\nu_{21} - \nu_{23}\nu_{32} - \nu_{13}\nu_{31} - 2\nu_{21}\nu_{32}\nu_{13} > 0.$$
 
-Isotropic $\nu = 1/2$ gives non-finite $C$; $\nu$ just below $1/2$ fails the eigenvalue ratio.
+Isotropic $\nu = 1/2$ gives non-finite $C$; $\nu$ within about $10^{-12}$ of $1/2$ (e.g. $1/2 - 10^{-14}$) fails the eigenvalue ratio.
 
 ## Rotations
 
@@ -79,7 +79,7 @@ All are batched over leading axes, so a per-element field of $R$ (shape `(n_el, 
 
   $$e_1' = \frac{a}{|a|}, \qquad e_3' = \frac{a \times b}{|a \times b|}, \qquad e_2' = e_3' \times e_1'.$$
 
-  Parallel or zero vectors give NaN columns and undefined gradients; `check_materials` rejects them.
+  Parallel vectors give NaN columns 2–3 (a zero $a$: all columns) and undefined gradients; `check_materials` rejects them.
 - **Bond matrices.** For Voigt rows $(ij)$ and columns $(kl)$,
 
   $$M_{(ij),(kl)} = \begin{cases} R_{ik}R_{jl} & k = l \\ R_{ik}R_{jl} + R_{il}R_{jk} & k \ne l \end{cases}, \qquad \sigma_g = M\sigma_l,$$
@@ -101,9 +101,9 @@ C, rho = phase_table(pairs, materials, orientations)  # pure jax.numpy
 ```
 
 - **`phases(mesh)`:** `pairs` is a tuple of $P$ `(material, orientation)` tuples in order of first appearance in the global element order; it is hashable, so it can be a static argument (`jax.jit(f, static_argnames="pairs")`). `index` is the `(n_el,)` int64 element → phase map (host indices stay int64 until PR 4).
-- **`phase_table(pairs, materials, orientations=None)`:** `materials` maps label → `Material(C, rho)`, `orientations` maps label → $R$. It returns the global stiffness `C` (P, 6, 6) $= $ `rotate` of each phase's $C$ and the density `rho` (P,). Memory is $36P$ floats; PR 5 gathers `C[index]` per element chunk and PR 6 builds one reference Ke per phase. A label missing from a dict is a plain `KeyError`.
+- **`phase_table(pairs, materials, orientations=None)`:** `materials` maps label → `Material(C, rho)`, `orientations` maps label → $R$. It returns the global stiffness `C` (P, 6, 6), each phase's $C$ rotated by its $R$, and the density `rho` (P,). Memory is $36P$ floats; PR 5 gathers `C[index]` per element chunk and PR 6 builds one reference Ke per phase. A label missing from a dict is a plain `KeyError`.
 - **Label 0:** orientation label 0 means the identity unless `orientations` has an entry for it; any other orientation label must be given (`orientations=None` means `{}`). Material label 0 has no default: a voxel mesh (all labels 0) needs `materials = {0: ...}`.
-- **`check_materials(pairs, materials, orientations=None)`:** raises `ValueError` for a label used in the mesh but missing from a dict, a `C` that fails `check_stiffness`, a density that is not finite and positive, or an $R$ that is not a finite rotation ($\max|R^\top R - I| \le 10^{-12}$, $\det R > 0$). Extra dict entries are allowed. PR 9's `solve_modes` calls it before tracing, so it takes concrete materials.
+- **`check_materials(pairs, materials, orientations=None)`:** raises `ValueError` for a label used in the mesh but missing from a dict, a `C` that fails `check_stiffness`, a density that is not a finite positive scalar, or an $R$ that is not a finite rotation ($\max|R^\top R - I| \le 10^{-12}$, so fp32-accurate rotations are rejected; $\det R > 0$). Extra dict entries are allowed. PR 9's `solve_modes` calls it before tracing, so it takes concrete materials.
 - **Density** is the physical density $\rho$ of a material. Design densities in topology optimization (PR 23) enter through the operators' per-element scaling $s_K$, $s_M$, not through `rho`.
 
 ## Not covered

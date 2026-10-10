@@ -11,6 +11,7 @@ _I, _J = (np.array(a)[:, None] for a in zip(*VOIGT, strict=True))  # row pair (i
 _K, _L = (np.array(a)[None, :] for a in zip(*VOIGT, strict=True))  # column pair (k, l)
 _SHEAR = (_K != _L).astype(float)
 _D = np.array([1.0, 1, 1, 2, 2, 2])  # engineering shear factor
+_DD = _D[:, None] / _D[None, :]
 
 
 def _rz(t):
@@ -51,7 +52,7 @@ def bond_stress(R):
 
 def bond_strain(R):
     """N with eps_g = N eps_l (engineering shear); N = D M D^-1 = M^-T."""
-    return bond_stress(R) * _D[:, None] / _D[None, :]
+    return bond_stress(R) * _DD
 
 
 def rotate(C, R):

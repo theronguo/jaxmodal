@@ -142,6 +142,7 @@ def test_check_stiffness_passes():
         (isotropic(1.0, 0.5 - 1e-14), "positive definite"),
         (orthotropic(140.0, 10.0, 10.0, 4.0, 0.3, 0.45, 5.0, 5.0, 3.4), "positive definite"),
         (np.eye(6) + np.triu(np.ones((6, 6)), 1) * 0.1, "symmetric"),
+        (np.eye(6) + np.triu(np.ones((6, 6)), 1) * 1e-11, "symmetric"),  # pins the 1e-12 tolerance
         (np.where(np.eye(6) > 0, np.nan, 0.0), "finite"),
         (np.eye(6)[:, :5], "finite"),
     ],
@@ -260,8 +261,10 @@ def test_orientation_default():
     check_materials(pairs, mats, {2: R2})
     C, _ = phase_table(pairs, mats, {2: R2})
     assert rel(C[0], mats[5].C) == 0
-    with pytest.raises(ValueError, match="orientation label 2"):
-        check_materials(pairs, mats)
+    R0 = from_euler((0.2, 0.0, 0.0))  # an explicit label-0 entry overrides the identity
+    check_materials(pairs, mats, {0: R0, 2: R2})
+    C, _ = phase_table(pairs, mats, {0: R0, 2: R2})
+    assert rel(C[0], rotate(mats[5].C, R0)) < 1e-15
 
 
 @pytest.mark.parametrize(
@@ -272,7 +275,19 @@ def test_orientation_default():
         ({5: Material(isotropic(1.0, 0.5 - 1e-14), 1.0)}, None, "positive definite"),
         ({5: Material(isotropic(1.0, 0.3), 0.0)}, None, "rho"),
         ({5: Material(isotropic(1.0, 0.3), np.nan)}, None, "rho"),
+        ({5: Material(isotropic(1.0, 0.3), np.ones(2))}, None, "rho"),
         ({5: Material(isotropic(1.0, 0.3), 1.0)}, {2: np.diag([1.0, 1, -1])}, "not a rotation"),
+        ({5: Material(isotropic(1.0, 0.3), 1.0)}, {2: 2 * np.eye(3)}, "not a rotation"),
+        (
+            {5: Material(isotropic(1.0, 0.3), 1.0)},
+            {2: np.eye(3), 0: np.diag([1.0, 1, -1])},
+            "orientation 0",
+        ),
+        (
+            {-1: Material(isotropic(1.0, 0.3), 1.0), 5: Material(isotropic(1.0, 0.3), -1.0)},
+            None,
+            "material 5",
+        ),
         (
             {5: Material(isotropic(1.0, 0.3), 1.0)},
             {2: from_vectors([1.0, 0, 0], [1.0, 0, 0])},
@@ -281,7 +296,7 @@ def test_orientation_default():
     ],
 )
 def test_check_materials_raises(mats, ors, match):
-    pairs = ((5, 0), (5, 2))
+    pairs = ((-1, 0), (5, 0), (5, 2)) if -1 in mats else ((5, 0), (5, 2))
     if ors is None:  # orientation 2 valid; the material is the bad part
         ors = {2: np.eye(3)}
     with pytest.raises(ValueError, match=match):

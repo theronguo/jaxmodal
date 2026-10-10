@@ -49,7 +49,6 @@ def orthotropic(E1, E2, E3, nu12, nu13, nu23, G12, G13, G23):
 
 def transversely_isotropic(E1, E2, nu12, nu23, G12):
     """Symmetry axis = local 1 (isotropic in the local 2-3 plane)."""
-    E2, nu23 = jnp.asarray(E2, float), jnp.asarray(nu23, float)
     return orthotropic(E1, E2, E2, nu12, nu12, nu23, G12, G12, E2 / (2 * (1 + nu23)))
 
 
@@ -77,21 +76,15 @@ def phases(mesh):
     keys = np.stack([mesh.material, mesh.orientation], 1)
     uniq, first, inv = np.unique(keys, axis=0, return_index=True, return_inverse=True)
     order = np.argsort(first)
-    rank = np.empty_like(order)
-    rank[order] = np.arange(len(order))
     pairs = tuple((int(m), int(o)) for m, o in uniq[order])
-    return rank[inv.ravel()], pairs
-
-
-def _orientation(orientations, o):
-    return orientations.get(o, jnp.eye(3)) if o == 0 else orientations[o]
+    return np.argsort(order)[inv.ravel()], pairs
 
 
 def phase_table(pairs, materials, orientations=None):
     """Rotated stiffness (P, 6, 6) and density (P,) per phase; pure jax.numpy."""
-    orientations = orientations or {}
+    orientations = {0: jnp.eye(3), **(orientations or {})}  # only label 0 defaults
     C = jnp.stack([jnp.asarray(materials[m].C, float) for m, _ in pairs])
-    R = jnp.stack([jnp.asarray(_orientation(orientations, o), float) for _, o in pairs])
+    R = jnp.stack([jnp.asarray(orientations[o], float) for _, o in pairs])
     rho = jnp.stack([jnp.asarray(materials[m].rho, float) for m, _ in pairs])
     return rotate(C, R), rho
 
@@ -107,9 +100,9 @@ def check_materials(pairs, materials, orientations=None):
         if rho.shape != () or not np.isfinite(rho) or rho <= 0:
             raise ValueError(f"material {m}: rho must be a finite positive scalar")
     for o in sorted({o for _, o in pairs}):
-        if o == 0 and o not in orientations:
-            continue
         if o not in orientations:
+            if o == 0:
+                continue
             raise ValueError(f"orientation label {o} is in the mesh but not in orientations")
         R = np.asarray(orientations[o], float)
         if R.shape != (3, 3) or not np.isfinite(R).all():
