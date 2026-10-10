@@ -278,6 +278,7 @@ def test_orientation_default():
         ({5: Material(isotropic(1.0, 0.3), np.ones(2))}, None, "rho"),
         ({5: Material(isotropic(1.0, 0.3), 1.0)}, {2: np.diag([1.0, 1, -1])}, "not a rotation"),
         ({5: Material(isotropic(1.0, 0.3), 1.0)}, {2: 2 * np.eye(3)}, "not a rotation"),
+        ({5: Material(isotropic(1.0, 0.3), 1.0)}, {2: np.eye(3) + 1e-10}, "not a rotation"),
         (
             {5: Material(isotropic(1.0, 0.3), 1.0)},
             {2: np.eye(3), 0: np.diag([1.0, 1, -1])},

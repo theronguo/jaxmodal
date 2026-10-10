@@ -91,7 +91,7 @@ def phase_table(pairs, materials, orientations=None):
 
 def check_materials(pairs, materials, orientations=None):
     """Host validation of the inputs of phase_table: labels, stiffness, density, rotations."""
-    orientations = orientations or {}
+    orientations = {0: np.eye(3), **(orientations or {})}
     for m in sorted({m for m, _ in pairs}):
         if m not in materials:
             raise ValueError(f"material label {m} is in the mesh but not in materials")
@@ -101,8 +101,6 @@ def check_materials(pairs, materials, orientations=None):
             raise ValueError(f"material {m}: rho must be a finite positive scalar")
     for o in sorted({o for _, o in pairs}):
         if o not in orientations:
-            if o == 0:
-                continue
             raise ValueError(f"orientation label {o} is in the mesh but not in orientations")
         R = np.asarray(orientations[o], float)
         if R.shape != (3, 3) or not np.isfinite(R).all():
