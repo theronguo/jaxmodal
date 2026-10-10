@@ -22,6 +22,9 @@ def box_mesh(shape, spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0), type="hex8"
     ijk = 2 * cell[:, None, :] + (REFERENCE_NODES[: NODES[type]] + 1).astype(np.int64)
     used, conn = np.unique(ijk[..., 0] + gx * (ijk[..., 1] + gy * ijk[..., 2]), return_inverse=True)
     ijk = np.stack([used % gx, used // gx % gy, used // (gx * gy)], 1)
+    sets = {}
+    for d in range(3):
+        sets |= face_sets(d, ijk[:, d], 2 * shape[d])
     return Mesh(
         points=np.asarray(origin, float) + np.asarray(spacing, float) * (ijk / 2),
         blocks={type: conn.reshape(len(e), -1)},

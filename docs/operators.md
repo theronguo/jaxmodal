@@ -26,7 +26,7 @@ AP = a_p(K + sigma * M, free)  # SPD reference for preconditioners and linear so
 K, M = assemble(mesh, materials, orientations=None, mass="consistent", nodal_mass=None, chunk=1024)
 ```
 
-1. **Host checks:** x64 must be on (`jaxmodal.config.enable_x64()`), else `ValueError`, so the oracle is never silently fp32. Then `phases(mesh)`, `check_materials` and `check_elements(mesh, mass)`, and the `nodal_mass` checks below.
+1. **Host checks:** `chunk >= 1`; x64 must be on (`jaxmodal.config.enable_x64()`), else `ValueError`, so the oracle is never silently fp32. Then `phases(mesh)`, `check_materials` and `check_elements(mesh, mass)`, and the `nodal_mass` checks below.
 2. **Element matrices:** per block, in chunks of $c = \min(\text{chunk}, n_\text{el})$ elements, the jitted PR 3 kernels `stiffness` and `mass` (or `lumped_mass`) with the rotated per-phase $C$ and $\rho$ from `phase_table`. The last chunk is padded with its first element and sliced off, so a block compiles once per (type, $c$). `chunk` bounds the $K_e$ temporaries and the XLA workspace, not total memory; 1024 is as fast as 4096 and peaks about 0.5 GB lower for hex20/hex27.
 3. **Global matrices:** COO triplets with int32 rows/cols from `element_dofs` → `csr_array` (duplicates summed) → $\tfrac12(A + A^\top)$. Each $K_e$ is exactly symmetric, but the summed CSR is symmetric only to ~1e-16 (summation order of duplicates), so the result is symmetrized and then satisfies `(K != K.T).nnz == 0`. K is built before M, so only one matrix's triplets are alive at a time.
 4. **Lumped mass** (`mass="lumped"`): a diagonal M from the PR 3 lumped diagonals (row-sum for hex8/hex27, HRZ for hex20).
@@ -48,7 +48,7 @@ K, M = assemble(mesh, materials, orientations=None, mass="consistent", nodal_mas
 ## Dirichlet conditions and masks
 
 - **BCs** are zero displacement per component in global axes on node sets: `bcs = {node_set: "xyz"}`, e.g. `{"xmin": "xyz", "ymin": "y"}`. The value is a non-empty string of distinct letters from `"xyz"`. Sets may overlap (the union is constrained); `{}` is free-free. An unknown set name or invalid components raise `ValueError`. `dof_mask` is the only parser of this dict; PR 9's `solve_modes(mesh, materials, bcs, ...)` takes the same format.
-- **Mask** $m$: `(n_dof,)` bool, `True` = free.
+- **Mask** $m$: `(n_dof,)` bool, `True` = free. `masked` and `a_p` raise `ValueError` unless it is a bool `np.ndarray` of length `n_dof` (a 0/1 int mask would silently index and complement wrongly).
 - **`masked(A, m)`** $= DAD$ with $D = \mathrm{diag}(m)$: the eigen-operator $v \mapsto m \odot A(m \odot v)$ as a matrix. Constrained rows and columns are exactly zero and the free block is exactly $A_{ff}$, so no spurious eigenvalues enter through the mask.
 
 ## $A_P$ (`a_p`)

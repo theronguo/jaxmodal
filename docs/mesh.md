@@ -124,7 +124,7 @@ mesh = voxel_mesh(shape=(nx, ny, nz), spacing=(hx, hy, hz), origin=(ox, oy, oz),
   mesh = dataclasses.replace(mesh, node_sets={**mesh.node_sets, "clamp": clamp})
   ```
 
-- **Cost** (M-series laptop): $88^3$ cells (2.1M DOFs) build in 0.04 s and `corner_jacobians` takes 0.09 s. $320^3$ (99M DOFs) builds in 2.0 s and `corner_jacobians` takes 4.0 s (rows in chunks of $2^{20}$); peak memory is 7.9 GiB. Coordinates and face sets are computed one axis at a time to keep temporaries bounded.
+- **Cost** (M-series laptop): $88^3$ cells (2.1M DOFs) build in 0.04 s and `corner_jacobians` takes 0.09 s. $320^3$ (99M DOFs) builds in 2.0 s and `corner_jacobians` takes 4.0 s (rows in chunks of $2^{20}$); peak memory is 8.5 GB. Coordinates and face sets are computed one axis at a time to keep temporaries bounded.
 
 ## Box meshes
 

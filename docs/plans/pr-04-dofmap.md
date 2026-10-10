@@ -1,6 +1,6 @@
 # PR 4 plan: DOF map, assembled reference operator, masking
 
-Branch `pr-04-dofmap`, from `main` after PR 3. Scope: the roadmap's PR 4 (Contents, Docs, Tests), plus a structured hex8/hex20/hex27 box mesh generator, which the patch tests need and PRs 5, 7 and 8 reuse (`voxel_mesh` is hex8 only and has no node sets).
+Branch `pr-04-dofmap`, from `main` after PR 3. (Code review superseded a few details below: `face_sets(d, idx, top)` works per axis, the default `chunk` is 1024, and the measured memory figures are in `docs/operators.md`.) Scope: the roadmap's PR 4 (Contents, Docs, Tests), plus a structured hex8/hex20/hex27 box mesh generator, which the patch tests need and PRs 5, 7 and 8 reuse (`voxel_mesh` is hex8 only and has no node sets).
 
 ## Measured facts (prototype, jax 0.11.2, fp64, M3 Max CPU)
 
