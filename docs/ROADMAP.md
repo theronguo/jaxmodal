@@ -13,7 +13,7 @@ Large-scale 3D linear modal analysis (Kv = λMv) in JAX. The solver uses matrix-
 
 Package name: `jaxmodal`. License: MIT.
 
-Status: final. Review rounds 1–30 incorporated (round 30: all 5 reviewers satisfied). Implementation proceeds PR by PR, each with its own reviewed plan in `docs/plans/`. PR 0 merged: jax pinned at ≥ 0.11.2; the persistent cache and CPU donation work; the `pymetis` extra is deferred to PR 19 (minimum 2025.1.1). PR 1 merged: own flat-`.inp` reader, Gmsh 4.1 ASCII only, VTU is the only written format; host topology is int64 until PR 4. PR 2 merged: phases are (material, orientation) label pairs; `phases` (host) is split from the traceable `phase_table`, so PR 21 can differentiate it; PR 6 builds one reference Ke per phase.
+Status: final. Review rounds 1–30 incorporated (round 30: all 5 reviewers satisfied). Implementation proceeds PR by PR, each with its own reviewed plan in `docs/plans/`. PR 0 merged: jax pinned at ≥ 0.11.2; the persistent cache and CPU donation work; the `pymetis` extra is deferred to PR 19 (minimum 2025.1.1). PR 1 merged: own flat-`.inp` reader, Gmsh 4.1 ASCII only, VTU is the only written format; host topology is int64 until PR 4. PR 2 merged: phases are (material, orientation) label pairs; `phases` (host) is split from the traceable `phase_table`, so PR 21 can differentiate it; PR 6 builds one reference Ke per phase. PR 3 merged: the element type is a static name and per-type tables are embedded constants (per-element arrays stay arguments); element DOF order is $3a + i$; `check_elements` is the host Jacobian/lumping check (PR 4 and PR 9 call it); `jacobian` gives PR 5's invJ and w·detJ.
 
 ## Principles
 
@@ -292,12 +292,13 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. E
   - Matches a NumPy reference implementation to 1e-12.
   - `jax.grad` of uᵀKe(X)u matches finite differences (rel. err. < 1e-6).
   - The Jacobian check raises on an inverted element.
+  - The lumped-mass and Jacobian raises live in the host check `check_elements(mesh, mass)`; the traceable kernels never raise.
 
 ### PR 4: DOF map, assembled reference operator, masking
 - Contents:
   - Global DOF numbering (int32).
   - Per-group element-to-DOF arrays.
-  - SciPy CSR K and M via COO; M consistent or lumped (diagonal from the PR 3 lumped Me).
+  - SciPy CSR K and M via COO; M consistent or lumped (diagonal from the PR 3 lumped Me). Assembly calls `check_elements(mesh, mass)` first.
   - Nodal mass vector.
   - Masking and A_P.
 - Docs: `docs/operators.md`.
@@ -313,7 +314,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. E
 
 ### PR 5: Matrix-free unstructured operator
 - Contents:
-  - Two modes: stored Ke, and on-the-fly computation from precomputed invJ·detJ per quadrature point.
+  - Two modes: stored Ke, and on-the-fly computation from precomputed invJ and w·detJ per quadrature point (10 floats, from PR 3's `jacobian`).
   - Optional per-element stiffness and mass scaling arrays s_K and s_M, so density design on unstructured meshes stays possible.
   - Chunked, block-native apply.
   - Scatter (`segment_sum`) vs chunked inverse-map gather, benchmarked per backend.
@@ -391,7 +392,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. E
   - Jacobi on A_P, with the σ pre-estimate (a few Jacobi-LOBPCG iterations or a user hint; test: the pre-estimate is within 2× of λ₁ and a user hint skips it).
   - Chunked mode computation; the deflation basis is optionally fp32, returned modes are fp64.
   - LOBPCG workspace estimator.
-  - Public API: `solve_modes(mesh, materials, bcs, n_modes, orientations=None, ...) → (λ, V, info)`.
+  - Public API: `solve_modes(mesh, materials, bcs, n_modes, orientations=None, ...) → (λ, V, info)`. It calls `check_materials` and `check_elements` before tracing.
   - `examples/` script per milestone, also run as a smoke test.
   - Fixes the Mac acceptance budgets.
 - Docs: `docs/eigensolvers.md` (algorithm, convergence theory, memory model, measured floor).

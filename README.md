@@ -2,7 +2,7 @@
 
 Large-scale 3D linear modal analysis, $K v = \lambda M v$, in JAX. It uses matrix-free operators, preconditioned LOBPCG, hex8/hex20/hex27 and solid-shell elements, and linear anisotropic elasticity. The targets are the lowest modes and modes in frequency bands, with FFD shape optimization and topology optimization later.
 
-**Status:** early development. PR 0 (scaffold, benchmark harness, conventions), PR 1 (mesh data model, readers, voxel generator) and PR 2 (anisotropic materials, rotations, phases) are done; there is no solver yet. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+**Status:** early development. PR 0 (scaffold, benchmark harness, conventions), PR 1 (mesh data model, readers, voxel generator), PR 2 (anisotropic materials, rotations, phases) and PR 3 (hex8/hex20/hex27 element kernels) are done; there is no solver yet. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Install
 
@@ -52,6 +52,19 @@ C, rho = phase_table(((7, 1),), {7: fiber}, {1: from_euler((0.5, 0.0, 0.0))})
 ```
 
 See [`docs/materials.md`](docs/materials.md) for the constructors, rotation conventions and phases.
+
+Check the elements once on the host, then compute batched element matrices (pure `jax.numpy`, differentiable with respect to coordinates and material):
+
+```python
+from jaxmodal.elements import check_elements, lumped_mass, mass, stiffness
+
+check_elements(mesh, mass="lumped")  # host: det J > 0 at quadrature points, lumped masses > 0
+X = mesh.points[mesh.blocks["hex20"]]  # (n_el, 20, 3)
+Ke = stiffness("hex20", X, isotropic(210e9, 0.3))  # (n_el, 60, 60), DOF 3a + i
+Me = mass("hex20", X, 7850.0)  # consistent; lumped_mass gives the HRZ diagonal
+```
+
+See [`docs/elements.md`](docs/elements.md) for shape functions, quadrature, lumping and the element check.
 
 ## Development
 

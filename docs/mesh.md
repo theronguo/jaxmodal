@@ -66,7 +66,7 @@ where $(a_d^-, a_d^+)$ is the pair of corners along reference axis $d$ that cont
 - $\eta$: (0,3), (1,2), (4,7), (5,6);
 - $\zeta$: (0,4), (1,5), (2,6), (3,7).
 
-This is the exact trilinear derivative at a corner. For an affine element $x = A\xi + b$, $\det J_a = \det A$; for a voxel with spacing $h$, $\det J_a = h_x h_y h_z / 8$. For hex20/hex27 it is only a sign and orientation check on the corner hex; curved-element validity at quadrature points is PR 3's check.
+This is the exact trilinear derivative at a corner. For an affine element $x = A\xi + b$, $\det J_a = \det A$; for a voxel with spacing $h$, $\det J_a = h_x h_y h_z / 8$. For hex20/hex27 it is only a sign and orientation check on the corner hex; curved-element validity at quadrature points is `check_elements` (`docs/elements.md`).
 
 ## Formats
 
