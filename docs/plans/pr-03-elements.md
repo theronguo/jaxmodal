@@ -1,6 +1,6 @@
 # PR 3 plan: element registry and hex elements
 
-Branch `pr-03-elements`, from `main` after PR 2. Scope: the roadmap's PR 3 (Contents, Docs, Tests). Element kernels follow Principle 5: pure `jax.numpy` functions of $(X_e, C_e, \rho_e)$. Review round 1 is incorporated.
+Branch `pr-03-elements`, from `main` after PR 2. Scope: the roadmap's PR 3 (Contents, Docs, Tests). Element kernels follow Principle 5: pure `jax.numpy` functions of $(X_e, C_e, \rho_e)$. Review rounds 1–2 are incorporated.
 
 ## Measured facts (prototype and reviewer probes, jax 0.11.2, fp64, M3 Max CPU)
 
@@ -10,7 +10,7 @@ Shape functions built from the inverse Vandermonde matrix of a monomial space (b
 - **Ke zero modes:** on 200 random elements per type (aspect ratio 2; perturbations 20% of the short edge for hex8, 10% for hex20/hex27, all nodes; isotropic $\nu = 0.49$ and a rotated orthotropic $C$), the six smallest $|\lambda|/\lambda_\max$ are ≤ 2.4e-16 and the 7th is ≥ 5.3e-4 (hex8), 1.5e-4 (hex20) and 1.1e-4 (hex27): ≥ 6 and ≥ 2 orders of margin on the 1e-10 and 1e-6 gates. A transposed $J$ breaks the zero modes (6th → 5e-5–3e-4); a tensor-shear B (factor ½) or a B row order that mismatches $C$ does **not** (rigid modes have zero strain), hence test 5's patch-energy check.
 - **Symmetry:** Ke from `einsum` is symmetric only to 5e-16 relative; $\tfrac12(K + K^\top)$ is exactly symmetric and fuses at no measurable cost.
 - **jit vs eager Ke:** identical (0.0). Central FD of $u^\top K_e(X)u$ w.r.t. $X$ (best of four steps): 1.0e-10 (hex8), 3.0e-10 (hex20), 5.5e-10 (hex27) relative.
-- **3×3 inverse/determinant:** a closed-form adjugate is 18× faster than `jnp.linalg.inv` + `det` on 1M batched matrices (0.0078 s vs 0.145 s; linalg is an unfused LAPACK/getrf custom call), agrees to 1.5e-15, and `jax.grad` of it is correct at $\det J \in \{10^{-3}, 10^{-8}, 0\}$.
+- **3×3 inverse/determinant:** a closed-form adjugate is 18× faster than `jnp.linalg.inv` + `det` on 1M batched matrices (0.0078 s vs 0.145 s; linalg is an unfused LAPACK/getrf custom call), agrees to 1.5e-15 (to 2e-14 vs `np.linalg.inv` for well-conditioned $J$; the gap grows with cond $J$). `jax.grad` of $\det J$ is correct at $\det J \in \{10^{-3}, 10^{-8}, 0\}$.
 - **Ke cost** (single 4-operand `einsum`, 4096 elements per batch): hex20 17 µs and 241 KB of temporaries per element (Ke itself 28.8 KB); hex27 24.6 µs and 323 KB (Ke 52.5 KB). Temporaries are 6–8× the output; a two-step $CB$-first version is slower and larger. About 75 GFLOP/s, so 10M stored hex20 Ke take ≈ 3 min on the Mac.
 - **Forms:** building $\nabla u = U^\top G$ instead of $B$ (8192 hex20): forward 5.9 vs 11.4 µs and 28.6 vs 158 KB temporaries per element; `grad` w.r.t. $X$ 9.7 vs 16.2 µs and 50 vs 166 KB. Agreement 2.6e-16.
 - **Lumping, undistorted box of volume $V$:** hex8 row-sum $V/8$; hex27 row-sum corners $V/216$, edges $4V/216$, faces $16V/216$, centre $64V/216$; hex20 row-sum corners $-27V/216 = -V/8$, midsides $36V/216 = V/6$ (why hex20 uses HRZ); hex20 HRZ corners $7V/248$, midsides $16V/248$.
@@ -19,13 +19,13 @@ Shape functions built from the inverse Vandermonde matrix of a monomial space (b
   - hex27 with midside node 8 (edge 0–1) moved $0.45$ of the edge toward corner 0: corner-0 row-sum mass $-7.0\times10^{-4}$ (of 1), while $\min_q \det J = 0.043 > 0$.
   - hex20 with midside node 8 moved to $x = 0.95$: $\min_q \det J = -0.012$, all 8 trilinear corner Jacobians positive (PR 1's `corner_jacobians` passes).
   - hex8 with corner 6 moved to $(-0.2, -0.2, -0.2)$: 4 of 8 Gauss $\det J$ negative.
-- **`check_elements` cost:** $\det J$ only, eager, chunk 65536: 0.46 s per 1M hex20 (jitted: 0.85 s, the last chunk recompiles). Going through $G$ and `inv` instead took 6.0 s and 0.85–1.15 GB per chunk.
+- **`check_elements` cost** (NumPy, chunk 65536, per 1M hex20): `np.einsum` for $J$ takes 10.5 s with the default `optimize=False` and 0.24–0.39 s with `optimize=True`; `np.linalg.det` 4.9 s vs 0.19 s for the explicit cofactor formula (agreement 5e-16); the point gather 0.46 s; the row-sum masses 0.03 s. So ≈ 1.1 s per 1M (≈ 11 s at 10M) with `optimize=True` and the explicit determinant. Going through $G$ and `inv` instead took 6.0 s and 0.85–1.15 GB per chunk.
 
 ## Files
 
 ```
 src/jaxmodal/elements/__init__.py   re-exports the public names below
-src/jaxmodal/elements/registry.py   gauss, Element, ELEMENTS (hex8, hex20, hex27); NumPy only
+src/jaxmodal/elements/registry.py   gauss, Element, ELEMENTS (hex8, hex20, hex27), det3; NumPy only
 src/jaxmodal/elements/kernels.py    jacobian, gradients, bmatrix, stiffness, mass, lumped_mass, the two forms; pure jnp
 src/jaxmodal/elements/check.py      check_elements (host NumPy)
 tests/helpers.py                    tensor() moved here from tests/test_materials.py (shared)
@@ -54,7 +54,7 @@ class Element:
     exponents: np.ndarray  # (n, 3) monomial space
     coef: np.ndarray       # (n, n) inverse Vandermonde: N(xi) = monomials(xi) @ coef
     order: int             # Gauss points per direction
-    lumping: str | None    # "rowsum", "hrz", or None (lumped mass unsupported)
+    lumping: str           # "rowsum" or "hrz"
     faces: tuple           # 6 tuples of node indices, see below
     points: np.ndarray     # (nq, 3) quadrature points
     weights: np.ndarray    # (nq,)
@@ -64,6 +64,8 @@ class Element:
     def grad(self, xi) -> (..., n, 3)
 
 ELEMENTS = {"hex8": ..., "hex20": ..., "hex27": ...}
+
+det3(J) -> det (...)   # explicit 3x3 determinant; indexing and arithmetic only, so it works on NumPy and jax arrays
 ```
 
 - **Shape functions** come from a monomial space $\{\xi^p\eta^q\zeta^r : (p, q, r) \in E\}$ and the node coordinates: with $V_{bk} = m_k(\xi_b)$, $N(\xi) = m(\xi)\,V^{-1}$, so $N_a(\xi_b) = \delta_{ab}$ by construction. Derivatives differentiate the monomials ($p\,\xi^{\max(p-1, 0)}$, no $0 \cdot \infty$ at $\xi = 0$).
@@ -90,7 +92,7 @@ mass_form(name, X, rho, u, w) -> u^T Me w (...)
 
 With $J_{ij} = \partial x_i/\partial\xi_j = \sum_a X_{ai}\,\partial N_a/\partial\xi_j$ at each quadrature point $q$:
 
-- **`jacobian`:** $\det J = a\cdot(b \times c)$ and $J^{-1} = \mathrm{cof}(J)^\top/\det J$ in closed form (rows $a, b, c$ of $J$; cofactors from cross products), and $\mathrm{wdet}_q = w_q\det J_q$. Polynomial in $J$, so `grad` is defined everywhere; no sign check (traceable; `check_elements` guards). $(J^{-1}, \mathrm{wdet})$ is the Jacobian-level data (10 floats per point) that PR 5's on-the-fly mode stores ("invJ·detJ per quadrature point"); it rebuilds $G$ with `gradients`.
+- **`jacobian`:** $\det J$ = `det3(J)` $= a\cdot(b \times c)$ and $J^{-1} = \mathrm{cof}(J)^\top/\det J$ in closed form (rows $a, b, c$ of $J$; the columns of $J^{-1}$ are $(b \times c, c \times a, a \times b)/\det J$), and $\mathrm{wdet}_q = w_q\det J_q$. $\det J$ and $\mathrm{cof}(J)$ are polynomial in $J$; $J^{-1}$ (and $G$, $K_e$ and their gradients) is finite only for $\det J \ne 0$, which `check_elements` guarantees ($\det J > 0$). No sign check here (traceable). $(J^{-1}, \mathrm{wdet})$ is the Jacobian-level data (10 floats per point) that PR 5's on-the-fly mode stores ("invJ·detJ per quadrature point"); it rebuilds $G$ with `gradients`.
 - **`gradients`:** $G_{qa} = J_q^{-\top}\nabla_\xi N_a(\xi_q)$, i.e. `einsum` of the tabulated `dN` with `invJ`.
 - **`bmatrix`:** $\varepsilon_v = \sum_{i,j} S_{vij}\,\partial u_i/\partial x_j$ with the constant selector $S_{vij} = 1$ if $\{i, j\}$ is the Voigt pair $v$ (both orderings), else 0, so shear rows give $\gamma_{ij} = u_{i,j} + u_{j,i}$. $B = \texttt{einsum}(S, G)$ reshaped with node axis before component axis (DOF $3a + i$).
 - **`stiffness`:** $K_e = \sum_q \mathrm{wdet}_q\,B_q^\top C B_q$ (one 4-operand `einsum`), then $\tfrac12(K_e + K_e^\top)$, exactly symmetric (PR 5 stores one triangle; SciPy references stay symmetric). Temporaries are 6–8× the output (measured facts); `docs/elements.md` states this for PR 5's chunking and estimator.
@@ -99,7 +101,6 @@ With $J_{ij} = \partial x_i/\partial\xi_j = \sum_a X_{ai}\,\partial N_a/\partial
   - Row-sum (hex8, hex27): $\bar m_a = \rho\sum_q \mathrm{wdet}_q N_{qa}$ ($= \sum_b \rho\,m_{ab}$ by partition of unity).
   - HRZ (hex20): $\bar m_a = \rho V\,m_{aa}/\sum_b m_{bb}$ with $V = \sum_q \mathrm{wdet}_q$.
   - Both give $\sum_a \bar m_a = \rho V$.
-  - `lumping=None` raises `ValueError` at trace time (the name is static). No PR 3 type has it; PR 16's solid-shell will.
 - **Forms** (the Principle 5 sensitivity kernels), without forming $K_e$, $M_e$ or $B$: with $U$ = `u` reshaped to $(n, 3)$, $H_q = U^\top G_q$ ($\nabla u$), $\varepsilon_q = \texttt{einsum}(S, H_q)$:
   - `stiffness_form` $= \sum_q \mathrm{wdet}_q\,\varepsilon_q(u)^\top C\,\varepsilon_q(w)$.
   - `mass_form` $= \rho\sum_q \mathrm{wdet}_q\,(N_q U)\cdot(N_q W)$.
@@ -111,11 +112,11 @@ With $J_{ij} = \partial x_i/\partial\xi_j = \sum_a X_{ai}\,\partial N_a/\partial
 check_elements(mesh, mass="consistent", chunk=65536)    # raises ValueError
 ```
 
-- Per block, in chunks of `chunk` elements (points gathered per chunk, never a full `(n_el, n, 3)` array), it computes in NumPy fp64 (independent of the x64 flag) only $J = $ `einsum(dN, X)`, $\det J$ (`np.linalg.det`), and for `mass="lumped"` with row-sum types, $\bar m = (w \det J)\,N$. It raises naming the global element index (`mesh.offsets[t]` + chunk start + row) and the type for the first element with
+- Per block, in chunks of `chunk` elements (points gathered per chunk, never a full `(n_el, n, 3)` array), it computes in NumPy fp64 (independent of the x64 flag) only $J = $ `np.einsum(..., optimize=True)` (the default `optimize=False` is 30× slower), $\det J$ = `det3(J)` (shared with `jacobian`; `np.linalg.det` is 25× slower), and for `mass="lumped"` with row-sum types, $\bar m = (w \det J)\,N$. It raises naming the global element index (`mesh.offsets[t]` + chunk start + row) and the type for the first element with
   - $\det J_q \le 0$ at any quadrature point (the Jacobian check), or
-  - with `mass="lumped"`: a row-sum lumped nodal mass $\le 0$ ($\rho = 1$; the sign does not depend on $\rho > 0$). HRZ masses are positive whenever $\det J > 0$, so they need no extra check. A type with `lumping=None` raises naming the block.
+  - with `mass="lumped"`: a row-sum lumped nodal mass $\le 0$ ($\rho = 1$; the sign does not depend on $\rho > 0$). HRZ masses are positive whenever $\det J > 0$, so they need no extra check.
 - `mass` other than `"consistent"`/`"lumped"` raises.
-- Eager NumPy, not jit: no device round trip, no recompile for the last chunk; 0.46 s per 1M hex20 (≈ 5 s at 10M).
+- Eager NumPy, not jit: no device round trip, no recompile for the last chunk; ≈ 1.1 s per 1M hex20 (≈ 11 s at 10M), per-chunk temporaries ≈ 42 MB (X) and 127 MB (J) at hex27.
 - Only quadrature points are checked (the roadmap's "Jacobian check at quadrature points"); corner orientation is PR 1's `corner_jacobians`. Voxel meshes are not special-cased.
 - **Callers:** the roadmap's "Lumping raises an error when any lumped nodal mass is ≤ 0" is implemented here, not in the traceable `lumped_mass` (traced values can't raise). PR 4's assembly calls `check_elements(mesh, mass)` before assembling, and PR 9's `solve_modes` calls it next to `check_materials` before tracing. The ROADMAP PR 3 test line, PR 4 Contents and PR 9 Contents are updated to say so.
 
@@ -128,7 +129,7 @@ References are independent of the implementation: hand-typed VTK reference coord
 1. **Quadrature:** `gauss(n)` integrates $\xi^p\eta^q\zeta^r$ exactly (1e-14) for $p, q, r \le 2n - 1$, $n = 2, 3$; weights sum to 8.
 2. **Shape functions vs hand-typed formulas** at 50 random points per type: $N$ and $\partial N/\partial\xi$ to 1e-14. `Element.nodes` equals the hand-typed coordinates. Tabulated `N`/`dN` equal `shape`/`grad` at `points`.
 3. **Partition of unity and completeness** at random points: $\sum_a N_a = 1$, $\sum_a \nabla N_a = 0$; linear completeness $\sum_a \xi_a N_a = \xi$, $\sum_a \xi_a \otimes \nabla N_a = I$; quadratic completeness ($\xi^2$, $\xi\eta$) for hex20/hex27. All to 1e-14.
-4. **NumPy reference:** `jacobian`, `gradients`, `stiffness`, `mass` and `lumped_mass` on 5 distorted elements per type match the loop reference to 1e-12. The closed-form `jacobian` also matches `np.linalg.inv`/`det` on random $J$ to 1e-14.
+4. **NumPy reference:** `jacobian`, `gradients`, `stiffness`, `mass` and `lumped_mass` on 5 distorted elements per type match the loop reference to 1e-12. The closed-form `jacobian` also matches `np.linalg.inv` (1e-12) and `np.linalg.det` (1e-14) on well-conditioned random $J = I + 0.3\,\mathcal N(0, 1)$, and `check.py`'s $\det J$ equals `wdet / w` from `jacobian` on the distorted elements to 1e-14 (no drift between the host and traced paths).
 5. **Patch energy (independent of Voigt):** for an affine $u = Hx$ with random $H$ on distorted elements (rotated orthotropic $C$), $u^\top K_e u = V\,\varepsilon_{ij}C_{ijkl}\varepsilon_{kl}$ with $\varepsilon = \mathrm{sym}(H)$ and $V = \sum_q \mathrm{wdet}_q$, to 1e-12, every type. Catches a tensor-shear factor, a row-order mismatch with $C$, a wrong selector and a transposed $J$.
 6. **Zero modes:** on 20 distorted elements per type and per material, the six smallest $|\lambda|$ of $K_e$ are < 1e-10·$\lambda_\max$ and the 7th > 1e-6·$\lambda_\max$ (`np.linalg.eigvalsh`). Also $\|K_e R\|_\infty \le 10^{-12}\|K_e\|_\infty\|R\|_\infty$ for the 6 analytic rigid modes.
 7. **Lumping:**
@@ -156,12 +157,13 @@ References are independent of the implementation: hand-typed VTK reference coord
   - PR 3 test line: the lumped-mass raise is `check_elements(mass="lumped")`, a host check.
   - PR 4 Contents: assembly calls `check_elements(mesh, mass)`.
   - PR 9 Contents: `solve_modes` calls `check_materials` and `check_elements` before tracing.
-  - Status line: "PR 3 merged: element type = static name, per-type tables embedded as constants; element DOF order $3a + i$; `check_elements` is the host Jacobian/lumping check (PR 4, PR 9 call it); `jacobian` gives PR 5's invJ·wdet; `lumping=None` lets PR 16 refuse lumped mass."
+  - PR 5 Contents: "precomputed invJ and w·detJ per quadrature point" (10 floats, from `jacobian`).
+  - Status line: "PR 3 merged: element type = static name, per-type tables embedded as constants; element DOF order $3a + i$; `check_elements` is the host Jacobian/lumping check (PR 4, PR 9 call it); `jacobian` gives PR 5's invJ and w·detJ."
 
 ## Not covered
 
 - Reduced integration (never); wedges/tets (later, one registry entry each).
-- Solid-shell (PR 16): ANS/EAS with condensation and through-ply quadrature are not $B^\top C B$ with a standard $B$, so its registry entry will carry its own kernel callables (or `stiffness` dispatches on the name) and `lumping=None`. Stress recovery (PR 17) adds a per-type recovery callable. Neither field is added now.
+- Solid-shell (PR 16): ANS/EAS with condensation and through-ply quadrature are not $B^\top C B$ with a standard $B$, so its registry entry will carry its own kernel callables (or `stiffness` dispatches on the name). PR 16 also adds `lumping=None` with its raise in `lumped_mass` (trace time, the name is static) and in `check_elements`, and their tests. Stress recovery (PR 17) adds a per-type recovery callable. Neither field is added now.
 - Element-wise $M_e$ Cholesky for probes (PR 14, lives in `elements/`).
 - The per-element scalings $s_K$, $s_M$ (PR 5; $K_e$ is linear in $C$, $M_e$ in $\rho$, so the caller multiplies).
 - Assembly and the DOF map (PR 4).
