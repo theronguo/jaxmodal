@@ -18,14 +18,21 @@ def dof_mask(mesh, bcs):
     return free.ravel()
 
 
+def _check_mask(A, mask):
+    if not (isinstance(mask, np.ndarray) and mask.dtype == bool and mask.shape == (A.shape[0],)):
+        raise ValueError(f"mask must be a bool ({A.shape[0]},) np.ndarray")
+
+
 def masked(A, mask):
     """D A D with D = diag(mask): constrained rows and columns zero, free block A_ff."""
+    _check_mask(A, mask)
     D = sp.diags_array(mask.astype(float))
     return (D @ A @ D).tocsr()
 
 
 def a_p(A, mask, s=None):
     """A_P = D A D + s (I - D); default s = mean of diag(A) over free DOFs (for SPD A)."""
+    _check_mask(A, mask)
     if not mask.any():
         raise ValueError("mask has no free DOF")
     if s is None:

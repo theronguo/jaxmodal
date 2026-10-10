@@ -9,11 +9,9 @@ import pytest
 from jaxmodal.elements import ELEMENTS, check_elements
 from jaxmodal.mesh import box_mesh, voxel_mesh
 
-SHAPE, SPACING, ORIGIN = (
-    (3, 2, 4),
-    (0.5, 0.25, 0.75),
-    (1.0, -0.5, 0.25),
-)  # dyadic: coordinates are exact
+SHAPE = (3, 2, 4)
+SPACING = (0.5, 0.25, 0.75)  # dyadic: coordinates are exact
+ORIGIN = (1.0, -0.5, 0.25)
 
 
 def assert_faces(m, shape):

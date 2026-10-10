@@ -47,9 +47,9 @@ def check_grid(shape, spacing, origin):
         )
 
     if not ok(shape, numbers.Integral) or min(shape) <= 0:
-        raise ValueError(f"voxel shape must be 3 positive ints, got {shape!r}")
+        raise ValueError(f"shape must be 3 positive ints, got {shape!r}")
     if not ok(spacing, numbers.Real) or not ok(origin, numbers.Real) or min(spacing) <= 0:
-        raise ValueError("voxel spacing/origin must be 3 finite reals, spacing > 0")
+        raise ValueError("spacing/origin must be 3 finite reals, spacing > 0")
 
 
 def face_sets(ijk, top):

@@ -30,6 +30,8 @@ def assemble(mesh, materials, orientations=None, mass="consistent", nodal_mass=N
 
     nodal_mass: None or (n_nodes,) non-negative point masses, added to the 3 DOFs of each node.
     """
+    if chunk < 1:
+        raise ValueError(f"chunk must be >= 1, got {chunk}")
     if not jax.config.jax_enable_x64:
         raise ValueError("assemble needs float64: call jaxmodal.config.enable_x64() first")
     index, pairs = phases(mesh)
@@ -39,10 +41,11 @@ def assemble(mesh, materials, orientations=None, mass="consistent", nodal_mass=N
     n_dof = 3 * n_nodes
     if nodal_mass is not None:
         nodal_mass = np.asarray(nodal_mass, float)
-        if nodal_mass.shape != (n_nodes,) or not np.isfinite(nodal_mass).all():
-            raise ValueError(f"nodal_mass must be a finite ({n_nodes},) array")
-        if (nodal_mass < 0).any():
-            raise ValueError("nodal_mass must be non-negative")
+        if (
+            nodal_mass.shape != (n_nodes,)
+            or not (np.isfinite(nodal_mass) & (nodal_mass >= 0)).all()
+        ):
+            raise ValueError(f"nodal_mass must be a finite, non-negative ({n_nodes},) array")
     C, rho = (np.asarray(a) for a in phase_table(pairs, materials, orientations))
     dofs = element_dofs(mesh)
 

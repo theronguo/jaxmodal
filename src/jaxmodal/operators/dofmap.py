@@ -11,7 +11,7 @@ def check_int32(**sizes):
 
 
 def element_dofs(mesh):
-    """type -> (n_el_type, 3n) int32 global DOFs 3 conn[:, a] + i, node-major as in PR 3."""
+    """type -> (n_el_type, 3n) int32 global DOFs 3 conn[:, a] + i (node-major, as the kernels)."""
     sizes = {f"{t}_dofs": 3 * c.size for t, c in mesh.blocks.items()}
     check_int32(n_dof=3 * len(mesh.points), **sizes)
     return {

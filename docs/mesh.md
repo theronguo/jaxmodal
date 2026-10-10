@@ -132,7 +132,7 @@ mesh = voxel_mesh(shape=(nx, ny, nz), spacing=(hx, hy, hz), origin=(ox, oy, oz),
 mesh = box_mesh(shape=(nx, ny, nz), spacing=(hx, hy, hz), origin=(ox, oy, oz), type="hex20")
 ```
 
-- A structured block of $n_x 	imes n_y 	imes n_z$ elements of type `hex8`, `hex20` or `hex27`, with shared nodes in VTK order. It is the test mesh for PRs 4, 5, 7 and 8 (`voxel_mesh` is hex8 only).
+- A structured block of $n_x \times n_y \times n_z$ elements of type `hex8`, `hex20` or `hex27`, with shared nodes in VTK order. It is the test mesh for PRs 4, 5, 7 and 8 (`voxel_mesh` is hex8 only).
 - **Nodes** are the used points of the half-spacing grid $(2n_x+1)\times(2n_y+1)\times(2n_z+1)$: hex8 uses even indices, hex20 indices with at most one odd component, hex27 all. Position $o + h \odot (i, j, k)/2$; nodes and elements in grid order ($x$ fastest), like `voxel_mesh`. Connectivity is the grid index of $2\,\text{cell} + \texttt{REFERENCE\_NODES}[:n] + 1$, one code path for all types.
 - **Sets:** the six face node sets as for voxel meshes; no element sets; labels 0; no `voxel` metadata. The hex8 box equals the unmasked `voxel_mesh` on points, connectivity and node sets.
 - **Validation:** `shape`, `spacing` and `origin` as for `voxel_mesh` (`check_grid`); an unknown `type` raises.

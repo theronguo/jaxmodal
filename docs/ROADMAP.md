@@ -43,7 +43,7 @@ Status: final. Review rounds 1–30 incorporated (round 30: all 5 reviewers sati
    - Voigt order `[11, 22, 33, 23, 13, 12]` with engineering shear strains.
    - fp64 by default, enabled through an explicit config call (no import side effects; PR 0 test: importing jaxmodal leaves `jax_enable_x64` unchanged).
    - Loops that are differentiated (operator chunk loops) use static trip counts (`scan`, or `fori_loop` with Python-int bounds); traced bounds appear only in solvers, which are never differentiated.
-   - Index arrays passed to JAX are int32. Host-side NumPy topology is int64 until PR 4's overflow asserts and cast.
+   - Index arrays passed to JAX are int32. Host-side NumPy topology is int64; it is cast through `check_int32` (PR 4) before going to the device.
    - Iteration vectors, returned modes, Gram matrices and Rayleigh–Ritz are always fp64. fp32 is allowed only inside preconditioners and for the device-side deflation basis. Returned locked modes come from an fp64 host copy.
    - m always denotes the LOBPCG block size (nev plus guard vectors).
 

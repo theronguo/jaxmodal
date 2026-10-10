@@ -4,10 +4,12 @@
 
 ```python
 from jaxmodal.mesh import box_mesh
-from jaxmodal.operators import a_p, assemble, dof_mask, element_dofs, masked
+from jaxmodal.operators import a_p, assemble, dof_mask, masked
 
 mesh = box_mesh((4, 2, 2), spacing=(0.25, 0.25, 0.25), type="hex20")
-K, M = assemble(mesh, materials)  # scipy.sparse.csr_array, float64, int32 indices
+K, M = assemble(
+    mesh, materials
+)  # materials as in docs/materials.md; scipy.sparse.csr_array, float64, int32 indices
 free = dof_mask(mesh, {"xmin": "xyz"})  # (n_dof,) bool, True = free
 Km, Mm = masked(K, free), masked(M, free)  # eigen-operator form, constrained rows/cols zero
 AP = a_p(K + sigma * M, free)  # SPD reference for preconditioners and linear solves
@@ -37,7 +39,7 @@ K, M = assemble(mesh, materials, orientations=None, mass="consistent", nodal_mas
 
 **Cost** (M3 Max, fp64, isotropic $C$, warm):
 
-| mesh | DOF | nonzeros of K | K and M | peak RSS |
+| mesh | DOF | nonzeros of K | K and M (warm) | whole-process peak RSS |
 |---|---|---|---|---|
 | hex8 $30^3$ | 89k | 6.8M | 0.55 s | 1.3 GB |
 | hex20 $15^3$ | 47k | 7.4M | 0.47 s | 1.9 GB |
@@ -64,7 +66,7 @@ which puts the scalar $s$ on the constrained diagonal:
 `tests/test_operators.py`:
 
 - **Assembly** equals a dense Python loop (explicit DOF lists, per-element `rotate(material, orientation)`, no `phases`/`element_dofs`) to 1e-14 on a distorted two-block mesh: hex20 and hex8 glued at a shared face, with two materials (one orthotropic, different $\rho$) and two orientations mixed in each block, for `chunk=7` and `chunk=4096`, consistent and lumped.
-- **Patch test:** on a $3^3$ box per type, rotated orthotropic $C$, interior corner nodes moved per component by $\le 15\%$ of the edge, all boundary nodes prescribed $u = Ax + b$, the interior solved with `spsolve`. The stress is constant at every quadrature point to 1e-10 relative to $\|\sigma\|_\infty$; measured 1.2e-15 (hex8), 1.0e-14 (hex20), 1.3e-14 (hex27) for straight edges (non-corner nodes on the trilinear map of the corners), and 6.4e-15 (hex20), 1.6e-14 (hex27) for curved elements (non-corner interior nodes additionally offset by $\le 5\%$ per component).
+- **Patch test:** on a $3^3$ box per type, rotated orthotropic $C$, interior corner nodes moved per component by $\le 15\%$ of the edge, all boundary nodes prescribed $u = Ax + b$, the interior solved with `spsolve`. The stress is constant at every quadrature point to 1e-10 relative to $\|\sigma\|_\infty$; measured 1.2e-15 (hex8), 1.0e-14 (hex20), 1.3e-14 (hex27) for straight edges (non-corner nodes on the trilinear map of the corners), and 6.4e-15 (hex20), 1.6e-14 (hex27) for curved elements (non-corner interior nodes additionally offset per component by $\le 5\%$ of the edge).
 - **Rigid translation mass:** $t_x^\top M t_x = \rho V + \sum m_n$ with the analytic volume, consistent and lumped, straight and curved; $t_x^\top M t_y = 0$.
 - **Masks and $A_P$:** expected constrained DOFs from node coordinates; exact free blocks; $A_P$ SPD (Cholesky), constrained diagonal $= s$, exact scaling by $2^{20}$, all-free mask gives $A$.
 - **Nodal masses** add exactly; `element_dofs` calls `check_int32` with every block's size.
