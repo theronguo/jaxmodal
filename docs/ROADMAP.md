@@ -13,7 +13,7 @@ Large-scale 3D linear modal analysis (Kv = λMv) in JAX. The solver uses matrix-
 
 Package name: `jaxmodal`. License: MIT.
 
-Status: final. Review rounds 1–30 incorporated (round 30: all 5 reviewers satisfied). Implementation proceeds PR by PR, each with its own reviewed plan in `docs/plans/`. PR 0 merged: jax pinned at ≥ 0.11.2; the persistent cache and CPU donation work; the `pymetis` extra is deferred to PR 19 (minimum 2025.1.1). PR 1 merged: own flat-`.inp` reader, Gmsh 4.1 ASCII only, VTU is the only written format; host topology is int64 until PR 4. PR 2 merged: phases are (material, orientation) label pairs; `phases` (host) is split from the traceable `phase_table`, so PR 21 can differentiate it; PR 6 builds one reference Ke per phase. PR 3 merged: the element type is a static name and per-type tables are embedded constants (per-element arrays stay arguments); element DOF order is $3a + i$; `check_elements` is the host Jacobian/lumping check (PR 4 and PR 9 call it); `jacobian` gives PR 5's invJ and w·detJ.
+Status: final. Review rounds 1–30 incorporated (round 30: all 5 reviewers satisfied). Implementation proceeds PR by PR, each with its own reviewed plan in `docs/plans/`. PR 0 merged: jax pinned at ≥ 0.11.2; the persistent cache and CPU donation work; the `pymetis` extra is deferred to PR 19 (minimum 2025.1.1). PR 1 merged: own flat-`.inp` reader, Gmsh 4.1 ASCII only, VTU is the only written format; host topology is int64 until PR 4's `check_int32` and cast. PR 2 merged: phases are (material, orientation) label pairs; `phases` (host) is split from the traceable `phase_table`, so PR 21 can differentiate it; PR 6 builds one reference Ke per phase. PR 3 merged: the element type is a static name and per-type tables are embedded constants (per-element arrays stay arguments); element DOF order is $3a + i$; `check_elements` is the host Jacobian/lumping check (PR 4 and PR 9 call it); `jacobian` gives PR 5's invJ and w·detJ. PR 4 merged: DOF $3n + i$; BCs are `{node_set: "xyz"}` (parsed only by `dof_mask`; PR 9 takes the same dict); masks are bool, True = free; `nodal_mass` is `(n_nodes,)`, isotropic (×3 per DOF); `assemble` returns symmetrized SciPy CSR with int32 indices (oracle, x64 only, ≤ ~10⁵ DOF); `box_mesh` (hex8/hex20/hex27) and `voxel_mesh` have face sets `xmin`…`zmax`; later PRs cast their own device index arrays through `check_int32`; `a_p` takes an explicit `s` for indefinite $K - \sigma M$.
 
 ## Principles
 
@@ -43,7 +43,7 @@ Status: final. Review rounds 1–30 incorporated (round 30: all 5 reviewers sati
    - Voigt order `[11, 22, 33, 23, 13, 12]` with engineering shear strains.
    - fp64 by default, enabled through an explicit config call (no import side effects; PR 0 test: importing jaxmodal leaves `jax_enable_x64` unchanged).
    - Loops that are differentiated (operator chunk loops) use static trip counts (`scan`, or `fori_loop` with Python-int bounds); traced bounds appear only in solvers, which are never differentiated.
-   - Index arrays passed to JAX are int32. Host-side NumPy topology is int64 until PR 4's overflow asserts and cast.
+   - Index arrays passed to JAX are int32. Host-side NumPy topology is int64; it is cast through `check_int32` (PR 4) before going to the device.
    - Iteration vectors, returned modes, Gram matrices and Rayleigh–Ritz are always fp64. fp32 is allowed only inside preconditioners and for the device-side deflation basis. Returned locked modes come from an fp64 host copy.
    - m always denotes the LOBPCG block size (nev plus guard vectors).
 
@@ -210,7 +210,7 @@ All sizes are fp64; GB = 10⁹ bytes.
 src/jaxmodal/
   config.py    dtype / x64 setup
   memory.py    memory estimators
-  mesh/        data model, io, voxel generator, reordering, partition
+  mesh/        data model, io, voxel and box generators, reordering, partition
   materials/   anisotropic C, Bond rotations, orientations
   elements/    registry, quadrature, shape functions, hex8/20/27, solid-shell, element-wise Me Cholesky (for probes)
   operators/   dofmap, assembled (oracle), matrix-free, voxel stencil, constraints (masking, A_P, rigid modes, deflation)
@@ -315,7 +315,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. E
 ### PR 5: Matrix-free unstructured operator
 - Contents:
   - Two modes: stored Ke, and on-the-fly computation from precomputed invJ and w·detJ per quadrature point (10 floats, from PR 3's `jacobian`).
-  - Optional per-element stiffness and mass scaling arrays s_K and s_M, so density design on unstructured meshes stays possible.
+  - Optional per-element stiffness and mass scaling arrays s_K and s_M, so density design on unstructured meshes stays possible; add s_K, s_M to PR 4's `assemble` (the oracle).
   - Chunked, block-native apply.
   - Scatter (`segment_sum`) vs chunked inverse-map gather, benchmarked per backend.
   - Consistent and lumped `apply_M`; `diag_K`, `diag_M`, nodal masses.
@@ -471,6 +471,7 @@ Each PR ships its docs (with LaTeX math) in `docs/`, listed below as **Docs**. E
   - Hierarchy exported to block-ELL, with a V-cycle on the device. Zero tentative-prolongator columns (aggregates of fully constrained DOFs) are dropped, so every coarse matrix stays SPD and the coarsest dense Cholesky succeeds.
   - Combined with PR 12; pure hex8 meshes skip p-MG and run AMG on the assembled A_P (solid-shell meshes do the same from PR 18). `solve_modes` dispatches unstructured meshes to this preconditioner.
   - Memory ordering: setup → free the assembled A → allocate LOBPCG.
+  - PR 4's `assemble` is the oracle only (≈ 120 GB at 10M hex8 DOF); the production hex8 A_P needs its own chunked assembler into a precomputed CSR pattern (≈ 1 GB per matrix per 1M hex8 DOF).
   - Option to reuse aggregates and recompute only the values (test: on a perturbed-density model, PCG iterations within 20% of a fresh setup).
   - Memory estimator.
 - Docs: `docs/preconditioners.md`.

@@ -11,7 +11,7 @@ Ke = stiffness("hex20", X, C)  # (n_el, 60, 60)
 Me = mass("hex20", X, rho)  # (n_el, 60, 60)
 ```
 
-- **Registry** (`registry.py`): NumPy only, built at import.
+- **Registry** (`registry.py`): NumPy only, built at import. It is built from the reference node tables in `jaxmodal.mesh.model` (`REFERENCE_NODES`, `EDGES`, `FACE_CORNERS`), so `jaxmodal.mesh` stays free of JAX.
 - **Kernels** (`kernels.py`): pure `jax.numpy` functions of $(X_e, C_e, \rho_e)$. `jit`, `vmap` and `grad` work through them (Principle 5).
 - **Check** (`check.py`): host NumPy. It raises on invalid elements.
 

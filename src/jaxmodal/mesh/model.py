@@ -8,6 +8,23 @@ import numpy as np
 TYPES = ("hex8", "hex20", "hex27")  # canonical block order
 NODES = {"hex8": 8, "hex20": 20, "hex27": 27}
 
+# Reference hex [-1, 1]^3 in VTK order: corners, edge midpoints, face centres, centre.
+CORNERS = np.array(
+    [[-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],
+     [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]],
+    float,
+)  # fmt: skip
+EDGES = ((0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4),
+         (0, 4), (1, 5), (2, 6), (3, 7))  # fmt: skip
+# Corners of the faces -xi, +xi, -eta, +eta, -zeta, +zeta, counter-clockwise seen from outside.
+FACE_CORNERS = ((0, 4, 7, 3), (1, 2, 6, 5), (0, 1, 5, 4), (3, 7, 6, 2), (0, 3, 2, 1), (4, 5, 6, 7))
+REFERENCE_NODES = np.vstack(
+    [CORNERS]
+    + [[(CORNERS[a] + CORNERS[b]) / 2 for a, b in EDGES]]
+    + [[CORNERS[list(f)].mean(0) for f in FACE_CORNERS]]
+    + [[[0.0, 0.0, 0.0]]]
+)  # (27, 3)
+
 # Corner pairs (minus, plus) along each reference axis, VTK hex order.
 PAIRS = (
     ((0, 1), (3, 2), (4, 5), (7, 6)),
@@ -30,9 +47,15 @@ def check_grid(shape, spacing, origin):
         )
 
     if not ok(shape, numbers.Integral) or min(shape) <= 0:
-        raise ValueError(f"voxel shape must be 3 positive ints, got {shape!r}")
+        raise ValueError(f"shape must be 3 positive ints, got {shape!r}")
     if not ok(spacing, numbers.Real) or not ok(origin, numbers.Real) or min(spacing) <= 0:
-        raise ValueError("voxel spacing/origin must be 3 finite reals, spacing > 0")
+        raise ValueError("spacing/origin must be 3 finite reals, spacing > 0")
+
+
+def face_sets(d, idx, top):
+    """Node sets "<axis>min", "<axis>max" of axis d: nodes whose integer grid index is 0 or top."""
+    a = "xyz"[d]
+    return {f"{a}min": np.flatnonzero(idx == 0), f"{a}max": np.flatnonzero(idx == top)}
 
 
 def _check_bijection(name, m, size, n):

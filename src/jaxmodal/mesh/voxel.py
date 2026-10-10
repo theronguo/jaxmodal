@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from .model import Mesh, Voxel, check_grid
+from .model import Mesh, Voxel, check_grid, face_sets
 
 
 def voxel_mesh(shape, spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0), mask=None):
@@ -38,13 +38,14 @@ def voxel_mesh(shape, spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0), mask=None
     element_map[active] = np.arange(n_el)
 
     g = np.flatnonzero(used)
-    points = np.empty((len(g), 3))
-    for d, idx in enumerate((g % sy, g // sy % (ny + 1), g // sz)):
+    points, sets = np.empty((len(g), 3)), {}
+    for d, idx in enumerate((g % sy, g // sy % (ny + 1), g // sz)):  # per axis: bounded temporaries
         points[:, d] = origin[d] + spacing[d] * idx
+        sets |= face_sets(d, idx, shape[d])
     return Mesh(
         points=points,
         blocks={"hex8": conn},
-        node_sets={},
+        node_sets=sets,
         element_sets={},
         material=np.zeros(n_el, np.int64),
         orientation=np.zeros(n_el, np.int64),

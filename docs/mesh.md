@@ -1,6 +1,6 @@
 # Mesh
 
-`jaxmodal.mesh` holds the host-side mesh: a NumPy data model, file readers, a VTU writer, a voxel generator and corner Jacobians. There is no JAX here; PR 4 casts topology to int32 for the device.
+`jaxmodal.mesh` holds the host-side mesh: a NumPy data model, file readers, a VTU writer, voxel and box generators and corner Jacobians. There is no JAX here (a test imports it in a fresh interpreter and checks that `jax` is not loaded); `element_dofs` casts topology to int32 for the device (`docs/operators.md`).
 
 ```python
 from jaxmodal.mesh import read, write, voxel_mesh, corner_jacobians
@@ -51,6 +51,8 @@ All types use VTK ordering on the reference cube $[-1, 1]^3$:
 | 8–19 (hex20, hex27) | edge midpoints (0,1), (1,2), (2,3), (3,0), (4,5), (5,6), (6,7), (7,4), (0,4), (1,5), (2,6), (3,7) |
 | 20–25 (hex27) | face centres $-\xi$, $+\xi$, $-\eta$, $+\eta$, $-\zeta$, $+\zeta$ |
 | 26 (hex27) | centre |
+
+`mesh/model.py` holds these tables as `CORNERS` (8, 3), `EDGES` (the 12 corner pairs above), `FACE_CORNERS` (corners of each face, counter-clockwise seen from outside) and `REFERENCE_NODES` (27, 3); `jaxmodal.elements` builds its registry from them, and `box_mesh` builds its connectivity from them.
 
 Abaqus C3D20 order equals VTK hex20. meshio permutes Gmsh hex20/hex27 to VTK. No other permutation is needed; one would go into `mesh/io.py` if a later format needs it.
 
@@ -104,7 +106,7 @@ mesh = voxel_mesh(shape=(nx, ny, nz), spacing=(hx, hy, hz), origin=(ox, oy, oz),
 ```
 
 - **Grid:** cell $(i, j, k)$ has flat index $i + n_x(j + n_y k)$ ($x$ fastest). Grid node $(i, j, k)$ has flat index $i + (n_x+1)\bigl(j + (n_y+1)k\bigr)$ and position $x_{ijk} = o + h \odot (i, j, k)$.
-- **Mask:** `mask[i, j, k]` is a bool array of shape `shape` selecting active cells; `None` means the full grid. Active cells become hex8 elements in grid order, and used nodes are kept in grid order. Labels are 0 and there are no sets.
+- **Mask:** `mask[i, j, k]` is a bool array of shape `shape` selecting active cells; `None` means the full grid. Active cells become hex8 elements in grid order, and used nodes are kept in grid order. Labels are 0 and there are no element sets.
 - **`mesh.voxel`** holds `shape`, `spacing`, `origin`, `node_map` (grid node → mesh node, −1 if dropped) and `element_map` (grid cell → mesh element, −1 if inactive). `Mesh` validates that a voxel mesh has exactly one hex8 block and that both maps are bijections onto the mesh; PR 6 checks that they agree with the geometry.
 - **Inverse maps** (valid after renumbering):
 
@@ -114,11 +116,25 @@ mesh = voxel_mesh(shape=(nx, ny, nz), spacing=(hx, hy, hz), origin=(ox, oy, oz),
   mask = (mesh.voxel.element_map >= 0).reshape(shape, order="F")
   ```
 
-- **Boundary sets:** add them with `replace`, e.g. a clamp at $x = o_x$:
+- **Face sets:** node sets `"xmin"`, `"xmax"`, `"ymin"`, `"ymax"`, `"zmin"`, `"zmax"` hold the used nodes on the six bounding grid planes (from the integer grid index, so exact), e.g. `bcs = {"xmin": "xyz"}` clamps $x = o_x$. On a masked mesh these are the bounding planes of the grid, not the boundary of the occupied region: a set may be nearly or fully empty (e.g. a voxelized sphere), and then a BC on it constrains little or nothing.
+- **Other boundary sets:** add them with `replace`, keeping the face sets:
 
   ```python
   clamp = np.flatnonzero(np.isclose(mesh.points[:, 0], origin[0]))
-  mesh = dataclasses.replace(mesh, node_sets={"clamp": clamp})
+  mesh = dataclasses.replace(mesh, node_sets={**mesh.node_sets, "clamp": clamp})
   ```
 
-- **Cost** (M-series laptop): $88^3$ cells (2.1M DOFs) build in 0.04 s and `corner_jacobians` takes 0.09 s. $320^3$ (99M DOFs) builds in 1.8 s and `corner_jacobians` takes 3.8 s (rows in chunks of $2^{20}$); peak memory is 7.9 GB.
+- **Cost** (M-series laptop): $88^3$ cells (2.1M DOFs) build in 0.04 s and `corner_jacobians` takes 0.09 s. $320^3$ (99M DOFs) builds in 2.0 s and `corner_jacobians` takes 4.0 s (rows in chunks of $2^{20}$); peak memory is 8.5 GB. Coordinates and face sets are computed one axis at a time to keep temporaries bounded.
+
+## Box meshes
+
+```python
+mesh = box_mesh(shape=(nx, ny, nz), spacing=(hx, hy, hz), origin=(ox, oy, oz), type="hex20")
+```
+
+- A structured block of $n_x \times n_y \times n_z$ elements of type `hex8`, `hex20` or `hex27`, with shared nodes in VTK order. It is the test mesh for PRs 4, 5, 7 and 8 (`voxel_mesh` is hex8 only).
+- **Nodes** are the used points of the half-spacing grid $(2n_x+1)\times(2n_y+1)\times(2n_z+1)$: hex8 uses even indices, hex20 indices with at most one odd component, hex27 all. Position $o + h \odot (i, j, k)/2$; nodes and elements in grid order ($x$ fastest), like `voxel_mesh`. Connectivity is the grid index of $2\,\text{cell} + \texttt{REFERENCE\_NODES}[:n] + 1$, one code path for all types.
+- **Sets:** the six face node sets as for voxel meshes; no element sets; labels 0; no `voxel` metadata. The hex8 box equals the unmasked `voxel_mesh` on points, connectivity and node sets.
+- **Validation:** `shape`, `spacing` and `origin` as for `voxel_mesh` (`check_grid`); an unknown `type` raises.
+- **Spacing** is uniform per axis. Graded meshes (PR 8's NAFEMS runs) will take per-axis node-coordinate arrays rather than remapping points, which would move midside nodes off the edge midpoints.
+- **Cost** (M3 Max): hex8 $100^3$ (3.1M DOF) 0.44 s and 0.8 GB, hex20 $60^3$ (2.7M DOF) 0.22 s, hex27 $40^3$ (1.6M DOF) 0.11 s. It sorts all (element, node) grid indices (`np.unique`), so it is O(N log N) and about 6× slower than `voxel_mesh` for hex8; fine for test meshes, while a used-node bitmask as in `voxel_mesh` would be the route above ~10M DOF.
