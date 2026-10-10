@@ -40,12 +40,23 @@ docs/mesh.md                            + RCM
 from jaxmodal.mesh import rcm
 from jaxmodal.operators import unstructured, scaled, apply_K, apply_M, diag_K, diag_M
 
-mesh, p, q = rcm(mesh)                        # node permutation p, element permutation q (new -> old)
-op = unstructured(mesh, materials, orientations=None, mode="stored", mass="consistent",
-                  nodal_mass=None, path=None, chunk=None, range_nodes=None)
-op = scaled(op, s_K=s_K, s_M=s_M)             # (n_el,) per-element scalings, default ones
-y = apply_K(op, v)                            # v: (n_dof, m) -> (n_dof, m); jitted
-y = apply_M(op, v); dK = diag_K(op); dM = diag_M(op)   # diagonals (n_dof,)
+mesh, p, q = rcm(mesh)  # node permutation p, element permutation q (new -> old)
+op = unstructured(
+    mesh,
+    materials,
+    orientations=None,
+    mode="stored",
+    mass="consistent",
+    nodal_mass=None,
+    path=None,
+    chunk=None,
+    range_nodes=None,
+)
+op = scaled(op, s_K=s_K, s_M=s_M)  # (n_el,) per-element scalings, default ones
+y = apply_K(op, v)  # v: (n_dof, m) -> (n_dof, m); jitted
+y = apply_M(op, v)
+dK = diag_K(op)
+dM = diag_M(op)  # diagonals (n_dof,)
 ```
 
 - `mode`: `"stored"` (packed symmetric $K_e$ per element) or `"otf"` (on the fly).
@@ -96,7 +107,7 @@ Both take a per-block element kernel `f(block data slice, u_e) -> y_e` and retur
 ## RCM (`mesh/reorder.py`)
 
 ```python
-mesh2, p, q = rcm(mesh)   # p: (n_nodes,) new -> old; q: (n_el,) new -> old global elements
+mesh2, p, q = rcm(mesh)  # p: (n_nodes,) new -> old; q: (n_el,) new -> old global elements
 ```
 
 - Node graph $A = E^\top E$ from the sparse element–node incidence $E$ (all blocks), `scipy.sparse.csgraph.reverse_cuthill_mckee(A, symmetric_mode=True)`.
