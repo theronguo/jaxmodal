@@ -174,7 +174,7 @@ Tolerances per Principle 1 ($\|a - b\|_\infty \le \text{tol}\,\|b\|_\infty$ over
 `tests/test_matfree.py`. Meshes:
 - **A:** the PR 4 mixed hex8 + hex20 glued mesh, distorted, two materials and two orientations mixed, RCM-reordered;
 - **B:** a distorted hex27 $3^3$ box, RCM-reordered;
-- **C:** mesh A without `rcm`, after a random node and element shuffle (asserts that in each block the elements are neither sorted by min node nor by max node, so the window rule is exercised);
+- **C:** mesh A without `rcm`, after a random node and element shuffle (asserts that in each block the elements are not sorted by min node, so the window rule is exercised);
 - **D:** a masked voxel mesh with an asymmetric mask (irregular, RCM-reordered).
 
 Random $s_K, s_M \in [0.1, 2]$ with one $s = 0$, random nodal masses with zeros. Sizes: `chunk=5` (pads both 8-element blocks and the 27-element block) and `range_nodes=23` (several ranges; $R \nmid n_\text{nodes}$, so the last range overlaps), plus one case with `chunk=None` and `range_nodes >= n_nodes` (one chunk, one range). Each op is built once per (mesh, mode, path, mass) in a module-scoped cache; m and the methods loop inside. Shared helpers (`mixed_mesh`, `distort`, `dense_reference` with $s_K$, $s_M$) move to `tests/helpers.py`.

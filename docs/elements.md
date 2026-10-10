@@ -62,6 +62,7 @@ bmatrix(G) -> B (..., nq, 6, 3n)
 stiffness(name, X, C) -> Ke (..., 3n, 3n)
 mass(name, X, rho) -> Me (..., 3n, 3n)
 lumped_mass(name, X, rho) -> diagonal of the lumped Me (..., 3n)
+kernels.lumped_nodal(name, wdet) -> lumped nodal masses per unit density (..., n)  # PR 5 reuses it
 stiffness_form(name, X, C, u, w) -> u^T Ke w (...)   # u, w: (..., 3n)
 mass_form(name, X, rho, u, w) -> u^T Me w (...)
 ```
@@ -78,9 +79,9 @@ $$J_{ij} = \frac{\partial x_i}{\partial \xi_j} = \sum_a X_{ai}\frac{\partial N_a
 - **Strain:** $\varepsilon_v = \sum_{ij} S_{vij}\,\partial u_i/\partial x_j$. The constant selector $S_{vij}$ is 1 when $\{i, j\}$ is Voigt pair $v$ (both orderings), so shear rows give $\gamma_{ij} = u_{i,j} + u_{j,i}$. `bmatrix` builds $B$ from $S$ and $G$, with node-major columns.
 - **Stiffness:** $K_e = \sum_q \mathrm{wdet}_q\,B_q^\top C B_q$ (one `einsum`), then $\tfrac12(K_e + K_e^\top)$.
   - $K_e$ is exactly symmetric; the `einsum` alone is symmetric only to $5\times10^{-16}$.
-  - XLA temporaries are 6–8× the output: 241 KB per hex20 element and 323 KB per hex27 element. A chunk of 65536 hex20 needs about 16 GB, so PR 5's stored-Ke chunking and estimator must count this.
+  - XLA temporaries are 6–8× the output: 30 KB per hex8 element, 241 KB per hex20 element and 323 KB per hex27 element (exactly linear in the chunk; PR 5's estimator uses these). A chunk of 65536 hex20 needs about 16 GB, so PR 5's stored-Ke chunking and estimator must count this.
   - Throughput on the M3 Max CPU is 17 µs per hex20 element (≈ 75 GFLOP/s).
-- **Mass:** $M_e = \rho\, m \otimes I_3$, with scalar $m_{ab} = \sum_q \mathrm{wdet}_q N_{qa} N_{qb}$, symmetrized. Stored or on-the-fly M (PR 5) should keep the scalar $n\times n$ $m$, which is 9× smaller than $M_e$.
+- **Mass:** $M_e = \rho\, m \otimes I_3$, with scalar $m_{ab} = \sum_q \mathrm{wdet}_q N_{qa} N_{qb}$, symmetrized. PR 5's matrix-free M stores no $m$ at all: it applies $\rho\, s_M \sum_q \mathrm{wdet}_q N_{qa} \sum_b N_{qb} u_{b}$ from the stored $\mathrm{wdet}$ (or the otf geometry) and $N$ on the fly.
 - **Bilinear forms:** these are the sensitivity kernels. They build neither $K_e$, $M_e$ nor $B$.
   - With $U$ = `u` reshaped to $(n, 3)$, $H_q = U^\top G_q$ is $\nabla u$ and $\varepsilon_q = S : H_q$.
   - $\texttt{stiffness\_form} = \sum_q \mathrm{wdet}_q\,\varepsilon_q(u)^\top C\,\varepsilon_q(w)$.

@@ -66,15 +66,19 @@ def mass(name, X, rho):
     )
 
 
+def lumped_nodal(name, wdet):
+    """Lumped nodal masses per unit density (..., n) from w det J (..., nq)."""
+    N = jnp.asarray(ELEMENTS[name].N, wdet.dtype)
+    if ELEMENTS[name].lumping == "rowsum":
+        return jnp.einsum("...q,qa->...a", wdet, N)
+    d = jnp.einsum("...q,qa->...a", wdet, N * N)  # HRZ: diagonal of m scaled to the element mass
+    return d * (wdet.sum(-1) / d.sum(-1))[..., None]
+
+
 def lumped_mass(name, X, rho):
     """Diagonal of the lumped Me (..., 3n): row-sum (hex8, hex27) or HRZ (hex20)."""
-    wdet, N = _wdet_N(name, X)
-    if ELEMENTS[name].lumping == "rowsum":
-        nodal = jnp.einsum("...q,qa->...a", wdet, N)
-    else:  # HRZ: diagonal of m scaled to the element mass
-        d = jnp.einsum("...q,qa->...a", wdet, N * N)
-        nodal = d * (wdet.sum(-1) / d.sum(-1))[..., None]
-    return jnp.repeat(jnp.asarray(rho)[..., None] * nodal, 3, axis=-1)
+    _, wdet = jacobian(name, X)
+    return jnp.repeat(jnp.asarray(rho)[..., None] * lumped_nodal(name, wdet), 3, axis=-1)
 
 
 def _strain(G, u):

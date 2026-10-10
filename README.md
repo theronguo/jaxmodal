@@ -2,7 +2,7 @@
 
 Large-scale 3D linear modal analysis, $K v = \lambda M v$, in JAX. It uses matrix-free operators, preconditioned LOBPCG, hex8/hex20/hex27 and solid-shell elements, and linear anisotropic elasticity. The targets are the lowest modes and modes in frequency bands, with FFD shape optimization and topology optimization later.
 
-**Status:** early development. PR 0 (scaffold, benchmark harness, conventions), PR 1 (mesh data model, readers, voxel generator), PR 2 (anisotropic materials, rotations, phases), PR 3 (hex8/hex20/hex27 element kernels) and PR 4 (DOF map, assembled SciPy reference operators, Dirichlet masking, box meshes) are done; there is no solver yet. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+**Status:** early development. PR 0 (scaffold, benchmark harness, conventions), PR 1 (mesh data model, readers, voxel generator), PR 2 (anisotropic materials, rotations, phases), PR 3 (hex8/hex20/hex27 element kernels), PR 4 (DOF map, assembled SciPy reference operators, Dirichlet masking, box meshes) and PR 5 (matrix-free unstructured operator, RCM reordering, memory estimator) are done; there is no solver yet. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Install
 
@@ -79,7 +79,23 @@ Km, Mm = masked(K, free), masked(M, free)  # constrained rows and columns zero
 AP = a_p(K + 1e3 * M, free)  # SPD: constrained diagonal = mean free diagonal
 ```
 
-See [`docs/operators.md`](docs/operators.md) for the DOF map, assembly, BCs and $A_P$.
+Apply K and M matrix-free on the device, on blocks of vectors, with per-element scalings for density design:
+
+```python
+import jax.numpy as jnp
+import numpy as np
+from jaxmodal.memory import unstructured_memory
+from jaxmodal.operators import unstructured
+
+op = unstructured(box, materials, mass="lumped")  # stored packed Ke; scatter on CPU
+op = op.scaled(s_K=np.full(box.n_el, 0.5))  # per-element stiffness scaling, no recompile
+v = jnp.ones((op.n_dof, 4))  # (n_dof, m) block
+y = op.apply_K(v)  # == 0.5 * K @ v
+d = op.diag_M()  # lumped mass diagonal
+unstructured_memory(box, m=4)["total"]  # bytes
+```
+
+See [`docs/operators.md`](docs/operators.md) for the DOF map, assembly, BCs, $A_P$ and the matrix-free operator.
 
 ## Development
 
