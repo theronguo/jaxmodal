@@ -9,15 +9,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-CORNERS = np.array(
-    [[-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],
-     [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]],
-    float,
-)  # fmt: skip
-EDGES = ((0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4),
-         (0, 4), (1, 5), (2, 6), (3, 7))  # fmt: skip
-# Corners of the faces -xi, +xi, -eta, +eta, -zeta, +zeta, counter-clockwise seen from outside.
-FACE_CORNERS = ((0, 4, 7, 3), (1, 2, 6, 5), (0, 1, 5, 4), (3, 7, 6, 2), (0, 3, 2, 1), (4, 5, 6, 7))
+from ..mesh.model import EDGES, FACE_CORNERS, REFERENCE_NODES
 
 
 def gauss(order):
@@ -75,9 +67,7 @@ class Element:
 
 
 def _element(name, n, order, lumping):
-    edge_nodes = [(CORNERS[a] + CORNERS[b]) / 2 for a, b in EDGES]
-    face_nodes = [CORNERS[list(f)].mean(0) for f in FACE_CORNERS]
-    nodes = np.vstack([CORNERS, edge_nodes, face_nodes, [[0, 0, 0]]])[:n]
+    nodes = REFERENCE_NODES[:n]
     exponents = np.array(list(itertools.product(range(2 if n == 8 else 3), repeat=3)))
     if n == 20:
         exponents = exponents[(exponents == 2).sum(1) <= 1]  # serendipity: at most one square

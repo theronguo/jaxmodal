@@ -1,7 +1,8 @@
-"""Mesh data model, IO and voxel generator. See docs/mesh.md."""
+"""Mesh data model, IO, voxel and box generators. See docs/mesh.md."""
 
+from .box import box_mesh
 from .io import read, write
 from .model import TYPES, Mesh, Voxel, corner_jacobians
 from .voxel import voxel_mesh
 
-__all__ = ["TYPES", "Mesh", "Voxel", "corner_jacobians", "read", "voxel_mesh", "write"]
+__all__ = ["TYPES", "Mesh", "Voxel", "box_mesh", "corner_jacobians", "read", "voxel_mesh", "write"]

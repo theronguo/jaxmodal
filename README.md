@@ -2,7 +2,7 @@
 
 Large-scale 3D linear modal analysis, $K v = \lambda M v$, in JAX. It uses matrix-free operators, preconditioned LOBPCG, hex8/hex20/hex27 and solid-shell elements, and linear anisotropic elasticity. The targets are the lowest modes and modes in frequency bands, with FFD shape optimization and topology optimization later.
 
-**Status:** early development. PR 0 (scaffold, benchmark harness, conventions), PR 1 (mesh data model, readers, voxel generator), PR 2 (anisotropic materials, rotations, phases) and PR 3 (hex8/hex20/hex27 element kernels) are done; there is no solver yet. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+**Status:** early development. PR 0 (scaffold, benchmark harness, conventions), PR 1 (mesh data model, readers, voxel generator), PR 2 (anisotropic materials, rotations, phases), PR 3 (hex8/hex20/hex27 element kernels) and PR 4 (DOF map, assembled SciPy reference operators, Dirichlet masking, box meshes) are done; there is no solver yet. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Install
 
@@ -65,6 +65,21 @@ Me = mass("hex20", X, 7850.0)  # consistent; lumped_mass gives the HRZ diagonal
 ```
 
 See [`docs/elements.md`](docs/elements.md) for shape functions, quadrature, lumping and the element check.
+
+Assemble the SciPy reference matrices (the test oracle for the matrix-free operators) on a structured box mesh, clamp a face and build the preconditioning operator $A_P$:
+
+```python
+from jaxmodal.mesh import box_mesh
+from jaxmodal.operators import a_p, assemble, dof_mask, masked
+
+box = box_mesh((8, 2, 2), spacing=(0.25, 0.25, 0.25), type="hex20")  # face sets xmin ... zmax
+K, M = assemble(box, materials)  # scipy.sparse.csr_array (n_dof, n_dof), DOF 3n + i
+free = dof_mask(box, {"xmin": "xyz"})  # bool, True = free
+Km, Mm = masked(K, free), masked(M, free)  # constrained rows and columns zero
+AP = a_p(K + 1e3 * M, free)  # SPD: constrained diagonal = mean free diagonal
+```
+
+See [`docs/operators.md`](docs/operators.md) for the DOF map, assembly, BCs and $A_P$.
 
 ## Development
 
