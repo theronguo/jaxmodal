@@ -146,8 +146,8 @@ check_elements(mesh, mass="consistent", chunk=65536)
 How it runs:
 
 - It works block by block, in chunks of `chunk` elements, so temporaries stay bounded: about 42 MB for X and 127 MB for J at hex27.
-- It computes in NumPy fp64, independent of the x64 flag. Only $J$ (`np.einsum(..., optimize=True)`) and $\det J$ are computed; the determinant uses the closed form shared with `jacobian`.
-- Cost is about 1.1 s per 1M hex20 elements on the M3 Max.
+- It computes in NumPy fp64, independent of the x64 flag: only $J$ (`np.einsum(..., optimize=True)`), $\det J$ (the closed form shared with `jacobian`) and, for `mass="lumped"`, the row-sum masses.
+- Cost on the M3 Max is about 0.6 s per 1M hex20 elements and 0.8 s per 1M hex27.
 - Corner orientation of the corner hex is covered by PR 1's `corner_jacobians`. A curved hex20 can pass that check and still fail here; for example, a midside node pulled next to a corner gives $\det J < 0$ at a quadrature point.
 
 **Callers:**

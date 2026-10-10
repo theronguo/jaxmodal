@@ -26,7 +26,7 @@ from jaxmodal.elements import (
     stiffness,
     stiffness_form,
 )
-from jaxmodal.elements.check import _det3
+from jaxmodal.elements.registry import _det3
 from jaxmodal.materials import from_euler, isotropic, orthotropic, rotate
 from jaxmodal.mesh import Mesh, corner_jacobians, read, voxel_mesh
 from tests.helpers import rel, tensor
@@ -309,8 +309,15 @@ def test_lumped_check_raises_on_negative_hex27_mass():
     assert np.asarray(lumped_mass("hex27", X, 1.0)).min() < 0
     mesh = one_mesh({"hex27": [X]})
     check_elements(mesh)
-    with pytest.raises(ValueError, match=r"element 0 \(hex27\): row-sum lumped nodal mass"):
-        check_elements(mesh, mass="lumped")
+    with pytest.raises(
+        ValueError, match=r"element 0 \(hex27\): row-sum lumped nodal mass -0.000704 "
+    ):
+        check_elements(mesh, mass="lumped")  # value equals the traced row-sum minimum above
+    assert f"{np.asarray(lumped_mass('hex27', X, 1.0)).min():.3g}" == "-0.000704"
+    # global index across blocks and chunks
+    mesh = one_mesh({"hex8": [unit("hex8")] * 2, "hex27": [unit("hex27")] * 3 + [X]})
+    with pytest.raises(ValueError, match=r"element 5 \(hex27\): row-sum"):
+        check_elements(mesh, mass="lumped", chunk=2)
 
 
 # ---------------------------------------------------------------- 8: gradients
@@ -452,7 +459,9 @@ def test_batching_jit_symmetry_dtype(name):
 def test_faces(name):
     el = ELEMENTS[name]
     edges = {frozenset(e) for e in EDGES}
-    assert len(el.faces) == 6
+    assert [f[:4] for f in el.faces] == [
+        (0, 4, 7, 3), (1, 2, 6, 5), (0, 1, 5, 4), (3, 7, 6, 2), (0, 3, 2, 1), (4, 5, 6, 7)
+    ]  # fmt: skip
     for f, nodes in enumerate(el.faces):
         assert len(nodes) == {8: 4, 20: 8, 27: 9}[NODES[name]]
         d, s = f // 2, 2 * (f % 2) - 1
@@ -462,7 +471,7 @@ def test_faces(name):
         assert all(frozenset(p) in edges for p in zip(c, c[1:] + c[:1], strict=True))
         p = VTK[list(c)]
         assert np.cross(p[2] - p[0], p[3] - p[1])[d] * s > 0  # outward
-        for k in range(4 if len(nodes) > 4 else 0):
+        for k in range(4 * (len(nodes) > 4)):
             assert np.array_equal(x[4 + k], (p[k] + p[(k + 1) % 4]) / 2)
         if len(nodes) == 9:
             assert nodes[8] == 20 + f

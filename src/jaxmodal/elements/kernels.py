@@ -56,17 +56,15 @@ def stiffness(name, X, C):
     return _sym(jnp.einsum("...q,...qva,...vw,...qwb->...ab", wdet, B, C, B))
 
 
-def _scalar_mass(name, X):
-    el, X, dt = _tables(name, X)
+def _wdet_N(name, X):
     _, wdet = jacobian(name, X)
-    N = jnp.asarray(el.N, dt)
-    return el, wdet, N, jnp.einsum("...q,qa,qb->...ab", wdet, N, N)
+    return wdet, jnp.asarray(ELEMENTS[name].N, wdet.dtype)
 
 
 def mass(name, X, rho):
     """Consistent Me (..., 3n, 3n) = rho m (x) I_3, exactly symmetric."""
-    _, _, _, m = _scalar_mass(name, X)
-    m = _sym(jnp.asarray(rho)[..., None, None] * m)
+    wdet, N = _wdet_N(name, X)
+    m = _sym(jnp.asarray(rho)[..., None, None] * jnp.einsum("...q,qa,qb->...ab", wdet, N, N))
     n = m.shape[-1]
     return (m[..., :, None, :, None] * jnp.eye(3, dtype=m.dtype)[:, None, :]).reshape(
         *m.shape[:-2], 3 * n, 3 * n
@@ -75,11 +73,11 @@ def mass(name, X, rho):
 
 def lumped_mass(name, X, rho):
     """Diagonal of the lumped Me (..., 3n): row-sum (hex8, hex27) or HRZ (hex20)."""
-    el, wdet, N, m = _scalar_mass(name, X)
-    if el.lumping == "rowsum":
+    wdet, N = _wdet_N(name, X)
+    if ELEMENTS[name].lumping == "rowsum":
         nodal = jnp.einsum("...q,qa->...a", wdet, N)
-    else:  # HRZ: diagonal scaled to the element mass
-        d = jnp.diagonal(m, axis1=-2, axis2=-1)
+    else:  # HRZ: diagonal of m scaled to the element mass
+        d = jnp.einsum("...q,qa->...a", wdet, N * N)
         nodal = d * (wdet.sum(-1) / d.sum(-1))[..., None]
     return jnp.repeat(jnp.asarray(rho)[..., None] * nodal, 3, axis=-1)
 
@@ -99,8 +97,6 @@ def stiffness_form(name, X, C, u, w):
 
 def mass_form(name, X, rho, u, w):
     """u^T Me w (...) without forming Me."""
-    el, X, dt = _tables(name, X)
-    _, wdet = jacobian(name, X)
-    N = jnp.asarray(el.N, dt)
+    wdet, N = _wdet_N(name, X)
     U, W = (jnp.einsum("qa,...ai->...qi", N, v.reshape(*v.shape[:-1], -1, 3)) for v in (u, w))
     return rho * jnp.einsum("...q,...qi,...qi->...", wdet, U, W)

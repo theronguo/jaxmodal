@@ -15,19 +15,13 @@ def check_elements(mesh, mass="consistent", chunk=65536):
         for s in range(0, len(cells), chunk):
             X = mesh.points[cells[s : s + chunk]]
             det = _det3(np.einsum("eai,qaj->eqij", X, el.dN, optimize=True))
-            bad = (det <= 0).any(1)
-            if bad.any():
-                e = int(np.argmax(bad))
-                raise ValueError(
-                    f"element {mesh.offsets[t] + s + e} ({t}): det J = {det[e].min():.3g} <= 0 "
-                    "at a quadrature point"
-                )
+            tests = [(det, "det J = {:.3g} <= 0 at a quadrature point")]
             if mass == "lumped" and el.lumping == "rowsum":
-                m = (det * el.weights) @ el.N
-                bad = (m <= 0).any(1)
+                msg = "row-sum lumped nodal mass {:.3g} <= 0; use mass='consistent'"
+                tests.append(((det * el.weights) @ el.N, msg))
+            for values, msg in tests:  # det J first: masses of inverted elements mean nothing
+                bad = (values <= 0).any(1)
                 if bad.any():
                     e = int(np.argmax(bad))
-                    raise ValueError(
-                        f"element {mesh.offsets[t] + s + e} ({t}): row-sum lumped nodal mass "
-                        f"{m[e].min():.3g} <= 0; use mass='consistent' or a less distorted mesh"
-                    )
+                    where = f"element {mesh.offsets[t] + s + e} ({t}): "
+                    raise ValueError(where + msg.format(values[e].min()))
