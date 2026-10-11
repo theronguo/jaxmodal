@@ -1,17 +1,14 @@
 # Operators
 
-`jaxmodal.operators` holds the global DOF map, the int32 overflow assert, the assembled SciPy reference operators (the oracle), Dirichlet masking and the matrix-free device operators (`unstructured`, PR 5; the voxel stencil `stencil`, PR 6).
+`jaxmodal.operators` holds the global DOF map, the int32 overflow assert, the assembled SciPy reference operators (the oracle), the matrix-free device operators (`unstructured`, PR 5; the voxel stencil `stencil`, PR 6), and Dirichlet masking, rigid body modes and deflation (PR 7, [`boundary_conditions.md`](boundary_conditions.md)).
 
 ```python
 from jaxmodal.mesh import box_mesh
-from jaxmodal.operators import a_p, assemble, dof_mask, masked
+from jaxmodal.operators import assemble
 
 mesh = box_mesh((4, 2, 2), spacing=(0.25, 0.25, 0.25), type="hex20")
 # materials: label -> Material, as in docs/materials.md
 K, M = assemble(mesh, materials)  # scipy.sparse.csr_array, float64, int32 indices
-free = dof_mask(mesh, {"xmin": "xyz"})  # (n_dof,) bool, True = free
-Km, Mm = masked(K, free), masked(M, free)  # eigen-operator form, constrained rows/cols zero
-AP = a_p(K + sigma * M, free)  # SPD reference for preconditioners and linear solves
 ```
 
 ## DOF numbering
@@ -54,21 +51,9 @@ K, M = assemble(
 | hex27 $12^3$ | 47k | 8.2M | 0.46 s | 1.5 GB |
 | hex20 $20^3$ | 107k | 17.3M | 1.16 s | 2.5 GB |
 
-## Dirichlet conditions and masks
+## Dirichlet conditions, $A_P$ and rigid modes
 
-- **BCs** are zero displacement per component in global axes on node sets: `bcs = {node_set: "xyz"}`, e.g. `{"xmin": "xyz", "ymin": "y"}`. The value is a non-empty string of distinct letters from `"xyz"`. Sets may overlap (the union is constrained); `{}` is free-free. An unknown set name or invalid components raise `ValueError`. `dof_mask` is the only parser of this dict; PR 9's `solve_modes(mesh, materials, bcs, ...)` takes the same format.
-- **Mask** $m$: `(n_dof,)` bool, `True` = free. `masked` and `a_p` raise `ValueError` unless it is a bool `np.ndarray` of length `n_dof` (a 0/1 int mask would silently index and complement wrongly).
-- **`masked(A, m)`** $= DAD$ with $D = \mathrm{diag}(m)$: the eigen-operator $v \mapsto m \odot A(m \odot v)$ as a matrix. Constrained rows and columns are exactly zero and the free block is exactly $A_{ff}$, so no spurious eigenvalues enter through the mask.
-
-## $A_P$ (`a_p`)
-
-Every preconditioner and linear solve (PR 10 on) uses
-$$A_P = mAm + s\,(I - \mathrm{diag}\,m),$$
-which puts the scalar $s$ on the constrained diagonal:
-
-- **Default** $s$ = mean of $\mathrm{diag}(A)$ over free DOFs, for SPD $A = K + \sigma M$. Then $A_P$ is SPD exactly when $A_{ff}$ is (the constrained block is $sI$), its diagonal is positive (Jacobi divides by no zero), and it scales with $A$ (independent of the unit system). A default $s \le 0$ raises, so `a_p` never silently returns a non-SPD $A_P$.
-- **Indefinite shift-invert** $K - \sigma M$ (PRs 10, 15): the roadmap (Key design decisions, interior bands) fixes $s = \overline{\mathrm{diag}\,K} + \sigma\,\overline{\mathrm{diag}\,M}$ over free DOFs, which the caller passes as `a_p(K - sigma * M, m, s=...)`.
-- A mask with no free DOF raises.
+BCs, masks, `masked`, `a_p`, rigid body modes and the deflation projector are described in [`boundary_conditions.md`](boundary_conditions.md).
 
 ## Matrix-free operator (`unstructured`)
 
@@ -94,7 +79,7 @@ y = op.apply_M(v)
 dK, dM = op.diag_K(), op.diag_M()  # (n_dof,)
 ```
 
-- **Interface (Principle 2).** `apply_K`, `apply_M`, `diag_K`, `diag_M` and `scaled` are methods; the voxel operator (`stencil(...) -> Stencil`, estimator `stencil_memory`) has the same five, so PR 7 and PR 9 take either by duck typing. The solver interface is these five methods plus the `n_dof` property (both operators also have `n_el`). Each method calls a module-level `jax.jit` function of `(op, v)`: the operator is a jit argument and nothing is closed over, so the methods also work on a traced operator inside a solver loop.
+- **Interface (Principle 2).** `apply_K`, `apply_M`, `diag_K`, `diag_M` and `scaled` are methods; the voxel operator (`stencil(...) -> Stencil`, estimator `stencil_memory`) has the same five, so PR 7 and PR 9 take either by duck typing. The solver interface is these five methods plus the `n_dof` property (both operators also have `n_el`), plus the rigid modes, which depend only on the mesh and the mask, so one function `rigid_modes(mesh, free)` serves both operators (PR 7, [`boundary_conditions.md`](boundary_conditions.md)). Each method calls a module-level `jax.jit` function of `(op, v)`: the operator is a jit argument and nothing is closed over, so the methods also work on a traced operator inside a solver loop.
 - **Inputs.** Host checks as in `assemble` (x64 on, `phases`, `check_materials`, `check_elements(mesh, mass)`, `nodal_mass`), `chunk >= 1`, `range_nodes >= 1`. `v` must be 2-D with `n_dof` rows (a trace-time check); `m = 1` is `(n_dof, 1)`. No masking: callers form $m \odot K(m \odot v)$ (PR 7, PR 9).
 - **`scaled(s_K=None, s_M=None)`**: `None` keeps the current value; otherwise the shape must be `(n_el,)`. Only shapes are checked, so it is traceable (use it under `jit` and `grad`). Values should be finite and $\ge 0$; $s = 0$ voids an element.
 - **Stored mode bakes $C$ into $K_e$:** changing materials means building a new operator. In otf mode, `dataclasses.replace(op, C=...)` changes the stiffness without recompiling. A stored-mode operator with `C` set raises (it would be ignored).
@@ -269,7 +254,6 @@ est = stencil_memory(mesh, m, mass="consistent", slab=None)  # same keys as unst
 - **Assembly** equals a dense Python loop (explicit DOF lists, per-element `rotate(material, orientation)`, no `phases`/`element_dofs`) to 1e-14 on a distorted two-block mesh: hex20 and hex8 glued at a shared face, with two materials (one orthotropic, different $\rho$) and two orientations mixed in each block, for `chunk=7` (several chunks, padded last one) and `chunk=4096` (one chunk), consistent and lumped.
 - **Patch test:** on a $3^3$ box per type, rotated orthotropic $C$, interior corner nodes moved per component by $\le 15\%$ of the edge, all boundary nodes prescribed $u = Ax + b$, the interior solved with `spsolve`. The stress is constant at every quadrature point to 1e-10 relative to $\|\sigma\|_\infty$; measured 1.2e-15 (hex8), 1.0e-14 (hex20), 1.3e-14 (hex27) for straight edges (non-corner nodes on the trilinear map of the corners), and 6.4e-15 (hex20), 1.6e-14 (hex27) for curved elements (non-corner interior nodes additionally offset per component by $\le 5\%$ of the edge).
 - **Rigid translation mass:** $t_x^\top M t_x = \rho V + \sum m_n$ with the analytic volume, consistent and lumped, straight and curved; $t_x^\top M t_y = 0$.
-- **Masks and $A_P$:** expected constrained DOFs from node coordinates; exact free blocks; $A_P$ SPD (Cholesky), constrained diagonal $= s$, exact scaling by $2^{20}$, all-free mask gives $A$.
 - **Nodal masses** add exactly; `element_dofs` calls `check_int32` with every block's size.
 - **Scalings** (`tests/test_matfree.py`): $K(s_K)$, $M(s_M)$ equal the dense loop with per-element scaling to 1e-14 (consistent and lumped, one $s = 0$); `None` is bit-identical to ones; nodal masses are unscaled; bad shapes and values raise.
 - **Matrix-free** (`tests/test_matfree.py`), on four meshes: A, the mixed hex8 + hex20 mesh (two materials, two orientations), RCM-ordered; B, a curved hex27 $3^3$ box, RCM-ordered; C, mesh A shuffled without RCM (elements not sorted by min node); D, an asymmetric masked voxel mesh with mixed labels; E (gather only), an RCM-ordered hex20 $12 \times 2 \times 2$ box with `chunk=4`, `range_nodes=203`: narrow windows and two ranges with a large overlap, so the last range's window extension is visible. Random $s_K, s_M \in [0.1, 2]$ with one $s = 0$, nodal masses with zeros, `chunk=5` (pads every block) and `range_nodes=23` (several ranges, overlapping last one):

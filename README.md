@@ -2,7 +2,7 @@
 
 Large-scale 3D linear modal analysis, $K v = \lambda M v$, in JAX. It uses matrix-free operators, preconditioned LOBPCG, hex8/hex20/hex27 and solid-shell elements, and linear anisotropic elasticity. The targets are the lowest modes and modes in frequency bands, with FFD shape optimization and topology optimization later.
 
-**Status:** early development. PR 0 (scaffold, benchmark harness, conventions), PR 1 (mesh data model, readers, voxel generator), PR 2 (anisotropic materials, rotations, phases), PR 3 (hex8/hex20/hex27 element kernels), PR 4 (DOF map, assembled SciPy reference operators, Dirichlet masking, box meshes), PR 5 (matrix-free unstructured operator, RCM reordering, memory estimator) and PR 6 (voxel stencil operator) are done; there is no solver yet. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+**Status:** early development. PR 0 (scaffold, benchmark harness, conventions), PR 1 (mesh data model, readers, voxel generator), PR 2 (anisotropic materials, rotations, phases), PR 3 (hex8/hex20/hex27 element kernels), PR 4 (DOF map, assembled SciPy reference operators, Dirichlet masking, box meshes), PR 5 (matrix-free unstructured operator, RCM reordering, memory estimator), PR 6 (voxel stencil operator) and PR 7 (rigid body modes, M-orthonormalization, deflation projector) are done; there is no solver yet. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Install
 
@@ -106,7 +106,19 @@ y = vop.apply_K(jnp.ones((vop.n_dof, 4)))
 stencil_memory(sphere, m=4)["total"]  # bytes
 ```
 
-See [`docs/operators.md`](docs/operators.md) for the DOF map, assembly, BCs, $A_P$ and the matrix-free and voxel stencil operators.
+Rigid body modes per face-connected part, the ones left under Dirichlet sets, M-orthonormalized for deflation:
+
+```python
+from jaxmodal.operators import m_orthonormalize, project, rigid_modes
+
+free = dof_mask(box, {"xmin": "x"})  # sliding on xmin: T_y, T_z and R_x remain
+R = jnp.asarray(rigid_modes(box, free))  # (n_dof, 3), constrained rows zero
+R = m_orthonormalize(R, op.apply_M(R))  # R^T M R = I (consumes its first argument)
+X = jnp.ones((op.n_dof, 4))
+Y = project(R, X, op.apply_M(X))  # X - R (R^T M X): M-orthogonal to the rigid modes
+```
+
+See [`docs/operators.md`](docs/operators.md) for the DOF map, assembly and the matrix-free and voxel stencil operators, and [`docs/boundary_conditions.md`](docs/boundary_conditions.md) for BCs, $A_P$, rigid modes and deflation.
 
 ## Development
 

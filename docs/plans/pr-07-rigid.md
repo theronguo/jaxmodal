@@ -48,13 +48,15 @@ docs/boundary_conditions.md (new), docs/operators.md, docs/mesh.md, docs/ROADMAP
 from jaxmodal.mesh import parts
 from jaxmodal.operators import dof_mask, m_orthonormalize, project, rigid_modes
 
-part = parts(mesh)                          # (n_nodes,) int64 part label per node, 0..n_parts-1
-free = dof_mask(mesh, bcs)                  # PR 4
-R0 = rigid_modes(mesh)                      # (n_dof, 6 n_parts): all modes (AMG near-null-space: free[:, None] * R0)
-R = rigid_modes(mesh, free)                 # (n_dof, k) float64 NumPy, constrained rows exactly 0
+part = parts(mesh)  # (n_nodes,) int64 part label per node, 0..n_parts-1
+free = dof_mask(mesh, bcs)  # PR 4
+R0 = rigid_modes(mesh)  # (n_dof, 6 n_parts): all modes (AMG near-null-space: free[:, None] * R0)
+R = rigid_modes(mesh, free)  # (n_dof, k) float64 NumPy, constrained rows exactly 0
 R = jnp.asarray(R)
-R = m_orthonormalize(R, op.apply_M(R))      # R^T M R = I (R is masked, so M's output mask is not needed)
-Y = project(R, X, MX)                       # X - R (R^T MX), MX passed in (Principle 6)
+R = m_orthonormalize(
+    R, op.apply_M(R)
+)  # R^T M R = I (R is masked, so M's output mask is not needed)
+Y = project(R, X, MX)  # X - R (R^T MX), MX passed in (Principle 6)
 ```
 
 Calling `rigid_modes` twice repeats the part search (seconds and GBs at 10M+ elements); a `part=` argument to reuse the labels is left to PR 13, the first caller that needs both.
