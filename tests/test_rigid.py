@@ -23,7 +23,7 @@ from jaxmodal.operators import (
 )
 
 ORIENT = {1: R}
-OFFSET = (1e3, -2e3, 3e3)  # large enough to need the centroid, small enough for SciPy's K
+OFFSET = (1e3, -2e3, 3e3)  # offset origin (centroid rotations: test_inputs); fine for SciPy's K
 
 
 def inf(A):

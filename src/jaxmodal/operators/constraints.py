@@ -61,6 +61,10 @@ def rigid_modes(mesh, free=None, max_parts=MAX_PARTS):
     part, k = 6 n_parts. free (bool (n_dof,), True = free): the remaining modes R null((I - m) R),
     per part, with constrained rows exactly 0.
     """
+    x = mesh.points
+    n = len(x)
+    if free is not None:
+        _check_mask(3 * n, free)
     part = parts(mesh)
     n_parts = int(part.max()) + 1
     if n_parts > max_parts:
@@ -68,10 +72,6 @@ def rigid_modes(mesh, free=None, max_parts=MAX_PARTS):
             f"mesh has {n_parts} parts > max_parts = {max_parts}: remove floating islands, or "
             "raise max_parts (R is dense, 48 n_dof n_parts bytes)"
         )
-    x = mesh.points
-    n = len(x)
-    if free is not None:
-        _check_mask(3 * n, free)
     count = np.bincount(part, minlength=n_parts)
     c = np.stack([np.bincount(part, x[:, i], n_parts) for i in range(3)], 1) / count[:, None]
     d = x - c[part]

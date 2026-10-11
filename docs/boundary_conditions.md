@@ -43,7 +43,7 @@ which puts the scalar $s$ on the constrained diagonal:
 
 - **Contact rule.** The element labels are scattered to their nodes and every element's nodes must carry its label. A node shared by two face-connected parts fails this, so edge and vertex contacts (hinges, which add mechanisms beyond the 6 rigid modes per part) and nonconforming contacts (nodes shared without a whole shared face; rejected conservatively) raise `ValueError("mesh parts touch without sharing a whole face ...")`. Parts that touch without sharing nodes are separate parts.
 - Elements with a repeated corner node (collapsed elements) raise: a face collapsed to an edge would otherwise match another one and hide an edge contact. `check_elements` does not necessarily catch these (a wedge-collapsed hex8 has $\det J > 0$ at its Gauss points).
-- **Cost:** ≈ 0.65 s and ≈ 0.4 kB of transient host memory per 1M elements (linear; ≈ 0.28 GB at 2M voxel DOF, ≈ 13.5 GB for a 100M-DOF voxel model). It runs before the solver allocates its device arrays. A voxel-only search (`scipy.ndimage.label` on the cell mask) would be 16× faster and 9× leaner; it is left to PR 18.
+- **Cost:** ≈ 0.65 s and ≈ 0.4 GB of transient host memory per 1M elements (≈ 0.4 kB per element; linear; ≈ 0.28 GB at 2M voxel DOF, ≈ 13.5 GB for a 100M-DOF voxel model). It runs before the solver allocates its device arrays. A voxel-only search (`scipy.ndimage.label` on the cell mask) would be 16× faster and 9× leaner; it is left to PR 18.
 
 ## Rigid body modes (`rigid_modes`)
 
