@@ -82,7 +82,7 @@ def _certify(Kf, Mf, lam, v, n_modes, s_bar, p, spec):
     if (res > bound).any():
         raise RuntimeError(f"eigsh residuals too large: {(res / bound).max() * RESID_TOL:.1f} eps")
     tau = max(GAP_REL * abs(lam[-1]), GAP_ABS * EPS * s_bar)
-    gaps = np.flatnonzero(np.diff(lam)[:n_modes] > tau)
+    gaps = np.flatnonzero(np.diff(lam) > tau)
     if not len(gaps):
         raise ValueError(f"no gap among the lowest {n_modes + 1} eigenvalues; ask for more modes")
     j = gaps[-1] + 1  # modes below the last gap

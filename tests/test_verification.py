@@ -52,6 +52,9 @@ def test_oracle_isotropic():
 def test_oracle_kmax():
     with pytest.raises(ValueError, match="kmax"):
         sliding_block(ORTHO, 0.7, L, 30, kmax=1)
+    assert np.array_equal(
+        sliding_block(ORTHO, 0.7, L, 30), sliding_block(ORTHO, 0.7, L, 30, kmax=16)
+    )
 
 
 @pytest.mark.parametrize("t", ["hex20", "hex27"])

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import scipy.linalg as sl
+import scipy.sparse as sp
 from helpers import MATERIALS, ORTHO, R, distort, mixed_mesh
 from scipy.linalg import lapack
 
@@ -296,3 +297,5 @@ def test_count_below_max(monkeypatch):
     monkeypatch.undo()
     with pytest.raises(ValueError, match="finite"):
         count_below(K, M, np.inf)
+    with pytest.raises(ValueError, match="eigenvalue"):
+        count_below(sp.diags_array([1.0, 2.0, 3.0]), sp.eye_array(3), 2.0)
