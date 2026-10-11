@@ -2,7 +2,6 @@
 
 import dataclasses
 import functools
-import warnings
 
 import jax.numpy as jnp
 import numpy as np
@@ -152,7 +151,10 @@ def test_parts():
     two = voxel_mesh((5, 2, 2), mask=mask)
     part = parts(two)
     assert (part == (two.points[:, 0] > 2.5)).all()
-    assert rigid_modes(two).shape[1] == 12
+    R2 = rigid_modes(two)
+    assert R2.shape[1] == 12
+    for q in (0, 6):  # rotations about each part's centroid
+        assert np.abs(R2[:, q : q + 3].T @ R2[:, q + 3 : q + 6]).max() <= 1e-10
     second = np.repeat(two.points[:, 0] > 2.5, 3)
     p2 = np.flatnonzero(two.points[:, 0] > 2.5)[:1]
     two = dataclasses.replace(two, node_sets=two.node_sets | {"p2": p2})
@@ -171,10 +173,11 @@ def test_parts():
     assert parts(blocks([(0, 0, 0), (1, 0, 0)], (2, 2, 2))).max() == 0
     assert parts(mesh("mixed")).max() == 0  # faces match across hex8/hex20 blocks
     b = box_mesh((2, 1, 1))
-    conn = b.blocks["hex8"].copy()
-    conn[0, 1] = conn[0, 0]
-    with pytest.raises(ValueError, match="collapsed"):
-        parts(dataclasses.replace(b, blocks={"hex8": conn}))
+    for i, j in ((1, 0), (5, 4)):  # bottom and top face
+        conn = b.blocks["hex8"].copy()
+        conn[0, i] = conn[0, j]
+        with pytest.raises(ValueError, match="collapsed"):
+            parts(dataclasses.replace(b, blocks={"hex8": conn}))
     # labels follow renumbering
     rng = np.random.default_rng(0)
     q = rng.permutation(two.n_el)
@@ -206,6 +209,7 @@ def test_projector():
         assert (project(jnp.zeros((len(free), 0)), X, Mm @ X) == X).all()
 
 
+@pytest.mark.filterwarnings("error")  # donation warnings are emitted at lowering
 def test_device_operators():
     m = sphere()
     _, M = assemble(m, MATERIALS)
@@ -220,12 +224,11 @@ def test_device_operators():
     ma = constraints._cholqr2.lower(V, MV).compile().memory_analysis()
     assert ma.alias_size_in_bytes == ma.output_size_in_bytes
     assert ma.temp_size_in_bytes <= 1.05 * 8 * n * k
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        m_orthonormalize(V, MV).block_until_ready()
+    m_orthonormalize(V, MV).block_until_ready()
     assert V.is_deleted() and not MV.is_deleted()
 
 
+@pytest.mark.filterwarnings("error")
 def test_inputs():
     m = mesh("box")
     n_dof = 3 * len(m.points)
