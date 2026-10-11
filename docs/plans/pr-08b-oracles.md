@@ -94,32 +94,34 @@ Plates as above; `box_mesh((n, n, nz), spacing=(a/n, b/n, h/nz), type=t)`, eleme
    - Visscher modes 7–16, hex20 and hex27, $n = 8$, `rotate(ORTHO, R)` via orientations.
 3. **Mode matching** (fast; ORTHO and PAG hex20 target meshes):
    - `mac(Phi, Phi, M)` off-diagonal $\le 10^{-12}$ (the analytic shapes are M-orthogonal on the FE `M`; kills an unweighted MAC), and `Phi` on constrained DOFs $\le 10^{-12}\max|\text{Phi}|$.
-   - Sets: the analytic modes split where the relative gap exceeds $10^{-2}$ (`np.split` at the cuts); an isolated mode is a set of size 1. The cutoff must not split a set (gap between modes 10 and 11 $\ge 10^{-2}$, asserted). Expected: ORTHO {4, 5}; PAG {3, 4}, {9, 10}.
+   - Sets: the analytic modes split where the relative gap exceeds $10^{-2}$ (`np.split` at the cuts); an isolated mode is a set of size 1. The cutoff must not split a set (gap between modes 10 and 11 $\ge 10^{-2}$, asserted). The non-trivial sets are asserted equal to the expected ones: ORTHO [[3, 4]]; PAG [[2, 3], [8, 9]] (0-based; modes {4, 5} and {3, 4}, {9, 10}).
+   - Labels: `labels[:10]` equals the documented mode order (ORTHO and PAG lists written out in the test), compared as sets inside each degenerate set.
    - Each FE degenerate pair is rotated by 45° before the MAC (any basis of the eigenspace is valid; this forces mixing whatever eigsh returns).
    - One rule for every set $S$: `mac(V, Phi, M)[S][:, S].sum(1) >= 0.9999`. FE mode $i$ thus carries the $(m, n, \text{family})$ label of its set; the FE frequencies are compared through this pairing.
    - Visscher: sorted from mode 7 (generic anisotropy; relative gaps $\ge 10^{-2}$ asserted).
-4. **Rates** (`slow`): levels as in the table; $\ge 1.8$ for ORTHO hex8 and for PAG hex8 modes 1–5 (mode 6 is pre-asymptotic, documented), $\ge 3.6$ for ORTHO and PAG hex20/hex27; finest error $\ge 100 f_\lambda$.
-5. **Upper bound** (inside the rate tests, consistent mass): at every level $\lambda^h_k \ge \lambda_k - 10\varepsilon\hat\lambda_\max$; nested ORTHO levels $4 \to 8$, $8 \to 16$ (hex20, hex27) and $8 \to 16$, $12 \to 24$ (hex8), PAG $4 \to 8$ (hex20, hex27) and $8 \to 16$ (hex8): $\lambda_k(\text{fine}) \le \lambda_k(\text{coarse}) + 10\varepsilon\hat\lambda_\max$. Visscher (fast): hex20 $4 \to 8$ nested, from mode 7, and $\lambda^h \ge \lambda_\text{Ritz}(1 - 10^{-6})$ (the Ritz value is an upper bound within $\approx 5\cdot10^{-7}$ of the exact one).
+4. **Rates** (`slow`): levels as in the table; $\ge 1.8$ for ORTHO hex8, $\ge 3.6$ for ORTHO and PAG hex20/hex27; finest error $\ge 100 f_\lambda$. PAG hex8 is not tested (mode 6 pre-asymptotic; its measured rates are documented). $\hat\lambda_\max$ by `eigsh(Kf, 1, Mf, which="LA", tol=1e-3)`: the default tolerance costs about 20 s per 30k-DOF mesh (measured), and these checks only need the order of magnitude (the change is $\le 1.1\cdot10^{-4}$ relative). The sliding-block helper `modes()` switches to the same call.
+5. **Upper bound** (inside the rate tests, consistent mass): at every level $\lambda^h_k \ge \lambda_k - 10\varepsilon\hat\lambda_\max$; nested ORTHO levels $4 \to 8$, $8 \to 16$ (hex20, hex27) and $8 \to 16$, $12 \to 24$ (hex8), PAG $4 \to 8$ (hex20, hex27): $\lambda_k(\text{fine}) \le \lambda_k(\text{coarse}) + 10\varepsilon\hat\lambda_\max$. Visscher (fast): hex20 $4 \to 8$ nested, from mode 7, and $\lambda^h \ge \lambda_\text{Ritz}(1 - 10^{-6})$ (the Ritz value is an upper bound within $\approx 5\cdot10^{-7}$ of the exact one).
 
-Expected runtime including setup: fast additions ≈ 21 s (Visscher 2.5 s cached, ORTHO targets 5.7 s, PAG hex20 8.3 s, Visscher targets 4 s, MAC reuses the target runs); slow ≈ 60 s.
+Expected runtime including setup: fast additions ≈ 25 s (Visscher 2.5 s cached, ORTHO targets 6 s, PAG hex20 11 s, Visscher targets 6 s, MAC reuses the target runs); slow ≈ 50 s (PAG hex27 target 21 s, rates about 30 s; measured by the performance reviewer with `tol=1e-3`).
 
-**Mutants expected to be killed:** plate strain sign, component rule removed, missing $m = 0$ / $n = 0$ families, the 90° rotation on the wrong ply or a wrong ply index from the centroid $z$ (target); Visscher derivative scaling and index-transposed $T$ (target); a wrong parity split (target); sign of an analytic shape component flipped (MAC $\ge 0.9999$); MAC without M (self-MAC check); degenerate-set handling removed (45° rotation). **Equivalent:** reversed ply order (mirror image, same spectrum).
+**Mutants expected to be killed:** plate strain sign, component rule removed, missing $m = 0$ / $n = 0$ families, the 90° rotation on the wrong ply or a wrong ply index from the centroid $z$ (target); Visscher derivative scaling and index-transposed $T$ (target); a wrong parity split ($a + b$, $a + b + c + i$, $a$ alone, one class dropped, per-class subset too small: 0.07–0.56, target); sign of an analytic shape component flipped (MAC $\ge 0.9999$); MAC without M (self-MAC check); degenerate-set handling removed (45° rotation); labels permuted or $m$/$n$ swapped (label assert); wrong gap cut (set assert). **Equivalent:** reversed ply order (mirror image, same spectrum); no parity split (the full problem).
 
 ## Docs
 
 - **`docs/verification.md`:**
   - simply supported BCs (definition above, PR 16 reuses it);
-  - Srinivas–Rao: source (Srinivas & Rao 1970, J. Sound Vib.), exact setup (geometry, materials, layup and ply labels), ansatz and component rule, the 1D Ritz, the transfer-matrix agreement (the ODE system and the $\pm10^{-9}$ sign changes, prototype), the truncation checks (not a proof, with the reason and the measured margins and monotonicity), reference values (lowest 10 $\lambda$ with labels for ORTHO and PAG), target meshes and errors, rates with the hex8 margin (1.88 vs 1.8) and the cross-ply hex8 note;
+  - Srinivas–Rao: source (Srinivas & Rao 1970, J. Sound Vib.), exact setup (geometry, materials, layup and ply labels), ansatz and component rule, the 1D Ritz, one sentence on the prototype transfer-matrix agreement (state $(U, V, W, \tau_{xz}, \tau_{yz}, \sigma_z)$, free faces, sign changes within $\lambda(1 \pm 10^{-9})$ at all 20 values tried), the truncation checks (not a proof, with the reason and the measured margins and monotonicity), reference values (lowest 10 $\lambda$ with labels for ORTHO and PAG), target meshes and errors, rates with the hex8 margin (1.88 vs 1.8) and the measured cross-ply hex8 rates (1.97 for modes 1–5, 1.64 for mode 6; not tested);
   - Visscher: source (Visscher et al. 1991, J. Acoust. Soc. Am.), basis, parity split and diagonal $M$, convergence table and rule, reference values (modes 7–16 at $N = 20$, uncertainty $\approx 5\cdot10^{-7}$), FE errors;
-  - mode matching: MAC definition, sets by relative gap, the 45° rotation, labels;
+  - mode matching: MAC definition, sets by relative gap, the 45° rotation, labels; the self-MAC $\le 10^{-12}$ holds for these meshes and mid-plane-symmetric layups (discrete sine orthogonality across $(m, n)$, z-parity within one $(m, n)$), not for sampled shapes in general;
+  - update the "Matching" bullet of the error-measures section: Srinivas–Rao (8b) and FV52 (8c) pair by M-weighted MAC with labels, degenerate sets by summed MAC; Visscher is compared sorted from mode 7;
   - why published tables are not reproduced (the two independent computations and FE convergence validate the oracles).
-- **`docs/ROADMAP.md`:** the 8b status sentence, and in it: "the hex8 Srinivas–Rao rate is taken on the single-ply orthotropic plate (the cross-ply's mode 6 is pre-asymptotic for hex8 at affordable sizes; modes 1–5 are checked)".
+- **`docs/ROADMAP.md`:** the 8b status sentence, and in it: "the hex8 Srinivas–Rao rate is taken on the single-ply orthotropic plate (the cross-ply is pre-asymptotic for hex8 at affordable sizes)".
 - **`README.md`:** status.
 
 ## Not covered
 
 - Published tables of Srinivas & Rao (1970) and Visscher et al. (1991) are not reproduced: the Srinivas–Rao Ritz is validated by its $P$-convergence, the (0,1,0) closed form and the prototype's transfer-matrix agreement; the Visscher Ritz by its $N$-convergence; the FE converges to both at the expected rates.
 - The transfer-matrix check is not in the tests (prototype fact; it would share the ansatz and conventions with the Ritz).
-- hex8 rate for mode 6 on the cross-ply (pre-asymptotic at affordable sizes).
+- hex8 rates on the cross-ply (mode 6 pre-asymptotic at affordable sizes; documented only).
 - Thin plates ($L/t \ge 100$): PR 16 (solid shells).
 - 8c: NAFEMS FV52/FV12, Lamb sphere.
