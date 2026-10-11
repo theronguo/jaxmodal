@@ -42,6 +42,19 @@ def masked(A, mask):
     return (D @ A @ D).tocsr()
 
 
+def restrict(K, M, free=None):
+    """(K_ff, M_ff, idx): free rows and columns in CSC, idx = free DOF indices (all for None).
+    Restriction, not masking: no spurious zero eigenvalues or pivots on constrained DOFs."""
+    if K.ndim != 2 or K.shape[0] != K.shape[1] or K.shape != M.shape:
+        raise ValueError(f"K and M must be square and of equal shape, got {K.shape}, {M.shape}")
+    if free is None:
+        idx = np.arange(K.shape[0])
+    else:
+        _check_mask(K.shape[0], free)
+        idx = np.flatnonzero(free)
+    return sp.csc_array(K)[idx][:, idx], sp.csc_array(M)[idx][:, idx], idx
+
+
 def a_p(A, mask, s=None):
     """A_P = D A D + s (I - D); default s = mean of diag(A) over free DOFs (for SPD A)."""
     _check_mask(A.shape[0], mask)
