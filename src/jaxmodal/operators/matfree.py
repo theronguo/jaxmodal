@@ -13,6 +13,7 @@ from jax import lax
 
 from ..elements import ELEMENTS, check_elements, kernels
 from ..materials import check_materials, phase_table, phases
+from .common import check_nodal_mass, check_v, check_x64, register, scaled
 from .dofmap import check_int32, conn_dofs
 
 DEFAULT_PATH = {"cpu": "scatter", "gpu": "scatter"}  # CPU from benchmarks/scatter_gather.py
@@ -182,22 +183,11 @@ class Unstructured:
 
     def scaled(self, s_K=None, s_M=None):
         """Copy with new per-element scalings (n_el,); None keeps the current one. Traceable."""
-        new = {}
-        for name, s in (("s_K", s_K), ("s_M", s_M)):
-            if s is not None:
-                if jnp.shape(s) != (self.n_el,):
-                    raise ValueError(f"{name} must have shape ({self.n_el},), got {jnp.shape(s)}")
-                new[name] = jnp.asarray(s, jnp.float64)
-        return dataclasses.replace(self, **new)
+        return scaled(self, s_K, s_M)
 
 
-def _register(cls, meta):
-    data = [f.name for f in dataclasses.fields(cls) if f.name not in meta]
-    jax.tree_util.register_dataclass(cls, data_fields=data, meta_fields=meta)
-
-
-_register(Block, ["type", "offset", "n_el", "chunk", "W"])
-_register(Unstructured, ["n_nodes", "mode", "mass", "path", "R", "n_ranges"])
+register(Block, ["type", "offset", "n_el", "chunk", "W"])
+register(Unstructured, ["n_nodes", "mode", "mass", "path", "R", "n_ranges"])
 
 
 def _packed_index(k):
@@ -240,17 +230,12 @@ def unstructured(
     """Matrix-free operator with apply_K, apply_M, diag_K, diag_M and scaled methods."""
     if mode not in ("stored", "otf"):
         raise ValueError(f"mode must be 'stored' or 'otf', got {mode!r}")
-    if not jax.config.jax_enable_x64:
-        raise ValueError("unstructured needs float64: call jaxmodal.config.enable_x64() first")
+    check_x64("unstructured")
     index, pairs = phases(mesh)
     check_materials(pairs, materials, orientations)
     check_elements(mesh, mass)
     n_nodes = len(mesh.points)
-    if nodal_mass is None:
-        nodal_mass = np.zeros(n_nodes)
-    nodal_mass = np.asarray(nodal_mass, float)
-    if nodal_mass.shape != (n_nodes,) or not (np.isfinite(nodal_mass) & (nodal_mass >= 0)).all():
-        raise ValueError(f"nodal_mass must be a finite, non-negative ({n_nodes},) array")
+    nodal_mass = check_nodal_mass(nodal_mass, n_nodes)
     lay = layout(mesh, path, chunk, range_nodes)
     sizes = {"n_dof": 3 * n_nodes, "phase": len(pairs)}
     sizes |= {f"{b['type']}_dofs": b["n_pad"] * b["k"] for b in lay["blocks"]}
@@ -418,8 +403,8 @@ def _assemble(op, kern, m):
 def _check(op, v=None):
     if op.mode == "stored" and op.C is not None:
         raise ValueError("stored mode bakes C into Ke: rebuild the operator to change materials")
-    if v is not None and (v.ndim != 2 or v.shape[0] != op.n_dof):
-        raise ValueError(f"v must have shape ({op.n_dof}, m), got {v.shape}")
+    if v is not None:
+        check_v(v, op.n_dof)
 
 
 @jax.jit

@@ -115,7 +115,7 @@ mesh = voxel_mesh(shape=(nx, ny, nz), spacing=(hx, hy, hz), origin=(ox, oy, oz),
 
 - **Grid:** cell $(i, j, k)$ has flat index $i + n_x(j + n_y k)$ ($x$ fastest). Grid node $(i, j, k)$ has flat index $i + (n_x+1)\bigl(j + (n_y+1)k\bigr)$ and position $x_{ijk} = o + h \odot (i, j, k)$.
 - **Mask:** `mask[i, j, k]` is a bool array of shape `shape` selecting active cells; `None` means the full grid. Active cells become hex8 elements in grid order, and used nodes are kept in grid order. Labels are 0 and there are no element sets.
-- **`mesh.voxel`** holds `shape`, `spacing`, `origin`, `node_map` (grid node → mesh node, −1 if dropped) and `element_map` (grid cell → mesh element, −1 if inactive). `Mesh` validates that a voxel mesh has exactly one hex8 block and that both maps are bijections onto the mesh; PR 6 checks that they agree with the geometry.
+- **`mesh.voxel`** holds `shape`, `spacing`, `origin`, `node_map` (grid node → mesh node, −1 if dropped) and `element_map` (grid cell → mesh element, −1 if inactive). `Mesh` validates that a voxel mesh has exactly one hex8 block and that both maps are bijections onto the mesh; `stencil` checks that they agree with the geometry (points on the grid, connectivity equal to the grid corners in VTK order; `docs/operators.md`).
 - **Inverse maps** (valid after renumbering):
 
   ```python

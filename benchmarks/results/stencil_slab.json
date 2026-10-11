@@ -1,0 +1,68 @@
+{
+  "runs": [
+    {
+      "n": 87,
+      "m": 1,
+      "slab": null,
+      "apply_s": 0.018382375012151897,
+      "slab_used": 8,
+      "peak_bytes": 59834440
+    },
+    {
+      "n": 87,
+      "m": 1,
+      "slab": 2,
+      "apply_s": 0.0196942079346627,
+      "slab_used": 2,
+      "peak_bytes": 40861744
+    },
+    {
+      "n": 87,
+      "m": 1,
+      "slab": 32,
+      "apply_s": 0.018485291046090424,
+      "slab_used": 32,
+      "peak_bytes": 151978152
+    },
+    {
+      "n": 87,
+      "m": 16,
+      "slab": null,
+      "apply_s": 0.18271879199892282,
+      "slab_used": 8,
+      "peak_bytes": 864731808
+    },
+    {
+      "n": 87,
+      "m": 16,
+      "slab": 2,
+      "apply_s": 0.19604579091537744,
+      "slab_used": 2,
+      "peak_bytes": 516293064
+    },
+    {
+      "n": 87,
+      "m": 16,
+      "slab": 32,
+      "apply_s": 0.2311197080416605,
+      "slab_used": 32,
+      "peak_bytes": 2096612888
+    }
+  ],
+  "slab_rule_ok": {
+    "m1": true,
+    "m16": true
+  },
+  "system": "benchmarks/results/system.json",
+  "versions": {
+    "jax": "0.11.2",
+    "jaxlib": "0.11.2",
+    "numpy": "2.5.3",
+    "platform": "macOS-27.2-arm64-arm-64bit",
+    "cpu_count": 16,
+    "p_cores": 12,
+    "e_cores": 4,
+    "xla_flags": null,
+    "jax_num_cpu_devices": true
+  }
+}

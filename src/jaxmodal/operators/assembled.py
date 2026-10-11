@@ -7,6 +7,7 @@ import scipy.sparse as sp
 
 from ..elements import check_elements, kernels
 from ..materials import check_materials, phase_table, phases
+from .common import check_nodal_mass, check_x64
 from .dofmap import element_dofs
 
 _KERNELS = {
@@ -42,20 +43,14 @@ def assemble(
     """
     if chunk < 1:
         raise ValueError(f"chunk must be >= 1, got {chunk}")
-    if not jax.config.jax_enable_x64:
-        raise ValueError("assemble needs float64: call jaxmodal.config.enable_x64() first")
+    check_x64("assemble")
     index, pairs = phases(mesh)
     check_materials(pairs, materials, orientations)
     check_elements(mesh, mass)
     n_nodes = len(mesh.points)
     n_dof = 3 * n_nodes
     if nodal_mass is not None:
-        nodal_mass = np.asarray(nodal_mass, float)
-        if (
-            nodal_mass.shape != (n_nodes,)
-            or not (np.isfinite(nodal_mass) & (nodal_mass >= 0)).all()
-        ):
-            raise ValueError(f"nodal_mass must be a finite, non-negative ({n_nodes},) array")
+        nodal_mass = check_nodal_mass(nodal_mass, n_nodes)
     for name, x in (("s_K", s_K), ("s_M", s_M)):
         x = None if x is None else np.asarray(x, float)
         if x is not None and (x.shape != (mesh.n_el,) or not (np.isfinite(x) & (x >= 0)).all()):
