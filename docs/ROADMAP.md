@@ -565,7 +565,7 @@ Split into three parts with unchanged acceptance criteria: **8a** the reference 
     - On the parallelogram mesh: ≥ 0.9 for extension and out-of-plane shear.
     - Parallelogram in-plane shear, and twist on both meshes, are report-only.
     - Trapezoidal in-plane bending is report-only, because all 4-node membrane elements that pass the patch test lock there (MacNeal 1987).
-  - Discretization-error tests use the PR 8 `eigsh` shift-invert solve at reference sizes (Jacobi LOBPCG is impractical at κ ≈ 1e12).
+  - Discretization-error tests use the PR 8 `eigsh` shift-invert solve (within its size limit, `docs/eigensolvers.md`) (Jacobi LOBPCG is impractical at κ ≈ 1e12).
   - **0.1% target (measured against 3D elasticity):**
     - Srinivas–Rao at L/t = 10 and 100 with ≥ k stacked elements per ply (k stated in the docs).
     - One layered element per laminate is reported, not gated.
