@@ -76,7 +76,7 @@ One factorization of the prototype's boxes (harness, SuperLU fill or peak; the D
 
 ### Accuracy
 
-The attainable accuracy is the floor $f_\lambda = 10\,\varepsilon\,\hat\lambda_\max/\lambda$ ($\hat\lambda_\max$: the largest eigenvalue, from dense `eigh` or `eigsh(which="LA")`) (relative), i.e. about $\varepsilon\kappa$ for the lowest elastic mode. Against dense `scipy.linalg.eigh` of $(K_f, M_f)$, up to 20 modes on free hex20 boxes (consistent and lumped), clamped hex27, sliding hex20, and free hex20/hex27 plates with $L/t = 100, 200$ ($\kappa \le 7.8\cdot10^9$):
+The attainable accuracy is the floor $f_\lambda = 10\,\varepsilon\,\hat\lambda_\max/\lambda$ ($\hat\lambda_\max$: the largest eigenvalue, from dense `eigh` or `eigsh(which="LA")`; the verification tests use `tol=1e-3`, enough for an order of magnitude) (relative), i.e. about $\varepsilon\kappa$ for the lowest elastic mode. Against dense `scipy.linalg.eigh` of $(K_f, M_f)$, up to 20 modes on free hex20 boxes (consistent and lumped), clamped hex27, sliding hex20, and free hex20/hex27 plates with $L/t = 100, 200$ ($\kappa \le 7.8\cdot10^9$):
 
 - elastic modes: $|\lambda - \lambda_\text{dense}| \le 0.99 f_\lambda\lambda$ (each side of the comparison is floor-limited);
 - rigid modes: $|\lambda| \le 0.04\cdot10\varepsilon\lambda_\max$ (dense `eigh`: up to $0.22$);

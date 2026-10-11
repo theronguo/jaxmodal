@@ -125,3 +125,10 @@ Expected runtime including setup: fast additions ≈ 25 s (Visscher 2.5 s cached
 - hex8 rates on the cross-ply (mode 6 pre-asymptotic at affordable sizes; documented only).
 - Thin plates ($L/t \ge 100$): PR 16 (solid shells).
 - 8c: NAFEMS FV52/FV12, Lamb sphere.
+
+## Implementation notes
+
+- The Lagrange basis is the Legendre Vandermonde times its inverse at the GLL nodes (vectorized; degree ≤ 24 is well conditioned). `np.einsum(..., optimize=True)` for the ply stiffness: without it, `plate_modes` at $P = 24$ took 3.2 s instead of 0.24 s.
+- Labels and sets are one assert per plate (simplicity NIT): the expected order is a list of label sets, compared with `[set(map(tuple, labels[S])) for S in sets]`.
+- `plate_fe` always computes 10 modes, so the rate levels reuse the target runs (ORTHO hex20/hex27 $n = 16$).
+- Measured: fast additions 30 s, slow additions 48 s (PAG hex27 target 27 s, rates 22 s), on a loaded machine.
