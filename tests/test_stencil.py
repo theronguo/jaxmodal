@@ -274,6 +274,7 @@ def test_int32(monkeypatch):
 
 
 def test_reference_element_and_axes():
+    assert grid_layout((4, 4, 4))[0][0] == 2 and grid_layout((5, 5, 3))[0][0] == 1  # ties: last
     for name, axes, layers in (("F", (0, 2, 1), 5), ("S", (1, 2, 0), 12), ("Tmix", (2, 1, 0), 6)):
         op = operator(name, "consistent", 4)
         m = case(name)[0]

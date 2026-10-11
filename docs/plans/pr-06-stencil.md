@@ -173,7 +173,7 @@ Random $s_K, s_M \in [0.1, 2]$ with one zero, nodal masses with zeros. Slab ∈ 
 11. **Benchmark:** a fast test asserts the recorded `slab_rule_ok` in `benchmarks/results/stencil_slab.json`; a slow smoke run of `main(sizes=...)` on one tiny configuration (no file written).
 12. **PR 5 refactor:** PR 5's tests pass unchanged after the move to `common.py`.
 
-Known equivalent mutants: padding layers holding node 0 instead of `n_nodes`, and the scatter with `mode="clip"` instead of `"drop"` (both only add zeros, since $s = 0$ on those cells); shift-permutation mutants on z-scan meshes (identity permutation) and the inverse instead of the forward permutation when it is a swap (its own inverse).
+Known equivalent mutants: node-grid padding holding node 0 instead of `n_nodes` (cell-grid padding 0 is not equivalent: element 0's $s$ leaks in), and the scatter with `mode="clip"` instead of `"drop"` (both only add zeros, since $s = 0$ on those cells); shift-permutation mutants on z-scan meshes (identity permutation) and the inverse instead of the forward permutation when it is a swap (its own inverse).
 
 ## Docs
 
