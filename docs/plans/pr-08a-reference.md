@@ -135,9 +135,9 @@ n = count_below(K, M, sigma, free)  # number of eigenvalues of (K_ff, M_ff) belo
 
 The lowest `n_modes` eigenpairs of $K_f v = \lambda M_f v$. $V$ is `(n_dof, n_modes)` with constrained rows exactly 0 and $V^\top M V = I$. PR 9 compares its masked LOBPCG modes against these.
 
-1. **Inputs.** `restrict` checks `K`, `M` and `free`. Also `1 <= n_modes` and `n_modes + 1 < n_free` (ARPACK needs $k < n$; one extra mode for the check); `sigma` is `None` or a finite value $< 0$; `points` is `None` or `(n_nodes, 3)` with `3 * n_nodes == n_dof`. Anything else raises `ValueError`.
+1. **Inputs.** `restrict` checks `K`, `M` and `free`. Also `1 <= n_modes` and `n_modes + 1 < n_free` (ARPACK needs $k < n$; one extra mode for the check); `sigma` is `None` or a finite value $< 0$; `points` is `None` or `(n_nodes, 3)` with `3 * n_nodes == n_dof`: the `mesh.points` that `K`, `M` were assembled from (DOF $3n + i$). The shape check cannot catch points of another mesh of the same size; wrong points only slow the ordering, never change the result (docstring). Anything else raises `ValueError`.
 2. **Ordering** (`_order(A, x)`), computed once per call from the pattern of $K_f$ (which contains that of $M_f$ for consistent mass; for lumped mass it is the union anyway).
-   - With `points`: geometric nested dissection on `x = points[idx // 3]` as above (median split on the widest axis, separator from CSR rows, leaves of 64), about 15 lines, with factorizations using `permc_spec="NATURAL"`.
+   - With `points`: geometric nested dissection on `x = points[idx // 3]` as above (median split on the widest axis, separator from CSR rows, leaves of `ND_LEAF = 64` DOFs, a module constant), about 15 lines, with factorizations using `permc_spec="NATURAL"`.
    - Without `points`: `p = arange` and `permc_spec="MMD_AT_PLUS_A"`, slower for bulky meshes (table).
    - Both keep `perm_r == perm_c`.
 3. **Factorization** (`_lu(A)`, used by the solves and the check): `splu(A[p][:, p], permc_spec=…, diag_pivot_thresh=0, options=dict(SymmetricMode=True))`. The `OPinv` solve is `y[p] = lu.solve(b[p])`. For $\sigma < 0$, $A = K_f - \sigma M_f$ is SPD, so no pivoting is needed.
@@ -154,7 +154,7 @@ The lowest `n_modes` eigenpairs of $K_f v = \lambda M_f v$. $V$ is `(n_dof, n_mo
    - When `n_modes` ends inside a cluster, only modes $1..j$ are certified by the count (documented). The tail cluster's members are still certified as eigenpairs by the residuals, and a missed member is caught if $\lambda_{n+1}$ lies past the gap.
 7. **Output:** `lam[:n_modes]`, and `V` with `V[idx] = v[:, :n_modes]`.
 
-**Cost and size.** 2 factorizations for SPD $K_f$, 3 with rigid modes (pass 1, pass 2, the count). Pass 1, pass 2 and the check use different shifts, so nothing can be shared. With `points`, the largest supported size for bulky meshes is about 100k free DOF at about 1 minute and 3 GB per factorization (per the ND table). Plate-like meshes go further. The implementation re-measures the whole routine at the sizes of the table (harness) and states the result, including the check's share, in `docs/eigensolvers.md` and the roadmap.
+**Cost and size.** 2 factorizations for SPD $K_f$, 3 with rigid modes (pass 1, pass 2, the count). Pass 1, pass 2 and the check use different shifts, so nothing can be shared. With `points`, the largest supported size for bulky meshes is about 100k free DOF: ≈ 26 s and 2.9 GB per factorization (ND table), ≈ 1–1.5 min for the routine's 2–3 factorizations; without `points` (MMD) the bulky limit stays about 35k. Plate-like meshes go further. The implementation re-measures the whole routine at the sizes of the table (harness) and states the result, including the check's share, in `docs/eigensolvers.md` and the roadmap.
 
 ### `count_below(K, M, sigma, free=None) -> int`
 
@@ -168,7 +168,7 @@ The exact number of eigenvalues of $(K_f, M_f)$ below $\sigma$ (any finite float
 
 **Two inertia implementations, on purpose.** `count_below` is dense and pivoted (Bunch–Kaufman is backward stable), so it is exact for well-separated $\sigma$: the roadmap's exact count at reference sizes, used by PR 9 and PR 14. The check inside `reference_modes` is sparse and unpivoted; it reuses the solver's factorization options and runs up to about 100k DOF. A one-line comment in each points to `docs/eigensolvers.md`.
 
-**Sizes.** "Reference size" (roadmap: PR 9's dense $r_M$ and inertia comparisons, PR 14's exact count) means $\le$ `MAX_DENSE` = 20k free DOF, where dense `eigh`, $M^{-1}$ and `count_below` are affordable. `reference_modes` alone, "the PR 8 `eigsh`", reaches about 100k bulky (used by PRs 11, 13, 16, 18). The roadmap and `docs/eigensolvers.md` define both terms in one place.
+**Sizes.** "Reference size" (roadmap: PR 9's dense $r_M$ and inertia comparisons, PR 14's exact count) means $\le$ `MAX_DENSE` = 20k free DOF, where dense `eigh`, $M^{-1}$ and `count_below` are affordable. `reference_modes` alone, "the PR 8 `eigsh`", reaches about 100k bulky with `points` (about 35k without) (used by PRs 11, 13, 16, 18). The roadmap and `docs/eigensolvers.md` define both terms in one place.
 
 ## In-test oracle: the sliding block (`tests/exact.py`)
 
@@ -229,7 +229,7 @@ References: dense `scipy.linalg.eigh` of $(K_f, M_f)$, the exact sliding-block s
 - **Comparison.** Modes are compared sorted against the exact sorted spectrum (justified above).
 
 6. **Oracle self-check:** the isotropic closed form, and the `kmax` guard raising when `kmax` is too small for `n`.
-7. **0.1% target** (roadmap): consistent hex20 and hex27 at $n = 8$ (15k DOF, about 2 s each), both materials, lowest 10 modes: $|f/f_\text{exact} - 1| \le 10^{-3}$ (measured $\le 3.3\cdot10^{-4}$: a 3× margin; $n = 6$ fails for the isotropic material). The mesh is stated in `docs/verification.md`.
+7. **0.1% target** (roadmap): consistent hex20 and hex27 at $n = 8$ (8k / 15k DOF for hex20 / hex27, about 2 s each), both materials, lowest 10 modes: $|f/f_\text{exact} - 1| \le 10^{-3}$ (measured $\le 3.3\cdot10^{-4}$: a 3× margin; $n = 6$ fails for the isotropic material). The mesh is stated in `docs/verification.md`.
 8. **Convergence rates** (`slow`). Least-squares slope of $\log|\lambda^h/\lambda - 1|$ against $\log h$, per mode, for the lowest 6 modes, over the levels of the table, both materials:
    - $\ge 1.8$ for hex8 consistent and row-sum, hex20 HRZ and hex27 row-sum;
    - $\ge 3.6$ for hex20 and hex27 consistent.
@@ -259,7 +259,7 @@ Expected runtime: test_reference ≈ 10 s, the 0.1% test ≈ 8 s, the slow rate 
 
 - **`docs/eigensolvers.md`** (new). PR 9 adds LOBPCG to it. For now it covers:
   - the reference solver: restriction vs masking, and that PR 9 compares against these modes padded with zeros;
-  - shift-invert at a negative shift: why negative, the measured silent failure, the σ rule with pass 2, the explicit `sigma` beyond $\kappa \approx 10^{10}$;
+  - shift-invert at a negative shift: why negative, the measured silent failure, the σ rule with pass 2, the explicit `sigma` beyond $\kappa \approx 10^{11}$;
   - certification: residuals, orthonormality, Sylvester's law, symmetric SuperLU, the last-gap rule and what it certifies, and the caveat that the sparse count is unpivoted (growth uncontrolled; `perm_r == perm_c` guards the structure, not the growth; failures are loud);
   - geometric nested dissection and the MMD fallback;
   - the accuracy floor $\varepsilon\kappa$ with the measured errors;
