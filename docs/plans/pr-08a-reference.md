@@ -201,7 +201,7 @@ References: dense `scipy.linalg.eigh` of $(K_f, M_f)$, the exact sliding-block s
 
 ### `tests/test_reference.py`
 
-1. **Against dense `eigh`**, `n_modes = 20`, all with `points` (plus one case without `points`, which must give the same result):
+1. **Against dense `eigh`**, `n_modes = 20`, all with `points` (plus one case without `points`, which must match the ND run to $2 f_\lambda$; `_order` returns a permutation, `np.array_equal(np.sort(p), np.arange(n))`):
    - **Cases:**
      - a free hex20 box with the orthotropic material, consistent and lumped, with nodal masses including zeros; this is the case that kills "pass 2 skipped";
      - a clamped curved hex27 (PR 5's mesh B, `xmin: xyz`);
@@ -218,7 +218,7 @@ References: dense `scipy.linalg.eigh` of $(K_f, M_f)$, the exact sliding-block s
    - **Deterministic:** `monkeypatch` `reference._solve` to drop one eigenpair below the gap (return modes $1..j-1, j+1..n+2$). The `RuntimeError` names the counts.
    - **Real ARPACK:** on the $8\times8\times1$ plate at `sigma = -1e-2 * s̄`, assert that ARPACK's raw output is wrong (computed with `_solve` directly), then that `reference_modes` raises. `pytest.skip` if a future ARPACK gets it right; this test records the behaviour, it does not depend on it.
 
-   The pair part: `_solve` patched to return a duplicated eigenvector raises (orthonormality). `splu` patched to return `perm_r != perm_c` raises.
+   The pair part, each check pinned by its message: `_solve` patched to replace mode $j$ by a copy of mode $j-1$ (a ghost: count and residuals pass, measured 4.1ε) raises the orthonormality error; `_solve` patched to perturb one eigenvector by $10^{-6}$ times another (orthonormality $10^{-12}$ and count pass) raises the residual error. `splu` patched to return `perm_r != perm_c` raises.
 3. **Clusters.** On a free isotropic hex20 $4^3$ cube, take the first 4 `n_modes` values (from dense `eigh` at test time; currently 9, 10, 12, 13) that end inside an exact FE multiplicity, asserting that the multiplicity is real (relative gap $< 10^{-10}$). Each gives no error, and the modes up to the last gap match dense `eigh`. Under the mutant "gap threshold → 0", at least one of the four miscounts. `n_modes = 3` on the free box (inside the rigid cluster) raises `ValueError`.
 4. **Inputs.** `n_modes = 0`, `n_modes + 1 >= n_free`, a bad mask, `sigma` of 0 or positive, mismatched shapes, and a wrong `points` shape raise `ValueError`. `restrict` returns `idx` and the restricted matrices (checked against dense slicing).
 5. **`count_below`** (the roadmap's test). On a clamped model (hex27, `xmin: xyz`) and a free model (hex20 box), consistent and lumped: for $\sigma$ mid-gap between at least 4 consecutive pairs with relative gap $\ge 10^{-3}$, including the first gap above the rigid cluster of the free model, the count equals the dense `eigh` count below $\sigma$. Every one of these cases has $2\times2$ pivots (4–16 rows), so the block-counting mutants die. `n_free > MAX_DENSE` raises; this is checked by lowering the module constant with `monkeypatch`.
@@ -229,7 +229,7 @@ References: dense `scipy.linalg.eigh` of $(K_f, M_f)$, the exact sliding-block s
 - **Comparison.** Modes are compared sorted against the exact sorted spectrum (justified above).
 
 6. **Oracle self-check:** the isotropic closed form, and the `kmax` guard raising when `kmax` is too small for `n`.
-7. **0.1% target** (roadmap): consistent hex20 and hex27 at $n = 8$ (8k / 15k DOF for hex20 / hex27, about 2 s each), both materials, lowest 10 modes: $|f/f_\text{exact} - 1| \le 10^{-3}$ (measured $\le 3.3\cdot10^{-4}$: a 3× margin; $n = 6$ fails for the isotropic material). The mesh is stated in `docs/verification.md`.
+7. **0.1% target** (roadmap): consistent hex20 and hex27 at $n = 8$ (6.7k / 13.0k free DOF for hex20 / hex27, about 2 s each), both materials, lowest 10 modes: $|f/f_\text{exact} - 1| \le 10^{-3}$ (measured $\le 3.3\cdot10^{-4}$: a 3× margin; $n = 6$ fails for the isotropic material). The mesh is stated in `docs/verification.md`.
 8. **Convergence rates** (`slow`). Least-squares slope of $\log|\lambda^h/\lambda - 1|$ against $\log h$, per mode, for the lowest 6 modes, over the levels of the table, both materials:
    - $\ge 1.8$ for hex8 consistent and row-sum, hex20 HRZ and hex27 row-sum;
    - $\ge 3.6$ for hex20 and hex27 consistent.
@@ -241,7 +241,7 @@ Expected runtime: test_reference ≈ 10 s, the 0.1% test ≈ 8 s, the slow rate 
 
 **Mutants expected to be killed:**
 - **σ rule:** pass 2 skipped (the box);
-- **certification:** check removed, $\mu$ off by one gap, gap threshold $\to 0$ (test 3's loop), residual or orthonormality check removed (test 2's duplicate);
+- **certification:** check removed, $\mu$ off by one gap, gap threshold $\to 0$ (test 3's loop), residual check removed (test 2's perturbed vector), orthonormality check removed (test 2's ghost);
 - **restriction:** masking instead of restriction (spurious zeros);
 - **output:** a wrong column order (residuals);
 - **inertia:** $2\times2$ blocks counted as 0 or 2, raw diagonal signs;
@@ -252,14 +252,14 @@ Expected runtime: test_reference ≈ 10 s, the 0.1% test ≈ 8 s, the slow rate 
 - the σ multiplier 0.01 → 0.1 or 1 (measured: same accuracy);
 - `COLAMD` instead of `MMD_AT_PLUS_A`;
 - a different `v0` seed;
-- leaf size 64 → 32 (cost only);
+- leaf size 64 → 32, ND replaced by `arange` or MMD, an empty separator (cost only; `p` stays a permutation);
 - $C_{55} \leftrightarrow C_{66}$ on the isotropic material.
 
 ## Docs
 
 - **`docs/eigensolvers.md`** (new). PR 9 adds LOBPCG to it. For now it covers:
   - the reference solver: restriction vs masking, and that PR 9 compares against these modes padded with zeros;
-  - shift-invert at a negative shift: why negative, the measured silent failure, the σ rule with pass 2, the explicit `sigma` beyond $\kappa \approx 10^{11}$;
+  - shift-invert at a negative shift: why negative, the measured silent failure, the σ rule with pass 2, the explicit `sigma` beyond $\kappa \approx 10^{11}$ (taken near $\lambda_k$, e.g. from a coarser run: an explicit $\sigma$ far below $\lambda_k$ raises the residual to 45–90ε on the plates at $-10^{-2}\bar s$ and can trip the 100ε check, loudly);
   - certification: residuals, orthonormality, Sylvester's law, symmetric SuperLU, the last-gap rule and what it certifies, and the caveat that the sparse count is unpivoted (growth uncontrolled; `perm_r == perm_c` guards the structure, not the growth; failures are loud);
   - geometric nested dissection and the MMD fallback;
   - the accuracy floor $\varepsilon\kappa$ with the measured errors;
