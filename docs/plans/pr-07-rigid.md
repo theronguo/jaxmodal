@@ -81,19 +81,21 @@ Calling `rigid_modes` twice repeats the part search (seconds and GBs at 10M+ ele
 - **Assumption:** every element has $s_K > 0$ (PRs 5 and 6 allow $s_K = 0$). Void elements can split a part or leave nodes without stiffness, so $\mathrm{null}(K_m)$ is then larger than $R$; `rigid_modes` does not see $s_K$, so designs use $s_\min > 0$ or remove void elements from the mesh (documented).
 - Size: dense $(n_\text{dof}, k)$ fp64 on the host (4.8 GB at 100M DOF free-free). At 100M the device copy belongs in PR 9's fp32 deflation basis, which the roadmap's budget already counts ("≲ 8 modes in total at 100M, including any rigid modes R").
 
-### `m_orthonormalize(V, MV) -> V'` (traceable, jnp)
+### `m_orthonormalize(V, MV) -> V'` (jitted, `donate_argnums=(0, 1)`)
 
 CholQR2, carrying the M product along so M is applied only once (by the caller):
 
 ```
-repeat 2 times:
-    G = sym(V^T MV);  L = cholesky(G);  T = solve_triangular(L, I_k)^T   # T = L^{-T}
-    V, MV = V @ T, MV @ T
+T(V, MV) = solve_triangular(cholesky(sym(V^T MV)), I_k)^T     # L^{-T}
+pass 1:  T1 = T(V, MV);  V, MV = V @ T1, MV @ T1
+pass 2:  V = V @ T(V, MV)
 ```
+
+`V` and `MV` are donated (docstring: the inputs are consumed; callers write `R = m_orthonormalize(R, op.apply_M(R))` with `R` already a device array, so it is transferred once). Measured (`memory_analysis`, $n = 2\cdot10^6$, $k = 6$, block = $8 n_\text{dof} k$): without donation the peak is 4 blocks (inputs 2, the pass-1 $V$ 1, output 1; XLA fuses `MV @ T1` into the second Gram matrix), with donation 3 blocks (the output aliases an input); 0.05 s at 10M DOF.
 
 Then $V'^\top M V' = I$ to round-off as long as the first Cholesky succeeds (CholQR2 needs $\kappa(V) \lesssim \varepsilon^{-1/2}$; measured: $4.7\cdot10^{-14}$ at $\kappa(G) = 4.5\cdot10^4$, where one pass gives $3.5\cdot10^{-10}$). `V @ T` avoids the transposed $(n_\text{dof}, k)$ copy of `solve_triangular(L, V.T).T`. $k = 0$ returns $(n_\text{dof}, 0)$. `MV` is the caller's M product, so the same function works with `assemble` (`Mm @ R`), `unstructured` and `stencil`; with a mask, $R$ is already masked, so $R^\top (m \odot MR) = R^\top MR$. $V$ must have full M-rank (true for $R$: $N_p$ is orthonormal, each part's 6 columns are independent and parts are disjoint); otherwise the result is NaN (docstring). PR 9's SVQB, not this function, handles rank-deficient blocks.
 
-**Device memory at 100M:** device $R$, $MR$ and the result are $3 \cdot 8\, n_\text{dof} k$ (14.4 GB for $k = 6$) plus the operator workspace at $m = k$. This setup (device $R$, $MR$, orthonormalize, cast to fp32 into the basis) runs before PR 9 allocates the solver blocks, as does the host part search (≈ 0.28 GB at 2M voxel DOF); documented in `docs/boundary_conditions.md` for PR 9's setup order.
+**Device memory at 100M:** device $R$, $MR$ and the pass-1 temporary, with the result aliasing a donated input: $3 \cdot 8\, n_\text{dof} k$ (14.4 GB for $k = 6$; 4 blocks, 19.2 GB, without donation) plus the operator workspace at $m = k$ during `apply_M`. This setup (device $R$, $MR$, orthonormalize, cast to fp32 into the basis) runs before PR 9 allocates the solver blocks, as does the host part search (≈ 0.28 GB at 2M voxel DOF); documented in `docs/boundary_conditions.md` for PR 9's setup order.
 
 ### `project(R, X, MX) -> X - R (R^\top MX)` (traceable, jnp)
 
@@ -110,7 +112,7 @@ References: PR 4's `assemble`, `dof_mask` and `masked`, dense `numpy.linalg.eigh
 3. **Parts:** two disjoint voxel blocks give 12 modes (two parts, each node labelled with its block); clamping one block (`xmin: xyz`) leaves 6, supported on the other block only; clamping a single node of the second block in addition gives the per-part result (3 there), unchanged by the first block's clamp. Two voxels joined only along an edge, and only at a vertex (a node shared without a shared face), raise the contact error from `parts` and `rigid_modes`; two voxels sharing a face give one part; a collapsed element raises. The mixed mesh is one part (faces match across hex8/hex20 blocks). Labels are deterministic: `parts` on an `rcm`-renumbered mesh and on a randomly renumbered mesh (`renumber` with random permutations) gives the same partition (mapped through the permutation), and `rigid_modes` the same span. `MAX_PARTS + 1` disjoint voxels raise with the default and pass with `max_parts=MAX_PARTS + 1`.
 4. **Unit independence:** the hex8 box scaled by $10^{6}$ and $10^{-6}$ gives the same counts as unscaled for every BC case in test 2.
 5. **Projector:** random $X$ $(n_\text{dof}, 5)$ on the masked mixed mesh with BCs leaving 3 modes and on the free sphere: $\|R^\top M_m\, \mathrm{project}(R, X, M_m X)\| \le 10^{-12}\|X\|$ (the roadmap's "projected random vectors are M-orthogonal to R"), $P^2 X = P X$ and $P R = 0$ to $10^{-12}$; `k = 0` returns $X$, also under `jit`.
-6. **Device operators:** on the free voxel sphere, `m_orthonormalize` with `stencil(...).apply_M` and with `unstructured(...).apply_M` equals the SciPy result to $10^{-12}$.
+6. **Device operators:** on the free voxel sphere, `m_orthonormalize` with `stencil(...).apply_M` and with `unstructured(...).apply_M` equals the SciPy result to $10^{-12}$. Memory: the compiled `m_orthonormalize` at $n_\text{dof} = 3\cdot10^5$, $k = 6$ has `alias_size == output_size` and `temp_size` ≤ 1.05 blocks; a donated device input is deleted afterwards (`is_deleted()`).
 7. **Inputs:** `rigid_modes` rejects a non-bool or wrong-length `free` (`ValueError`); `free` with every DOF constrained gives $(n_\text{dof}, 0)$ and `m_orthonormalize` of it $(n_\text{dof}, 0)$; `free=None` gives $6 n_\text{parts}$ unit-norm columns, and per part the translation columns are orthogonal to the rotation columns, $\|R_0[:, T]^\top R_0[:, R]\| \le 10^{-14}$ (exact because $\sum_n (x_n - c_p) = 0$; this catches rotating about the origin instead of the centroid, which CholQR2 would otherwise hide, on the offset box of test 1); `max_parts` below the part count raises, above it passes; importing `jaxmodal.mesh` still does not load jax (the existing test, now covering `parts`).
 
 Equivalent mutants (expected to survive): the rotation sign (same span); `RANK_TOL` anywhere in about $[10^{-16}, 0.1]$ (the measured gap).
