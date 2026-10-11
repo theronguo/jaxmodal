@@ -263,7 +263,7 @@ Expected runtime: test_reference ≈ 10 s, the 0.1% test ≈ 8 s, the slow rate 
   - certification: residuals, orthonormality, Sylvester's law, symmetric SuperLU, the last-gap rule and what it certifies, and the caveat that the sparse count is unpivoted (growth uncontrolled; `perm_r == perm_c` guards the structure, not the growth; failures are loud);
   - geometric nested dissection and the MMD fallback;
   - the accuracy floor $\varepsilon\kappa$ with the measured errors;
-  - cost, and the largest supported size (re-measured table, with the check's share);
+  - cost, and the largest supported size (re-measured table: per factorization and the routine peak with the `lu.U` copy, with the check's share);
   - the definitions of "reference size" and "the PR 8 `eigsh`";
   - the dense inertia count: Sylvester, Bunch–Kaufman, why the $2\times2$ blocks are indefinite, the Fortran-order memory, `MAX_DENSE`;
   - why there are two inertia implementations.
