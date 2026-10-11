@@ -54,7 +54,7 @@ $\bar s = \mathrm{mean}\,\mathrm{diag} K_f / \mathrm{mean}\,\mathrm{diag} M_f$; 
   - Inside the rigid cluster the count is undefined.
   - This is an unpivoted $LDL^\top$ of an indefinite matrix, so element growth is not controlled. A wrong count is possible in principle. It would almost always appear as a loud `RuntimeError`.
 - **Geometric nested dissection** (reviewer prototype, `r8-perf/nd.py`).
-  - **Method:** recursive median bisection of the free DOFs on the widest coordinate axis. The separator is the left DOFs that are coupled to the right side, read from the CSR rows. Children are ordered first, then the separator, down to leaves of 64 DOFs. Then `splu(A[p][:, p], permc_spec="NATURAL", ...)`.
+  - **Method:** recursive bisection of the free DOFs by rank on the widest coordinate axis (a stable `argsort`, halves of equal size, so ties at the median cannot stall the recursion on graded meshes; the reviewer prototype used `c <= median`). The separator is the left DOFs that are coupled to the right side, read from the CSR rows. Children are ordered first, then the separator, down to leaves of 64 DOFs. Then `splu(A[p][:, p], permc_spec="NATURAL", ...)`.
   - **Overhead:** the ordering takes 0.04–0.15 s. The solve residual is the same (about $5\cdot10^{-13}$) and `perm_r == perm_c` holds.
   - SuperLU's `relax`/`panel_size` options and `COLAMD` gain nothing over MMD; a coordinate-free BFS ordering is worse than MMD.
   - **One factorization:**
@@ -137,7 +137,7 @@ The lowest `n_modes` eigenpairs of $K_f v = \lambda M_f v$. $V$ is `(n_dof, n_mo
 
 1. **Inputs.** `restrict` checks `K`, `M` and `free`. Also `1 <= n_modes` and `n_modes + 1 < n_free` (ARPACK needs $k < n$; one extra mode for the check); `sigma` is `None` or a finite value $< 0$; `points` is `None` or `(n_nodes, 3)` with `3 * n_nodes == n_dof`: the `mesh.points` that `K`, `M` were assembled from (DOF $3n + i$). The shape check cannot catch points of another mesh of the same size; wrong points only slow the ordering, never change the result (docstring). Anything else raises `ValueError`.
 2. **Ordering** (`_order(A, x)`), computed once per call from the pattern of $K_f$ (which contains that of $M_f$ for consistent mass; for lumped mass it is the union anyway).
-   - With `points`: geometric nested dissection on `x = points[idx // 3]` as above (median split on the widest axis, separator from CSR rows, leaves of `ND_LEAF = 64` DOFs, a module constant), about 15 lines, with factorizations using `permc_spec="NATURAL"`.
+   - With `points`: geometric nested dissection on `x = points[idx // 3]` as above (rank split on the widest axis, separator from CSR rows, leaves of `ND_LEAF = 64` DOFs, a module constant), about 15 lines, with factorizations using `permc_spec="NATURAL"`.
    - Without `points`: `p = arange` and `permc_spec="MMD_AT_PLUS_A"`, slower for bulky meshes (table).
    - Both keep `perm_r == perm_c`.
 3. **Factorization** (`_lu(A)`, used by the solves and the check): `splu(A[p][:, p], permc_spec=…, diag_pivot_thresh=0, options=dict(SymmetricMode=True))`. The `OPinv` solve is `y[p] = lu.solve(b[p])`. For $\sigma < 0$, $A = K_f - \sigma M_f$ is SPD, so no pivoting is needed.
@@ -154,7 +154,7 @@ The lowest `n_modes` eigenpairs of $K_f v = \lambda M_f v$. $V$ is `(n_dof, n_mo
    - When `n_modes` ends inside a cluster, only modes $1..j$ are certified by the count (documented). The tail cluster's members are still certified as eigenpairs by the residuals, and a missed member is caught if $\lambda_{n+1}$ lies past the gap.
 7. **Output:** `lam[:n_modes]`, and `V` with `V[idx] = v[:, :n_modes]`.
 
-**Cost and size.** 2 factorizations for SPD $K_f$, 3 with rigid modes (pass 1, pass 2, the count). Pass 1, pass 2 and the check use different shifts, so nothing can be shared. With `points`, the largest supported size for bulky meshes is about 100k free DOF: ≈ 26 s and 2.9 GB per factorization (ND table), ≈ 1–1.5 min for the routine's 2–3 factorizations; without `points` (MMD) the bulky limit stays about 35k. Plate-like meshes go further. The implementation re-measures the whole routine at the sizes of the table (harness) and states the result, including the check's share, in `docs/eigensolvers.md` and the roadmap.
+**Cost and size.** 2 factorizations for SPD $K_f$, 3 with rigid modes (pass 1, pass 2, the count). Pass 1, pass 2 and the check use different shifts, so nothing can be shared. With `points`, the largest supported size for bulky meshes is about 100k free DOF: ≈ 26 s and 2.9 GB per factorization (ND table). The routine peaks higher, because the count's `lu.U` builds a full CSC copy of $U$ next to the factor (SciPy has no pivot accessor): measured end to end at hex20 $20^3$, 62 s and 5.9 GB for SPD $K_f$ (99.5k DOF, 2 factorizations), 124 s and 7.1 GB with rigid modes (107k DOF, 3); without `points` (MMD) the bulky limit stays about 35k. Plate-like meshes go further. The implementation re-measures the whole routine at the sizes of the table (harness) and states the routine peak (not only the per-factorization peak) and time, including the check's share, in `docs/eigensolvers.md` and the roadmap.
 
 ### `count_below(K, M, sigma, free=None) -> int`
 
