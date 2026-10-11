@@ -171,6 +171,8 @@ def test_parts():
             with pytest.raises(ValueError, match="without sharing a whole face"):
                 f(m)
     assert parts(blocks([(0, 0, 0), (1, 0, 0)], (2, 2, 2))).max() == 0
+    big = blocks([np.s_[:30], np.s_[31:]], (61, 40, 25))  # > 2**16 nodes: key dtype range
+    assert len(big.points) > 2**16 and (parts(big) == (big.points[:, 0] > 30.5)).all()
     assert parts(mesh("mixed")).max() == 0  # faces match across hex8/hex20 blocks
     b = box_mesh((2, 1, 1))
     for i, j in ((1, 0), (5, 4)):  # bottom and top face
