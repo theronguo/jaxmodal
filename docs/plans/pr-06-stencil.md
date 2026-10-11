@@ -186,3 +186,9 @@ Known equivalent mutants: padding layers holding node 0 instead of `n_nodes`, an
 
 - Rigid body modes for voxel meshes (PR 7); multigrid (PR 11); the voxel sensitivity pass (PR 23; `jax.grad` through the operator works already; PR 21's element-kernel pass can use `reference_element` too).
 - Distorted voxel meshes and hex20/hex27 grids (use `unstructured`); sub-layer chunking of very large cross-sections.
+
+## Implementation notes (code review)
+
+- The static `layers` field was dropped (nothing read it); the layer count is `grid_layout(mesh.voxel.shape)[1]`.
+- `apply_M` and `diag_M` seed the scan carry with the nodal term, and the consistent mass uses the 24×24 `kron(me, I3)` GEMM: both keep `apply_M`'s workspace at or below `apply_K`'s.
+- `benchmarks/harness.measure_json` replaces the per-benchmark `run()` boilerplate.

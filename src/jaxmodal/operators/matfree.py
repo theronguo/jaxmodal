@@ -417,7 +417,7 @@ def _apply_K(op, v):
 def _apply_M(op, v):
     _check(op, v)
     if op.mass == "lumped":
-        return (_assemble(op, lambda b, d: _m_diag(op, b, d), 1) + op.nodal[:, None]) * v
+        return _diag_M(op)[:, None] * v
     return _assemble(op, lambda b, d: _m_apply(op, b, d, v), v.shape[1]) + op.nodal[:, None] * v
 
 

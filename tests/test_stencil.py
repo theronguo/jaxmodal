@@ -17,6 +17,7 @@ from jaxmodal.materials import Material, phase_table, phases, rotate
 from jaxmodal.memory import stencil_memory
 from jaxmodal.mesh import box_mesh, rcm, voxel_mesh
 from jaxmodal.operators import assemble, reference_element, stencil, unstructured, voxel
+from jaxmodal.operators.voxel import grid_layout
 
 ORIENT = {1: R}
 MASSES = ("consistent", "lumped")
@@ -232,8 +233,9 @@ def test_geometry_check():
     for bad in (dataclasses.replace(m, points=pts), dataclasses.replace(m, blocks={"hex8": rot})):
         with pytest.raises(ValueError, match="voxel grid"):
             stencil(bad, MATERIALS, ORIENT)
-    with pytest.raises(ValueError, match="voxel grid"):
-        stencil(box_mesh((2, 2, 2)), MATERIALS)
+    for f in (lambda m: stencil(m, MATERIALS), lambda m: stencil_memory(m, 1)):
+        with pytest.raises(ValueError, match="voxel grid"):
+            f(box_mesh((2, 2, 2)))
 
 
 def test_inputs():
@@ -247,7 +249,7 @@ def test_inputs():
         with pytest.raises(ValueError, match=match):
             stencil(m, MATERIALS, **kw)
     op = stencil(m, MATERIALS, slab=100)
-    assert op.slab == op.layers == 5
+    assert op.slab == grid_layout(m.voxel.shape)[1] == 5
     for kw in (dict(s_K=np.ones(3)), dict(s_M=np.ones((m.n_el, 1)))):
         with pytest.raises(ValueError, match="shape"):
             op.scaled(**kw)
@@ -274,8 +276,8 @@ def test_int32(monkeypatch):
 def test_reference_element_and_axes():
     for name, axes, layers in (("F", (0, 2, 1), 5), ("S", (1, 2, 0), 12), ("Tmix", (2, 1, 0), 6)):
         op = operator(name, "consistent", 4)
-        assert (op.axes, op.layers) == (axes, layers)
         m = case(name)[0]
+        assert (op.axes, grid_layout(m.voxel.shape)[1]) == (axes, layers)
         Ke, me = reference_element(op)
         X = m.points[m.blocks["hex8"][0]]
         for p, (mat, ori) in enumerate(phases(m)[1]):

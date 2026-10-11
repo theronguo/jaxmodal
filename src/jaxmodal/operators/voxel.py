@@ -35,7 +35,7 @@ def _check_grid(mesh):
     """Raise unless mesh.points and the connectivity are exactly the voxel grid."""
     vx = mesh.voxel
     if vx is None:
-        raise ValueError("stencil needs a voxel mesh (mesh.voxel is None): no voxel grid")
+        raise ValueError("stencil needs a voxel mesh: mesh.voxel is None (no voxel grid)")
     nx, ny, nz = vx.shape
     sx, sxy = nx + 1, (nx + 1) * (ny + 1)
     g = np.flatnonzero(vx.node_map >= 0)
@@ -76,7 +76,6 @@ class Stencil:
     nodal: jax.Array  # (n_dof,)
     slab: int
     axes: tuple  # grid axes (x, y, z) in stored order, scan axis first
-    layers: int  # unpadded layer count along the scan axis
     mass: str
     n_nodes: int
     n_el: int
@@ -102,7 +101,7 @@ class Stencil:
         return scaled(self, s_K, s_M)
 
 
-register(Stencil, ["slab", "axes", "layers", "mass", "n_nodes", "n_el"])
+register(Stencil, ["slab", "axes", "mass", "n_nodes", "n_el"])
 
 
 def stencil(mesh, materials, orientations=None, mass="consistent", nodal_mass=None, slab=None):
@@ -115,7 +114,7 @@ def stencil(mesh, materials, orientations=None, mass="consistent", nodal_mass=No
     check_materials(pairs, materials, orientations)
     n_nodes, n_el = len(mesh.points), mesh.n_el
     nodal_mass = check_nodal_mass(nodal_mass, n_nodes)
-    axes, layers, slab, L = grid_layout(mesh.voxel.shape, slab)
+    axes, _, slab, L = grid_layout(mesh.voxel.shape, slab)
     node, cell = _grids(mesh.voxel, axes, L, n_nodes, n_el)
     check_int32(n_dof=3 * n_nodes, node=node.size, cell=cell.size, phase=len(pairs))
     C, rho = phase_table(pairs, materials, orientations)
@@ -131,7 +130,6 @@ def stencil(mesh, materials, orientations=None, mass="consistent", nodal_mass=No
         nodal=jnp.asarray(np.repeat(nodal_mass, 3)),
         slab=slab,
         axes=axes,
-        layers=layers,
         mass=mass,
         n_nodes=n_nodes,
         n_el=n_el,
@@ -156,20 +154,24 @@ def _slabs(op, kern, m, init=None):
     kern(nd, el) gives (8, 3, slab, B, A, m) corner-DOF-major values for the slab's cells."""
     L, B, A = op.cell.shape
     s = op.slab
-    shifts = OFFSETS[:, list(op.axes)]
 
     def step(out, j):
         nd = lax.dynamic_slice_in_dim(op.node, j * s, s + 1)
         el = lax.dynamic_slice_in_dim(op.cell, j * s, s)
         Y = kern(nd, el)
         y = jnp.zeros((3, s + 1, B + 1, A + 1, m))
-        for a, (d0, d1, d2) in enumerate(shifts):
+        for a, (d0, d1, d2) in enumerate(_shifts(op)):
             y = y.at[:, d0 : d0 + s, d1 : d1 + B, d2 : d2 + A].add(Y[a])
         return out.at[nd].add(jnp.moveaxis(y, 0, -2), mode="drop"), None
 
     out = jnp.zeros((op.n_dof, m)) if init is None else init  # carried, updated in place
     out, _ = lax.scan(step, out.reshape(op.n_nodes, 3, m), jnp.arange(L // s, dtype=jnp.int32))
     return out.reshape(-1, m)
+
+
+def _shifts(op):
+    """(8, 3) corner offsets in stored axis order: the gather and scatter shifts."""
+    return OFFSETS[:, list(op.axes)]
 
 
 def _gather(x, el):
@@ -182,8 +184,7 @@ def _corners(op, v, nd):
     s, (B, A) = nd.shape[0] - 1, (nd.shape[1] - 1, nd.shape[2] - 1)
     u = v.reshape(op.n_nodes, 3, -1).at[nd].get(mode="fill", fill_value=0.0)
     u = jnp.moveaxis(u, -2, 0)  # (3, s+1, B+1, A+1, m)
-    shifts = OFFSETS[:, list(op.axes)]
-    return jnp.stack([u[:, d0 : d0 + s, d1 : d1 + B, d2 : d2 + A] for d0, d1, d2 in shifts])
+    return jnp.stack([u[:, d0 : d0 + s, d1 : d1 + B, d2 : d2 + A] for d0, d1, d2 in _shifts(op)])
 
 
 def _k_apply(op, Ke, v, nd, el):
@@ -198,7 +199,7 @@ def _k_apply(op, Ke, v, nd, el):
     def phase_step(Y, p):  # one accumulator: workspace independent of the phase count
         return Y + (Ke[p] @ U).reshape(shape) * jnp.where(ph == p, s, 0.0), None
 
-    return lax.scan(phase_step, jnp.zeros(shape), jnp.arange(op.rho.shape[0]))[0]
+    return lax.scan(phase_step, jnp.zeros(shape), jnp.arange(op.rho.shape[0], dtype=jnp.int32))[0]
 
 
 def _m_weight(op, el):
@@ -215,7 +216,7 @@ def _k_diag(op, Ke, el):
     P = op.rho.shape[0]
     d = jnp.diagonal(Ke, axis1=1, axis2=2)  # (P, 24)
     ph, s = _gather(op.phase, el), _gather(op.s_K, el)
-    w = jnp.where(ph == jnp.arange(P)[:, None, None, None], s, 0.0)  # (P, s, B, A)
+    w = jnp.where(ph == jnp.arange(P, dtype=jnp.int32)[:, None, None, None], s, 0.0)  # (P, s, B, A)
     return jnp.einsum("pk,p...->k...", d, w).reshape(8, 3, *el.shape, 1)
 
 
@@ -235,9 +236,9 @@ def _apply_K(op, v):
 @jax.jit
 def _apply_M(op, v):
     check_v(v, op.n_dof)
-    _, me = reference_element(op)
     if op.mass == "lumped":
-        return (_slabs(op, lambda nd, el: _m_diag(op, me, el), 1) + op.nodal[:, None]) * v
+        return _diag_M(op)[:, None] * v
+    _, me = reference_element(op)
     kern = lambda nd, el: _m_apply(op, me, v, nd, el)  # noqa: E731
     return _slabs(op, kern, v.shape[1], op.nodal[:, None] * v)  # adding it after costs a vector
 

@@ -7,9 +7,6 @@ Machine bandwidth (STREAM triad): results/system.json.
 
 import argparse
 import json
-import os
-import tempfile
-from pathlib import Path
 
 from benchmarks import harness
 
@@ -47,12 +44,8 @@ open("{out}", "w").write(json.dumps(r))
 
 def run(t, n, rcm=False, mode="stored", path="scatter", m=1, chunk=None, R=None):
     cfg = dict(type=t, n=n, rcm=rcm, mode=mode, path=path, m=m, chunk=chunk, range_nodes=R)
-    with tempfile.TemporaryDirectory() as d:
-        out = os.path.join(d, "r.json")
-        setup = SETUP.format(t=t, n=n, rcm=rcm, mode=mode, path=path, m=m, chunk=chunk, R=R)
-        r = harness.measure(CODE.format(out=out), setup)
-        cfg |= json.loads(Path(out).read_text())
-    cfg["peak_bytes"] = r["peak_bytes"]
+    setup = SETUP.format(t=t, n=n, rcm=rcm, mode=mode, path=path, m=m, chunk=chunk, R=R)
+    cfg |= harness.measure_json(CODE, setup)
     print(json.dumps(cfg), flush=True)
     return cfg
 

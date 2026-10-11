@@ -97,6 +97,14 @@ def measure(code, setup=""):
     return {"peak_bytes": peak, "rss_bytes": rss, "time_s": r["time_s"]}
 
 
+def measure_json(code, setup=""):
+    """measure() for `code` that writes a JSON dict to "{out}"; that dict plus peak_bytes."""
+    with tempfile.TemporaryDirectory() as d:
+        out = os.path.join(d, "r.json")
+        r = measure(code.format(out=out), setup)
+        return json.loads(Path(out).read_text()) | {"peak_bytes": r["peak_bytes"]}
+
+
 def _sysctl(name):
     try:
         p = subprocess.run(["sysctl", "-n", name], capture_output=True, text=True)

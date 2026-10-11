@@ -7,9 +7,6 @@ triad): results/system.json.
 
 import argparse
 import json
-import os
-import tempfile
-from pathlib import Path
 
 from benchmarks import harness
 
@@ -39,11 +36,7 @@ open("{out}", "w").write(json.dumps(dict(apply_s=min(ts), slab_used=op.slab)))
 
 def run(n, m, slab=None):
     cfg = dict(n=n, m=m, slab=slab)
-    with tempfile.TemporaryDirectory() as d:
-        out = os.path.join(d, "r.json")
-        r = harness.measure(CODE.format(out=out), SETUP.format(n=n, m=m, slab=slab))
-        cfg |= json.loads(Path(out).read_text())
-    cfg["peak_bytes"] = r["peak_bytes"]
+    cfg |= harness.measure_json(CODE, SETUP.format(**cfg))
     print(json.dumps(cfg), flush=True)
     return cfg
 

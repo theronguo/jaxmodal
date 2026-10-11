@@ -59,6 +59,11 @@ def test_peak_freed_below_high_water():
     assert close(r["peak_bytes"], 0.8 * GB)
 
 
+def test_measure_json():
+    r = harness.measure_json('open("{out}", "w").write(json.dumps(dict(a=1)))', "import json")
+    assert r["a"] == 1 and "peak_bytes" in r
+
+
 @pytest.mark.slow
 @darwin
 def test_peak_controls():
