@@ -35,7 +35,7 @@ On thin plates $\lambda_7/\bar s$ is tiny ($2\cdot10^{-8}$ at $L/t = 100$, $1.2\
 **σ rule** (`sigma=None`):
 
 1. **Pass 1** at $\sigma_0 = -\sqrt\varepsilon\,\bar s$ (unit-independent). It needs only rough $\tilde\lambda$, and works while $|\sigma_0|$ is not far above $\lambda_k$ ($k$ = `n_modes + 1`); measured on plates down to $\lambda_7/\bar s = 10^{-9}$ ($L/t = 1000$).
-2. **Pass 2**, if pass 1 finds near-zero eigenvalues ($\tilde\lambda_1 < 100|\sigma_0|$: rigid modes, a nearly singular $K_f$, or a thin structure whose low modes lie below $100|\sigma_0|$), at $\sigma = -0.01\,\tilde\lambda_k$. Then $|\sigma| \le \lambda_k$, and the rigid-mode amplification $\lambda_7/|\sigma|$ is harmless. Only if every wanted mode is rigid-mode noise ($\tilde\lambda_k \le 100\,\varepsilon\,\bar s$, which then raises `ValueError` "no gap") does pass 1 stand.
+2. **Pass 2**, if pass 1 finds near-zero eigenvalues ($\tilde\lambda_1 < 100|\sigma_0|$: rigid modes, a nearly singular $K_f$, or a thin structure whose low modes lie below $100|\sigma_0|$), at $\sigma = -0.01\,\tilde\lambda_k$. Then $|\sigma| \le \lambda_k$, and the rigid-mode amplification $\lambda_7/|\sigma|$ is harmless. Only if every wanted mode is rigid-mode noise ($\tilde\lambda_k \le 100\,\varepsilon\,\bar s$, which then raises `ValueError` "no gap") does pass 1 stand; on very thin structures that request can instead fail loudly (`ArpackNoConvergence`, or the residual check).
 
 For SPD $K_f$ (clamped, sliding), pass 1 is as accurate as a pass at $-0.01\lambda_k$. Pass 2 at $-\lambda_k$, $-0.1\lambda_k$ and $-0.01\lambda_k$ gives the same accuracy; 0.01 is a margin.
 
@@ -50,6 +50,8 @@ Every result is checked; a failure raises `RuntimeError` instead of returning wr
 1. **Orthonormality:** $\|V^\top M_f V - I\|_\max \le 10^{-10}$.
 2. **Residuals:** every mode has $\|K_f v - \lambda M_f v\|_\infty \le 100\,\varepsilon\,(\|K_f\|_\infty + |\lambda|\,\|M_f\|_\infty)\,\|v\|_\infty$ (measured maximum $10.65\varepsilon$). With accurate, M-orthonormal eigenvectors, a count equal to $j$ proves that the first $j$ vectors span the lowest invariant subspace; together, 1 and 2 rule out a ghost copy standing in for a missing mode.
 3. **Count.** Let $j$ be the largest index $\le n$ with $\lambda_{j+1} - \lambda_j > \tau = \max(10^{-6}|\lambda_{n+1}|,\ 100\,\varepsilon\,\bar s)$: the last gap at or below the requested count. Rigid-mode noise ($\lesssim 4\varepsilon\bar s$), exact FE degeneracies and the splitting of degenerate pairs by `eigsh` (up to $2.6\cdot10^{-5}$ relative, $\le 1.7\varepsilon\bar s$ absolute, on very thin square plates) count as clusters; real gaps are far wider. $K_f - \mu M_f$ at $\mu = (\lambda_j + \lambda_{j+1})/2$ is factored, and by Sylvester's law of inertia the number $c$ of negative pivots is the number of eigenvalues below $\mu$; $c \ne j$ raises `eigsh missed modes: c eigenvalues below μ, j found`. No gap at all (e.g. `n_modes=3` on a free body, inside the rigid cluster) raises `ValueError` asking for more modes.
+
+A request that ends inside a cluster of near-singular soft modes (soft springs, near-mechanisms, $\lambda \lesssim 10^{-9}\bar s$) can fail the residual check, loudly; ask for modes past the cluster.
 
 When `n_modes` ends inside a cluster, the count certifies modes $1..j$ only; the tail cluster's members are still certified as eigenpairs by the residuals, and a missed member is caught if $\lambda_{n+1}$ lies past the gap.
 
