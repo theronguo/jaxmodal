@@ -83,7 +83,7 @@ def rigid_modes(mesh, free=None, max_parts=MAX_PARTS):
         R[nodes, k, col + 3 + i] = d[:, j]  # e_i x d
         R[nodes, j, col + 3 + i] = -d[:, k]
     R = R.reshape(3 * n, -1)
-    R /= np.linalg.norm(R, axis=0)
+    R /= np.sqrt(np.einsum("ij,ij->j", R, R))  # column norms without an |R|^2 copy
     if free is None:
         return R
     fixed = np.flatnonzero(~free)

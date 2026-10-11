@@ -16,7 +16,8 @@ def parts(mesh):
         if (corners[:, 1:] == corners[:, :-1]).any():
             raise ValueError("mesh has collapsed elements (a repeated corner node)")
     faces = np.array(FACE_CORNERS)
-    keys = np.concatenate([np.sort(c[:, faces], axis=-1).reshape(-1, 4) for c in conn])
+    dtype = np.int32 if len(mesh.points) < 2**31 else np.int64  # exact keys, half the memory
+    keys = np.concatenate([np.sort(c[:, faces].astype(dtype), -1).reshape(-1, 4) for c in conn])
     order = np.lexsort(keys.T[::-1])  # 6 faces per element, in global element order
     keys = keys[order]
     same = (keys[1:] == keys[:-1]).all(1)
