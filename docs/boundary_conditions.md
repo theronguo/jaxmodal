@@ -1,6 +1,6 @@
 # Boundary conditions, rigid modes and deflation
 
-`jaxmodal.operators` (module `operators/constraints.py`) holds the Dirichlet masks, the masked eigen-operator and $A_P$ (SciPy, PR 4), and the rigid body modes, their M-orthonormalization and the deflation projector (PR 7). `jaxmodal.mesh.parts` finds the face-connected parts.
+`jaxmodal.operators` (module `operators/constraints.py`) holds the Dirichlet masks, the masked eigen-operator and $A_P$ (SciPy, PR 4), the free-DOF restriction (PR 8a), and the rigid body modes, their M-orthonormalization and the deflation projector (PR 7). `jaxmodal.mesh.parts` finds the face-connected parts.
 
 ```python
 import jax.numpy as jnp
@@ -24,8 +24,9 @@ Y = project(R, X, MX)  # X - R (R^T MX), with MX = M X
 ## Dirichlet conditions and masks
 
 - **BCs** are zero displacement per component in global axes on node sets: `bcs = {node_set: "xyz"}`, e.g. `{"xmin": "xyz", "ymin": "y"}`. The value is a non-empty string of distinct letters from `"xyz"`. Sets may overlap (the union is constrained); `{}` is free-free. An unknown set name or invalid components raise `ValueError`. `dof_mask` is the only parser of this dict; PR 9's `solve_modes(mesh, materials, bcs, ...)` takes the same format.
-- **Mask** $m$: `(n_dof,)` bool, `True` = free. `masked` and `a_p` raise `ValueError` unless it is a bool `np.ndarray` of length `n_dof` (a 0/1 int mask would silently index and complement wrongly).
+- **Mask** $m$: `(n_dof,)` bool, `True` = free. `masked`, `a_p` and `restrict` raise `ValueError` unless it is a bool `np.ndarray` of length `n_dof` (a 0/1 int mask would silently index and complement wrongly).
 - **`masked(A, m)`** $= DAD$ with $D = \mathrm{diag}(m)$: the eigen-operator $v \mapsto m \odot A(m \odot v)$ as a matrix. Constrained rows and columns are exactly zero and the free block is exactly $A_{ff}$, so no spurious eigenvalues enter through the mask.
+- **`restrict(K, M, free=None)`** returns $(K_{ff}, M_{ff}, \mathrm{idx})$ in CSC form, with `idx = flatnonzero(free)` (all DOFs for `None`); `K` and `M` must be square and of equal shape. This is restriction, not masking: `masked` keeps the constrained DOFs as zero rows, which add spurious zero eigenvalues to an eigensolve and spurious zero pivots to an inertia count. The PR 8 reference solver and inertia count use it ([`eigensolvers.md`](eigensolvers.md)).
 
 ## $A_P$ (`a_p`)
 
@@ -84,3 +85,5 @@ so $R^\top M (PX) = 0$, $P^2 = P$ and $PR = 0$. `project(R, X, MX)` takes $MX$ (
 - **Projector:** random blocks on the masked mixed mesh (3 modes) and the free sphere: $\|R^\top M_m PX\| \le 10^{-12}\|X\|$, $P^2X = PX$, $PR = 0$; $k = 0$ returns $X$.
 - **Device operators:** `m_orthonormalize` with `stencil` and `unstructured` `apply_M` equals the SciPy result to $10^{-12}$; the compiled CholQR2 aliases its output to the donated $V$ with $\le 1.05$ blocks of temporaries and no donation warning.
 - **Inputs:** bad masks raise; an all-constrained mask gives $(n_\text{dof}, 0)$; free columns have unit norm and translations are orthogonal to rotations ($\le 10^{-10}$; rotating about the origin would give ≈ 0.9).
+
+`tests/test_reference.py` (PR 8a): `restrict` returns `flatnonzero(free)` and blocks equal to dense slicing (all DOFs for `None`); mismatched shapes and bad masks raise.
