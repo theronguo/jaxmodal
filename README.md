@@ -2,7 +2,7 @@
 
 Large-scale 3D linear modal analysis, $K v = \lambda M v$, in JAX. It uses matrix-free operators, preconditioned LOBPCG, hex8/hex20/hex27 and solid-shell elements, and linear anisotropic elasticity. The targets are the lowest modes and modes in frequency bands, with FFD shape optimization and topology optimization later.
 
-**Status:** early development. PR 0 (scaffold, benchmark harness, conventions), PR 1 (mesh data model, readers, voxel generator), PR 2 (anisotropic materials, rotations, phases), PR 3 (hex8/hex20/hex27 element kernels), PR 4 (DOF map, assembled SciPy reference operators, Dirichlet masking, box meshes), PR 5 (matrix-free unstructured operator, RCM reordering, memory estimator), PR 6 (voxel stencil operator) and PR 7 (rigid body modes, M-orthonormalization, deflation projector) are done; there is no solver yet. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+**Status:** early development. PR 0 (scaffold, benchmark harness, conventions), PR 1 (mesh data model, readers, voxel generator), PR 2 (anisotropic materials, rotations, phases), PR 3 (hex8/hex20/hex27 element kernels), PR 4 (DOF map, assembled SciPy reference operators, Dirichlet masking, box meshes), PR 5 (matrix-free unstructured operator, RCM reordering, memory estimator), PR 6 (voxel stencil operator), PR 7 (rigid body modes, M-orthonormalization, deflation projector) and PR 8a (certified SciPy reference eigensolver, dense inertia count, sliding-block verification) are done; the matrix-free solver comes next. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Install
 
@@ -119,6 +119,18 @@ Y = project(R, X, op.apply_M(X))  # X - R (R^T M X): M-orthogonal to the rigid m
 ```
 
 See [`docs/operators.md`](docs/operators.md) for the DOF map, assembly and the matrix-free and voxel stencil operators, and [`docs/boundary_conditions.md`](docs/boundary_conditions.md) for BCs, $A_P$, rigid modes and deflation.
+
+The certified SciPy reference eigensolver and the exact inertia count, on the assembled matrices (the oracle for the matrix-free solver):
+
+```python
+from jaxmodal.eigen import reference_modes
+from jaxmodal.linalg import count_below
+
+lam, V = reference_modes(K, M, 10, free, points=box.points)  # lowest 10, V (n_dof, 10), V^T M V = I
+n = count_below(K, M, 0.5 * (lam[2] + lam[3]), free)  # 3 below sigma: the rigid modes (dense)
+```
+
+See [`docs/eigensolvers.md`](docs/eigensolvers.md) for the reference solver, its certification and size limits, and [`docs/verification.md`](docs/verification.md) for the exact solutions and measured convergence.
 
 ## Development
 
