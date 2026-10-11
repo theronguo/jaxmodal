@@ -35,11 +35,13 @@ On thin plates $\lambda_7/\bar s$ is tiny ($2\cdot10^{-8}$ at $L/t = 100$, $1.2\
 **σ rule** (`sigma=None`):
 
 1. **Pass 1** at $\sigma_0 = -\sqrt\varepsilon\,\bar s$ (unit-independent). It needs only rough $\tilde\lambda$, and works while $|\sigma_0|$ is not far above $\lambda_k$ ($k$ = `n_modes + 1`); measured on plates down to $\lambda_7/\bar s = 10^{-9}$ ($L/t = 1000$).
-2. **Pass 2**, only if pass 1 finds near-zero eigenvalues ($\tilde\lambda_1 < 100|\sigma_0| < \tilde\lambda_k$: rigid modes or a nearly singular $K_f$), at $\sigma = -0.01\,\tilde\lambda_k$. Then $|\sigma| \le \lambda_k$, and the rigid-mode amplification $\lambda_7/|\sigma|$ is harmless. If every wanted mode is near zero, pass 1 stands.
+2. **Pass 2**, if pass 1 finds near-zero eigenvalues ($\tilde\lambda_1 < 100|\sigma_0|$: rigid modes, a nearly singular $K_f$, or a thin structure whose low modes lie below $100|\sigma_0|$), at $\sigma = -0.01\,\tilde\lambda_k$. Then $|\sigma| \le \lambda_k$, and the rigid-mode amplification $\lambda_7/|\sigma|$ is harmless. Only if every wanted mode is rigid-mode noise ($\tilde\lambda_k \le 100\,\varepsilon\,\bar s$, which then raises \"no gap\") does pass 1 stand.
 
 For SPD $K_f$ (clamped, sliding), pass 1 is as accurate as a pass at $-0.01\lambda_k$. Pass 2 at $-\lambda_k$, $-0.1\lambda_k$ and $-0.01\lambda_k$ gives the same accuracy; 0.01 is a margin.
 
-**Explicit `sigma`** skips the rule (one pass). The rule is validated up to $\kappa = \lambda_\max/\lambda_7 \approx 8\cdot10^9$. Beyond $\kappa \approx 10^{11}$ (PR 16's solid shells reach $10^{12}$), pass `sigma` near $\lambda_k$, e.g. $-0.01\lambda_k$ from a coarser run. A $\sigma$ far below $\lambda_k$ raises the residuals (45–90ε on the $L/t = 200$ plates at $-10^{-2}\bar s$) and can trip the residual check, loudly. On the free hex27 plate $8\times8\times1$ with spacing $(1, 1, 0.005)$ ($L/t = 1600$, $\kappa = 3\cdot10^{13}$) the automatic rule fails the residual check (700–7800ε), and $\sigma = -0.01\tilde\lambda_{k}$ certifies.
+The rule is validated against dense `eigh` up to $\kappa = \lambda_\max/\lambda_7 \approx 8\cdot10^9$, and certifies on the free hex27 plate $8\times8\times1$ with spacing $(1, 1, 0.005)$ ($L/t = 1600$, $\kappa = 3\cdot10^{13}$) for `n_modes` 7–25; there the floor $f_\lambda = 10\,\varepsilon\,\kappa \approx 0.07$ for the lowest elastic mode, and the measured error against dense `eigh` is $0.09 f_\lambda$ (lowest 12). (Without the thin-structure case of pass 2, pass 1 at $|\sigma_0| \approx 10^5\lambda_k$ fails the residual check there, at 700–7800ε.)
+
+**Explicit `sigma`** skips the rule (one pass), e.g. $-0.01\lambda_k$ from a coarser run, for PR 16's solid shells ($\kappa \approx 10^{12}$) if the rule ever fails there. A $\sigma$ far below $\lambda_k$ raises the residuals (45–90ε on the $L/t = 200$ plates at $-10^{-2}\bar s$) and can trip the residual check, loudly.
 
 ### Certification
 
@@ -96,10 +98,10 @@ The tests (`tests/test_reference.py`) assert $2 f_\lambda$, $10^{-12}$ and $100\
 | hex20 $20^3$, free | ND | 107k | 120 s | 34.5 s | 6.98 GB |
 | hex20 $14^3$, clamped | MMD | 36.5k | 29.6 s | 13.5 s | 2.49 GB |
 | hex20 $14^3$, free | MMD | 38.5k | 53.6 s | 15.8 s | 2.78 GB |
-| hex27 plate $40\times40\times1$, $L/t = 200$, free | ND | 59.0k | 5.3 s | 2.0 s | 1.26 GB |
-| the same plate | MMD | 59.0k | 4.1 s | 1.5 s | 0.90 GB |
+| hex27 plate $40\times40\times1$, $L/t = 200$, free | ND | 59.0k | 7.7 s | 1.9 s | 1.26 GB |
+| the same plate | MMD | 59.0k | 5.7 s | 1.4 s | 0.90 GB |
 
-The factorizations dominate; the check is about 20–45% of the time. The largest supported size is about 100k free DOF on bulky meshes with `points` (2 minutes, 7 GB), and about 35k without. Plate-like meshes factor much faster and go further; on the plate MMD is as good as ND, and pass 2 is skipped because every wanted mode lies below $100|\sigma_0|$.
+The factorizations dominate; the check is about 20–45% of the time. The largest supported size is about 100k free DOF on bulky meshes with `points` (2 minutes, 7 GB), and about 35k without. Plate-like meshes factor much faster and go further; on the plate MMD is as good as ND.
 
 ## Sizes
 
@@ -122,7 +124,7 @@ The factorizations dominate; the check is about 20–45% of the time. The larges
 
 - **Accuracy**, `n_modes = 20`: a free orthotropic hex20 box (consistent and lumped, with nodal masses including zeros: the case that needs pass 2), a clamped curved hex27, the mixed hex8 + hex20 mesh with `xmin: x` (3 rigid modes), and a free hex27 plate $8\times8\times1$ with $L/t = 200$. Rigid modes $|\lambda| \le 10\varepsilon\lambda_\max$, elastic $\le 2 f_\lambda$, $\|V^\top MV - I\| \le 10^{-12}$, constrained rows 0, residuals $\le 100\varepsilon$; an explicit $\sigma = -0.01\lambda_{n+1}$ and the run without `points` give the same $\lambda$. `_order` returns a permutation, also in the tie fallback.
 - **Certification**, each check pinned by its message: a dropped mode (count), the real ARPACK failure above (`slow`), a ghost copy (orthonormality), a vector perturbed by $10^{-6}$ M-orthogonally to the others (residuals), a patched SuperLU with `perm_r != perm_c`.
-- **Clusters:** the first four `n_modes` ending inside an exact multiplicity of a free isotropic hex20 $4^3$ cube certify and match up to the last gap; `n_modes = 3` on a free box raises; on the $L/t = 1600$ plate, `n_modes` 7, 10, 12, 17, 21, 25 certify with an explicit $\sigma$ (a purely relative gap threshold falsely raises at 10, 12, 17).
+- **Clusters:** the first four `n_modes` ending inside an exact multiplicity of a free isotropic hex20 $4^3$ cube certify and match up to the last gap; `n_modes = 3` on a free box raises; on the $L/t = 1600$ plate, `n_modes` 7, 10, 12, 17, 21, 25 certify under the automatic σ rule (a purely relative gap threshold falsely raises at 10, 12, 17).
 - **Inputs** raise `ValueError`; `restrict` matches dense slicing.
 - **`count_below`** matches the dense `eigh` count at mid-gap $\sigma$ (relative gap $\ge 10^{-3}$, including the first gap above the rigid cluster) on a clamped hex27 and a free hex20 box, consistent and lumped; these cases have $2\times2$ pivots.
 

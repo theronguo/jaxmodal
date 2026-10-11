@@ -119,7 +119,7 @@ def reference_modes(K, M, n_modes, free=None, sigma=None, points=None):
     if sigma is None:
         s0 = -np.sqrt(EPS) * s_bar
         lam, v = _solve(Kf, Mf, k, s0, p, spec)
-        if lam[0] < 100 * abs(s0) < lam[-1]:  # near-zero modes: re-solve near lam_k
+        if lam[0] < 100 * abs(s0) and lam[-1] > GAP_ABS * EPS * s_bar:  # near-zero modes: re-solve
             lam, v = _solve(Kf, Mf, k, -0.01 * lam[-1], p, spec)
     else:
         lam, v = _solve(Kf, Mf, k, sigma, p, spec)

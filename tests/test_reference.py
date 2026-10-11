@@ -216,20 +216,12 @@ def test_inside_rigid_cluster():
 
 
 @pytest.mark.parametrize("n", [7, 10, 12, 17, 21, 25])
-def test_thin_plate_gaps(n, thin_rough):
-    """L/t = 1600: eigsh splits degenerate pairs; the absolute gap term keeps mu out of them.
-    kappa = 3e13 lies beyond the sigma rule's validated range: explicit sigma near lam_n."""
+def test_thin_plate_gaps(n):
+    """L/t = 1600 (kappa = 3e13): eigsh splits degenerate pairs; the absolute gap term keeps mu
+    out of them."""
     m, (K, M), _, _ = case("thin")
-    lam, _ = reference_modes(K, M, n, sigma=-0.01 * thin_rough[n], points=m.points)
+    lam, _ = reference_modes(K, M, n, points=m.points)
     assert len(lam) == n
-
-
-@pytest.fixture(scope="module")
-def thin_rough():
-    """Rough lowest 27 eigenvalues of the thin plate (one shift-invert run near lam_7)."""
-    _, (K, M), _, _ = case("thin")
-    s = -1e-14 * K.diagonal().mean() / M.diagonal().mean()
-    return reference._solve(K.tocsc(), M.tocsc(), 27, s, np.arange(K.shape[0]), "MMD_AT_PLUS_A")[0]
 
 
 # --- inputs and restrict ---
