@@ -96,8 +96,10 @@ The tests (`tests/test_reference.py`) assert $2 f_\lambda$, $10^{-12}$ and $100\
 | hex20 $20^3$, free | ND | 107k | 120 s | 34.5 s | 6.98 GB |
 | hex20 $14^3$, clamped | MMD | 36.5k | 29.6 s | 13.5 s | 2.49 GB |
 | hex20 $14^3$, free | MMD | 38.5k | 53.6 s | 15.8 s | 2.78 GB |
+| hex27 plate $40\times40\times1$, $L/t = 200$, free | ND | 59.0k | 5.3 s | 2.0 s | 1.26 GB |
+| the same plate | MMD | 59.0k | 4.1 s | 1.5 s | 0.90 GB |
 
-The factorizations dominate; the check is about 20–45% of the time. The largest supported size is about 100k free DOF on bulky meshes with `points` (2 minutes, 7 GB), and about 35k without. Plate-like meshes factor much faster and go further.
+The factorizations dominate; the check is about 20–45% of the time. The largest supported size is about 100k free DOF on bulky meshes with `points` (2 minutes, 7 GB), and about 35k without. Plate-like meshes factor much faster and go further; on the plate MMD is as good as ND, and pass 2 is skipped because every wanted mode lies below $100|\sigma_0|$.
 
 ## Sizes
 
