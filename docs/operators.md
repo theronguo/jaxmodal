@@ -1,6 +1,6 @@
 # Operators
 
-`jaxmodal.operators` holds the global DOF map, the int32 overflow assert, the assembled SciPy reference operators (the oracle), Dirichlet masking and the matrix-free device operators (`unstructured`, PR 5; the voxel stencil follows in PR 6).
+`jaxmodal.operators` holds the global DOF map, the int32 overflow assert, the assembled SciPy reference operators (the oracle), Dirichlet masking and the matrix-free device operators (`unstructured`, PR 5; the voxel stencil `stencil`, PR 6).
 
 ```python
 from jaxmodal.mesh import box_mesh
@@ -18,7 +18,7 @@ AP = a_p(K + sigma * M, free)  # SPD reference for preconditioners and linear so
 
 - **Global DOF** $3n + i$ is component $i$ of node $n$; `n_dof = 3 * len(mesh.points)`.
 - **Element DOFs** follow PR 3's node-major order $3a + i$, so `element_dofs(mesh)[t]` is $3\,\mathrm{conn}[:, a] + i$, an `(n_el_type, 3n)` int32 array per block.
-- **int32:** `check_int32(**sizes)` is the one overflow assert (Principle 6). It takes named plain ints and raises `ValueError` naming every size $\ge 2^{31}$. `element_dofs` checks `n_dof` and, per block, `<type>_dofs` $= n_\text{el} \cdot 3n$, then casts. Every later PR that sends a host index array to the device passes its sizes through `check_int32` and casts there: `unstructured` checks `n_dof`, `<type>_dofs` $= n_\text{pad} \cdot 3n$ (padded), `phase` (the phase count) and, on the gather path, `inv` (the inverse-map size) and `window` ($\sum_b W_b k_b + 1$); PR 6 checks the voxel maps.
+- **int32:** `check_int32(**sizes)` is the one overflow assert (Principle 6). It takes named plain ints and raises `ValueError` naming every size $\ge 2^{31}$. `element_dofs` checks `n_dof` and, per block, `<type>_dofs` $= n_\text{el} \cdot 3n$, then casts. Every later PR that sends a host index array to the device passes its sizes through `check_int32` and casts there: `unstructured` checks `n_dof`, `<type>_dofs` $= n_\text{pad} \cdot 3n$ (padded), `phase` (the phase count) and, on the gather path, `inv` (the inverse-map size) and `window` ($\sum_b W_b k_b + 1$); `stencil` checks `n_dof`, the `node` and `cell` grid sizes and `phase`.
 
 ## Assembled reference (`assemble`)
 
@@ -94,7 +94,7 @@ y = op.apply_M(v)
 dK, dM = op.diag_K(), op.diag_M()  # (n_dof,)
 ```
 
-- **Interface (Principle 2).** `apply_K`, `apply_M`, `diag_K`, `diag_M` and `scaled` are methods; PR 6's voxel operator (`stencil(...) -> Stencil`, estimator `stencil_memory`) has the same five, so PR 7 and PR 9 take either by duck typing. Each method calls a module-level `jax.jit` function of `(op, v)`: the operator is a jit argument and nothing is closed over, so the methods also work on a traced operator inside a solver loop.
+- **Interface (Principle 2).** `apply_K`, `apply_M`, `diag_K`, `diag_M` and `scaled` are methods; the voxel operator (`stencil(...) -> Stencil`, estimator `stencil_memory`) has the same five, so PR 7 and PR 9 take either by duck typing. The solver interface is these five methods plus the `n_dof` property (both operators also have `n_el`). Each method calls a module-level `jax.jit` function of `(op, v)`: the operator is a jit argument and nothing is closed over, so the methods also work on a traced operator inside a solver loop.
 - **Inputs.** Host checks as in `assemble` (x64 on, `phases`, `check_materials`, `check_elements(mesh, mass)`, `nodal_mass`), `chunk >= 1`, `range_nodes >= 1`. `v` must be 2-D with `n_dof` rows (a trace-time check); `m = 1` is `(n_dof, 1)`. No masking: callers form $m \odot K(m \odot v)$ (PR 7, PR 9).
 - **`scaled(s_K=None, s_M=None)`**: `None` keeps the current value; otherwise the shape must be `(n_el,)`. Only shapes are checked, so it is traceable (use it under `jit` and `grad`). Values should be finite and $\ge 0$; $s = 0$ voids an element.
 - **Stored mode bakes $C$ into $K_e$:** changing materials means building a new operator. In otf mode, `dataclasses.replace(op, C=...)` changes the stiffness without recompiling. A stored-mode operator with `C` set raises (it would be ignored).
@@ -203,6 +203,65 @@ Call it on the mesh that will be used (after `rcm`, if any), with the same keywo
 - The estimate costs as much as `layout` (0.3 s at 1M DOF gather).
 - **Composition:** later estimators (PR 9/11/13/14/15) add PR 5's `storage + workspace` and count `overhead` once; they count their own vectors.
 
+## Voxel stencil (`stencil`)
+
+```python
+from jaxmodal.operators import reference_element, stencil
+
+op = stencil(mesh, materials, orientations=None, mass="consistent", nodal_mass=None, slab=None)
+op = op.scaled(s_K=s_K, s_M=s_M)  # (n_el,), default ones
+y = op.apply_K(v)  # (n_dof, m) -> (n_dof, m); also apply_M, diag_K, diag_M
+Ke, me = reference_element(op)  # (P, 24, 24) per phase; (8, 8) scalar mass per unit density
+```
+
+For `voxel_mesh` meshes (`mesh.voxel` set; it also works after `renumber`/`rcm`). Same interface and conventions as `unstructured` (DOF $3n + i$ in mesh node order, 2-D `v`, traceable `scaled`, nodal masses, consistent or lumped mass; on a box element row-sum and HRZ coincide at $\rho V/8$ per node), so results compare directly with `unstructured` and `assemble` on the same mesh.
+
+- **Restriction:** one reference hex8 $K_e$ per phase (a (material, orientation) pair); elements differ only by phase, $s_K$ and $s_M$. The points must be the grid points. A distorted voxel mesh, hex20/hex27 grids or many phases (cost ∝ P: one GEMM per phase; e.g. one orientation per element) belong to `unstructured`.
+- **Geometry check** (NumPy, before building): every used grid node's mesh point equals `origin + spacing * (i, j, k)` to $10^{-12}\max_d(|o_d| + h_d n_d)$, and every active cell's connectivity equals the `node_map` of its grid corners in VTK order (exact). Otherwise `ValueError("mesh does not match its voxel grid: ...")`. With `Mesh`'s bijection checks this makes the grid description equivalent to the mesh. A mesh without `voxel` raises too.
+- **Inputs.** Host checks: x64 on, `phases`, `check_materials`, `nodal_mass`, `mass` ∈ {consistent, lumped}, `slab >= 1` (capped at the layer count), and the geometry check below; no `check_elements` (the reference cell is a box). `v` as in `unstructured`. `stencil_memory` also raises on a non-voxel mesh.
+- **Leaves:** `node` $(L+1, B+1, A+1)$ and `cell` $(L, B, A)$ int32 id grids; `phase` $(n_\text{el})$ int32; `C` $(P, 6, 6)$, `rho` $(P)$; `spacing` $(3)$; `s_K`, `s_M` $(n_\text{el})$; `nodal` $(n_\text{dof})$. Static: `slab`, `axes`, `mass`, `n_nodes`, `n_el`. Changing `C`, `rho`, `spacing` (the operator then acts as the uniformly rescaled grid), $s$ or `nodal` never rebuilds or recompiles, and `jax.grad` with respect to all of them works.
+- **Grid description** (for PR 11's coarse operators and PR 23's sensitivities): `node`/`cell` are the grid's node and cell ids transposed by `axes` (grid axes (x, y, z) in stored order, scan axis first) and padded along the scan axis from the layer count (`grid_layout(mesh.voxel.shape)[1]`) to $L$ (a multiple of `slab`); dropped nodes, inactive cells and padding hold the out-of-range sentinels `n_nodes` and `n_el`. The sentinels are out of range on purpose: `.at[].get(mode="fill", fill_value=0)` reads them as 0 and `.at[].add(mode="drop")` discards writes to them. `reference_element(op)` gives $K_e^p$ = `kernels.stiffness` and $m_e = \sum_q w_q\det J_q N_q N_q^\top$ on the reference cell $X = \text{spacing}\odot(\text{CORNERS}+1)/2$; the applies call it each time (a few µs).
+- **Scan axis and slab:** slabs run along the longest grid axis (ties: the last), so a layer is the smallest cross-section (a flat $1000\times1000\times33$ plate gets 33k-cell layers instead of 1M-cell z-layers). `slab` (layers per scan step) defaults to $\max(1, \lfloor 2^{16}/A_\text{layer}\rfloor)$, about 64k cells, capped at the layer count; PR 5's `chunk` counts elements instead. A slab is at least one layer, so the workspace of a very large cross-section is what the estimator reports.
+
+### Slab loop
+
+One `lax.scan` over slabs carries the $(n_\text{nodes}, 3, m)$ output (initialized with `nodal * v` for `apply_M`: adding it afterwards costs a vector of temporaries). Per slab:
+
+1. `nd` = the slab's node ids (slab + 1 layers: a one-layer halo shared with the next slab), `el` = its cell ids (`dynamic_slice`, int32 starts);
+2. $u$ = `v.at[nd].get(mode="fill", fill_value=0)`, moved to component-major; the 8 corner slices (shifted by the VTK $\{0,1\}$ offsets permuted by `axes`) stacked into $U$ $(24, N)$, $N$ = cells·m;
+3. **apply_K:** $Y = \sum_p w_p \odot (K_e^p U)$ with $w_p = s_K[\text{el}]\,[\text{phase}[\text{el}] = p]$, one GEMM per phase accumulated by a `lax.scan` over phases (one accumulator, so the workspace does not grow with P; P = 1 is a single GEMM); **apply_M (consistent):** $Y = \rho_{p(e)} s_{M,e}\,(m_e \otimes I_3)\,U$, the same $24\times24$ GEMM; **diagonals and lumped mass:** per-corner values ($\sum_p w_p\,\mathrm{diag} K_e^p$; $\rho s_M (m_e)_{aa}$ or the row sums $V/8$) through the same loop with $m = 1$; lumped `apply_M` $= (d + \text{nodal}) \odot v$, recomputed per call;
+4. 8 shifted adds of $Y$ into a slab buffer, then `out.at[nd].add(..., mode="drop")`.
+
+Every per-cell gather passes `fill_value=0`, so inactive and padded cells contribute exactly 0 (JAX's default fill for floats is NaN). No full-grid vector exists: the output is the only $n_\text{dof}$-sized buffer, and one code path serves full and masked grids.
+
+**Why this layout** (prototype, M3 Max, $87^3$ full box, 2.04M DOF, m = 1 / 16): a node-major batched einsum takes 0.020 / 0.36–0.53 s; the corner-DOF-major GEMM 0.018 / 0.16–0.20 s but with $v$ and the output padded by a zero row, 558–1274 MB of temporaries at m = 16; with fill/drop instead of padding, 0.016 / 0.15–0.18 s and 98–192 MB. A dense grid-vector variant without gathers (full box only) was slower (0.024 / 0.31 s). At m = 16 the gather costs ≈ 9 ms of 157 ms; the corner stack, GEMM (≈ 280 GFLOP/s) and shifted adds take about a third each.
+
+**Slab benchmark** (`benchmarks/stencil_slab.py`, results in `benchmarks/results/stencil_slab.json`; $87^3$, P = 1, apply_K, min of 5, fresh subprocesses; the harness unmaps freed large blocks, so these times include first-touch page faults on the output and temporaries, ≈ 3 / 23 ms; in a plain process the rule takes 0.0153 / 0.160 s):
+
+| slab (cells) | 2 (15k) | 8 (61k, rule) | 32 (242k) |
+|---|---|---|---|
+| m = 1 | 0.0197 s | 0.0184 s | 0.0185 s |
+| m = 16 | 0.196 s | 0.183 s | 0.231 s |
+
+The rule is within 10% of the best for both $m$ (`slab_rule_ok`, checked by a fast test). Per DOF this is ≈ 4.5× faster than PR 5's stored-Ke `unstructured` at m = 1 and ≈ 1.4× at m = 16.
+
+**Cost per apply** (m = 1, P = 1, for PR 18's roofline): per cell, $2 \cdot 24^2 = 1152$ flops; data moved per slab: the int32 `node`/`cell` slices (≈ 8 B per cell), the gathered $u$ and the scattered output (each ≈ 24 B per node read and written), $s$ (8 B per cell); the rest stays in slab-sized buffers.
+
+### Memory estimator (`stencil_memory`)
+
+```python
+from jaxmodal.memory import stencil_memory
+
+est = stencil_memory(mesh, m, mass="consistent", slab=None)  # same keys as unstructured_memory
+```
+
+- `storage`: the leaves, exact (`node`, `cell`, `phase` int32; `nodal` fp64 per DOF; `s_K`, `s_M`).
+- `vectors`: $3 \cdot 8\,n_\text{dof} m$, as `unstructured_memory`.
+- `workspace`: $8c\,(24 k_P m + 15)$ per slab of $c$ cells, $k_P = 2$ ($U$, $Y$) for one phase and 3 (plus the phase accumulator) otherwise; within 7% of `memory_analysis` for $m \in \{1, 4, 16, 24\}$, P ∈ {1, 2} (consistent `apply_M` equals the one-phase `apply_K`; diagonals and lumped `apply_M` are smaller).
+- `build`: the int64 grids on the host; `overhead`: 10 MB; `total = overhead + storage + max(build, vectors + workspace)`; composition as for `unstructured_memory`.
+- 2.04M DOF box, m = 24: storage 35 MB, workspace 0.57 GB; with six `(n_dof, 24)` arrays the estimate is 4.14 GB against a measured peak of 3.87 GB.
+- 100M voxel DOF (a ≈ $322^3$ cube, one 104k-cell layer per slab): operator (grids and `phase`) ≈ 0.4 GB; $s_K$, $s_M$, `nodal` ≈ 1.3 GB; workspace ≈ 0.3 GB (P = 1) or 0.5 GB (P ≥ 2) at m = 8.
+
 ## Validation
 
 `tests/test_operators.py`:
@@ -222,3 +281,10 @@ Call it on the mesh that will be used (after `rcm`, if any), with the same keywo
   - **int32** checks and casts; input errors; `None` leaves per mode and path.
   - **Estimator storage** equals the operator's leaf bytes exactly (except the tiny `rho`, `C`) for every mode and path.
   - **Slow:** compile time of apply_K + apply_M at 1M hex20 elements ≤ 1.5× that at 10k (fresh subprocesses, no cache, both modes and paths); the estimator total within 20% of the measured peak (build + apply_K + apply_M) at hex20 $55^3$ (2.08M DOF, estimate ≥ 2 GB) for both paths and $m = 1, 16$, and apply_K alone within 20% of workspace + output; `memory_analysis` temporaries within 10% of the workspace and build formulas.
+- **Voxel stencil** (`tests/test_stencil.py`), all meshes with anisotropic spacing: F, a full $5\times4\times3$ box with an offset origin (scan axis x); S, PR 1's voxelized sphere on a $10\times12\times11$ grid (scan axis y); T, a masked $4\times5\times6$ grid (scan axis z) whose mask has a dropped node in a halo layer, an inactive cell next to an active one across a slab boundary and a corner-only contact, in three label variants (two materials, one orthotropic material in two orientations, both mixed: P = 4); R, a T variant after `rcm`. Random $s_K$, $s_M$ with one zero, nodal masses with zeros, slab ∈ {1, 4 (padded layers on F and T), None}:
+  - `apply_K`, `apply_M` (m = 1, 5), `diag_K`, `diag_M` equal the scaled `assemble` to 1e-12 for both masses and every slab, and PR 5's `unstructured` to 1e-12; measured errors are about 1e-16.
+  - **Gradients** (T, P = 4): with respect to $s_K$, $s_M$ (both masses), $\rho$ and $C$ equal central differences along a random direction to 1e-8, and the $s_K$ gradient equals the per-element $w_e^\top K_e v_e$ to 1e-12; with respect to `spacing` equal central differences of `assemble` on the rescaled mesh to 1e-7.
+  - **No recompile:** one executable gives the new SciPy products after replacing $s_K$, $s_M$, `C`, `rho`, `spacing`, `nodal`, consistent and lumped.
+  - **Geometry check:** a point moved by 1e-6, a cell with cyclically rotated corners (same nodes, positive $\det J$, wrong VTK order) and a non-voxel mesh raise.
+  - `reference_element` equals PR 3's `stiffness` and `mass` on a mesh cell for every phase; `axes` and the layer count per mesh; int32 checks and casts; input errors; estimator storage equals the leaf bytes exactly.
+  - **Slow:** `memory_analysis` temporaries of `apply_K`/`apply_M` within 10% of `workspace` at $87^3$ (m = 1, 4, 16, 24; P = 1, 2); the Mac acceptance (estimate within 20% of the measured peak of build + six `(n_dof, 24)` random arrays + `apply_K` + `apply_M` at 2.04M DOF, estimate ≥ 2 GB); the slab benchmark smoke run.

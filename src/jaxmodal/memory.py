@@ -1,13 +1,16 @@
 """Device memory estimators (bytes). See docs/operators.md."""
 
 from .elements import ELEMENTS
+from .materials import phases
 from .operators.matfree import layout
+from .operators.voxel import grid_layout
 
 # XLA temporaries of the build kernel per element (memory_analysis, exactly linear in chunk).
 BUILD_BYTES = {
     "stored": {"hex8": 29.95e3, "hex20": 241.06e3, "hex27": 322.70e3},
     "otf": {"hex8": 1.22e3, "hex20": 4.10e3, "hex27": 4.10e3},
 }
+GATHER_FLOATS = 15  # stencil: per-cell slab buffers besides the 24 k m GEMM ones (memory_analysis)
 OVERHEAD = 10e6  # fixed JAX runtime overhead beyond the formulas, measured (hex20 30^3, hex8 60^3)
 
 
@@ -67,4 +70,30 @@ def unstructured_memory(
         overhead=OVERHEAD,
     )
     out["total"] = out["overhead"] + storage + max(out["build"], out["vectors"] + workspace)
+    return {k: int(v) for k, v in out.items()}
+
+
+def stencil_memory(mesh, m, mass="consistent", slab=None):
+    """Estimated peak bytes of stencil(...) plus apply_K and apply_M on (n_dof, m) blocks.
+
+    Same keys and composition rule as unstructured_memory.
+    """
+    n_dof, n_el = 3 * len(mesh.points), mesh.n_el
+    if mesh.voxel is None:
+        raise ValueError("stencil_memory needs a voxel mesh: mesh.voxel is None (no voxel grid)")
+    shape = mesh.voxel.shape
+    axes, _, slab, L = grid_layout(shape, slab)
+    B, A = shape[axes[1]], shape[axes[2]]
+    grids = (L + 1) * (B + 1) * (A + 1) + L * B * A
+    k = 2 if len(phases(mesh)[1]) == 1 else 3  # U and Y, plus the phase accumulator
+    out = dict(
+        storage=4 * (grids + n_el) + 8 * (n_dof + 2 * n_el),  # node, cell, phase; nodal, s_K, s_M
+        vectors=3 * 8 * n_dof * m,
+        workspace=8 * slab * B * A * (24 * k * m + GATHER_FLOATS),  # memory_analysis within 10%
+        build=8 * grids,  # int64 grids on the host
+        overhead=OVERHEAD,
+    )
+    out["total"] = (
+        out["overhead"] + out["storage"] + max(out["build"], out["vectors"] + out["workspace"])
+    )
     return {k: int(v) for k, v in out.items()}
