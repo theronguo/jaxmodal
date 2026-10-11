@@ -5,7 +5,7 @@ Exact solutions and published benchmarks that check the discretization, with the
 ## Error measures and mode matching
 
 - **Targets** are relative errors in frequency, $|f^h/f - 1|$ with $f = \sqrt\lambda/2\pi$; the roadmap's 0.1% in $f$ is about 0.2% in $\lambda$.
-- **Rates** are fitted to relative errors in $\lambda$, $|\lambda^h/\lambda - 1|$: the least-squares slope of $\log$ error against $\log h$, per mode, over the stated levels. Richardson extrapolation is not used. The finest error must be $\ge 100 f_\lambda$, with the solver floor $f_\lambda = 10\,\varepsilon\,\hat\lambda_\max/\lambda$, so that round-off cannot bend the fit.
+- **Rates** are fitted to relative errors in $\lambda$, $|\lambda^h/\lambda - 1|$: the least-squares slope of $\log$ error against $\log h$, per mode, over the stated levels. Richardson extrapolation is not used. The finest error must be $\ge 100 f_\lambda$, with the solver floor $f_\lambda = 10\,\varepsilon\,\hat\lambda_\max/\lambda$ ($\hat\lambda_\max$ from `eigsh(which="LA")`), so that round-off cannot bend the fit.
 - **Matching.** For the sliding block, the computed modes are compared sorted against the exact sorted spectrum. This is valid because each list is the lowest part of a spectrum: the $k$-th smallest values correspond, whatever the mode shapes. Exactly degenerate exact values pair either way. Benchmarks with labelled modes (8b, 8c) pair by MAC.
 
 ## Sliding block
@@ -40,7 +40,7 @@ $$\Gamma = \begin{pmatrix} C_{11}k_x^2 + C_{66}k_y^2 + C_{55}k_z^2 & (C_{12} + C
 
 Modes 7–10 are the worst. $n = 8$ meets the target with a 3× margin; $n = 6$ fails for the isotropic material. The test asserts $\le 10^{-3}$ at $n = 8$.
 
-**Convergence rates** (lowest 6 modes, both materials give the same rates; the test asserts $\ge 1.8$ for the quadratic and $\ge 3.6$ for the quartic cases):
+**Convergence rates** (lowest 6 modes, both materials give the same rates; the test asserts $\ge 3.6$ for hex20 and hex27 consistent and $\ge 1.8$ otherwise, the roadmap's bounds; hex27 row-sum measures 3.94):
 
 | element, mass | levels $n$ | finest error in $\lambda$ | min. fitted rate |
 |---|---|---|---|

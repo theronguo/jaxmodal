@@ -1,6 +1,6 @@
 # Boundary conditions, rigid modes and deflation
 
-`jaxmodal.operators` (module `operators/constraints.py`) holds the Dirichlet masks, the masked eigen-operator and $A_P$ (SciPy, PR 4), the free-DOF restriction (PR 8), and the rigid body modes, their M-orthonormalization and the deflation projector (PR 7). `jaxmodal.mesh.parts` finds the face-connected parts.
+`jaxmodal.operators` (module `operators/constraints.py`) holds the Dirichlet masks, the masked eigen-operator and $A_P$ (SciPy, PR 4), the free-DOF restriction (PR 8a), and the rigid body modes, their M-orthonormalization and the deflation projector (PR 7). `jaxmodal.mesh.parts` finds the face-connected parts.
 
 ```python
 import jax.numpy as jnp
@@ -86,4 +86,4 @@ so $R^\top M (PX) = 0$, $P^2 = P$ and $PR = 0$. `project(R, X, MX)` takes $MX$ (
 - **Device operators:** `m_orthonormalize` with `stencil` and `unstructured` `apply_M` equals the SciPy result to $10^{-12}$; the compiled CholQR2 aliases its output to the donated $V$ with $\le 1.05$ blocks of temporaries and no donation warning.
 - **Inputs:** bad masks raise; an all-constrained mask gives $(n_\text{dof}, 0)$; free columns have unit norm and translations are orthogonal to rotations ($\le 10^{-10}$; rotating about the origin would give ≈ 0.9).
 
-`tests/test_reference.py` (PR 8): `restrict` returns `flatnonzero(free)` and blocks equal to dense slicing (all DOFs for `None`); mismatched shapes and bad masks raise.
+`tests/test_reference.py` (PR 8a): `restrict` returns `flatnonzero(free)` and blocks equal to dense slicing (all DOFs for `None`); mismatched shapes and bad masks raise.

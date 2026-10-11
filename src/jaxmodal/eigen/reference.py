@@ -19,7 +19,7 @@ def _order(A, x):
     """Geometric nested dissection of the DOFs of A at coordinates x (n, 3): split at the median
     of the widest axis; left DOFs coupled to the right form the separator, ordered last."""
     B = abs(sp.csr_array(A))
-    out = []
+    out, right = [], np.zeros(A.shape[0])
 
     def split(s):
         if len(s) <= ND_LEAF:
@@ -31,10 +31,10 @@ def _order(A, x):
             left = c < med
         if not left.any():
             return out.append(s)
-        right = np.zeros(A.shape[0])
-        right[s[~left]] = 1.0
         L = s[left]
+        right[s[~left]] = 1.0
         sep = B[L] @ right > 0
+        right[s[~left]] = 0.0
         split(L[~sep])
         split(s[~left])
         out.append(L[sep])

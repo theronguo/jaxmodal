@@ -2,11 +2,13 @@
 
 import dataclasses
 import functools
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import scipy.linalg as sl
 from helpers import MATERIALS, ORTHO, R, distort, mixed_mesh
+from scipy.linalg import lapack
 
 from jaxmodal.eigen import reference, reference_modes
 from jaxmodal.linalg import count_below, inertia
@@ -115,14 +117,13 @@ def _patched(monkeypatch, edit):
 
 def test_missed_mode(monkeypatch):
     m, (K, M), _, _ = case("box")
-
-    def drop(Kf, Mf, lam, v):  # drop mode 10 (index 9), take one more from the top
-        lam2, v2 = solve(Kf, Mf, len(lam) + 1, -0.01 * lam[-1], np.arange(len(v)), "MMD_AT_PLUS_A")
-        keep = np.r_[0:9, 10 : len(lam) + 1]
-        return lam2[keep], v2[:, keep]
-
     solve = reference._solve
-    _patched(monkeypatch, drop)
+
+    def drop(Kf, Mf, k, *a):  # one mode below the gap missing, one more from the top
+        lam, v = solve(Kf, Mf, k + 1, *a)
+        return np.delete(lam, 9), np.delete(v, 9, 1)
+
+    monkeypatch.setattr(reference, "_solve", drop)
     with pytest.raises(RuntimeError, match="eigsh missed modes"):
         reference_modes(K, M, 20, points=m.points)
 
@@ -178,15 +179,13 @@ def test_off_diagonal_pivot(monkeypatch):
     free = dof_mask(m, {"xmin": "xyz"})
     splu = reference.splu
 
-    class LU:
-        def __init__(self, lu):
-            self.lu, self.perm_c, self.U = lu, lu.perm_c, lu.U
-            self.perm_r = np.roll(lu.perm_r, 1)
+    def fake(*a, **k):
+        lu = splu(*a, **k)
+        return SimpleNamespace(
+            solve=lu.solve, U=lu.U, perm_c=lu.perm_c, perm_r=np.roll(lu.perm_r, 1)
+        )
 
-        def solve(self, b):
-            return self.lu.solve(b)
-
-    monkeypatch.setattr(reference, "splu", lambda *a, **k: LU(splu(*a, **k)))
+    monkeypatch.setattr(reference, "splu", fake)
     with pytest.raises(RuntimeError, match="pivoted off the diagonal"):
         reference_modes(K, M, 10, free)
 
@@ -280,18 +279,13 @@ def test_count_below(name):
     if n_rigid:
         assert gaps[0] == n_rigid - 1  # first gap above the rigid cluster
     assert len(gaps) >= 4
+    two = 0
+    Kf, Mf, _ = restrict(K, M, free)
     for q in gaps[:6]:
-        assert count_below(K, M, (w[q] + w[q + 1]) / 2, free) == q + 1
-
-
-def test_count_below_two_by_two():
-    """Bunch-Kaufman picks 2x2 pivots here, so their counting is exercised."""
-    from scipy.linalg import lapack
-
-    _, (K, M), _, _ = case("box")
-    _, w = dense("box")
-    A = (K - (w[10] + w[11]) / 2 * M).toarray(order="F")
-    assert (lapack.dsytrf(A, lower=1)[1] < 0).any()
+        sigma = (w[q] + w[q + 1]) / 2
+        assert count_below(K, M, sigma, free) == q + 1
+        two += (lapack.dsytrf((Kf - sigma * Mf).toarray(), lower=1)[1] < 0).sum()
+    assert two  # 2x2 pivots occur, so their counting is exercised
 
 
 def test_count_below_max(monkeypatch):

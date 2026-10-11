@@ -58,9 +58,9 @@ When `n_modes` ends inside a cluster, the count certifies modes $1..j$ only; the
 - **With `points`: geometric nested dissection.** The free DOFs are bisected recursively at the median of the widest coordinate axis (`c <= median`, which keeps whole node planes on one side so the separator is one clean layer; if all DOFs tie at or below the median, `c < median`; if that is empty too, the subset becomes a leaf). The separator is the left DOFs coupled to the right side, read from the CSR rows of $|K_f|$. Children are ordered first, then the separator, down to leaves of `ND_LEAF = 64` DOFs; SuperLU then factors with `permc_spec="NATURAL"`. The ordering takes 0.04–0.15 s. A rank split (equal halves) cuts through node planes and costs 30–65% more factorization time.
 - **Without `points`:** SuperLU's `MMD_AT_PLUS_A`, fine for plates, slower and denser for bulky meshes.
 
-One factorization, measured (harness, SuperLU fill or peak):
+One factorization of the prototype's boxes (harness, SuperLU fill or peak; the DOF counts differ slightly from the cost table below, which uses other BCs):
 
-| mesh | free DOF | `MMD_AT_PLUS_A` | geometric ND |
+| mesh | DOF (prototype) | `MMD_AT_PLUS_A` | geometric ND |
 |---|---|---|---|
 | hex20 $12^3$ | 22k | 4.7 s, 50M fill | 1.4 s, 28M |
 | hex20 $14^3$ | 34.6k | 14.9 s, 106M | 4.7 s, 55M |
@@ -72,7 +72,7 @@ One factorization, measured (harness, SuperLU fill or peak):
 
 ### Accuracy
 
-The attainable accuracy is the floor $f_\lambda = 10\,\varepsilon\,\lambda_\max/\lambda$ (relative), i.e. about $\varepsilon\kappa$ for the lowest elastic mode. Against dense `scipy.linalg.eigh` of $(K_f, M_f)$, up to 20 modes on free hex20 boxes (consistent and lumped), clamped hex27, sliding hex20, and free hex20/hex27 plates with $L/t = 100, 200$ ($\kappa \le 7.8\cdot10^9$):
+The attainable accuracy is the floor $f_\lambda = 10\,\varepsilon\,\hat\lambda_\max/\lambda$ ($\hat\lambda_\max$: the largest eigenvalue, from dense `eigh` or `eigsh(which="LA")`) (relative), i.e. about $\varepsilon\kappa$ for the lowest elastic mode. Against dense `scipy.linalg.eigh` of $(K_f, M_f)$, up to 20 modes on free hex20 boxes (consistent and lumped), clamped hex27, sliding hex20, and free hex20/hex27 plates with $L/t = 100, 200$ ($\kappa \le 7.8\cdot10^9$):
 
 - elastic modes: $|\lambda - \lambda_\text{dense}| \le 0.99 f_\lambda\lambda$ (each side of the comparison is floor-limited);
 - rigid modes: $|\lambda| \le 0.04\cdot10\varepsilon\lambda_\max$ (dense `eigh`: up to $0.22$);
@@ -97,7 +97,7 @@ The tests (`tests/test_reference.py`) assert $2 f_\lambda$, $10^{-12}$ and $100\
 | hex20 $14^3$, clamped | MMD | 36.5k | 29.6 s | 13.5 s | 2.49 GB |
 | hex20 $14^3$, free | MMD | 38.5k | 53.6 s | 15.8 s | 2.78 GB |
 
-The factorizations dominate; the check is 25–45% of the time. The largest supported size is about 100k free DOF on bulky meshes with `points` (2 minutes, 7 GB), and about 35k without. Plate-like meshes factor much faster and go further.
+The factorizations dominate; the check is about 20–45% of the time. The largest supported size is about 100k free DOF on bulky meshes with `points` (2 minutes, 7 GB), and about 35k without. Plate-like meshes factor much faster and go further.
 
 ## Sizes
 
