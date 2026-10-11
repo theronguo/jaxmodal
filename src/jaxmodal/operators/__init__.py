@@ -1,7 +1,8 @@
-"""DOF map, assembled reference operators and Dirichlet masking. See docs/operators.md."""
+"""DOF map, assembled reference operators, matrix-free operators, Dirichlet masking, rigid
+modes and deflation. See docs/operators.md and docs/boundary_conditions.md."""
 
 from .assembled import assemble
-from .constraints import a_p, dof_mask, masked
+from .constraints import a_p, dof_mask, m_orthonormalize, masked, project, rigid_modes
 from .dofmap import check_int32, element_dofs
 from .matfree import Unstructured, unstructured
 from .voxel import Stencil, reference_element, stencil
@@ -14,8 +15,11 @@ __all__ = [
     "check_int32",
     "dof_mask",
     "element_dofs",
+    "m_orthonormalize",
     "masked",
+    "project",
     "reference_element",
+    "rigid_modes",
     "stencil",
     "unstructured",
 ]
