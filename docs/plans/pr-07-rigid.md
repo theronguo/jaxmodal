@@ -98,7 +98,7 @@ Then $V'^\top M V' = I$ to round-off as long as the first Cholesky succeeds (Cho
 ### `project(R, X, MX) -> X - R (R^\top MX)` (traceable, jnp)
 
 - With $R^\top M R = I$: $R^\top M (P X) = 0$ and $P^2 = P$; $P R = 0$. `MX` is passed in, not recomputed (Principle 6; LOBPCG has it). With masked $R$ and $X$, the unmasked `apply_M(X)` gives the same result.
-- fp64 and unchunked: $R$ has at most $6\,\text{MAX\_PARTS}$ columns. The chunked, optionally fp32 projector over the preallocated locked basis is PR 9's; there $R$ occupies the first columns of that basis, so this function is the reference it is tested against.
+- fp64 and unchunked: $R$ has $6 n_\text{parts}$ columns at most. The chunked, optionally fp32 projector over the preallocated locked basis is PR 9's; there $R$ occupies the first columns of that basis, so this function is the reference it is tested against.
 - $k = 0$ returns $X$.
 
 ## Tests (`tests/test_rigid.py`)
