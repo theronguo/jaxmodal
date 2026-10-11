@@ -286,3 +286,9 @@ Expected runtime: test_reference ≈ 10 s, the 0.1% test ≈ 8 s, the slow rate 
 - A sparse direct solver beyond SuperLU: SciPy has none, and the roadmap excludes CHOLMOD and pypardiso. Geometric ND is the cheap win.
 - Validation at $\kappa \gtrsim 10^{11}$: PR 16 validates `reference_modes` at its own $\kappa$, with an explicit `sigma`.
 - Interior shift-invert slices with $\sigma > 0$ (PR 15 has its own Lanczos).
+
+## Implementation notes (code review)
+
+- Pass 2 runs whenever $\tilde\lambda_1 < 100|\sigma_0|$, unless every wanted mode is rigid-mode noise ($\tilde\lambda_k \le 100\,\varepsilon\,\bar s$). The planned "$\tilde\lambda_k \le 100|\sigma_0|$: pass 1 stands" kept $|\sigma_0| \approx 10^5\lambda_k$ on the $L/t = 1600$ plate, which then failed the residual check; that plate now certifies under the automatic rule.
+- The real-ARPACK test needs $\sigma = -10^{-2}\bar s$ on the $8\times8\times1$ plate (42 s; $-10^{-3}$ and $-10^{-4}$ come out right) and is marked `slow`.
+- GAP_REL → 0 survives every probe (the absolute term suffices); the relative term is kept as a margin.
