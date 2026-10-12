@@ -10,6 +10,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 from helpers import MATERIALS, R, distort, mixed_mesh, rel, rhs
 
@@ -131,10 +132,18 @@ def test_galerkin(name, mode, mass):
 
 
 def test_galerkin_pattern():
-    """Stored and otf give the same structural pattern (no pruned cancellations)."""
-    _, op, free, sigma, _ = galerkin_case("hex20", "stored")
-    _, op2, *_ = galerkin_case("hex20", "otf")
-    a, b = (PM._hex8_galerkin(ap_operator(o, free, sigma))[0] for o in (op, op2))
+    """The pattern is structural, 9 x the corner adjacency over shared elements, in both modes:
+    a uniform box with unit materials has exact cancellations (that differ between modes)."""
+    mesh = box_mesh((3, 2, 2), type="hex20")
+    free = dof_mask(mesh, {"xmin": "xyz"})
+    c = np.unique(mesh.blocks["hex20"][:, :8], return_inverse=True)[1].reshape(-1, 8)
+    ij = (np.repeat(c, 8, axis=1).ravel(), np.tile(c, 8).ravel())
+    nnz = 9 * sp.coo_array((np.ones(c.size * 8), ij)).tocsr().nnz
+    a, b = (
+        PM._hex8_galerkin(ap_operator(unstructured(mesh, MATERIALS, mode=m), free, 0.37))[0]
+        for m in ("stored", "otf")
+    )
+    assert a.nnz == b.nnz == nnz == 9 * 10 * 7 * 7
     assert (a.indptr == b.indptr).all() and (a.indices == b.indices).all()
 
 

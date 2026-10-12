@@ -163,8 +163,10 @@ def _hex8_galerkin(A):
         (np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))), shape=(n_c, n_c)
     ).tocsr()  # sums duplicates, keeps explicit zeros
     At = Ac.T.tocsr()
+    Ac.sort_indices()
     At.sort_indices()
-    assert (At.indptr == Ac.indptr).all() and (At.indices == Ac.indices).all()  # symmetric pattern
+    if not ((At.indptr == Ac.indptr).all() and (At.indices == Ac.indices).all()):
+        raise RuntimeError("hex8 Galerkin pattern is not symmetric")
     Ac.data = (Ac.data + At.data) / 2
     return Ac, T
 

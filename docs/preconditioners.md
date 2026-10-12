@@ -321,7 +321,7 @@ Degree 2 is the default. Per PCG solve (V-cycle $2d$ applies plus PCG's one):
 | degree | $A_P$ applies | $t_A$ with a ~1 $t_A$ production coarse solve |
 |---|---|---|
 | 2 | 70 | ~84 |
-| 3 | 70–77 | ~80 |
+| 3 | 70–77 | 80–88 |
 | 4 | 81 | ~90 |
 
 The cost is a tie, and degree 2 needs the least smoother workspace. At hex20 $24^3$ ($m = 25$): $t_A$ = 53 ms; the V-cycle takes 987 ms, of which the test-only `splu` solve is 765 ms (14.4 $t_A$) and the rest 4.2 $t_A$ ($2d$ = 4 applies plus transfers). The build takes 13.3 s, mostly `splu`. `_hex8_galerkin` alone at hex20 $44^3$ (1,075,275 DOF; 21.2M nonzeros, the same pattern in both modes) takes 1.4 s stored and 2.7 s otf, compilation included, with a process peak 2.5 GB above the built operator (cells, COO triples, CSR and its transpose).
