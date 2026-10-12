@@ -19,6 +19,7 @@ from jaxmodal.mesh import box_mesh, voxel_mesh
 from jaxmodal.operators import a_p, ap_operator, assemble, stencil, unstructured
 from jaxmodal.precond import block_jacobi, chebyshev, jacobi, lmax_estimate
 from jaxmodal.precond.chebyshev import SAFETY
+from jaxmodal.precond.jacobi import _inverse_blocks
 
 ORIENT = {1: R}
 
@@ -113,6 +114,13 @@ def test_node_blocks(name):
     for f in (jacobi, block_jacobi):
         with pytest.raises(ValueError, match="sigma"):
             f(op, free, -0.1)
+
+
+def test_inverse_blocks_fp32():
+    """fp32 level blocks (PR 11) stay fp32."""
+    B = jnp.asarray(np.eye(3) * 2.0 + 0.1, jnp.float32)[None].repeat(2, 0)
+    inv, m = _inverse_blocks(B, np.array([True] * 5 + [False]))
+    assert inv.dtype == jnp.float32 and np.allclose(inv[0], np.linalg.inv(B[0]), rtol=1e-6)
 
 
 def d_dense(op, free, kind, sigma):
