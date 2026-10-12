@@ -144,7 +144,7 @@ def test_lmax(name, kind, seed):
 def test_lmax_invariant_start():
     """An invariant start (A = 2.5 I, identity precond) hits beta = 0 at once; the guard
     returns 2.5 instead of NaN."""
-    E = block_ell(2.5 * sp.eye(12, format="csr"))
+    E = block_ell(2.5 * sp.eye(1, format="csr"), b=1)  # v / |v| = +-1: w = 0 exactly
     assert float(lmax_estimate(E, Partial(lambda r: r))) == pytest.approx(2.5, rel=1e-14)
 
 
