@@ -1,6 +1,6 @@
 # Eigensolvers
 
-`jaxmodal.eigen.reference_modes` (module `eigen/reference.py`) is the SciPy reference eigensolver on assembled matrices; `jaxmodal.linalg.count_below` (module `linalg/inertia.py`) is the exact dense inertia count (PR 8a). They are oracles for the matrix-free LOBPCG and for later PRs; both run on the host on the SciPy matrices from `assemble`. `jaxmodal.eigen.lobpcg` (module `eigen/lobpcg.py`, PRs 9a and 9b) is the matrix-free solver, with `jacobi`, `sigma_estimate`, chunked solves and the estimator `jaxmodal.memory.lobpcg_memory`; see [LOBPCG](#lobpcg).
+`jaxmodal.eigen.reference_modes` (module `eigen/reference.py`) is the SciPy reference eigensolver on assembled matrices; `jaxmodal.linalg.count_below` (module `linalg/inertia.py`) is the exact dense inertia count (PR 8a). They are oracles for the matrix-free LOBPCG and for later PRs; both run on the host on the SciPy matrices from `assemble`. `jaxmodal.eigen.lobpcg` (module `eigen/lobpcg.py`, PRs 9a and 9b) is the matrix-free solver, with `jacobi`, `sigma_estimate`, chunked solves and the estimator `jaxmodal.memory.lobpcg_memory`; see [LOBPCG](#lobpcg). `jaxmodal.eigen.solve_modes` (PR 9c) is the public entry point on top of it; see [Public API](#public-api-solve_modes).
 
 ```python
 from jaxmodal.eigen import reference_modes
@@ -12,6 +12,61 @@ free = dof_mask(mesh, bcs)
 lam, V = reference_modes(K, M, 20, free, points=mesh.points)  # lam (20,) ascending, V (n_dof, 20)
 n = count_below(K, M, sigma, free)  # number of eigenvalues of (K_ff, M_ff) below sigma
 ```
+
+## Public API (`solve_modes`)
+
+```python
+from jaxmodal.eigen import solve_modes
+
+lam, V, info = solve_modes(mesh, materials, {"xmin": "xyz"}, 20, orientations, mass="lumped")
+f = info["frequencies"]  # Hz for SI inputs
+```
+
+`solve_modes(mesh, materials, bcs, n_modes, orientations=None, *, mass="consistent", nodal_mass=None, tol=1e-6, maxit=500, seed=0, chunk=None, guards=None, basis_dtype="float64", low_memory=False)` (module `eigen/api.py`, PR 9c) is the modal-analysis entry point:
+
+1. `dof_mask(mesh, bcs)` first, so a bad BC dict fails before the operator build ([`boundary_conditions.md`](boundary_conditions.md)).
+2. **Dispatch:** a voxel mesh (`mesh.voxel is not None`) gets `stencil`, any other mesh `unstructured` in its default stored mode, with `orientations`, `mass` and `nodal_mass` forwarded (`nodal_mass` `(n_nodes,)` is added to M, isotropically). Both builders run the host checks (`check_materials`; `check_elements` or the voxel grid check) before any trace. `info["operator"]` is `"stencil"` or `"unstructured"`.
+3. **Rigid deflation:** `rigid_modes(mesh, free)` gives the rigid modes the BCs leave (per face-connected part), M-orthonormalized with the operator's own mass (nodal masses included) and passed to `lobpcg` as `R`. The lowest `n_modes` *elastic* modes come back; `info["rigid"]` is the M-orthonormal rigid basis $(n_\mathrm{dof}, k)$, NumPy fp64, and `info["n_rigid"]` $= k$ (for PR 17's effective-mass sum rule).
+4. `lobpcg` with the default Jacobi; the solver options are forwarded unchanged ([LOBPCG](#lobpcg)).
+
+- **Returns:** `lobpcg`'s `lam`, `V` and `info`, plus `operator`, `n_rigid`, `rigid` and `frequencies` $= \sqrt{\max(\lambda, 0)}/(2\pi)$.
+- **Errors:** those of `dof_mask`, the builders and `lobpcg`, and from the rigid-mode setup: parts that touch only at an edge or vertex (hinged) or nonconformingly raise from `parts`, and more than `MAX_PARTS` = 10 parts raise from `rigid_modes` (R is dense).
+- **Slender models under Jacobi:** iterations grow with the stiffness ratio. A hex20 cantilever $20\times2\times2$ ($L/h = 10$) needs 403 iterations at tol $10^{-6}$, so raise `maxit`; thin plates are out of reach until PRs 10–13 (see [Measured behaviour](#measured-behaviour)).
+
+Measured (isotropic $E = 3$, $\nu = 0.3$, $\rho = 2$; 10 modes, tol $10^{-10}$; M3 Max CPU):
+
+| mesh | BCs | operator | rigid | iterations | time | max rel. λ error |
+|---|---|---|---|---|---|---|
+| hex20 box $6\times5\times4$ | `xmin` clamped | unstructured | 0 | 236 | 1.9 s | $2.5\cdot10^{-13}$ |
+| hex20 box $6\times5\times4$ | free | unstructured | 6 | 271 | 1.2 s | $2.0\cdot10^{-14}$ |
+| voxel $10\times8\times6$ | `zmin` clamped | stencil | 0 | 120 | 1.8 s | $5.8\cdot10^{-14}$ |
+| voxel $10\times8\times6$ | free | stencil | 6 | 125 | 1.1 s | $2.6\cdot10^{-14}$ |
+
+The host steps at the acceptance sizes (hex20 $44^3$, voxel $87^3$) take under 3 s together: element check 0.05–0.09 s, operator build 2.0 / 0.2 s, `rigid_modes` 0.1 / 0.5 s, `m_orthonormalize` 0.1 / 0.2 s.
+
+### Mac acceptance budgets
+
+PRs 11 and 13 accept on wall-time budgets: **10 min** for a 2M-DOF voxel solve, 10 modes (PR 11, also with fp32 V-cycles), and **15 min** for a 1M-DOF hex20 solve, 20 modes (PR 13). The run is specified as tol $= 10^{-6}$, the 9-block step, an fp64 basis, and wall time including setup, the σ pre-estimate and compilation. The peak criteria (within 20% of the estimators) are separate.
+
+Throughput at the acceptance sizes (steel, Jacobi; setup is `lobpcg`'s own, clamped: a free body adds about 1 s at 2M DOF for $R$ and $MR$, and the operator build is separate):
+
+| case | DOF | $m$ | $t_K$ | $t_M$ | 9-block step | low-memory step | setup |
+|---|---|---|---|---|---|---|---|
+| hex20 $44^3$, clamped, 20 modes | 1.08M | 25 | 140 ms | 167 ms | 730 ms | 1165 ms | 2.6 s |
+| voxel $87^3$, 10 modes | 2.04M | 15 | 160 ms | 162 ms | 786 ms | 1248 ms | 1.0 s |
+
+Model for a preconditioned solve:
+
+$$T \approx T_\text{setup} + T_\sigma + T_\text{compile} + N_\text{it}\,(t_\text{step} + c_V\,t_A + t_\text{axpy}),$$
+
+with $t_A = t_K + t_M$ (the preconditioners approximate $K + \sigma M$, $\sigma > 0$, with no fused apply); $c_V$ the fine-level applies per V-cycle in $t_A$ units (Chebyshev degree 2 pre- and post-smoothing plus the residual: 5; coarse levels about 0.5 for the voxel GMG and about 1 for hex20 p-MG plus hex8 AMG); $t_\text{axpy} \approx 0.1$ s the smoother's vector updates; and $N_\text{it} = 150$ LOBPCG iterations, an assumption PRs 11 and 13 must check.
+
+| case | per iteration | $N_\text{it} = 150$ | setup + σ + compile | total | budget | margin |
+|---|---|---|---|---|---|---|
+| voxel 2M, 10 modes | $0.79 + 5.5 \cdot 0.32 + 0.1 = 2.65$ s | 6.6 min | about 1.5 min | about 8 min | 10 min | 1.25× |
+| hex20 1M, 20 modes | $0.73 + 6 \cdot 0.31 + 0.1 = 2.69$ s | 6.7 min | about 1.5 min | about 8 min | 15 min | 1.8× |
+
+The hex20 setup includes pyamg smoothed aggregation on the hex8 $A_P$ (1.9 s at $44^3$), its assembly (2.6 s), PR 12's Galerkin product, σ and compilation. The budgets keep the roadmap's figures rather than the model's, which leaves margin for the two unmeasured inputs ($N_\text{it}$, the V-cycle cost). If PR 11 or 13 measures $N_\text{it} > 150$ or a costlier V-cycle, it revisits its budget with this model; a fused $K + \sigma M$ apply ($t_A \approx t_K$) is the first lever.
 
 ## Reference solver (`reference_modes`)
 
@@ -217,7 +272,7 @@ A single chunk of 30 modes ($m = 36$) needs 266 iterations, 2.4 s against 4.9 s 
 - **`basis`** $= n \cdot \text{capacity} \cdot (8$ or $4)$; **`rigid`** $= 2 \cdot 8\,n\,n_\mathrm{rigid}$ ($R$ and $MR$); **`host`** $= b + 8\,n\,n_\mathrm{modes}$ (the asynchronously freed step output and the fp64 modes on the host), plus 4 blocks for a chunked solve (transients between chunks: the start block, the seed, allocator slack; at most 2.6 measured).
 - **`total`** = overhead + operator storage + basis + rigid + host + max(operator build, step).
 
-Measured process peak at hex20 $44^3$ (1.08M DOF), 40 modes in one chunk with 8 guards ($m = 48$), 3 iterations: 8.74 GB against the estimate 8.87 GB (9-block), 6.52 against 6.75 GB (low-memory). Chunked, with a diagonal pencil (300k DOF, 100 modes in chunks of 10): 1.24 against 1.30 GB (fp64 basis), 1.09 against 1.15 GB (fp32). The step term is an envelope fit: up to about 2× high at 10k–100k DOF, and for an operator without workspace (diagonal) a single chunk can come out about 4% low, and many chunks up to 7% low (500k DOF, 400 modes in chunks of 10: allocator growth of about $0.15 \cdot 8\,n\,n_\mathrm{modes}$; real operators add slack through the workspace term).
+Measured process peak at hex20 $44^3$ (1.08M DOF), 40 modes in one chunk with 8 guards ($m = 48$), 3 iterations: 8.74 GB against the estimate 8.87 GB (9-block), 6.52 against 6.75 GB (low-memory). At the PR 13 acceptance width ($m = 25$, 10 iterations, 9-block) the estimate is 4–7% low: 5.50 against 5.28 GB clamped, 5.63–5.79 against 5.39 GB free; at the PR 11 voxel size ($87^3$, $m = 15$, free, 9-block) 5.26 against 5.47 GB. Chunked, with a diagonal pencil (300k DOF, 100 modes in chunks of 10): 1.24 against 1.30 GB (fp64 basis), 1.09 against 1.15 GB (fp32). The step term is an envelope fit: up to about 2× high at 10k–100k DOF, and for an operator without workspace (diagonal) a single chunk can come out about 4% low, and many chunks up to 7% low (500k DOF, 400 modes in chunks of 10: allocator growth of about $0.15 \cdot 8\,n\,n_\mathrm{modes}$; real operators usually add slack through the workspace term, but at narrow blocks such as hex20 at $m = 25$ the fit is 4–7% low, as measured above).
 
 ### Convergence
 
@@ -349,5 +404,15 @@ All runs: isotropic $E = 3$, $\nu = 0.3$, $\rho = 2$ on the box $(1, 0.83, 0.67)
   - `ValueError` for `chunk` 0 or above `n_modes`, `guards` 0, `basis_dtype="float16"` and chunk + guards above the free DOFs.
 - **Floor** (slow): within $[0.1, 10]\times\varepsilon\lambda_\max/\lambda_1$.
 - **Jacobi, σ and errors:** Jacobi against the assembled diagonals; σ within $[\lambda_1, 2\lambda_1]$; `ValueError` for a too-large block, a bad `X0`, `n_modes` or `maxit` below 1, and a non-M-orthonormal R; `RuntimeError` after 3 refills; the `maxit` and no-progress exits run the explicit confirmation (counted).
+
+`tests/test_api.py`, `solve_modes` against `reference_modes` (10 modes, tol $10^{-10}$, the λ rule above; the rigid count pinned by the reference's zero eigenvalues):
+
+- clamped hex20 box (unstructured dispatch, `V` M-orthonormal with constrained rows 0, `frequencies`); free with random nodal masses (6 rigid modes, `info["rigid"]` M-orthonormal and M-orthogonal to `V` under the full mass; the nodal masses change λ observably); sliding `xmin: x` (3 rigid modes);
+- voxel, clamped and free (stencil dispatch, counted by spies on the builders);
+- hex27 with a rotated transversely isotropic phase on half the elements and HRZ lumped mass (the rotation changes λ observably);
+- every `lobpcg` option forwarded (two option sets, 3 chunks each);
+- bad BCs raise before any operator is built; a missing material, $\rho \le 0$ and an inverted hex20 raise in the builders before `lobpcg`.
+
+`tests/test_examples.py` runs each script in `examples/` in a subprocess; it must exit 0 and print its check line.
 
 The discretization itself is verified in [`verification.md`](verification.md).

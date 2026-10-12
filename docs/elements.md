@@ -154,7 +154,7 @@ How it runs:
 **Callers:**
 
 - PR 4's assembly calls `check_elements(mesh, mass)`.
-- PR 9's `solve_modes` calls it next to `check_materials`, before tracing.
+- `unstructured` (and so `solve_modes`) calls it next to `check_materials`, before any build or trace.
 - The kernels themselves never raise.
 
 ## Faces
