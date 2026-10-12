@@ -13,6 +13,11 @@ def register(cls, meta):
     jax.tree_util.register_dataclass(cls, data_fields=data, meta_fields=meta)
 
 
+def as_float(v):
+    """v, or v in fp64 when it is not floating (the applies follow a float vector's dtype)."""
+    return v if jnp.issubdtype(v.dtype, jnp.floating) else v.astype(jnp.float64)
+
+
 def cast_floats(tree, dtype):
     """tree with its float array leaves in dtype (other leaves unchanged)."""
 

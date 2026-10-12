@@ -12,6 +12,7 @@ from ..elements import ELEMENTS, kernels
 from ..materials import check_materials, phase_table, phases
 from ..mesh.model import CORNERS
 from .common import (
+    as_float,
     cast_floats,
     check_nodal_mass,
     check_v,
@@ -266,6 +267,7 @@ def _m_diag(op, me, el):
 @jax.jit
 def _apply_K(op, v):
     check_v(v, op.n_dof)
+    v = as_float(v)
     op = cast_floats(op, v.dtype)  # the applies run in the vector's precision
     Ke = reference_element(op)[0].astype(v.dtype)
     return _slabs(op, lambda nd, el: _k_apply(op, Ke, v, nd, el), v.shape[1], dtype=v.dtype)
@@ -274,6 +276,7 @@ def _apply_K(op, v):
 @jax.jit
 def _apply_M(op, v):
     check_v(v, op.n_dof)
+    v = as_float(v)
     if op.mass == "lumped":
         return _diag_M(op).astype(v.dtype)[:, None] * v
     op = cast_floats(op, v.dtype)  # the applies run in the vector's precision

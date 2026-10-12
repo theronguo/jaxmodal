@@ -223,13 +223,10 @@ def gmg_memory(mesh, m, dtype="float64", s_K=None):
             rows = max(256, 1 << (rows - 1).bit_length())
             storage += 104 * rows + 96**2 * 8
             work += 3 * 8 * rows * m
-    build = GMG_BUILD * n_nodes
-    if dtype == "float32":
-        build = max(build, storage * 3)  # the fp64 build plus its fp32 copy: <= 3x fp32 bytes
     out = dict(
         storage=storage,
         workspace=work,
-        build=build,
+        build=GMG_BUILD * n_nodes,  # fp32: the cast copy (< 300 B/node) fits under it
         overhead=OVERHEAD,
         step=GMG_STEP[("9-block", dtype)] * b,
         step_low=GMG_STEP[("low", dtype)] * b,

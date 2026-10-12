@@ -13,7 +13,7 @@ import pytest
 from jaxmodal.eigen import lobpcg, reference_modes, sigma_estimate
 from jaxmodal.linalg import pcg
 from jaxmodal.materials import Material, isotropic
-from jaxmodal.memory import gmg_memory, lobpcg_memory, stencil_memory
+from jaxmodal.memory import GMG_STEP, gmg_memory, lobpcg_memory, stencil_memory
 from jaxmodal.mesh import box_mesh, rcm, voxel_mesh
 from jaxmodal.operators import (
     a_p,
@@ -25,7 +25,7 @@ from jaxmodal.operators import (
     stencil,
     unstructured,
 )
-from jaxmodal.precond import gmg, jacobi
+from jaxmodal.precond import SingularShiftError, gmg, jacobi
 
 G = importlib.import_module("jaxmodal.precond.gmg")
 krylov = importlib.import_module("jaxmodal.linalg.krylov")
@@ -448,15 +448,15 @@ def test_guard_raises():
     """Test 9 (guard): sigma = 0 with rigid modes, zero-stiffness cells or meshes rigid_modes
     rejects raises the guard's message; the backstop has its own."""
     op, free, _ = unit((16, 16, 16))
-    with pytest.raises(ValueError, match="sigma > 0"):
+    with pytest.raises(SingularShiftError, match="sigma > 0"):
         gmg(op, free, 0.0)
     op, free, _ = unit((64, 64, 1), bcs={"xmin": "x"})
-    with pytest.raises(ValueError, match="sigma > 0"):
+    with pytest.raises(SingularShiftError, match="sigma > 0"):
         gmg(op, free, 0.0)
     op, free, _ = unit((8, 8, 8), bcs={"xmin": "xyz"})
     s_K = np.ones(op.n_el)
     s_K[np.asarray(voxel_mesh((8, 8, 8)).voxel.element_map).reshape(8, 8, 8)[:, :, 4].ravel()] = 0
-    with pytest.raises(ValueError, match="zero-stiffness"):
+    with pytest.raises(SingularShiftError, match="zero-stiffness"):
         gmg(op.scaled(s_K=s_K), free, 0.0)
     edge = np.zeros((2, 2, 1), bool)
     edge[0, 0, 0] = edge[1, 1, 0] = True
@@ -464,7 +464,7 @@ def test_guard_raises():
     islands[:, ::2] = True
     for mask, bcs in ((edge, {"xmin": "xyz", "xmax": "xyz"}), (islands, {"xmin": "xyz"})):
         op, free, _ = unit(mask.shape, mask, bcs)
-        with pytest.raises(ValueError, match="sigma > 0") as err:
+        with pytest.raises(SingularShiftError, match="sigma > 0") as err:
             gmg(op, free, 0.0)
         assert isinstance(err.value.__cause__, ValueError)
     op, free, _ = unit(edge.shape, edge, {"xmin": "xyz", "xmax": "xyz"})
@@ -636,7 +636,7 @@ def storage_cases():
         "box16": (voxel_mesh((16,) * 3, (1 / 16,) * 3), None, True),
         "plate32": (voxel_mesh((32, 32, 1), (1 / 32,) * 3), None, True),
         "masked": (voxel_mesh((9, 7, 6), (1 / 9,) * 3, mask=mask), None, False),
-        "crop": (voxel_mesh((10, 10, 10), (0.1,) * 3, mask=crop), None, False),
+        "crop": (voxel_mesh((10, 10, 10), (0.1,) * 3, mask=crop), None, True),
         "islands": (m, s.ravel(), False),
     }
 
@@ -644,7 +644,7 @@ def storage_cases():
 @pytest.mark.parametrize("dtype", ["float64", "float32"])
 def test_gmg_storage(dtype):
     """Test 7: gmg_memory's storage bounds the built hierarchy's unique buffers, within 5% on
-    full boxes (measured 1.0001-1.0002: Chebyshev and A_P scalars)."""
+    full boxes and the cropped grid (measured 1.0001-1.005: Chebyshev and A_P scalars)."""
     for name, (m, s_K, full) in storage_cases().items():
         op = stencil(m, STEEL if s_K is None else UNIT)
         if s_K is not None:
@@ -688,3 +688,27 @@ def test_gmg_step(low):
             lambda w: stencil_memory(m, w), n, 10, low_memory=low, precond_memory=pc
         )["step"]
         assert got <= est, (dtype, got / (8 * n * k), est / (8 * n * k))
+
+
+@pytest.mark.slow
+def test_gmg_step_tight():
+    """Test 8: at 48^3 (m = 15) the GMG step's extra temporaries over the Jacobi step are
+    within 0.6 blocks below GMG_STEP for every step and V-cycle dtype (pins the constants)."""
+    from test_lobpcg import step_args
+
+    op, free, _ = steel((48,) * 3, {"xmin": "xyz"})
+    n, k = op.n_dof, 15
+    for low, key in ((False, "9-block"), (True, "low")):
+        c, _ = lob._capacity(100, 1, k, low)
+        f = lob.lobpcg_step_low if low else lob.lobpcg_step
+
+        def temp(P, f=f, c=c, low=low):
+            args = list(step_args(op, n, k, low, 0))
+            args[1], args[3] = op, P
+            mem = f.lower(*args, c=c).compile().memory_analysis()
+            return (mem.temp_size_in_bytes + mem.alias_size_in_bytes) / (8 * n * k)
+
+        jac = temp(jacobi(op, free, 0.0))
+        for dtype in ("float64", "float32"):
+            extra, model = temp(gmg(op, free, 1e5, dtype=dtype)) - jac, GMG_STEP[(key, dtype)]
+            assert model - 0.6 <= extra <= model, (key, dtype, extra)

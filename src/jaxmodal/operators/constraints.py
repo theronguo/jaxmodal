@@ -12,7 +12,7 @@ import scipy.sparse as sp
 from jax.scipy.linalg import solve_triangular
 
 from ..mesh import parts
-from .common import check_x64, register
+from .common import as_float, check_x64, register
 
 MAX_PARTS = 10  # default cap on parts: R is dense, 8 n_dof 6 n_parts bytes
 RANK_TOL = 1e-8  # sigma_i <= RANK_TOL sigma_max counts as zero (unit-normalized columns)
@@ -91,6 +91,7 @@ register(APOperator, [])
 
 @jax.jit
 def _ap_apply(A, x):
+    x = as_float(x)
     m, sigma, s = (a.astype(x.dtype) for a in (A.free[:, None], A.sigma, A.s))
     mx = m * x
     return m * (A.op.apply_K(mx) + sigma * A.op.apply_M(mx)) + s * (1 - m) * x

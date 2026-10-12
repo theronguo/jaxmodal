@@ -392,6 +392,8 @@ def test_fp32_applies(mass):
     for f in (op.apply_K, op.apply_M, A):
         y64, y32 = f(v), f(v.astype(jnp.float32))
         assert y32.dtype == jnp.float32 and rel(y32, y64) <= 1e-6
+        k = jnp.round(10 * v).astype(jnp.int32)  # non-float vectors are applied in fp64
+        assert f(k).dtype == jnp.float64 and rel(f(k), f(k.astype(jnp.float64))) == 0
     big = stencil(voxel_mesh((16,) * 3), MATERIALS, mass=mass)
     fs = (voxel._apply_K,) + ((voxel._apply_M,) if mass == "consistent" else ())
     for f in fs:

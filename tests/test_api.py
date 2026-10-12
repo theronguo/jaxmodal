@@ -10,12 +10,12 @@ from exact import mac
 from scipy.sparse.linalg import eigsh
 
 from benchmarks import gmg_study
-from jaxmodal.eigen import reference_modes, solve_modes
+from jaxmodal.eigen import lobpcg, reference_modes, solve_modes
 from jaxmodal.materials import Material, from_euler, isotropic, transversely_isotropic
 from jaxmodal.memory import solve_modes_memory
 from jaxmodal.mesh import Mesh, box_mesh, voxel_mesh
 from jaxmodal.operators import assemble, dof_mask, m_orthonormalize, restrict, rigid_modes
-from jaxmodal.precond import SingularShiftError, gmg
+from jaxmodal.precond import GMG, SingularShiftError, gmg, jacobi
 
 api = importlib.import_module("jaxmodal.eigen.api")
 G = importlib.import_module("jaxmodal.precond.gmg")
@@ -223,6 +223,19 @@ def built(monkeypatch):
     return sigmas
 
 
+@pytest.fixture
+def preconds(monkeypatch):
+    """The precond of every lobpcg call inside eigen/api.py (the last is the final solve's)."""
+    calls = []
+
+    def spy(op, free, n_modes, tol, R, precond, *a, **kw):
+        calls.append(precond)
+        return lobpcg(op, free, n_modes, tol, R, precond, *a, **kw)
+
+    monkeypatch.setattr(api, "lobpcg", spy)
+    return calls
+
+
 def rigid(op, mesh, free):
     R = jnp.asarray(rigid_modes(mesh, free))
     return m_orthonormalize(R, op.apply_M(R)) if R.shape[1] else None
@@ -252,8 +265,9 @@ def test_sigma_estimate(built, name, shape, bcs, factors, density):
     assert lam1 * (1 - 1e-6) <= sigma <= 2 * lam1, sigma / lam1
     if bcs == "clamped":
         assert built == [0.0]
-    else:
-        assert built[0] > 0 and all(b <= a for a, b in zip(built, built[1:], strict=False))
+    else:  # rebuilt only after a drop by more than 3x; stopped on a smaller drop or at 4 rounds
+        assert built[0] > 0 and all(b < a / 3 for a, b in zip(built, built[1:], strict=False))
+        assert sigma > built[-1] / 3 or len(built) == 4
     assert 0 < its <= 20 * len(built)
 
 
@@ -314,7 +328,7 @@ def odd_case(name):
 
 
 @pytest.mark.parametrize("name", ["clamped", "free", "masked"])
-def test_gmg_modes(built, name):
+def test_gmg_modes(built, preconds, name):
     """Test 3: solve_modes with GMG on odd voxel meshes matches reference_modes (lam 1e-8, MAC
     1 - 1e-8); the final build is at info["sigma"]."""
     mesh, bcs, nodal = odd_case(name)
@@ -327,11 +341,12 @@ def test_gmg_modes(built, name):
     assert np.abs(lam / lr[nr:] - 1).max() <= 1e-8
     assert np.diag(mac(V, Vr[:, nr:], M)).min() >= 1 - 1e-8
     assert built[-1] == info["sigma"] > 0
+    assert isinstance(preconds[-1], GMG) and preconds[-1].dtype == "float64"
     if name != "free":
         assert built == [0.0, info["sigma"]]
 
 
-def test_dispatch():
+def test_dispatch(preconds):
     """Test 4: "auto" picks GMG on voxel meshes and Jacobi otherwise; option errors."""
     lam, _, info = solve_modes(box((3, 3, 2)), MAT, {"xmin": "xyz"}, 2)
     assert info["precond"] == "jacobi" and info["sigma"] == 0.0 and info["sigma_iterations"] == 0
@@ -339,8 +354,14 @@ def test_dispatch():
     vox = voxel_mesh((5, 4, 3), (0.2,) * 3)
     _, _, info = solve_modes(vox, MAT, {"xmin": "xyz"}, 2, precond="jacobi")
     assert info["precond"] == "jacobi" and info["sigma"] == 0.0 and info["sigma_iterations"] == 0
+    _, _, info = solve_modes(vox, MAT, {"xmin": "xyz"}, 2, precond="jacobi", sigma=2e5)
+    ref = jacobi(api.stencil(vox, MAT), dof_mask(vox, {"xmin": "xyz"}), 2e5)
+    np.testing.assert_array_equal(preconds[-1].args[0], ref.args[0])  # built at the hint
     _, _, info = solve_modes(vox, MAT, {"xmin": "xyz"}, 2)
     assert info["precond"] == "gmg" and info["sigma"] > 0 and info["sigma_iterations"] > 0
+    assert isinstance(preconds[-1], GMG) and preconds[-1].dtype == "float64"
+    _, _, info = solve_modes(vox, MAT, {"xmin": "xyz"}, 2, precond_dtype="float32")
+    assert isinstance(preconds[-1], GMG) and preconds[-1].dtype == "float32"
     assert {"setup", "iterations", "precond"} <= info["time"].keys()
     bad = [
         (box((2, 2, 2)), dict(precond="gmg"), "voxel mesh"),
@@ -369,9 +390,15 @@ def test_singular_narrow(monkeypatch):
         assert not isinstance(e.value, SingularShiftError)
 
     def plain(op, free, sigma, **kw):
-        raise ValueError("plain")
+        if sigma == 0:
+            raise ValueError("plain")
+        return gmg(op, free, sigma, **kw)
+
+    def no_estimate(*a, **kw):
+        raise AssertionError("fell back to sigma_estimate")
 
     monkeypatch.setattr(api, "gmg", plain)
+    monkeypatch.setattr(api, "sigma_estimate", no_estimate)
     with pytest.raises(ValueError, match="plain"):
         solve_modes(vox, MAT, {"xmin": "xyz"}, 2)
 

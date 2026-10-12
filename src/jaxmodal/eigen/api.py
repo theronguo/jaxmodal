@@ -38,7 +38,8 @@ def _gmg_sigma(op, free, R):
         P = gmg(op, free, sigma)
     its = 0
     for rnd in range(4):
-        lam, _, info = lobpcg(op, free, 1, 0.1, R, P, maxit=20)  # never raises on non-convergence
+        # tol 0.1 and maxit 20 are tuning (docs/eigensolvers.md); never raises on non-convergence
+        lam, _, info = lobpcg(op, free, 1, 0.1, R, P, maxit=20)
         its += info["iterations"]
         new, prev = float(lam[0]), sigma
         sigma = new if prev == 0 else min(prev, new)

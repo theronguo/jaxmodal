@@ -890,6 +890,8 @@ def test_precond_composition():
                 g["storage"] + max(o["build"], g["build"], b["step"]) - max(o["build"], a["step"])
             )
             assert abs(b["total"] - a["total"] - extra) <= 1
+        big = lobpcg_memory(op_mem, n, 10, precond_memory=lambda m, g=g: g | dict(build=10**12))
+        assert 10**12 < big["total"] < 10**12 + b["total"]  # a dominant precond build counts
     for bcs, nr in (({"xmin": "xyz"}, 0), ({}, 6)):
         for precond, dtype in (("auto", "float64"), ("gmg", "float32"), ("jacobi", "float64")):
             got = solve_modes_memory(mesh, bcs, 10, precond=precond, precond_dtype=dtype)
