@@ -280,8 +280,11 @@ All tests compare against `reference_modes`, requesting at least 6 modes past th
 6. **Rank-deficient start.** `X0` with duplicated columns: `refills ≥ 1`, converges, λ match as in test 1.
 7. **Forced P drop and the P invariant.**
    - (a) Call `lobpcg_step` on a state whose $P = XC + 10^{-12}\xi$ (random $C$, $\xi$, P mask all True): the drop flag is set and the output is finite. With a random $P$ (M-orthonormalized against $X$), the flag is not set.
-   - (c) `_p_coeffs` with $C_P = C_X B + 10^{-12}\xi$ in one column and random elsewhere masks exactly that column. The other columns come out $G$-orthonormal and $G$-orthogonal to $C_X$ to $10^{-12}$.
    - (b) After 30 steps from a real start on hex20 $4^3$, explicit M applies give $\|P'^\top M X'\|_\max \le 10^{-6}$ and $\|P'^\top M P' - I\|_\max \le 10^{-6}$ on the live columns. Correct code measures $\le 7\cdot10^{-8}$; without the coefficient-space orthogonalization it is about 0.6.
+   - (c) `_p_coeffs` returns the coefficients and both masks: the noise-rule live mask, over the original columns, and the SVQB keep mask.
+     - Input: $C_P = C_X B + 10^{-12}\xi$ in one column, random elsewhere, with $G = I + 0.1\,\mathrm{sym}(\text{random})$.
+     - The live mask is all True except that column, and $k - 1$ columns are kept.
+     - The kept columns are $G$-orthonormal and $G$-orthogonal to $C_X$ to $10^{-12}$.
 8. **Near-singular M.** hex20 $6^3$ with 30% void elements ($E\cdot10^{-9}$, $\rho\cdot10^{-12}$, seed 0) at tol $10^{-8}$, seed 0: converged within 500 iterations (measured 358), λ error $\le f_\lambda$ against `reference_modes` on the same materials.
 9. **Floor** (slow). At tol $10^{-16}$ on the clamped and the free hex20 $4^3$ (clamped measured: ratio 0.9), the lowest attained max residual (`min(history)`) is within $[0.1, 10]\times\varepsilon\lambda_\max/\lambda_1$. The values are recorded in `docs/eigensolvers.md`.
 10. **Compiles.** In a fresh subprocess with the cache disabled, count `jax.monitoring` backend-compile events whose `fun_name` contains `lobpcg_step`.
@@ -294,6 +297,7 @@ All tests compare against `reference_modes`, requesting at least 6 modes past th
 14. **Step memory.** The step is compiled with a diagonal pytree test operator (`apply_K = d_K ⊙ v`, `apply_M = d_M ⊙ v`, the five-method interface) at $n = 10^5$ and $m = 17$: the same configuration as the measurement, with no operator workspace. Only lowering and compilation run.
     - `memory_analysis()` must give (temp + alias)$/(n m \cdot 8) \le 16.5$, which pins the sequenced update.
     - With a real operator the temp also holds the K/M apply workspace (PR 5: per element chunk), which does not scale with $nm$.
+15. **Non-finite step.** A preconditioner returning NaN (`Partial(lambda r: r * jnp.nan)`) makes `lobpcg` raise `FloatingPointError` on the first iteration.
 
 ### Mutants (each must fail a test)
 
@@ -317,7 +321,7 @@ All tests compare against `reference_modes`, requesting at least 6 modes past th
 | unmasked K apply | 1 (constrained rows) |
 | soft-locking mask removed ($a$ = all) | survivor expected (only cost); noted |
 | `optimization_barrier`s removed | 14 (18 blocks) |
-| host non-finite check removed | survivor (a guard for a fallback failure that no test can provoke); noted |
+| host non-finite check removed | 15 |
 
 ## Docs
 
