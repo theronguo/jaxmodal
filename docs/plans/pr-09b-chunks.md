@@ -245,10 +245,12 @@ The 9-block and low-memory Memory budget rows and the "Max locked modes" row are
 | projector loop bound `count // c` instead of the ceiling | 6 |
 | fp32 basis used without the upcast | 6 |
 | unlocked columns not zeroed at insert | 1, 3 |
-| capacity without the $+m$ | 8, 1 |
+| capacity without the $+m$ | 8 (`test_capacity`) |
 | insert before the capacity check | 8 (`is_deleted`) |
 | cluster rule off | 3 |
-| cluster rule evaluated once, $j$ frozen at the first converged iteration | 3, else recorded as an expected survivor |
+| cluster rule evaluated once, $j$ frozen at the first converged iteration | none: expected survivor (the cube's clusters are found at the first gated iteration) |
+| cluster rule gate $r \le t$ instead of $r^2 \le t$ | none: expected survivor (the guard error comes from the failed-exit re-check; the gate only lets clusters extend earlier) |
+| `V` not cut at `n_modes` | 3 (`V.shape`) |
 | straddling cluster not cut at `n_modes` | 3 |
 | guard check off (silent lock inside a cluster) | 4 |
 | fp32 threshold term off | 5b |
@@ -294,7 +296,8 @@ The 9-block and low-memory Memory budget rows and the "Max locked modes" row are
 ## Implementation notes
 
 Where the implementation differs from the plan above:
-- **Cluster rule gate.** The rule starts once the wanted residuals are $\le \sqrt{t}$, not once they pass $t$. With one guard on the cube triple, the split cluster never converges (the guard's Ritz value is $1.3\cdot10^{-7}$ off after 500 iterations), so the planned gate never fired and the guard error never came. $j$ only grows, and the progress test restarts when it grows (a toggling $j$ caused a false stall in test 3). At a failed exit with the wanted residuals $\le \sqrt t$, the boundary is re-checked with the guards' uncertainty, gap $< \max(100\,t_j, 10\,r_{j+1}^2)$, and the guard error raised if the cluster fills the block.
-- **No basis for a single chunk** (capacity 0, the projector compiled out), and the last chunk is never inserted: `V` = locked columns plus the final chunk's.
-- **Estimator form.** step $= A\,b + f\,w$ with $(A, f) = (16, 2.5)$ and $(11, 1.75)$, the envelope over hex8/20/27 at 6.6k–1.08M DOF, $m$ = 7–48 (23 points; two tiny meshes exceeded a fit on hex20 alone). The max with the diagonal figure is dropped ($A \ge S$). The held-out check uses other element types; hex20 $8^3$ is a fit point but stays in test 10. Measured at 1.08M: 9.71 / 7.39 GB against 10.32 / 8.33 GB.
+- **Cluster rule gate.** The rule starts once the wanted residuals are $\le \sqrt{t}$, not once they pass $t$. With one guard on the cube triple, the split cluster never converges (the guard's Ritz value is $1.3\cdot10^{-7}$ off after 500 iterations), so the planned gate never fired and the guard error never came. $j$ only grows, and the progress test restarts when it grows (a toggling $j$ caused a false stall in test 3). The guard error itself comes from the failed-exit re-check (the gate $r^2 \le t$ only lets clusters extend earlier; with $r \le t$ the tests still pass): at a failed exit with the wanted residuals $\le \sqrt t$, the boundary is re-checked with the guards' uncertainty, gap $< \max(100\,t_j, \min(10\,r_{j+1}^2, 10^{-3}))$, and the guard error raised if the cluster fills the block. Only chunks that will be locked raise it (code review round 1: otherwise every single-chunk solve with a cluster straddling `n_modes` raised, unlike 9a); the final chunk keeps `want` then.
+- **No basis for a single chunk** (capacity 0, the projector compiled out), and the last chunk is never inserted. `V` is a preallocated fp64 host array filled at each lock and with the final chunk's columns (code review round 1: per-lock fp32 host copies plus a final `hstack` were not in the estimate); deviation 4's fp32/fp64 split is gone.
+- **`host` term.** A chunked solve peaked up to 2.6 blocks above the estimate (transients between chunks); `host` adds 4 blocks when capacity > 0. Test 11 runs one chunk (8.74 / 6.52 GB against 8.87 / 6.75 GB); test 11b, a chunked diagonal pencil (300k DOF, 100 modes, chunks of 10), checks peak ≤ estimate (1.24 / 1.09 GB against 1.30 / 1.15 GB, fp64 / fp32 basis).
+- **Estimator form.** step $= A\,b + f\,w$ with $(A, f) = (16, 2.5)$ and $(11, 1.75)$, the envelope over hex8/20/27 at 6.6k–1.08M DOF, $m$ = 7–48 (23 points; two tiny meshes exceeded a fit on hex20 alone). The max with the diagonal figure is dropped ($A \ge S$). The held-out check uses other element types; hex20 $8^3$ is a fit point but stays in test 10, and hex8 $20^3$ and hex27 $12^3$ at $m = 24$ are the held-out points (24.7 / 20.7 and 18.8 / 13.9 blocks against 42.5 / 29.6 and 27.9 / 19.3).
 - **Tests.** Test 5 compares with the reference (stronger than the fp64-basis run). Test 6 uses capacities $2c$ and $8c$ (at $c$ the slice is the whole basis and XLA skips the copy). Test 9 allows 0.01 blocks between configurations (measured 16.001 vs 16.005).

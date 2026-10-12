@@ -72,7 +72,7 @@ Status: final. Review rounds 1–30 incorporated (round 30: all 5 reviewers sati
   - Implicit product updates with periodic explicit recompute, selected by a traced flag (`lax.cond`) inside the step variants, so it adds no compiled variant.
   - The deflation projector is re-applied every iteration.
   - The locked buffer is preallocated, with a count. A Python outer loop calls at most two compiled step variants (the 9-block step, 16 blocks measured, and the low-memory step, 11 blocks measured); each step call donates the iteration state. Lock insertion into the preallocated basis is a jitted `dynamic_update_slice` with the basis donated (in place).
-  - A low-memory 6-block mode stores X, W, P and three product temporaries, recomputing the K and M products as needed (PR 9b measured 4 extra K and M applies per iteration, 6 against 2, and 11 blocks: see the PR 9 note).
+  - A low-memory step (the "6-block mode") keeps only X and P and recomputes every K and M product when needed: 6 applies per iteration against 2, and 11 blocks measured, not 6 (PR 9b; see the PR 9 note).
 - **Convergence:**
   - Measured by the λ-scaled residual r = ‖Kx − λMx‖ / (|λ|‖Mx‖). This gives sin θ ≲ r·λ/gap and δλ/λ ≲ r²·λ/gap (heuristic, up to M conditioning; the rigorous form with the M⁻¹-norm residual is used in PR 9). The normwise backward error is only reported.
   - Default tol = 1e-6.
@@ -163,7 +163,7 @@ All sizes are fp64; GB = 10⁹ bytes.
 | Locked modes / deflation basis | small | small | n × 0.08 GB (fp32: half) | n × 0.8 GB (fp32: half) |
 | Max locked modes (fp32 basis; low-memory step, fp32 preconditioner and multigrid) | > 2000 | > 2000 | ≈ 700 (stored Ke) – 1000 (on the fly), with fp32 AMG from PR 18 | none on one GPU unless the GPU step holds ≤ 7.5 blocks (see below) |
 
-The LOBPCG rows use PR 9b's measured steps: 16 blocks for the 9-block step (new X and P coexist with the old blocks and W) and 11 for the low-memory step (XLA copies the donated X and P early), both including the Rayleigh–Ritz update and deflation-projector temporaries. `memory.lobpcg_memory` reproduces them (within 6% / 13% of the measured peak at 1.08M DOF).
+The LOBPCG rows use PR 9b's measured steps: 16 blocks for the 9-block step (new X and P coexist with the old blocks and W) and 11 for the low-memory step (XLA copies the donated X and P early), both including the Rayleigh–Ritz update and deflation-projector temporaries. `memory.lobpcg_memory` reproduces them (1–4% above the measured peak at 1.08M DOF, one chunk; 5% above for a chunked 300k-DOF solve).
 
 - **Mac (64 GB, unified memory):**
   - Both test columns fit easily.
@@ -426,7 +426,7 @@ Split into three parts with unchanged acceptance criteria: **8a** the reference 
   2. The rigid modes stay a separate fp64 block with M R precomputed, not the first basis columns: projecting against the locked basis costs one extra M apply per iteration (storing M V would double the basis), and single-chunk free-body solves pay nothing.
   3. A chunk that does not converge (no-progress or `maxit` exit) ends the solve; the locked modes plus that chunk's wanted columns are returned with `converged` False. A floor-accepted chunk counts as converged.
   4. `V` is returned as a NumPy fp64 array (host) in every solve.
-  5. The cluster rule compares the relative gap $(\lambda_{j+1} - \lambda_j)/|\lambda_j|$ with $100\,t_j$ ($t_j \ge$ tol is the acceptance threshold), evaluated once the wanted residuals are $\le \sqrt{t}$; at a failed exit the boundary is re-checked with the guards' Ritz-value uncertainty $10r^2$, so a split cluster gives the guard error rather than a silent failure.
+  5. The cluster rule compares the relative gap $(\lambda_{j+1} - \lambda_j)/|\lambda_j|$ with $100\,t_j$ ($t_j \ge$ tol is the acceptance threshold), evaluated once the wanted residuals are $\le \sqrt{t}$; at a failed exit the boundary is re-checked with the guards' Ritz-value uncertainty $\min(10r^2, 10^{-3})$, so a split cluster gives the guard error rather than a silent failure. Only chunks that will be locked raise the guard error; the final chunk (every single-chunk solve) returns as in 9a.
   6. With an fp32 basis the chunks after the first accept at $\max(\mathrm{tol}, 2u_{32}) \approx 1.2\cdot10^{-7}$: the rounded locked modes leave a residual floor near $10^{-8}$.
 - **Milestone:** first end-to-end modes in pure JAX.
 

@@ -561,9 +561,9 @@ def test_cluster_at_chunk_boundary():
     triples, and the last triple (modes 12-14) straddles n_modes, so the return is cut."""
     p = problem(*CUBE)
     lr, _ = reference(CUBE, 12)
-    lam, _, info = lobpcg(p.op, p.free, 12, tol=1e-10, R=p.R, chunk=4)
+    lam, V, info = lobpcg(p.op, p.free, 12, tol=1e-10, R=p.R, chunk=4)
     assert info["converged"] and [c["locked"] for c in info["chunks"]] == [5, 5, 4]
-    assert len(lam) == 12
+    assert len(lam) == len(info["residuals"]) == 12 and V.shape == (p.op.n_dof, 12)
     for g in clusters(lr, 1e-8):
         if g[-1] < 12:
             c = lr[g[0]]
@@ -571,10 +571,14 @@ def test_cluster_at_chunk_boundary():
 
 
 def test_guard_error():
-    """Test 4: one guard cannot show the end of the triple at the chunk boundary."""
+    """Test 4: one guard cannot show the end of the triple at the chunk boundary. A chunk that
+    is never locked (a single chunk) returns instead: its tail past n_modes is cut, as in 9a."""
     p = problem(*CUBE)
     with pytest.raises(ValueError, match="guards >= 2"):
         lobpcg(p.op, p.free, 12, tol=1e-10, R=p.R, chunk=4, guards=1)
+    lr, _ = reference(CUBE, 4)
+    lam, _, info = lobpcg(p.op, p.free, 4, tol=1e-8, R=p.R, guards=1)
+    assert len(lam) == 4 and np.allclose(lam[:2], lr[:2], rtol=1e-8)
 
 
 @pytest.mark.parametrize("tol", [1e-6, 1e-10])
@@ -614,18 +618,13 @@ def test_projector(dtype):
     Y, MY = jnp.asarray(rng.standard_normal((n, k))), jnp.asarray(rng.standard_normal((n, k)))
     V = jnp.asarray(B[:, :count], jnp.float64)
     want = np.asarray(Y - V @ (V.T @ MY))
-    got = np.asarray(jax.jit(lob._project, static_argnums=4)(B, jnp.int32(count), Y, MY, c))
+    f = jax.jit(lob._project, static_argnums=4)
+    got = np.asarray(f(B, jnp.int32(count), Y, MY, c))
     assert np.abs(got - want).max() <= 1e-14 * np.abs(want).max()
     n, c = 100_000, 64
     temps = set()
     for cap in (2 * c, 8 * c):  # cap = c: the slice is the whole basis (no copy)
-        args = (
-            S((n, cap), dtype),
-            S((), jnp.int32),
-            S((n, k), jnp.float64),
-            S((n, k), jnp.float64),
-        )
-        f = jax.jit(lob._project, static_argnums=4)
+        args = (S((n, cap), dtype), S((), jnp.int32), *(S((n, k), jnp.float64),) * 2)
         temps.add(f.lower(*args, c).compile().memory_analysis().temp_size_in_bytes)
     assert len(temps) == 1 and temps.pop() <= 1.01 * (c + k) * n * 8
 
@@ -638,6 +637,21 @@ def test_insert_in_place(dtype):
     B2 = lob._insert(B, jnp.ones((1000, 10)), jnp.int32(10))
     assert B.is_deleted() and B2.unsafe_buffer_pointer() == ptr
     assert np.all(np.asarray(B2)[:, 10:20] == 1) and np.all(np.asarray(B2)[:, 20:] == 0)
+
+
+def test_capacity():
+    """Every lock writes m columns starting at count <= n_modes - 1 - (the final chunk's
+    want), so the write ends stay within the capacity; the +m matters here."""
+    assert lob._capacity(30, 10, 15, True) == (15, 45)
+    for n_modes, chunk, k, low in ((30, 10, 15, True), (100, 7, 12, False), (12, 4, 9, False)):
+        c, cap = lob._capacity(n_modes, chunk, k, low)
+        assert cap % c == 0
+        # worst case: every lock extends to j = m - 1 (one short of the guard error)
+        count = 0
+        while count + chunk < n_modes:
+            assert count + k <= cap
+            count += k - 1
+    assert lob._capacity(12, 12, 17, False)[1] == 0  # one chunk: no basis
 
 
 def test_lock_full():
@@ -653,17 +667,21 @@ def test_lock_full():
 
 
 @pytest.mark.parametrize("low", [False, True], ids=["9-block", "low"])
-@pytest.mark.parametrize("s,k", [(24, 15), (24, 48), (8, 15)])
-def test_step_within_estimate(s, k, low):
-    """Test 10: compiled step temp + aliased state <= lobpcg_memory's step term with the
-    hex20 operator (8^3: operator workspace dominates)."""
-    mesh = box_mesh((s, s, s), type="hex20")
+@pytest.mark.parametrize(
+    "t,s,k", [("hex20", 24, 15), ("hex20", 24, 48), ("hex20", 8, 15), ("hex8", 20, 24),
+              ("hex27", 12, 24)],
+)  # fmt: skip
+def test_step_within_estimate(t, s, k, low):
+    """Test 10: compiled step temp + aliased state <= lobpcg_memory's step term (hex20: fit
+    points, 8^3 where operator workspace dominates; hex8 20^3 and hex27 12^3 at m = 24: held
+    out of the fit)."""
+    mesh = box_mesh((s, s, s), type=t)
     op = unstructured(mesh, MAT)
     n = op.n_dof
     got = step_blocks(op, n, k, low, 4 * k)
     est = lobpcg_memory(lambda m: unstructured_memory(mesh, m), n, k, chunk=k, guards=0,
                         low_memory=low)["step"]  # fmt: skip
-    print(f"hex20 {s}^3 m={k} low={low}: {got:.2f} blocks, estimate {est / (8 * n * k):.2f}")
+    print(f"{t} {s}^3 m={k} low={low}: {got:.2f} blocks, estimate {est / (8 * n * k):.2f}")
     assert got * 8 * n * k <= est
 
 
@@ -679,12 +697,12 @@ mats = {0: Material(isotropic(3.0, 0.3), 2.0)}
 mesh = box_mesh((44, 44, 44), type="hex20")
 free = dof_mask(mesh, {"xmin": "xyz"})
 op = unstructured(mesh, mats)  # warm-up: full run, freed below
-lobpcg(op, free, 80, chunk=40, guards=8, maxit=3, low_memory=LOW)
+lobpcg(op, free, 40, guards=8, maxit=3, low_memory=LOW)
 del op
 """
 PEAK = """
 op = unstructured(mesh, mats)
-lobpcg(op, free, 80, chunk=40, guards=8, maxit=3, low_memory=LOW)
+lobpcg(op, free, 40, guards=8, maxit=3, low_memory=LOW)
 """
 
 
@@ -692,18 +710,67 @@ lobpcg(op, free, 80, chunk=40, guards=8, maxit=3, low_memory=LOW)
 @pytest.mark.skipif(sys.platform != "darwin", reason="peak_bytes needs macOS")
 @pytest.mark.parametrize("low", [False, True], ids=["9-block", "low"])
 def test_estimate_1m(low):
-    """Test 11: hex20 44^3 (1.08M DOF), block 48, basis capacity 128, 3 iterations: measured
-    peak within 20% of lobpcg_memory's total."""
+    """Test 11: hex20 44^3 (1.08M DOF), 40 modes in one chunk (block 48), 3 iterations:
+    measured peak within 20% of lobpcg_memory's total. Test 11b covers locking."""
     from benchmarks import harness
 
     mesh = box_mesh((44, 44, 44), type="hex20")
     n = 3 * len(mesh.points)
-    est = lobpcg_memory(lambda m: unstructured_memory(mesh, m), n, 80, chunk=40, guards=8,
+    est = lobpcg_memory(lambda m: unstructured_memory(mesh, m), n, 40, guards=8,
                         low_memory=low)["total"]  # fmt: skip
     peak = harness.measure(PEAK.replace("LOW", str(low)), PEAK_SETUP.replace("LOW", str(low)))
     peak = peak["peak_bytes"]
     print(f"1M low={low}: estimate {est / 1e9:.2f} GB, peak {peak / 1e9:.2f} GB")
     assert est >= 2e9 and abs(est - peak) <= 0.2 * peak, (est, peak)
+
+
+CHUNKS_SETUP = """
+import dataclasses
+from jaxmodal import config
+config.enable_x64()
+from jaxmodal.eigen import lobpcg
+from jaxmodal.operators.common import register
+@dataclasses.dataclass(frozen=True)
+class Diagonal:
+    dK: jax.Array
+    dM: jax.Array
+    n_dof = property(lambda self: self.dK.shape[0])
+    apply_K = lambda self, v: self.dK[:, None] * v
+    apply_M = lambda self, v: self.dM[:, None] * v
+    diag_K = lambda self: self.dK
+    diag_M = lambda self: self.dM
+register(Diagonal, [])
+n = N_DOF
+d = np.full(n, 1e6)
+d[:400] = 1 + 0.37 * np.arange(400)
+op = Diagonal(jnp.asarray(np.random.default_rng(0).permutation(d)), jnp.ones(n))
+free = np.ones(n, bool)
+lobpcg(op, free, 30, tol=1e-8, chunk=10, basis_dtype=DT)  # warm-up compiles
+"""
+CHUNKS = """
+lam, V, info = lobpcg(op, free, 100, tol=1e-8, chunk=10, basis_dtype=DT)
+assert info["converged"] and len(lam) == 100
+"""
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(sys.platform != "darwin", reason="peak_bytes needs macOS")
+@pytest.mark.parametrize("dtype", ["float64", "float32"])
+def test_estimate_chunks(dtype):
+    """Test 11b: a diagonal pencil (300k DOF) solved in 10 locked chunks: the measured peak,
+    including the end of the solve, stays within lobpcg_memory's total."""
+    from benchmarks import harness
+
+    n = 300_000
+    op_mem = lambda m: dict(storage=16 * n, workspace=0, build=0, overhead=10e6)  # noqa: E731
+    est = lobpcg_memory(op_mem, n, 100, chunk=10, basis_dtype=dtype)["total"]
+    sub = {"N_DOF": str(n), "DT": repr(dtype)}
+    code, setup = CHUNKS, CHUNKS_SETUP
+    for key, val in sub.items():
+        code, setup = code.replace(key, val), setup.replace(key, val)
+    peak = harness.measure(code, setup)["peak_bytes"]
+    print(f"chunks {dtype}: estimate {est / 1e9:.2f} GB, peak {peak / 1e9:.2f} GB")
+    assert peak <= est, (est, peak)
 
 
 def test_failed_chunk():

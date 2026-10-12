@@ -332,36 +332,43 @@ def lobpcg(
     max(5, chunk // 5)); converged chunks are locked into a basis of dtype basis_dtype
     ("float64" or "float32"; with float32, chunks after the first accept at
     max(tol, 1.2e-7)). maxit counts per chunk. low_memory: the low-memory step (11 instead of
-    16 blocks, about 1.6-1.9x the time). Never raises on non-convergence: check
+    16 blocks, about 1.4-1.9x the time). Never raises on non-convergence: check
     info["converged"] and info["stagnated"]; a failed chunk ends the solve, so fewer than
     n_modes can come back."""
     return _solve(
-        op, free, n_modes, tol, R, precond, X0, maxit, seed, chunk, guards, basis_dtype, low_memory
+        op, free, n_modes, tol, R, precond, X0, maxit, seed,
+        chunk=chunk, guards=guards, basis_dtype=basis_dtype, low=low_memory,
+    )  # fmt: skip
+
+
+def _extent(lam, r, t, want, guards, lock, failed=False):
+    """want extended over a cluster at the block boundary: relative gaps < 100 t, or, at a
+    failed exit, within 10 r^2 (capped at 1e-3; the Ritz value uncertainty of a slowly
+    converging guard). A cluster that reaches the block end raises the guard error in a chunk
+    that will be locked (lock); the final chunk keeps want (its tail is cut at n_modes)."""
+    win = 100 * t[:-1]
+    if failed:
+        win = np.maximum(win, np.minimum(10 * r[1:] ** 2, 1e-3))
+    j, k = want, len(lam)
+    while j < k and lam[j] - lam[j - 1] < win[j - 1] * abs(lam[j - 1]):
+        j += 1
+    if j < k:
+        return j
+    if not lock:
+        return want
+    raise ValueError(
+        f"a cluster at the chunk boundary (from mode {want}) fills the block: it needs more "
+        f"than {guards} guard vectors; pass guards >= {guards + 1} or a chunk size that ends "
+        "in a gap"
     )
 
 
-def _extent(lam, r, t, want, guards, failed=False):
-    """want extended over a cluster at the block boundary: relative gaps < 100 t, or, at a
-    failed exit, within 10 r^2 (the Ritz value uncertainty of a slowly converging guard).
-    Raises the guard error if the cluster reaches the block end."""
-    j, k = want, len(lam)
-    while j < k and lam[j] - lam[j - 1] < max(100 * t[j - 1], 10 * failed * r[j] ** 2) * abs(
-        lam[j - 1]
-    ):
-        j += 1
-    if j == k:
-        raise ValueError(
-            f"a cluster at the chunk boundary (from mode {want}) fills the block: it needs more "
-            f"than {guards} guard vectors; pass guards >= {guards + 1} or a chunk size that "
-            "ends in a gap"
-        )
-    return j
-
-
-def _iterate(state, args, k, want, guards, tol, consts, maxit, low, c, stop):
-    """The iteration loop of one chunk. Returns (state, r, t, j, iterations, converged,
-    stagnated, history, drops): j = want, extended over a cluster at the block boundary."""
+def _iterate(state, args, consts, want, lock, guards, tol, maxit, low, c, stop):
+    """The iteration loop of one chunk: (state, r, t, j, record), with j = want extended over
+    a cluster at the block boundary and record the info["chunks"] entry plus history and
+    drops."""
     op, m = args[0], args[1]
+    k = state[0].shape[1]
     hist, lsum, drops = [], [], 0
     best, best_l, it_best = np.inf, np.inf, 0
     converged = stagnated = False
@@ -379,7 +386,8 @@ def _iterate(state, args, k, want, guards, tol, consts, maxit, low, c, stop):
         drops += int(out[-1])
         # cluster rule once the wanted residuals are <= sqrt(t): Ritz values are then accurate
         # to about t, well inside the 100 t window. j only grows; progress restarts with it
-        if (r[:want] ** 2 <= t[:want]).all() and (jn := _extent(lam, r, t, want, guards)) > j:
+        near = bool((r[:want] ** 2 <= t[:want]).all())
+        if near and (jn := _extent(lam, r, t, want, guards, lock)) > j:
             j, best, best_l, it_best = jn, np.inf, np.inf, it
         hist.append(r[:j].max())
         lsum.append(lam[:j].sum())
@@ -398,10 +406,12 @@ def _iterate(state, args, k, want, guards, tol, consts, maxit, low, c, stop):
                 break
     if not converged:  # report residuals of explicit products on every exit
         # wanted columns near convergence but a failed chunk: a split cluster (guard error)
-        if stop is None and (r[:want] ** 2 <= t[:want]).all():
-            _extent(lam, r, t, want, guards, failed=True)
+        if lock and near:
+            _extent(lam, r, t, want, guards, lock, failed=True)
         state, r, t = _explicit(state, op, m, consts, low)
-    return state, r, t, j, it + 1, converged, stagnated, hist, drops
+    rec = dict(want=want, locked=j if converged else 0, iterations=it + 1, converged=converged,
+               stagnated=stagnated, history=hist, drops=drops)  # fmt: skip
+    return state, r, t, j, rec
 
 
 def _explicit(state, op, m, consts, low):
@@ -450,7 +460,8 @@ def _solve(
     key, sub = jax.random.split(jax.random.key(seed))
     nK, nM = map(float, _norms(op, m, m * jax.random.normal(sub, (n, 1))))
     t1 = time.perf_counter()
-    count, lams, res, thr, host, chunks, hist = 0, [], [], [], [], [], []
+    V = np.empty((n, n_modes))  # filled at each lock: the only host copy of the modes
+    count, lams, res, thr, chunks, hist = 0, [], [], [], [], []
     drops = refills = iterations = 0
     while True:
         want = min(chunk, n_modes - count)
@@ -464,28 +475,28 @@ def _solve(
         t_eff = max(tol, 2.0**-23) if fp32 and count else tol
         consts = jnp.array([nK, nM, t_eff, C_FLOOR])
         args = (op, m, precond, R, MR, B, cnt)
-        state, r, t, j, its, ok, stag, h, d = _iterate(
-            state, args, k, want, guards, tol, consts, maxit, low, c, stop
+        lock = count + want < n_modes  # the final chunk is never locked
+        state, r, t, j, rec = _iterate(
+            state, args, consts, want, lock, guards, tol, maxit, low, c, stop
         )
-        refills, iterations, drops = refills + nref, iterations + its, drops + d
-        hist += h
+        ok = rec["converged"]
+        refills, iterations = refills + nref, iterations + rec["iterations"]
+        drops += rec.pop("drops")
+        hist += rec.pop("history")
+        chunks.append(rec)
         jj = j if ok else want
-        chunks.append(dict(want=want, locked=j if ok else 0, iterations=its, converged=ok,
-                           stagnated=stag))  # fmt: skip
         lams.append(np.asarray(state[-1][:jj]))
         res.append(r[:jj])
         thr.append(t[:jj])
         if not ok or count + j >= n_modes:
             break
-        if fp32:
-            host.append(np.asarray(state[0][:, :j]))
+        V[:, count : count + j] = np.asarray(state[0][:, :j])
         B = _lock(B, count, state[0], j)
         count += j
-        X0 = state[0][:, j:]
-    Xf = np.asarray(state[0])[:, :jj]
-    del state, X0  # free the step state before the basis comes to the host
-    V = np.hstack((host if fp32 or not count else [np.asarray(B)[:, :count]]) + [Xf])
-    V = V[:, :n_modes]
+        X0, state = state[0][:, j:], None  # free the old state before the next start
+    end = min(count + jj, n_modes)
+    V[:, count:end] = np.asarray(state[0][:, : end - count])
+    V = V[:, :end]
     info = dict(
         iterations=iterations,
         converged=all(ch["converged"] for ch in chunks),
