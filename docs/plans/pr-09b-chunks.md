@@ -252,7 +252,8 @@ The 9-block and low-memory Memory budget rows and the "Max locked modes" row are
 | cluster rule gate $r \le t$ instead of $r^2 \le t$ | none: expected survivor (the guard error comes from the failed-exit re-check; the gate only lets clusters extend earlier) |
 | `V` not cut at `n_modes` | 3 (`V.shape`) |
 | no re-orthonormalization at lock | `test_many_chunks` |
-| `_reortho`: one projection pass, SVQB instead of Cholesky, no Cholesky | `test_chunks`, `test_reortho` |
+| `_reortho`: one projection pass, SVQB instead of Cholesky, no Cholesky | `test_reortho` |
+| span guard off | `test_lock_in_span` |
 | `_reortho` without the mask to $j$ columns | none: equivalent (the triangular factor keeps the first $j$ columns independent of the rest, and `_lock` and `V` cut at $j$) |
 | residuals of the locked chunk not recomputed after `_reortho` | 1 (rtol $10^{-5}$; off by up to $8\cdot10^{-5}$ otherwise) |
 | failed-exit window without the $10^{-3}$ cap | none: expected survivor (needs wanted residuals $\le \sqrt t$ with a large guard residual; the cap prevents a false guard error there) |

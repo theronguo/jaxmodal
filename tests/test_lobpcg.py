@@ -124,7 +124,7 @@ def check_modes(p_args, lam, V, info, tol):
     assert np.all(V[~p.free] == 0)
     Vf = V[p.idx]
     assert np.abs(Vf.T @ (p.Mf @ Vf) - np.eye(n)).max() <= 1e-10
-    # rounding differs between the jitted and eager products (about 1e-7 relative at r ~ 1e-11);
+    # jitted and eager products agree far below this (about 5e-15 relative measured in 9b);
     # residuals from implicitly updated products would differ by 1e-4 or more
     assert np.allclose(info["residuals"], residuals(p, lam, jnp.asarray(V)), rtol=1e-5, atol=0)
     if p.R is not None:
@@ -676,6 +676,24 @@ def test_reortho():
     assert abs(cos - 1) < 1e-12  # column order kept
     _, g = lob._reortho(X.at[:, 1].set(B[:, 2]), 3, op, m, B, jnp.int32(5), c=c)
     assert g < 1e-20
+    # columns 1e-6 off span(B): one projection pass leaves 7e-11, two leave 1e-16
+    rng2 = np.random.default_rng(1)
+    Xc = jnp.asarray(Bm @ rng2.standard_normal((5, k)) + 1e-6 * rng2.standard_normal((n, k)))
+    Y, _ = lob._reortho(Xc, 3, op, m, B, jnp.int32(5), c=c)
+    assert np.abs(Bm.T @ (np.asarray(op.dM)[:, None] * np.asarray(Y))).max() < 1e-13
+
+
+def test_lock_in_span(monkeypatch):
+    """A locked column inside span(B) (projected norm below 0.5) raises."""
+    p = problem("hex20", (4, 4, 4), "clamped")
+    real = lob._reortho
+
+    def zero_norm(*a, **kw):
+        return real(*a, **kw)[0], 0.0
+
+    monkeypatch.setattr(lob, "_reortho", zero_norm)
+    with pytest.raises(RuntimeError, match="span of the earlier"):
+        lobpcg(p.op, p.free, 4, chunk=2)
 
 
 def test_lock_full():
