@@ -1,6 +1,6 @@
 # PR 11b plan: GMG in `solve_modes`, σ pre-estimate, fp32 V-cycle, estimator, Mac acceptance
 
-PR 11b completes PR 11 (M3) on top of 11a's `gmg(op, free, sigma)`. It makes the voxel GMG the default preconditioner of `solve_modes` and adds the following:
+PR 11b completes PR 11 (M3) on top of 11a's `gmg(op, free, sigma)`. It makes the voxel GMG the default preconditioner of `solve_modes`. It also adds:
 
 - a σ pre-estimate that works on slender and high-contrast bodies (`docs/open_items.md`);
 - an fp32 V-cycle;
@@ -12,17 +12,17 @@ Roadmap tests in this PR:
 
 | roadmap test | here |
 |---|---|
-| σ pre-estimate within 2× of λ₁; a user hint skips it | test 1, 2 |
+| σ pre-estimate within 2× of λ₁; a user hint skips it | tests 1, 2 |
 | `solve_modes` on an odd voxel mesh matches `eigsh` (PR 9 tolerances) | test 3 |
 | fp32 GMG: same tol as fp64, ≤ 20% more LOBPCG iterations | test 6 |
-| Mac acceptance: 2M DOF, 10 modes, tol $10^{-6}$, ≤ 10 min, peak within 20% of the estimators, fp64 and fp32 V-cycles | test 9 |
+| Mac acceptance: 2M DOF, 10 modes, tol $10^{-6}$, ≤ 10 min, peak within 20% of the estimators, fp64 and fp32 V-cycles | test 10 |
 | deferred GPU checks | ROADMAP list (no test) |
 
-## Measured facts (prototypes in `scratchpad/p11b/`; jax 0.11.2, M3 Max CPU)
+## Measured facts (prototypes in `scratchpad/p11b/`, reviewer probes in `scratchpad/r11b_corr1/`, `rev11b_p1/`, `rev11b_perf/`, `c11b-plan1/`; jax 0.11.2, M3 Max CPU)
 
 Steel, unit box, `xmin` clamped unless noted. λ₁ is the SciPy reference (`benchmarks/gmg_study.lam1`).
 
-**σ sensitivity.** LOBPCG with GMG built at σ = f·λ₁ (10 modes, tol $10^{-6}$), in iterations:
+**σ sensitivity.** LOBPCG with GMG built at σ = f·λ₁ (10 modes, tol $10^{-6}$), iterations:
 
 | case | f = 0 | 1e-3 | 0.3 | 1 | 3 | 10 | 100 | 1e4 |
 |---|---|---|---|---|---|---|---|---|
@@ -33,65 +33,82 @@ Steel, unit box, `xmin` clamped unless noted. λ₁ is the SciPy reference (`ben
 | aniso $h_z = h/10$, $32^3$ | 109 | 108 | 109 | 108 | 109 | 108 | 109 | 100 |
 
 - Any σ in $[0, 3\lambda_1]$ is as good as $\lambda_1$; σ ≥ 10λ₁ costs iterations on bulky and free bodies.
-- `sigma_estimate` (Jacobi) is 46–3800× above λ₁ on plates, beams, anisotropic grids and SIMP fields (11a study). At 2M DOF it takes 73 s (252 iterations), more than the LOBPCG solve itself.
-- Capping it at 3 or 10 iterations gives $10^2$–$10^7$×.
+- `sigma_estimate` (Jacobi) is up to 3800× above λ₁ on thin plates, slender beams, anisotropic grids and SIMP fields, and within 2.5× on small plates and stubby beams (11a study). At 2M DOF it takes 73 s (252 iterations), more than the solve.
+- Capped at 3 or 10 iterations it is $10^2$–$10^7$× above λ₁.
 
-**GMG-refined pre-estimate** (prototype `sig3.py`):
-- Build `gmg(op, free, 0.0)`, if the singular guard accepts σ = 0. Otherwise build `gmg(op, free, σ₀)`, with σ₀ = `sigma_estimate(..., maxit=10)` (an upper bound).
-- Then run 1-mode LOBPCG with that GMG (block 6, maxit 20, residual tol 0.1). σ = its Rayleigh quotient, which is ≥ λ₁.
-- From σ₀ > 0, rebuild at σ and repeat while σ falls below a third of the previous value (at most 4 rounds).
+**GMG-refined pre-estimate** (the rule below; probes `rev11b_p1/sigplan.py`, `r11b_corr1/sigp.py`, `c11b-plan1/sigv*.py`):
 
-| case | start | rounds | σ/λ₁ | time |
-|---|---|---|---|---|
-| box $16^3$ | 0 | 1 | 1.00 | 3.7 s |
-| free box $16^3$ | 5.1λ₁ | 2 | 1.00 | 1.4 s |
-| plate $64^2\times1$ | 0 | 1 | 1.00 | 4.9 s |
-| beam $128\times1\times1$ | 0 | 1 | 1.00 | 4.6 s |
-| SIMP field (checked-in), $32^3$ | 0 | 1 | 1.00 | 4.9 s |
-| SIMP seed 4 | 0 | 1 | 1.00 | 2.0 s |
-| aniso $h_z = h/10$ | 0 | 1 | 1.00 | 2.2 s |
-| free plate $32^2\times1$ | 1800λ₁ | 2 | 1.00 | 2.6 s |
-| free beam $64\times2\times2$ | 1000λ₁ | 2 | 1.00 | 4.6 s |
-| unfiltered binary SIMP, $32^3$ | 0 | 1 | 390 | 2.9 s |
+| case | start σ/λ₁ | σ/λ₁ after each round | LOBPCG iterations |
+|---|---|---|---|
+| box $8^3$ | 0 | 1.00 | 4 |
+| odd $9\times8\times8$ | 0 | 1.00 | 4 |
+| plate $32^2\times1$ / $64^2\times1$ | 0 | 1.00 / 1.00 | 14 / 20 |
+| beam $64\times2\times2$ / $128\times1\times1$ | 0 | 1.00 / 1.00 | 9 / 20 |
+| aniso $h_z = h/10$, $16^3$ | 0 | 1.00 | 20 |
+| SIMP field (checked-in), $32^3$ | 0 | 1.00 | 20 |
+| clamped beam with a 200× tip nodal mass | 0 | 1.00 | 6 |
+| free box $8^3$ | 1.82 | 1.00 | 6 |
+| free plate $16^2\times1$ | 81 | 1.00, 1.00 | 11 + 7 |
+| free beam $128\times1\times1$ | $5.1\cdot10^4$ | **2.7**, 1.00 | |
+| free aniso $h_z = h/10$ | $8.9\cdot10^3$ | **6.83**, 1.00, 1.00 | |
+| free SIMP field | 277 | 1.05, 1.00 | |
+| two disjoint free boxes (12 rigid modes) | 1.75 | 1.00 | |
+| clamped body + floating part (6 rigid modes) | 14 | 1.00, 1.00 | |
+| unfiltered binary SIMP, $32^3$ | 0 | 390 | 20 |
 
-- The binary field's λ₁ is a void-region mode that 20 iterations from a random start miss. 100 iterations find it.
-- 10-mode LOBPCG does not converge on that field at any σ, with GMG or with Jacobi (below). It is a documented limitation, not a test case.
-- Times are at prototype sizes. At 2M DOF the pre-estimate costs 13 s (σ = 0 build 5.1 s, 5 iterations 8.1 s) against 73 s for Jacobi `sigma_estimate`.
+- From σ₀ > 0 one round is not always enough: the free beam and the free anisotropic grid land at 2.7 and 6.8 λ₁ after round 1. Test 1 includes the free beam, so dropping the rounds fails it.
+- The binary field's λ₁ is a void-region mode that 20 iterations from a random start miss (100 find it). 10-mode LOBPCG does not converge on that field at any σ either (below). It is a documented limitation, not a test case.
+- **Cost at 2M DOF (clamped, one round):**
+  - `gmg(op, free, 0.0)` 5–6 s cold;
+  - 5 LOBPCG iterations 8–9 s cold (6.6 s warm);
+  - 13–15 s in total, against 73 s for Jacobi `sigma_estimate`.
+- **Free bodies** add `sigma_estimate(maxit=10)` and up to 3 more rounds (build 2–6 s plus ≤ 20 iterations at about 1.3 s each). The worst case is about 2 min at 2M.
 
-**Mac acceptance prototype** ($87^3$, 2.04M DOF, 10 modes, tol $10^{-6}$, 9-block step, fp64 basis, cold process, wall time including compilation):
+**Mac acceptance prototype** ($87^3$, 2.04M DOF, 10 modes, tol $10^{-6}$, 9-block step, fp64 basis, cold process, wall time including compilation; `big2.py`):
 
 | V-cycle | σ pre-estimate | final GMG build | LOBPCG (iterations) | total |
 |---|---|---|---|---|
 | fp64 | 13.2 s | 2.0 s | 42.9 s (16) | 58.8 s |
 | fp32 | 13.2 s | 2.3 s | 38.7 s (16) | 54.9 s |
 
-The budget model assumed 150 LOBPCG iterations and about 8 min (`docs/eigensolvers.md`). The 10-min budget stays as the roadmap fixes it; the model's table is updated with the measured numbers.
+The budget model assumed $N_\text{it}$ = 150 and $c_V$ = 5.5, about 8 min (`docs/eigensolvers.md`). Measured: $N_\text{it}$ = 16, $c_V$ = 5.3 (fp64) and 4.5 (fp32). The 10-min budget stays as the roadmap fixes it, and the model's table gets the measured numbers.
 
-**Peak memory** (`harness.measure`, `lobpcg(..., maxit=3)` after the build, $87^3$, block 15):
+**V-cycle, warm, best of 5** ($87^3$, $m = 15$; `rev11b_perf/fp32.py`):
 
-| preconditioner | peak | `lobpcg_memory` estimate without preconditioner |
+| V-cycle | time | temporaries |
 |---|---|---|
-| Jacobi | 4.47 GB | 5.27 GB |
-| GMG fp64 | 6.21 GB | not applicable |
-| GMG fp32 | 5.11 GB | not applicable |
+| fp64 | 1.76 s ($5.3\,t_A$) | 12.11 fp64 blocks |
+| fp32 | 1.48 s ($4.5\,t_A$; −16%) | 8.45 fp64 blocks |
 
-GMG adds 1.75 GB (fp64) or 0.64 GB (fp32) over Jacobi:
-- 0.31 GB of storage (11a);
-- the V-cycle workspace inside the step: 12.1 fp64 blocks for the V-cycle alone (fp32: 8.4), partly overlapping the step's own temporaries.
+The fp32 $A_P$ apply alone takes 0.22 s against 0.33 s.
 
-**fp32 V-cycle prototype** (cast the built hierarchy to fp32; coarsest Cholesky and deflation in fp64):
-- LOBPCG iterations, fp64 → fp32: box $32^3$ 16 → 15, plate $32^2\times1$ 21 → 21, odd $33\times8\times8$ 14 → 14.
-- At $87^3$, m = 15: V-cycle 3.19 → 2.61 s, temporaries 12.1 → 8.4 fp64 blocks.
-- The fp32 cycle differs from the fp64 one by $3\cdot10^{-7}$ relative, and its asymmetry is $10^{-6}$ relative. LOBPCG tolerates both (it uses the preconditioner only to build its search directions).
-- The stencil allocates its accumulators in fp64 and promotes fp32 inputs, so the prototype makes `apply_K`/`apply_M` follow the vector's dtype (below).
+**Peak memory** (`harness.measure`, warm subprocess, `lobpcg(..., maxit=20)` after the build, $87^3$, block 15; the GMG solve converges at 16, so this is the whole solve):
 
-**SIMP fields under LOBPCG.**
-- On the checked-in SIMP field, LOBPCG for 10 modes at tol $10^{-6}$ reports stagnation at:
-  - 208 iterations with fp64 GMG at λ₁;
-  - 157 with 15 guards.
-- With fp32 GMG it converges in 241 iterations. Jacobi does not converge in 400.
-- The likely cause is the fp64 residual floor: $\varepsilon\,\lambda_\max/\lambda_1 \approx 10^{-6}$ for this $10^9$-contrast pencil, whose $\lambda_1$ is a spurious island mode.
-- Logged in `docs/open_items.md` (revisit in PR 21, whose modified interpolation removes the spurious modes). Not an 11b test.
+| preconditioner | measured peak | estimate |
+|---|---|---|
+| Jacobi | 4.91 GB | 5.27 GB (`lobpcg_memory` today, +7%) |
+| GMG fp64 | 6.73 GB | about 6.83 GB (+1.5%) |
+| GMG fp32 | 5.64 GB | about 6.0 GB (+7%) |
+
+- The projected estimates are the Jacobi estimate plus GMG storage (0.31 / 0.16 GB) plus the extra step blocks with GMG:
+  - fp64: +5.1 blocks of 0.245 GB, from 11a's `memory_analysis` of the step (21.1 against 16.0 blocks);
+  - fp32: about +2.4 blocks.
+- The roadmap band, $|\text{est} - \text{peak}| \le 0.2\,\text{peak}$ (as in the PR 6 and PR 9 tests), allows 5.39–8.08 GB for fp64 and 4.51–6.77 GB for fp32. Both projections sit well inside.
+- With `maxit = 3` the peaks are about 0.5 GB lower (4.47 / 6.21 / 5.11 GB). Test 10 measures the whole `solve_modes` run.
+
+**fp32 V-cycle prototype** (hierarchy cast to fp32; coarsest Cholesky and deflation in fp64; `lob32.py`, `c11b-plan1/lob32b.py`):
+- LOBPCG iterations, fp32 / fp64: box $16^3$ 15/15, box $32^3$ 15/16, plate $32^2\times1$ 21/21, odd $33\times8\times8$ 14/14.
+- λ agree to ≤ $3\cdot10^{-11}$ relative.
+- The cycle differs from fp64 by $3\cdot10^{-7}$ relative, and $x^\top P_{32}x$ stays positive, including on $A_P x$ and $A_P^2 x$ directions.
+- Asymmetry $|u^\top Pv - v^\top Pu|/\sqrt{u^\top Pu\; v^\top Pv} \le 6\cdot10^{-9}$.
+- The stencil allocates its accumulators in fp64 and promotes fp32 inputs, so `apply_K`/`apply_M` must follow the vector's dtype (below). With that patch, fp32 applies match fp64 to ≤ $1.7\cdot10^{-7}$ (two phases, masked, nodal masses, consistent and lumped).
+
+**SIMP fields under LOBPCG** (observation, cause unknown). On the checked-in SIMP field at tol $10^{-6}$ for 10 modes:
+- fp64 GMG at λ₁ stagnates at 208 iterations, or at 157 with 15 guards;
+- fp32 GMG converges at 241;
+- Jacobi does not converge in 400.
+
+Logged in `docs/open_items.md` with the cause open (search-direction quality, the floor-acceptance logic, or the pencil's conditioning). Revisit in PR 21, whose modified interpolation removes the spurious island modes. Not an 11b test.
 
 ## Design
 
@@ -105,167 +122,192 @@ lam, V, info = solve_modes(mesh, materials, bcs, n_modes, orientations=None, *, 
 ```
 
 - **`precond`**:
-  - `"auto"` (default) is `"gmg"` for a voxel mesh and `"jacobi"` otherwise.
-  - `"gmg"` on a non-voxel mesh raises `ValueError`.
-  - Any other value raises.
-  - PRs 12 and 13 add `"pmg"` and `"amg"`, and switch `"auto"` for unstructured meshes.
-  - Dispatch is a plain `if` on the name; a registry waits until a third preconditioner exists.
+  - `"auto"` (default) means `"gmg"` for a voxel mesh and `"jacobi"` otherwise.
+  - `"gmg"` on a non-voxel mesh raises `ValueError`, as does an unknown name.
+  - PRs 12 and 13 add `"pmg"`/`"amg"` and switch `"auto"` for unstructured meshes.
+  - It is a plain `if` on the name; a registry waits until a third preconditioner exists.
 - **`sigma`**:
   - `None` (default): GMG runs the pre-estimate below.
-  - A float ≥ 0: a hint. GMG is built at it directly, and the pre-estimate is skipped.
+  - A float ≥ 0: a hint. GMG is built at it directly, skipping the pre-estimate.
   - Jacobi uses `jacobi(op, free, sigma or 0.0)` and never runs the pre-estimate (PR 9a: σ changes Jacobi's iterations by < 3%).
   - A negative or non-finite σ raises.
-- **`precond_dtype`**: `"float64"` or `"float32"`, forwarded to `gmg(..., dtype=...)`. With Jacobi only `"float64"` is accepted (others raise). PR 13 adds fp32 for p-MG and AMG.
+- **`precond_dtype`**: `"float64"` or `"float32"`, forwarded to `gmg(..., dtype=...)`. With Jacobi only `"float64"` is accepted. PR 13 adds fp32 for p-MG and AMG.
 - **`info`** gains:
   - `precond`: the name used;
-  - `sigma`: the shift the preconditioner was built at (`None` for Jacobi without a hint);
-  - `sigma_iterations`: LOBPCG iterations of the pre-estimate, 0 when it is skipped;
-  - `setup_s`: wall time from the start of `solve_modes` to the start of `lobpcg`, covering the build, rigid modes, the pre-estimate and the final GMG.
-- Order:
-  1. `dof_mask`, then the operator, then the rigid modes (as in 9c).
+  - `sigma`: the shift the preconditioner was built at (0.0 for Jacobi without a hint);
+  - `sigma_iterations`: the pre-estimate's LOBPCG iterations summed over rounds, 0 when skipped;
+  - `time["precond"]`: wall time of the rigid modes, the pre-estimate and the final build. `time["setup"]` stays `lobpcg`'s.
+- **Order:**
+  1. `dof_mask`, then the operator and the rigid modes (as in 9c).
   2. The preconditioner (pre-estimate, then the final `gmg` at σ).
   3. `lobpcg(..., precond=P)`.
 
-  The pre-estimate GMG is freed before the final build (only one hierarchy is alive).
+### σ pre-estimate (`_gmg_sigma(op, free, R)` in `eigen/api.py`, about 15 lines)
 
-### σ pre-estimate: `sigma_estimate(op, free, R=None, maxit=300, seed=0, precond=None)`
+`sigma_estimate` is unchanged. The refinement calls `lobpcg` directly:
 
-The existing function gains `precond`:
-- With `precond=None`, it behaves as today (Jacobi, plateau stop).
-- With a preconditioner, it runs 1-mode LOBPCG (block 6) with it, stopping at residual ≤ 0.1 or `maxit` (callers pass 20), and returns `(λ̃₁, iterations)`. λ̃₁ ≥ λ₁ always holds (a Rayleigh quotient).
+```python
+lam, _, info = lobpcg(op, free, 1, 0.1, R, P, maxit=20)  # block 6; never raises on non-convergence
+```
 
-The plateau stop stays Jacobi-only: with GMG, λ̃ can sit at a plateau for a few iterations before dropping (binary field: 7 iterations at 390λ₁). The residual stop is safe with GMG because it reaches 0.1 only near an eigenpair. The prototype stops at 4–8 iterations only on the cases where λ̃ is already within 1% of λ₁.
+1. **Start.**
+   - `P = gmg(op, free, 0.0)`, which succeeds when the singular guard proves $A_P$ nonsingular (clamped bodies), giving σ = 0.
+   - On `SingularShiftError`, start from σ₀ = `sigma_estimate(op, free, R, maxit=10)[0]` (an upper bound) and build `P = gmg(op, free, σ₀)`.
+2. **Round.** `new = lam[0]`, the Rayleigh quotient, always ≥ λ₁. Then `σ = new` if σ = 0, else `min(σ, new)`.
+3. **Stop.**
+   - From σ = 0, stop after one round: GMG at σ = 0 approximates $K^{-1}$ on the free DOFs, the best preconditioner for λ₁.
+   - From σ₀ > 0, stop when `new > previous / 3`, or after 4 rounds.
+   - Otherwise set `P = None` (one hierarchy alive at a time), rebuild at σ, and go to step 2.
+4. Return σ and the summed iterations. `solve_modes` then sets `P = None` and builds the final `gmg(op, free, σ, dtype=precond_dtype)`. Rebuilds on the same grid do not recompile (11a).
 
-The round logic lives in `eigen/api.py` (`_gmg_sigma(op, free, R)`, about 15 lines):
-1. **Start.** Build `gmg(op, free, 0.0)`; this succeeds when the singular guard proves $A_P$ nonsingular (clamped bodies). On `ValueError` from the guard, start instead from σ₀ = `sigma_estimate(op, free, R, maxit=10)[0]` and build `gmg(op, free, σ₀)`.
-2. **Refine.** σ = `sigma_estimate(op, free, R, maxit=20, precond=P)[0]`.
-3. **Stop.** From σ = 0, stop after one round (GMG at σ = 0 is $K^{-1}$ on the free DOFs, the best preconditioner for λ₁). From σ₀ > 0, rebuild at σ and repeat until σ > previous/3, at most 4 rounds.
+The residual tolerance 0.1 is `lobpcg`'s own λ-scaled residual. With Jacobi a residual stop was rejected (a stop at 0.5 gave 432× λ₁, `docs/eigensolvers.md`). With GMG the residual reaches 0.1 only near an eigenpair; the probes stop early (4–14 iterations) only where σ is within 1% of λ₁, and otherwise run to 20. The binary field is the known miss.
 
-To tell the guard's refusal apart from other errors, `gmg` raises a `SingularShiftError(ValueError)` subclass at σ = 0; only that one is caught. Rebuilds on the same grid do not recompile (11a). Total pre-estimate iterations go to `info["sigma_iterations"]`.
+**`SingularShiftError(ValueError)`** is a new exception in `precond/gmg.py`, exported from `jaxmodal.precond`.
+- Raised by every σ = 0 refusal in `_check_sigma0`: zero-stiffness cells, rigid modes left, and meshes `rigid_modes` rejects (chained).
+- The finite backstops ("smoother blocks are not finite", "coarsest factor is not finite") stay plain `ValueError` and propagate.
+- `_gmg_sigma` catches only `SingularShiftError`.
 
 ### fp32 V-cycle: `gmg(op, free, sigma, *, degree=2, coarse_degree=4, ratio=30.0, dtype="float64")`
 
-- The build runs in fp64 as today (the Galerkin sums, smoother inverses and `lmax_estimate` need it). With `dtype="float32"` it then casts to fp32:
-  - the coarse levels' block-ELL values;
-  - every level's smoother inverse blocks;
-  - the Chebyshev `lmax` and `ratio`;
-  - the transfer weights.
+- **Build.** The build runs in fp64 as today (the Galerkin sums, smoother inverses and `lmax_estimate` need it). With `dtype="float32"` the levels are then rebuilt in fp32:
+  - Each coarse level's `BlockELL` gets fp32 values: `A32`.
+  - Each smoother becomes `dataclasses.replace(S, A=A32, precond=D32, lmax=f32(lmax), ratio=f32(ratio))`. `D32` is the Partial with fp32 inverse blocks; the k = 1 mask `m` stays as is.
+  - The transfer weights are cast to fp32.
+  - Level 0 keeps the fp64 `APOperator` as `levels[0][0]` and as `S.A` (one object, no copy of the caller's Stencil).
 
-  The fp64 originals are dropped, so steady storage is the fp32 copy; the build peak briefly holds both, and the estimator's `build` term includes it.
-- Kept in fp64:
+  So `levels[l][0] is levels[l][1].A` holds on every level. The fp64 originals are dropped before `gmg` returns, so steady storage is the fp32 copy.
+- **Kept in fp64:**
   - the coarsest Cholesky factor (the cycle casts the coarse right-hand side to fp64 and back);
   - the deflation arrays (small, applied outside the cycle in fp64);
-  - the fine $A_P$, which is the matrix-free operator. Its stored leaves stay fp64, and it runs in the vector's precision (next bullet).
-- **Dtype-following applies.** `Stencil.apply_K`/`apply_M` cast the operator's float leaves to `v.dtype` inside the jitted apply and allocate their accumulators in that dtype. `APOperator.__call__` casts its mask, σ and $s$ likewise. For fp64 vectors every cast is a no-op, so fp64 results are unchanged (existing tests). For fp32 vectors the slab GEMMs run in fp32.
+  - `free`;
+  - the fine operator's leaves.
+- **Dtype-following applies.** `Stencil.apply_K`/`apply_M` cast the operator's float leaves to `v.dtype` inside the jitted apply. They allocate the `_slabs`/phase-scan accumulators and the `jnp.eye` of $M_e$ in that dtype. `APOperator.__call__` casts its mask, σ and $s$ likewise.
+  - For fp64 vectors every cast is a no-op, so fp64 results are bitwise unchanged; no current caller passes fp32 (LOBPCG upcasts fp32 basis slices).
   - Diagonals and `block_diag_K` stay fp64.
-  - The unstructured operator is unchanged (PR 13 owns fp32 for p-MG and AMG).
-- **The cycle** (`_vcycle_apply`):
+  - The unstructured operator is unchanged (PR 13).
+- **Cycle** (`_vcycle_apply`):
   1. Mask and pre-deflate in fp64.
   2. Cast to `P.dtype` and run the V-cycle.
   3. Cast the correction back and post-deflate in fp64.
 
-  `GMG` gets a static field `dtype`. The cycle is applied symmetrically (same operations pre and post). Its fp32 rounding asymmetry, about $10^{-6}$ relative, is within what LOBPCG and PCG to $10^{-6}$ tolerate. PCG to $10^{-8}$ with an fp32 cycle is not promised (documented).
+  `GMG` gets a static field `dtype`. Pre- and post-smoothing are the same operations; the fp32 rounding asymmetry (≤ $6\cdot10^{-9}$ in the energy-normalized measure) is harmless to LOBPCG. PCG to $10^{-8}$ with an fp32 cycle is not promised (documented).
 
 ### Memory estimator (`memory.py`)
 
-**`gmg_memory(mesh, m, dtype="float64", s_K=None)`** returns `storage`, `workspace`, `build` and `overhead` (the operator estimators' keys and composition rule).
+**`gmg_memory(mesh, m, dtype="float64", s_K=None)`** returns `storage`, `workspace`, `build` and `overhead`, with the operator estimators' keys and composition rule.
 
-- **`storage`** is computed exactly from the hierarchy shapes, with only boolean masks on the host. Each level's active-cell mask is coarsened by the 11a rule, and its node count is the OR of the 8 shifted masks; there is no `voxel_mesh` per level, so the estimate stays cheap at 100M cells. It sums:
-  - ELL values: rows padded to `_ell_rows`, $27\cdot9$ entries, in `dtype`;
-  - ELL columns: int32;
-  - smoother inverse blocks: $9k$ entries per node for group size $k$, in `dtype`, plus their index arrays;
-  - transfer index arrays and weights;
-  - the coarsest dense factor: $(3n_c)^2\cdot8$;
-  - the fine `free` vector;
-  - with `s_K` given, the island deflation, from `_islands` and the padded row count: about 104 B per row plus 96²·8 for $E^+$.
+- **`storage`** is an upper bound from shape arithmetic. It shares no code with `gmg.py`.
+  - **Fine level:** exact from the mesh. Smoother inverse blocks: $9k$ entries per node for the group size $k$ (the product of the stopped axes' node counts), in `dtype`. Plus the group index arrays, the k = 1 mask, and `free`.
+  - **Coarse levels:** each axis of the bounding box is halved while it has more than 2 elements (11a's rule), and every level is counted as a full box. Per level:
+    - ELL values: rows padded like `_ell_rows`, $27\cdot9$ entries, in `dtype`;
+    - int32 ELL columns;
+    - smoother blocks and masks as on the fine level;
+    - transfer index arrays (int32) and int64 tables with `dtype` weights.
+  - **Coarsest factor:** $(3n_c)^2\cdot 8$ (≤ 27 nodes).
+  - **Islands:** with `s_K` given, the island deflation from `_islands` and the padded row count (104 B per row, $96^2\cdot8$ for $E^+$).
+  - The measure is the unique device buffers of the built `GMG` by identity, excluding the operator's own leaves (counted by `stencil_memory`). The Chebyshev and APOperator scalars are negligible and covered by the bound.
+- **`workspace`** $= c_\text{dt}\cdot 8\,n_\text{dof}\,m$: the V-cycle temporaries alone, for PCG users. $c_\text{dt}$ is an upper envelope of `memory_analysis` of the jitted cycle at $16^3$–$64^3$ ($c$ = 12.1 for fp64 and 8.45 for fp32 at $87^3$). With islands, add $3\,n_\text{rows}/n_\text{dof}$ blocks.
+- **`build`:** a per-node fit of the setup peak (+1.12 GB at $87^3$). For fp32, the fp32 copy is added only if a harness check of the fp32 build peak shows it is alive together with the fp64 build peak.
 
-  Test 7 checks it equals the built `GMG`'s leaf bytes exactly.
-- **`workspace`**: the V-cycle temporaries at width $m$. A fit $c_\text{dt}\cdot n_\text{dof}\cdot m\cdot 8 + w_\text{op}$ with $c$ from `memory_analysis` of the jitted cycle at three sizes, as for the stencil (12.1 fp64 blocks for fp64 and 8.4 for fp32 at $87^3$, $m = 15$; the fit is an upper envelope). With islands, add 3 padded-rows/$n_\text{dof}$ blocks (11a review).
-- **`build`**: the setup peak, a per-node fit of the 11a measurement (+1.12 GB at $87^3$) plus, for fp32, the fp32 copy of the storage.
+**`lobpcg_memory(..., precond_memory=None)`** takes a callable $m \mapsto$ preconditioner estimate (`lambda m: gmg_memory(mesh, m)`).
+- The step term becomes $(A + A_P)\,b + f\,w$. $A_P$ is a per-(step type, dtype) table `GMG_STEP` of extra blocks, an upper envelope from `memory_analysis` of the 9-block and low-memory steps with GMG at $16^3$–$64^3$ (11a: +5.1 at $87^3$ fp64). It is one fit, not a fit times a fit.
+- The preconditioner's `storage` is added to the total, and its `build` enters max(build, step).
+- `precond_memory=None` is Jacobi (already inside $A$), unchanged.
 
-**`lobpcg_memory(..., precond_memory=None)`**: a new keyword taking a callable $m \mapsto$ preconditioner estimate (`lambda m: gmg_memory(mesh, m)`).
-- It adds the preconditioner's `storage` to the total and its `build` into max(build, step).
-- `step` gains $g\cdot$ workspace, with $g$ fitted from `memory_analysis` of the 9-block and low-memory steps with GMG as the preconditioner (the V-cycle's temporaries partly overlap the step's own). Fit at $16^3$–$64^3$, upper envelope, recorded like `STEP_FIT`.
-- Jacobi's own storage, one vector, is already inside $A$.
-
-**`solve_modes_memory(mesh, bcs, n_modes, *, mass="consistent", chunk=None, guards=None, basis_dtype="float64", low_memory=False, precond="auto", precond_dtype="float64", s_K=None)`**: the one-call estimate of a `solve_modes` run, composed from `stencil_memory` / `unstructured_memory`, `gmg_memory` and `lobpcg_memory`, with `n_rigid` from `rigid_modes(mesh, dof_mask(mesh, bcs))`.
-- Returns `lobpcg_memory`'s dict.
-- The pre-estimate's GMG is freed before the final build and its 1-mode LOBPCG is smaller than the solve, so it adds nothing to the peak (test 9 measures the whole run).
+**`solve_modes_memory(mesh, bcs, n_modes, *, mass="consistent", chunk=None, guards=None, basis_dtype="float64", low_memory=False, precond="auto", precond_dtype="float64", n_rigid=None)`** is the one-call estimate of a `solve_modes` run.
+- It is composed from `stencil_memory` or `unstructured_memory`, `gmg_memory` (no islands: `solve_modes` builds uniform `s_K`) and `lobpcg_memory`.
+- `n_rigid=None` computes it with `rigid_modes(mesh, dof_mask(mesh, bcs))`; pass it to skip that host work at large sizes.
+- It returns `lobpcg_memory`'s dict.
+- The pre-estimate's GMG is freed before the final build, and its 6-column LOBPCG is smaller than the solve's, so it adds nothing to the peak (test 10 measures the whole clamped run; the free path frees P before each rebuild).
 
 ### Docs
 
-- `docs/eigensolvers.md`:
-  - the `solve_modes` signature, dispatch, `precond`/`sigma`/`precond_dtype` and the new `info` keys;
-  - the σ pre-estimate section: the GMG-refined rule, the table above, the binary-field limitation;
-  - the Mac acceptance section with the measured runs (the model's $N_\text{it}$ = 150 replaced by the measured 16);
-  - the memory model with `precond_memory`, and `solve_modes_memory`.
-- `docs/preconditioners.md`:
-  - the fp32 V-cycle (what is cast, the fp64 coarse solve and deflation, the measured iterations and time, PCG to $10^{-8}$ not promised);
+- **`docs/eigensolvers.md`:**
+  - `solve_modes`: the signature, the dispatch, `precond`/`sigma`/`precond_dtype`, and the new `info` keys. Replace step 4 "`lobpcg` with the default Jacobi". Rewrite the "Slender models under Jacobi … thin plates are out of reach" bullet: voxel meshes now get GMG, unstructured meshes wait for PRs 12–13.
+  - The σ pre-estimate section:
+    - the GMG-refined rule and its table;
+    - why the residual stop is safe with GMG while the Jacobi text ("no stop criterion here … 432×") still holds for Jacobi;
+    - the free-body cost;
+    - the binary-field miss;
+    - the sentence "lobpcg therefore never runs the pre-estimate … whose solve_modes dispatch runs it" updated to the shipped dispatch.
+  - Mac acceptance: the measured runs. In the model table, $N_\text{it}$ = 16 and $c_V$ = 5.3 / 4.5 replace 150 and 5.5.
+  - The memory model: `precond_memory`, `GMG_STEP`, `solve_modes_memory`.
+- **`docs/preconditioners.md`:**
+  - the fp32 V-cycle: what is cast, the fp64 coarse solve and deflation, the measured iterations, time (1.76 → 1.48 s) and temporaries, and that PCG to $10^{-8}$ is not promised;
   - `gmg_memory`;
-  - the measured 2M acceptance.
-- `docs/operators.md`: dtype-following `apply_K`/`apply_M` for the stencil.
-- `README.md`: the quick-start notes that voxel meshes get GMG automatically, shows a `solve_modes` voxel call with `precond_dtype`, and points to `solve_modes_memory`. Update the status line.
-- `docs/ROADMAP.md`:
-  - the PR 11b status;
-  - the deferred GPU checks, with the 100M estimate of `solve_modes_memory` (low-memory step, fp32 V-cycle) recorded next to them.
-- `docs/open_items.md`:
-  - the σ pre-estimate entry resolved;
-  - new entries for the binary-field λ₁ miss and for SIMP LOBPCG stagnation at tol $10^{-6}$.
+  - the 2M acceptance;
+  - correct "18 at $87^3$" to the shipped 16.
+- **`docs/operators.md`:** the stencil's dtype-following `apply_K`/`apply_M`.
+- **`README.md`:** voxel meshes get GMG automatically. Show a voxel `solve_modes` call with `precond_dtype` and `solve_modes_memory`. Update the status line.
+- **`docs/ROADMAP.md`:**
+  - the PR 11b status, and the "Plans:" line gains `pr-11b-gmg-solve.md`;
+  - the deferred GPU checks, with `solve_modes_memory`'s 100M figure (low-memory step, fp32 V-cycle, $m = 8$). Expected outcome: it does not fit one 80 GB GPU (the step alone is about 70 GB), so the 100M solve comes after PR 19;
+  - new deferred items: fp32 V-cycle speed on the GPU (16% on CPU), the σ = 0 guard's host `rigid_modes` at 100M (about 27 s and 20 GB host, scaled from 2M), and the per-island $A_P$ applies of the deflation setup.
+- **`docs/open_items.md`:**
+  - Move the σ pre-estimate entry to Resolved, noting the binary-field exception (390×).
+  - New entries:
+    - the binary-field λ₁ miss;
+    - SIMP LOBPCG stagnation at tol $10^{-6}$, cause open;
+    - phase-contrast models: islands are detected from `s_K` only, so a multi-phase voxel model with $10^3$–$10^5$ material contrast gets no island deflation.
 
 ## Files
 
 - `src/jaxmodal/eigen/api.py`: `solve_modes` options, `_gmg_sigma`.
-- `src/jaxmodal/eigen/lobpcg.py`: `sigma_estimate(..., precond=None)` with the residual stop.
-- `src/jaxmodal/precond/gmg.py`: `dtype`, the fp32 cast, `SingularShiftError`, the cycle casts.
+- `src/jaxmodal/precond/gmg.py`: `dtype`, the fp32 level rebuild, `SingularShiftError`, the cycle casts.
 - `src/jaxmodal/precond/__init__.py`: export `SingularShiftError`.
 - `src/jaxmodal/operators/voxel.py`, `operators/constraints.py`: dtype-following applies.
-- `src/jaxmodal/memory.py`: `gmg_memory`, `lobpcg_memory(precond_memory=)`, `solve_modes_memory`, fits.
-- `tests/test_api.py`, `tests/test_gmg.py`, `tests/test_stencil.py`, `tests/test_lobpcg.py` (memory).
-- `benchmarks/gmg_study.py`: an `acceptance` entry (the 2M solve, fp64 and fp32: times, iterations, peaks, estimates) written to `results/gmg_study.json`.
-- Docs listed above.
+- `src/jaxmodal/memory.py`: `gmg_memory`, `lobpcg_memory(precond_memory=)`, `GMG_STEP`, `solve_modes_memory`.
+- Tests: `tests/test_api.py`, `tests/test_gmg.py`, `tests/test_stencil.py`, `tests/test_lobpcg.py` (memory).
+- `benchmarks/gmg_study.py`: an `acceptance(n)` entry (the 2M solve, fp64 and fp32: times, iterations, peaks, estimates) into `results/gmg_study.json`.
+- The docs above.
 
 ## Tests
 
-1. **σ pre-estimate within 2× of λ₁** (`test_api.py`, parametrized). Cases: box $8^3$ clamped, free box $8^3$, odd $9\times8\times8$, plate $32^2\times1$, beam $64\times2\times2$, aniso $h_z = h/10$ ($16^3$), the checked-in SIMP field ($32^3$, slow), free plate $16^2\times1$.
-   - Against `reference_modes`: $\lambda_1 \le \tilde\sigma \le 2\lambda_1$.
-   - The prototype gives 1.00 on all of them.
-   - The SIMP case is marked slow (its reference takes about 20 s).
-2. **Hint skips the pre-estimate.** `solve_modes(..., sigma=s)` gives `info["sigma"] == s` and `info["sigma_iterations"] == 0`, and the modes match the default run to the solve tolerance.
-   - A spy on `sigma_estimate` (monkeypatch) confirms it is not called.
-   - With `sigma=0.0` on a free body the guard raises; the hint is not overridden.
-3. **`solve_modes` on an odd voxel mesh matches `eigsh`.** $9\times6\times5$ voxel mesh, clamped `xmin`, 6 modes. Compare λ and MAC against `reference_modes` to the PR 9 tolerances (relative λ error ≤ $10^{-8}$ at tol $10^{-10}$, MAC ≥ $1 - 10^{-8}$), with `precond="auto"` (GMG); `info["precond"] == "gmg"`.
-   - A free odd voxel mesh is run the same way: rigid deflation plus pre-estimate from σ₀ > 0.
-   - Also an occupancy-masked voxel mesh with nodal masses.
-4. **Dispatch and options.**
-   - `precond="auto"` picks Jacobi for a hex20 box, and `"gmg"` there raises.
-   - `precond="jacobi"` on a voxel mesh gives the 9c result; unknown names raise.
-   - `precond_dtype="float32"` with Jacobi raises; a negative or NaN σ raises.
-   - `info` has all new keys.
-5. **Dtype-following applies** (`test_stencil.py`). fp32 `apply_K`/`apply_M` (consistent and lumped, two phases, occupancy-masked, nodal masses) return fp32 and match fp64 to $10^{-6}$ relative. `ap_operator` on fp32 returns fp32.
-6. **fp32 GMG** (`test_gmg.py`):
-   - The fp32 `GMG` leaves (ELL values, smoother inverses, transfer weights, Chebyshev scalars) are fp32, and the Cholesky factor and deflation are fp64.
-   - The V-cycle output is fp64 and within $10^{-5}$ relative of the fp64 cycle.
-   - It is symmetric to $10^{-5}$ and positive on masked inputs.
-   - LOBPCG (10 modes, tol $10^{-6}$) with fp32 GMG converges with at most 1.2× the fp64 iterations on box $32^3$, plate $32^2\times1$ and odd $33\times8\times8$ (measured 15/16, 21/21, 14/14). Its λ agree with the fp64 run to $10^{-9}$ relative.
-7. **`gmg_memory` storage is exact.** It equals the sum of the built `GMG`'s leaf bytes on:
-   - box $16^3$;
-   - an occupancy-masked odd mesh;
-   - the island case (with `s_K`);
-   - plate $32^2\times1$.
+Runtime budget: the fast suite (`-m "not slow and not gpu"`) stays under 5 min idle (ROADMAP rule). The new fast tests add at most about 60 s; the larger cases are marked slow.
 
-   Each in fp64 and fp32.
-8. **Workspace and step fits are upper bounds.**
-   - `memory_analysis` of the jitted V-cycle (fp64, fp32; m = 1, 6, 15) at $16^3$ and $32^3$ is ≤ `gmg_memory(...)["workspace"]`, and within 2× of it at $32^3$.
-   - The LOBPCG step with GMG is ≤ the `lobpcg_memory` step term (9-block and low-memory).
-9. **Mac acceptance** (slow, macOS; `test_api.py`). $87^3$ voxel box (2.04M DOF), steel, `xmin` clamped, `solve_modes(..., 10, tol=1e-6)` with defaults (GMG, pre-estimate, 9-block, fp64 basis), once with `precond_dtype="float64"` and once with `"float32"`.
-   - **Wall time:** one cold subprocess per dtype (`harness.measure` with an empty setup, so compilation counts). `time_s` ≤ 600 s; all modes converged.
-   - **Peak:** one warm subprocess per dtype (setup = a full warm-up run, freed), so the measured peak is the solve's. It must be within 20% of `solve_modes_memory(mesh, bcs, 10, precond_dtype=...)["total"]`, and the estimate must be ≥ 2 GB.
-   - The prototype gives 59 s / 55 s and peaks of 6.21 / 5.11 GB.
-10. **Gmg-study acceptance entry smoke** (slow): `gmg_study.acceptance(n=8)` runs and records times, iterations, peak and estimate keys.
+1. **σ pre-estimate within 2× of λ₁** (`test_api.py`, parametrized, `_gmg_sigma` against `reference_modes`): $\lambda_1(1 - 10^{-8}) \le \tilde\sigma \le 2\lambda_1$.
+   - Fast cases: box $8^3$, odd $9\times8\times8$, plate $32^2\times1$, beam $64\times2\times2$, free box $8^3$, free plate $16^2\times1$, free beam $128\times1\times1$ (2.7 λ₁ after one round, so it needs the rounds).
+   - Slow cases: aniso $h_z = h/10$ at $16^3$, the checked-in SIMP field.
+   - A spy on `gmg` asserts the σ sequence. Clamped cases build at exactly 0.0 first, then at σ̃ (the final build). Free cases build at σ₀ > 0 first, and each later build σ is ≤ the previous one.
+   - `sigma_iterations` ≤ 20 × rounds.
+2. **Hint skips the pre-estimate.**
+   - `solve_modes(..., sigma=s)` gives `info["sigma"] == s` and `info["sigma_iterations"] == 0`; a spy shows `_gmg_sigma` is not called and `gmg` is built once, at `s`; the modes match the default run to the solve tolerance.
+   - `sigma=0.0` on a free body raises `SingularShiftError`: the hint is not overridden.
+3. **`solve_modes` on an odd voxel mesh matches `eigsh`.**
+   - $9\times6\times5$ voxel mesh, clamped `xmin`, 6 modes, tol $10^{-10}$, `precond="auto"`. λ relative error ≤ $10^{-8}$ and MAC ≥ $1 - 10^{-8}$ against `reference_modes` (PR 9 tolerances); `info["precond"] == "gmg"`.
+   - The same for a free odd voxel mesh (σ₀ path, rigid deflation).
+   - The same for an occupancy-masked odd voxel mesh with nodal masses.
+4. **Dispatch, options, errors.**
+   - `"auto"` picks Jacobi for a hex20 box; `"gmg"` there raises.
+   - `"jacobi"` on a voxel mesh gives the 9c path (`info["sigma"] == 0.0`).
+   - Unknown names, `precond_dtype="float32"` with Jacobi, and a negative or NaN σ all raise.
+   - `info` has the new keys, including `time["precond"]`.
+   - **Exception narrowness:**
+     - `gmg(..., 0.0)` on a free body raises `SingularShiftError`, while a backstop (patched non-finite smoother blocks) raises a `ValueError` that is not one.
+     - With `gmg` monkeypatched to raise a plain `ValueError` at σ = 0, `solve_modes` propagates it.
+5. **Dtype-following applies** (`test_stencil.py`):
+   - fp32 `apply_K`/`apply_M` (consistent and lumped, two phases, occupancy-masked, nodal masses) return fp32 and match fp64 to $10^{-6}$ relative; `ap_operator` on fp32 returns fp32.
+   - Compiled `memory_analysis` temporaries of fp32 `apply_K`/`apply_M` are ≤ 0.6× fp64. This kills "compute in fp64, cast the result".
+6. **fp32 GMG** (`test_gmg.py`):
+   - Leaves: ELL values, smoother inverses, transfer weights and Chebyshev scalars are fp32. `levels[l][0] is levels[l][1].A` on every level. The only fp64 leaves left are the operator's own arrays (identical objects), `free`, `L` and `defl`.
+   - The cycle output is fp64, within $10^{-5}$ relative of the fp64 cycle, symmetric to $10^{-5}$, and positive on masked inputs.
+   - The jitted fp32 cycle's temporaries are ≤ 0.8× fp64 (measured 0.70).
+   - LOBPCG (10 modes, tol $10^{-6}$) with fp32 GMG converges with ≤ 1.2× the fp64 iterations, with λ within $10^{-9}$ relative. Box $16^3$ is fast (15/15). Box $32^3$, plate $32^2\times1$ and odd $33\times8\times8$ are slow (15/16, 21/21, 14/14).
+7. **`gmg_memory` storage bound.** On box $16^3$, an occupancy-masked odd mesh, the island case (with `s_K`) and plate $32^2\times1$, in fp64 and fp32:
+   - the bound is ≥ the unique buffer bytes of the built `GMG` (excluding the operator's leaves);
+   - on the full boxes it is ≤ 1.3× those bytes.
+8. **Workspace and step fits are upper bounds, and tight.**
+   - V-cycle `memory_analysis` (fp64, fp32; $m$ = 15) at $16^3$ (fast) and $32^3$ (slow) is ≤ `gmg_memory["workspace"]`, and within 1.25× of it at $32^3$.
+   - The LOBPCG step with GMG (9-block, low-memory) is ≤ the `lobpcg_memory` step term.
+9. **Estimator composition** (fast, exact). `lobpcg_memory` with `precond_memory` minus without equals the preconditioner storage plus the change in max(build, step) per the documented rule. `solve_modes_memory(...)["total"]` equals the hand-composed sum from the three estimators, for GMG fp64, GMG fp32 and Jacobi, clamped and free.
+10. **Mac acceptance** (slow, macOS; `test_api.py`). $87^3$ voxel box (2.04M DOF), steel, `xmin` clamped, `solve_modes(..., 10, tol=1e-6)` with defaults (GMG, pre-estimate, 9-block, fp64 basis), once with `precond_dtype="float64"` and once with `"float32"`.
+    - **Wall time:** one cold subprocess per dtype (`harness.measure` with an empty setup; it drops the compilation cache, so compilation counts). `time_s` ≤ 600 s, and all modes converged.
+    - **Peak:** one warm subprocess per dtype (setup = a full run, freed). $|\text{est} - \text{peak}| \le 0.2\,\text{peak}$ with est = `solve_modes_memory(mesh, bcs, 10, precond_dtype=...)["total"]`, and est ≥ 2 GB.
+    - Expected: 59 / 55 s, peaks about 6.7 / 5.6 GB, estimates about 6.8 / 6.0 GB.
+11. **Gmg-study acceptance entry smoke** (slow): `gmg_study.acceptance(n=8)` runs and records the times, iterations, peak and estimate keys.
 
 ## Not covered
 
-- p-MG and AMG fp32 (PR 13).
-- The unstructured operator's dtype-following (PR 13).
+- p-MG and AMG fp32, and the unstructured operator's dtype-following (PR 13).
 - A 100M solve and the GPU checks (deferred list).
-- The SIMP LOBPCG floor and the binary-field λ₁ miss (`open_items.md`).
+- The SIMP LOBPCG stagnation, the binary-field λ₁ miss, and island detection from phases (`open_items.md`).
