@@ -233,8 +233,10 @@ def test_forced_p_drop():
     state, args = start(p, 15)
     X, m = state[0], args[1]
     rng = jax.random.split(jax.random.key(1), 3)
-    for noise in (1e-12, None):
-        if noise:  # P inside span(X) up to noise: breaks the invariant, the pivot test fires
+    for noise in (1e-12, 1e-6, None):
+        # P inside span(X) up to noise breaks the invariant. At 1e-12 the Cholesky of G_M fails;
+        # at 1e-6 it is finite, but min diag(L)^2 is below PIVOT
+        if noise:
             C, xi = jax.random.normal(rng[0], (15, 15)), m * jax.random.normal(rng[1], X.shape)
             P = X @ C + noise * xi
         else:  # a random P, M-orthonormal and M-orthogonal to X
@@ -243,24 +245,45 @@ def test_forced_p_drop():
             P = m_orthonormalize(P, m * p.op.apply_M(m * P))
         KP, MP = m * p.op.apply_K(m * P), m * p.op.apply_M(m * P)
         st = [a + 0 for a in state[:3]] + [P, KP, MP, jnp.ones(15, bool), state[7] + 0]
-        _, out = lob.lobpcg_step(tuple(st), *args, False)
+        new, out = lob.lobpcg_step(tuple(st), *args, False)
         assert np.isfinite(np.asarray(out)).all()
         assert bool(out[-1]) == (noise is not None)
+        Xn = new[0]
+        G = np.asarray(Xn.T @ (m * p.op.apply_M(m * Xn)))
+        assert np.abs(G - np.eye(15)).max() <= 1e-10
 
 
 def test_p_invariant():
     p = problem("hex20", (4, 4, 4), "clamped")
     state, args = start(p, 15)
     state = tuple(state)
+    m = args[1]
     for it in range(30):
         state, _ = lob.lobpcg_step(state, *args, (it + 1) % lob.RECOMPUTE == 0)
-    m = args[1]
+        if it + 1 == lob.RECOMPUTE:  # the products were just recomputed explicitly
+            X = state[0]
+            KX = m * p.op.apply_K(m * X)
+            assert np.linalg.norm(state[1] - KX) <= 1e-15 * np.linalg.norm(KX)
     X, P, live = state[0], state[3], np.asarray(state[6])
     assert live.any()
     MX, MP = m * p.op.apply_M(m * X), m * p.op.apply_M(m * P)
     assert np.abs(np.asarray(P.T @ MX)[live]).max() <= 1e-6
     G = np.asarray(P.T @ MP)[np.ix_(live, live)]
     assert np.abs(G - np.eye(live.sum())).max() <= 1e-6
+
+
+def test_recompute_schedule(monkeypatch):
+    p = problem("hex8", (2, 2, 2), "clamped")
+    step, flags = lob.lobpcg_step, []
+
+    def record(*args):
+        flags.append(bool(args[-1]))
+        return step(*args)
+
+    monkeypatch.setattr(lob, "lobpcg_step", record)
+    lobpcg(p.op, p.free, 2, tol=1e-16, maxit=40)
+    assert len(flags) >= 20
+    assert [i + 1 for i, f in enumerate(flags) if f] == [20, 40][: len(flags) // 20]
 
 
 def test_p_coeffs():
@@ -371,10 +394,26 @@ def test_errors():
         lobpcg(op, free, 2, maxit=0)
     with pytest.raises(ValueError, match="free must be"):
         lobpcg(op, free.astype(int), 2)
+    for X0 in (np.ones((op.n_dof, 8)), np.ones(op.n_dof)):  # block size 7
+        with pytest.raises(ValueError, match="X0 must"):
+            lobpcg(op, free, 2, X0=X0)
     R = np.zeros((op.n_dof, 1))
     R[free, 0] = 1.0  # not M-normalized
     with pytest.raises(ValueError, match="M-orthonormal"):
         lobpcg(op, free, 2, R=R)
+
+
+def test_refill_limit(monkeypatch):
+    p = problem("hex8", (2, 2, 2), "clamped")
+    start = lob._start
+
+    def never_full(*args):  # SVQB always drops every column
+        X, KX, MX, keep = start(*args)
+        return X, KX, MX, jnp.zeros_like(keep)
+
+    monkeypatch.setattr(lob, "_start", never_full)
+    with pytest.raises(RuntimeError, match="rank-deficient"):
+        lobpcg(p.op, p.free, 2)
 
 
 @dataclasses.dataclass(frozen=True)

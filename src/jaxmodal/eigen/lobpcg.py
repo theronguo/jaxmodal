@@ -143,8 +143,8 @@ def lobpcg_step(state, op, m, precond, R, MR, consts, recompute):
     beta = 10 * jnp.max(jnp.abs(lam)) + consts[0] / consts[1]
     ones, none = jnp.ones(k, bool), jnp.zeros(k, bool)
     th, C, G, ok = _rr(GK, GM, jnp.concatenate([ones, actW, actP]), beta)
-    th2, C2, G2, _ = _rr(GK, GM, jnp.concatenate([ones, actW, none]), beta)
-    th, C, G = jnp.where(ok, th, th2), jnp.where(ok, C, C2), jnp.where(ok, G, G2)
+    th2, C2, _, _ = _rr(GK, GM, jnp.concatenate([ones, actW, none]), beta)
+    th, C = jnp.where(ok, th, th2), jnp.where(ok, C, C2)  # G fits both: C2 has no P rows
     Cx = C[:, :k]
     Cp, live, keep = _p_coeffs(Cx, Cx.at[:k].set(0.0), G)
     # a P column was lost (noise rule or SVQB drop) iff fewer kept than nonzero inputs
