@@ -63,18 +63,13 @@ The prototype is the design below: one module-level jitted step with every array
   
     A factory that builds a new jit per solve also recompiles every solve.
   - The design below compiles one step per shape. In the prototype, a second solve with the same shapes added 0 compiles, and a second tol reused the executable.
-- **Step memory** (performance review, first prototype, diagonal operator, unit = one $n\times m$ fp64 block):
-
-  | variant | temp + aliased state |
-  |---|---|
-  | P re-orthogonalized in n-space against X and W | 12 + 6 |
-  | without it | 7 + 6 |
-  
-  - With P kept orthogonal in coefficient space (`lob2`), the step measures 12 + 6 blocks at $m = 15$ and $48$, $n = 10^5$ and $10^6$. The temp is the same with R of 6 or 60 columns, so the temp does not grow with the basis.
+- **Step memory** (performance review, `lob2`, diagonal operator, unit = one $n\times m$ fp64 block):
+  - The step measures temp + aliased state = 12 + 6 blocks at $m = 15$ and $48$, $n = 10^5$ and $10^6$.
+  - The temp is the same with R of 6 or 60 columns, so the temp does not grow with the basis.
   - XLA:CPU does not fuse a sum of GEMMs: `X C_x + W C_w + P C_p` holds all three products at once. Sequencing the update with `optimization_barrier` (below) gives 10 + 6 = 16 blocks at the same speed (73 / 215 ms against 72 / 216 ms).
-  - The roadmap's "9 blocks + ≈ 2 Rayleigh–Ritz temporaries ≈ 11 blocks" cannot be reached in XLA. A donated buffer takes its output only after every read of it, so the 6 new X/P blocks coexist with the 6 old ones and W (3). One $(n, 3m)$ array or a stacked $(3, n, m)$ layout is worse (21 + 9).
-  
-  9a records the measured temp + alias of the final step in blocks in `docs/eigensolvers.md` (expected 16). 9b's estimator models that count and updates the Memory budget rows, for example 1M at $m = 25$: 3.2 GB instead of 1.8 + 0.4 GB. That is noted there as a deviation.
+  - The roadmap's "9 blocks + ≈ 2 Rayleigh–Ritz temporaries ≈ 11 blocks" was not reached in any measured variant. A donated buffer takes its output only after every read of it, so the 6 new X/P blocks coexist with the 6 old ones and W (3). One $(n, 3m)$ array or a stacked $(3, n, m)$ layout measured worse (21 + 9).
+
+  9a records the measured temp + alias of the final step in `docs/eigensolvers.md` and pins it (test 14). 9b's estimator models that count and updates the Memory budget rows, for example 1M at $m = 25$: 3.2 GB instead of 1.8 + 0.4 GB. That is noted there as a deviation.
 - **Per-iteration cost** (182k DOF, first prototype):
 
   | m | step | K + M applies | dense part |
@@ -296,6 +291,7 @@ All tests compare against `reference_modes`, requesting at least 6 modes past th
 11. **σ pre-estimate.** On clamped hex20 $8^3$ and free hex20 $6^3$ (with `R`): $\lambda_1 \le \sigma \le 2\lambda_1$.
 12. **Jacobi.** `jacobi(op, free, s)(v)` with $s = 0.7\,\bar s \ne 0$ equals $m\odot v/(\mathrm{diag}K + s\,\mathrm{diag}M)$ against the assembled diagonals; constrained rows are 0.
 13. **Errors.** A block size larger than the free DOFs minus the deflation rank raises `ValueError`.
+14. **Step memory.** On hex20 $8^3$, `lobpcg_step.lower(...).compile().memory_analysis()` gives (temp + alias)$/(n m \cdot 8) \le 16.5$, which pins the sequenced update.
 
 ### Mutants (each must fail a test)
 
@@ -318,11 +314,13 @@ All tests compare against `reference_modes`, requesting at least 6 modes past th
 | σ stop window of 1 iteration | 11 |
 | unmasked K apply | 1 (constrained rows) |
 | soft-locking mask removed ($a$ = all) | survivor expected (only cost); noted |
+| `optimization_barrier`s removed | 14 (18 blocks) |
+| host non-finite check removed | survivor (a guard for a fallback failure that no test can provoke); noted |
 
 ## Docs
 
 - **`docs/eigensolvers.md`:** module list in the intro, plus a LOBPCG section with:
-  - the `lobpcg` / `jacobi` / `sigma_estimate` signatures, the `info` fields, the block-size rule and the `ValueError`, and the `R` contract;
+  - the `lobpcg` / `jacobi` / `sigma_estimate` signatures, the `info` fields, the block-size rule, the errors (`ValueError` for the block size, `RuntimeError` for a start block that stays rank-deficient, `FloatingPointError` for a non-finite step; non-convergence never raises), and the `R` contract;
   - the algorithm: the steps above, why SVQB zeroes inactive columns, the mask value and the Courant–Fischer argument, the two P levels (the column noise rule and the whole-block pivot-test fallback), implicit updates, the sequenced update;
   - convergence: residual, threshold, the outcome table, both progress clauses, the theory;
   - the σ pre-estimate and its cost, and why the default Jacobi uses σ = 0;
