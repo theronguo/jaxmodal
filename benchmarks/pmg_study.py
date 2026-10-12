@@ -26,7 +26,6 @@ from jaxmodal.materials import Material, isotropic
 from jaxmodal.mesh import box_mesh
 from jaxmodal.operators import ap_operator, assemble, dof_mask, rigid_modes, unstructured
 from jaxmodal.precond import jacobi, pmg
-from jaxmodal.precond.pmg import _hex8_galerkin
 from tests.helpers import distort
 
 STEEL = {0: Material(isotropic(210e9, 0.3), 7850.0)}
@@ -126,18 +125,35 @@ def cost(n=24, m=25):
     return out
 
 
+GAL_SETUP = """
+from jaxmodal import config
+config.enable_x64()
+import jax
+from jaxmodal.materials import Material, isotropic
+from jaxmodal.mesh import box_mesh
+from jaxmodal.operators import ap_operator, dof_mask, unstructured
+from jaxmodal.precond.pmg import _hex8_galerkin
+mesh = box_mesh(({n},) * 3, (1 / {n},) * 3, type="hex20")
+op = unstructured(mesh, {{0: Material(isotropic(210e9, 0.3), 7850.0)}}, mode="{mode}")
+A = ap_operator(op, dof_mask(mesh, {{"xmin": "xyz"}}), 1e7)
+jax.block_until_ready(A)
+"""
+
+GAL_RUN = """
+import json, time
+t = time.perf_counter()
+Ac, _ = _hex8_galerkin(A)
+json.dump(dict(n_dof=op.n_dof, time_s=time.perf_counter() - t, nnz=int(Ac.nnz)), open("{out}", "w"))
+"""
+
+
 def galerkin_1m(n=44):
-    """_hex8_galerkin alone (no splu) at hex20 n^3, stored and otf, with compilation."""
-    out = {}
-    for mode in ("stored", "otf"):
-        mesh = box_mesh((n,) * 3, (1 / n,) * 3, type="hex20")
-        op, free = unstructured(mesh, STEEL, mode=mode), dof_mask(mesh, {"xmin": "xyz"})
-        t = time.perf_counter()
-        Ac, _ = _hex8_galerkin(ap_operator(op, free, 1e7))
-        out[mode] = dict(n_dof=op.n_dof, time_s=time.perf_counter() - t, nnz=int(Ac.nnz))
-        del op, Ac
-        jax.clear_caches()
-    return out
+    """_hex8_galerkin alone (no splu) at hex20 n^3, stored and otf, with compilation, each in a
+    fresh subprocess: peak_bytes is the process peak above the built operator (harness)."""
+    return {
+        mode: harness.measure_json(GAL_RUN, GAL_SETUP.format(n=n, mode=mode))
+        for mode in ("stored", "otf")
+    }
 
 
 def lobpcg_runs(cases=LOBPCG, k=10, tol=1e-6):

@@ -313,7 +313,7 @@ Setup:
 | hex20 $4^3$, `s_K` = $10^{-3}$ on a checkerboard | 1.3k | 19 |
 | hex20 $6^3$, nodal masses of one element mass on a seeded half of the nodes | 3.7k | 14 |
 | hex20 cube $8^3$, ratio 10 / 20 / 30 / 60 | 8.0k | 14 / 13 / 14 / 18 |
-| hex20 single-layer plate $16^2\times1$, element aspect $a$ = 1 / 2 / 4 / 10 | 5.9k | 15 / 21 / 63 / not converged (stagnates after 600–740) |
+| hex20 single-layer plate $16^2\times1$, element aspect $a$ = 1 / 2 / 4 / 10 | 5.9k | 15 / 21 / 63 / not converged (stagnates after 620–720) |
 | hex20 box $8^3$ with $h_z = h/a$, $a$ = 1 / 2 / 4 / 10 | 8.0k | 14 / 17 / 28 / 76 |
 
 Degree 2 is the default. Per PCG solve (V-cycle $2d$ applies plus PCG's one):
@@ -324,15 +324,15 @@ Degree 2 is the default. Per PCG solve (V-cycle $2d$ applies plus PCG's one):
 | 3 | 70–77 | ~80 |
 | 4 | 81 | ~90 |
 
-The cost is a tie, and degree 2 needs the least smoother workspace. At hex20 $24^3$ ($m = 25$): $t_A$ = 53 ms; the V-cycle takes 994 ms, of which the test-only `splu` solve is 772 ms (14.5 $t_A$) and the rest 4.2 $t_A$ ($2d$ = 4 applies plus transfers). The build takes 13.3 s, mostly `splu`. `_hex8_galerkin` alone at hex20 $44^3$ (1,075,275 DOF, 21.2M nonzeros) takes 1.4 s stored and 2.9 s otf, compilation included (about +1.5 GB host, measured in review).
+The cost is a tie, and degree 2 needs the least smoother workspace. At hex20 $24^3$ ($m = 25$): $t_A$ = 53 ms; the V-cycle takes 987 ms, of which the test-only `splu` solve is 765 ms (14.4 $t_A$) and the rest 4.2 $t_A$ ($2d$ = 4 applies plus transfers). The build takes 13.3 s, mostly `splu`. `_hex8_galerkin` alone at hex20 $44^3$ (1,075,275 DOF; 21.2M nonzeros, the same pattern in both modes) takes 1.4 s stored and 2.7 s otf, compilation included, with a process peak 2.5 GB above the built operator (cells, COO triples, CSR and its transpose).
 
-**LOBPCG** (10 modes, tol $10^{-6}$, σ = $\lambda_1$; times include compilation; eigenvalues agree with the Jacobi run to $\le 9\cdot10^{-11}$):
+**LOBPCG** (10 modes, tol $10^{-6}$, σ = $\lambda_1$; times include compilation; eigenvalues agree with the Jacobi run to $\le 7\cdot10^{-11}$):
 
 | mesh | DOF | Jacobi | p-MG degree 2 |
 |---|---|---|---|
-| hex20 $12^3$ | 24,843 | 435 iterations, 6.1 s | 15, 1.3 s |
+| hex20 $12^3$ | 24,843 | 435 iterations, 6.0 s | 15, 1.2 s |
 | hex20 beam $20\times2\times2$ | 1,863 | 309 iterations, 1.6 s | 14, 0.3 s |
-| hex27 $16^3$ | 107,811 | 509 iterations, 21.7 s | 15, 3.4 s |
+| hex27 $16^3$ | 107,811 | 509 iterations, 21.6 s | 15, 3.4 s |
 
 **Limitations** ([`open_items.md`](open_items.md)).
 - **Flat elements:** the hex8 coarse space locks in bending when elements are flat ($a \gg 1$), so the coarse correction misses the smooth bending error. See the table above; the hex27 plate $32^2\times1$ at $a = 10$ needs > 1000 iterations and does not converge. Slenderness alone with $a = 1$ is fine (beam: 16). Revisit in PR 13 (AMG on the high-order level, a near-null space that keeps bending) and M4 (solid-shell elements).
