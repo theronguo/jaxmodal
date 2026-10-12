@@ -8,6 +8,7 @@ import functools
 import jax
 import jax.numpy as jnp
 import numpy as np
+import scipy.sparse as sp
 from jax import lax
 from jax.scipy.linalg import cho_solve
 from jax.tree_util import Partial
@@ -66,11 +67,8 @@ class _Grid:
     def __post_init__(self):
         mesh = voxel_mesh(self.shape, mask=self.mask)
         vx = mesh.voxel
-        self.node_map, self.element_map, self.conn = (
-            vx.node_map,
-            vx.element_map,
-            mesh.blocks["hex8"],
-        )
+        self.node_map, self.element_map = vx.node_map, vx.element_map
+        self.conn = mesh.blocks["hex8"]
         nx, ny, nz = self.shape
         c = np.flatnonzero(vx.element_map >= 0)
         self.ijk = np.stack([c % nx, c // nx % ny, c // (nx * ny)], 1)
@@ -246,7 +244,7 @@ class GMG:
     transfers: tuple
     L: jax.Array
     free: jax.Array
-    defl: tuple  # (rows, Z, AZ, Einv): island rigid modes and A_P Z on their support rows
+    defl: tuple | None  # (rows, isl, Z, AZ, Einv): island rigid modes, A_P Z per support row
 
     @property
     def n_dof(self):
@@ -269,15 +267,31 @@ def _vcycle(P, b, lvl):
     return x + S(b - A(x))
 
 
+def _wt(rows, isl, W, r):
+    """W^T r: (6 MAX_ISLANDS, m) from the per-row island blocks W (rows, 6)."""
+    rr = r[rows]
+    t = [jax.ops.segment_sum(W[:, j, None] * rr, isl, MAX_ISLANDS) for j in range(6)]
+    return jnp.stack(t, 1).reshape(-1, r.shape[1])
+
+
+def _wy(rows, isl, W, y, r):
+    """W y, scattered into a zero array shaped like r."""
+    yk = y.reshape(MAX_ISLANDS, 6, -1)
+    v = sum(W[:, j, None] * yk[isl, j] for j in range(6))
+    return jnp.zeros_like(r).at[rows].add(v)
+
+
 @jax.jit
 def _vcycle_apply(P, r):
     m = P.free[:, None]
-    rows, Z, AZ, Einv = P.defl
     r = m * r
-    y = Einv @ (Z.T @ r[rows])
-    v = m * _vcycle(P, r - jnp.zeros_like(r).at[rows].add(AZ @ y), 0)
-    w = Einv @ (AZ.T @ v[rows])
-    return v + jnp.zeros_like(r).at[rows].add(Z @ (y - w))
+    if P.defl is None:
+        return m * _vcycle(P, r, 0)
+    rows, isl, Z, AZ, Einv = P.defl
+    y = Einv @ _wt(rows, isl, Z, r)
+    v = m * _vcycle(P, r - _wy(rows, isl, AZ, y, r), 0)
+    w = Einv @ _wt(rows, isl, AZ, v)
+    return v + _wy(rows, isl, Z, y - w, r)
 
 
 # ---------------------------------------------------------------- builder
@@ -307,44 +321,57 @@ def _islands(cell_ids, s_K):
     act = cell_ids >= 0
     stiff = np.zeros(cell_ids.shape, bool)
     stiff[act] = s_K[cell_ids[act]] > 10 * lo
-    lab, k = ndimage.label(stiff, np.ones((3, 3, 3)))
-    parts = sorted((cell_ids[lab == c] for c in range(1, k + 1)), key=len, reverse=True)
-    return parts[1 : 1 + MAX_ISLANDS]
+    lab, _ = ndimage.label(stiff, np.ones((3, 3, 3)))
+    top = np.argsort(-np.bincount(lab.ravel())[1:], kind="stable")[1 : 1 + MAX_ISLANDS] + 1
+    return [cell_ids[lab == c] for c in top]
 
 
 def _deflation(A0, F, spacing, free, islands):
-    """(rows, Z, AZ, Einv): masked rigid modes Z of each island (translations, rotations about
-    its centroid) and A_P Z on their support rows, padded to power-of-2 sizes (padding rows
-    point at DOF 0 with zero values); Einv = (Z^T A_P Z)^+."""
+    """None without islands, else (rows, isl, Z, AZ, Einv): for every support row of every
+    island (its nodes plus one ring of cells) the row's DOF, the island id, the row of the
+    island's masked rigid modes Z (translations, rotations about its centroid) and of A_P Z,
+    padded to a power of 2 (padding: DOF 0, island 0, zero values); Einv = (Z^T A_P Z)^+ over
+    the 6 MAX_ISLANDS columns (absent islands give zero columns)."""
+    if not islands:
+        return None
     xyz = F.node_ijk() * spacing
-    n = 1 << max(len(islands) - 1, 0).bit_length()
-    cols, sup = [], [np.zeros(0, np.int64)]
-    for e in islands:
+    rows, isl, Z, AZ = [], [], [], []
+    for c, e in enumerate(islands):
         nodes = np.unique(F.conn[e])
         x = xyz[nodes] - xyz[nodes].mean(0)
         z = np.zeros((len(nodes), 3, 6))
         z[:, :, :3] = np.eye(3)
         z[:, :, 3:] = np.cross(np.eye(3)[:, None], x).transpose(1, 2, 0)  # e_j x x
         dof = (3 * nodes[:, None] + np.arange(3)).ravel()
-        cols.append((dof, z.reshape(-1, 6) * free[dof, None]))
+        z = z.reshape(-1, 6) * free[dof, None]
         ring = np.unique(F.conn[np.isin(F.conn, nodes).any(1)])
-        sup.append((3 * ring[:, None] + np.arange(3)).ravel())
-    rows = np.unique(np.concatenate(sup))
-    nr = max(256, 1 << (len(rows) - 1).bit_length())
-    Z = np.zeros((nr, 6 * n))
-    AZ = jnp.zeros((nr, 6 * n))
-    for c, (dof, z) in enumerate(cols):
-        Z[np.searchsorted(rows, dof), 6 * c : 6 * c + 6] = z
-        full = jnp.zeros((len(free), 6)).at[dof].set(z)
-        AZ = AZ.at[: len(rows), 6 * c : 6 * c + 6].set(A0(full)[rows])
-    E = Z.T @ np.asarray(AZ)
+        sup = (3 * ring[:, None] + np.arange(3)).ravel()
+        zs = np.zeros((len(sup), 6))
+        zs[np.searchsorted(sup, dof)] = z
+        rows.append(sup)
+        isl.append(np.full(len(sup), c))
+        Z.append(zs)
+        AZ.append(np.asarray(A0(jnp.zeros((len(free), 6)).at[dof].set(z))[sup]))
+    rows, isl, Z, AZ = map(np.concatenate, (rows, isl, Z, AZ))
+    cols = (6 * isl[:, None] + np.arange(6)).ravel()
+    shape = (len(free), 6 * MAX_ISLANDS)
+    Zg, AZg = (sp.csr_array((W.ravel(), (np.repeat(rows, 6), cols)), shape) for W in (Z, AZ))
+    E = (Zg.T @ AZg).toarray()
     dg = np.diag(E)
     sc = np.where(dg > 0, 1 / np.sqrt(np.where(dg > 0, dg, 1)), 0.0)
     lam, U = np.linalg.eigh(sc[:, None] * E * sc[None])
     keep = lam > 1e-12 * max(lam.max(), 0)
     Einv = sc[:, None] * (U[:, keep] / lam[keep]) @ U[:, keep].T * sc[None]
-    rows = np.concatenate([rows, np.zeros(nr - len(rows), np.int64)])
-    return jnp.asarray(rows, jnp.int32), jnp.asarray(Z), AZ, jnp.asarray(Einv)
+    pad = max(256, 1 << (len(rows) - 1).bit_length()) - len(rows)
+    rows, isl = (np.concatenate([a, np.zeros(pad, np.int64)]) for a in (rows, isl))
+    Z, AZ = (np.concatenate([a, np.zeros((pad, 6))]) for a in (Z, AZ))
+    return (
+        jnp.asarray(rows, jnp.int32),
+        jnp.asarray(isl, jnp.int32),
+        jnp.asarray(Z),
+        jnp.asarray(AZ),
+        jnp.asarray(Einv),
+    )
 
 
 def _smoother(A, B, idx, pos, degree, ratio):

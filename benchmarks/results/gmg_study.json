@@ -559,10 +559,10 @@
     "n": 87,
     "n_dof": 2044416,
     "m": 15,
-    "setup_peak_bytes": 1127236496,
-    "vcycle_s": 1.878770750015974,
-    "apply_s": 0.3647460419451818,
-    "timing_peak_bytes": 4500819592
+    "setup_peak_bytes": 1120879480,
+    "vcycle_s": 1.921931374934502,
+    "apply_s": 0.3704310830216855,
+    "timing_peak_bytes": 4293676560
   },
   "versions": {
     "jax": "0.11.2",

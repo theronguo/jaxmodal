@@ -232,13 +232,15 @@ def test_symmetric(bcs):
 
 
 def island_case(soft=1e-6):
-    """12x6x4 unit grid, clamped xmin: a stiff body (x < 4), a stiff island (x 7-8, y 2-3,
-    z 1-2) and a single stiff cell (10, 0, 3), in soft cells s_K = s_M = soft."""
+    """12x6x4 unit grid, clamped xmin, in soft cells s_K = s_M = soft: a stiff body (x < 4,
+    y < 3), a stiff island (x 7-8, y 2-3, z 1-2), an island of two cells touching only at a
+    vertex ((10, 0, 3), (11, 1, 2)) and a clamped single-cell island (0, 5, 3)."""
     m = voxel_mesh((12, 6, 4), (0.5, 1.0, 0.7))
     s = np.full((4, 6, 12), soft)  # (z, y, x) = element order
-    s[:, :, :4] = 1.0
+    s[:, :3, :4] = 1.0
     s[1:3, 2:4, 7:9] = 1.0
-    s[3, 0, 10] = 1.0
+    s[3, 0, 10] = s[2, 1, 11] = 1.0
+    s[3, 5, 0] = 1.0
     op = stencil(m, UNIT).scaled(s_K=s.ravel(), s_M=s.ravel())
     free = dof_mask(m, {"xmin": "xyz"})
     K, M = assemble(m, UNIT, s_K=s.ravel(), s_M=s.ravel())
@@ -252,9 +254,17 @@ def test_islands():
     ids = np.arange(m.n_el).reshape(4, 6, 12)
     cells = G.grid_ids(op)[0]
     got = G._islands(cells, np.asarray(op.s_K))
-    assert [sorted(i) for i in got] == [sorted(ids[1:3, 2:4, 7:9].ravel()), [ids[3, 0, 10]]]
-    assert G._islands(cells, np.where(s.ravel() < 1, 2e-3, 1.0)) == []
+    want = [sorted(ids[1:3, 2:4, 7:9].ravel()), sorted([ids[3, 0, 10], ids[2, 1, 11]])]
+    assert [sorted(i) for i in got] == want + [[ids[3, 5, 0]]]
+    assert G._islands(cells, np.where(s.ravel() < 1, 2e-3, 1.0)) == []  # contrast 500
     assert G._islands(cells, np.ones(m.n_el)) == []
+    got = G._islands(cells, np.where(s.ravel() < 1, 1e-3, 1.0))  # contrast exactly 1e3
+    assert [sorted(i) for i in got] == want + [[ids[3, 5, 0]]]
+    t = s.copy()
+    t[1, 1, 6] = 1.0  # touches the block island along an edge only
+    t[0, 5, 6] = 5e-6  # 5 min(s_K): soft (stiff means > 10 min)
+    got = G._islands(cells, t.ravel())
+    assert sorted(got[0]) == sorted([*want[0], ids[1, 1, 6]]) and len(got) == 3
 
 
 def test_deflation_dense():
@@ -263,8 +273,8 @@ def test_deflation_dense():
     centroid, constrained rows 0)."""
     m, op, free, A0, s = island_case()
     P = gmg(op, free, 0.37)
-    rows, Z, AZ, Einv = P.defl
-    V = dense(dataclasses.replace(P, defl=(rows, 0 * Z, 0 * AZ, 0 * Einv)), A0.shape[0])
+    assert P.defl is not None
+    V = dense(dataclasses.replace(P, defl=None), A0.shape[0])
     conn = m.blocks["hex8"]
     cols = []
     for e in G._islands(G.grid_ids(op)[0], np.asarray(op.s_K)):
@@ -278,24 +288,32 @@ def test_deflation_dense():
                 u[nodes] = np.cross(np.eye(3)[j - 3], x)
             cols.append(u.ravel() * free)
     Zr = np.array(cols).T
-    Q = Zr @ np.linalg.inv(Zr.T @ A0 @ Zr) @ Zr.T
+    Q = Zr @ np.linalg.pinv(Zr.T @ A0 @ Zr) @ Zr.T
     eye = np.eye(A0.shape[0])
     ref = Q + (eye - Q @ A0) @ V @ (eye - A0 @ Q)
     got = dense(P, A0.shape[0])
     assert rel(got, ref) <= 1e-10
+    assert (got[~free] == 0).all() and (got[:, ~free] == 0).all()
     assert rel(got, got.T) <= 1e-12
     assert np.linalg.eigvalsh(got[np.ix_(free, free)]).min() > 0
 
 
 def test_deflation_shapes():
-    """Deflation arrays are padded to power-of-2 sizes (one compiled cycle per bucket); no
-    island gives zero columns and the plain V-cycle."""
-    _, op, free, _, _ = island_case()
-    rows, Z, AZ, Einv = gmg(op, free, 0.37).defl
-    assert Z.shape[1] == 12 and Z.shape[0] == len(rows) and (len(rows) & (len(rows) - 1)) == 0
+    """Per-row deflation storage padded to a power of 2 rows, 6 MAX_ISLANDS columns in E^+
+    (one compiled cycle per row bucket); rows on two islands' rings appear once per island;
+    no island gives defl None (the plain V-cycle)."""
+    m, op, free, _, _ = island_case()
+    rows, isl, Z, AZ, Einv = gmg(op, free, 0.37).defl
+    n = len(rows)
+    assert Z.shape == AZ.shape == (n, 6) and n >= 256 and n & (n - 1) == 0
+    assert Einv.shape == (6 * G.MAX_ISLANDS,) * 2 and not np.asarray(Einv)[18:].any()
+    isl, rows = np.asarray(isl), np.asarray(rows)
+    live = np.abs(np.asarray(Z)).sum(1) + np.abs(np.asarray(AZ)).sum(1) > 0
+    assert set(isl[live]) == {0, 1, 2}
+    for c in (0, 1, 2):  # each island's rows are distinct
+        assert len(np.unique(rows[live & (isl == c)])) == (live & (isl == c)).sum()
     _, op, free, _, _ = island_case(soft=1.0)
-    rows, Z, AZ, Einv = gmg(op, free, 0.37).defl
-    assert Z.shape == (256, 6) and not np.asarray(Z).any() and not np.asarray(Einv).any()
+    assert gmg(op, free, 0.37).defl is None
 
 
 def test_defaults():
@@ -384,7 +402,7 @@ def test_simp():
 
 
 def test_single_layer():
-    """Test 8: plate 32^2 x 1, clamped xmin, sigma = lam_1: <= 100 iterations (measured 48;
+    """Test 8: plate 32^2 x 1, clamped xmin, sigma = lam_1: <= 100 iterations (measured 37;
     thin plates grow with h, docs/preconditioners.md)."""
     from benchmarks.gmg_study import lam1
 
@@ -400,10 +418,11 @@ def test_free():
     assert its <= 100 and np.isfinite(np.asarray(P.L)).all()
 
 
-@pytest.mark.parametrize("shape, bound", [((64, 2, 2), 60), ((33, 8, 8), 30)])  # 28 and 15
+@pytest.mark.parametrize(
+    "shape, bound", [((128, 1, 1), 100), ((64, 2, 2), 60), ((33, 8, 8), 30)]
+)  # measured 58, 23, 14
 def test_beam_and_odd(shape, bound):
-    """Test 10: beam 64 x 2 x 2 and the odd 33 x 8 x 8 box at sigma = lam_1 (the 128 x 1 x 1
-    beam needs 69-137, near-tolerance restarts: study only)."""
+    """Test 10: beams 128 x 1 x 1 and 64 x 2 x 2 and the odd 33 x 8 x 8 box at sigma = lam_1."""
     from benchmarks.gmg_study import lam1
 
     op, free, m = steel(shape, {"xmin": "xyz"})

@@ -22,7 +22,7 @@ Coarsening is by element count, not spacing: $h_z = h/10$ needs 106 iterations. 
 
 ### σ pre-estimate on slender and high-contrast bodies (PR 11b)
 
-`sigma_estimate` is 30–3800× above $\lambda_1$ on thin plates, slender beams, anisotropic grids and SIMP fields, so the roadmap check "within 2× of $\lambda_1$" would fail there. Default: none yet; 11b's plan must choose a better pre-estimate (e.g. GMG-preconditioned LOBPCG).
+`sigma_estimate` is up to 3800× above $\lambda_1$ on thin plates, slender beams, anisotropic grids and SIMP fields, so the roadmap check "within 2× of $\lambda_1$" would fail there. Default: none yet; 11b's plan must choose a better pre-estimate (e.g. GMG-preconditioned LOBPCG).
 
 ### GMG restriction on the GPU (PR 11 deferred GPU checks)
 
