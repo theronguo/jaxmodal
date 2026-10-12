@@ -23,8 +23,8 @@ The PR 9 roadmap items of the 9b row: Contents 1 (the 6-block mode), 3 (chunked 
    - The name "6-block mode" stays, for the roadmap's terminology. The Memory budget rows are updated: "LOBPCG, 6 blocks" becomes 11 blocks, "9 blocks" becomes 16. Both counts already include the Rayleigh–Ritz update temporaries and the projector temporaries, so the separate "Rayleigh–Ritz update temporaries" row is folded into them (no double counting).
    - **Consequences for the roadmap budgets:**
      - 10M hex20 on 80 GB (column "10M", $m = 30$, block 2.4 GB): the low-memory step goes from 14 + 5 GB (6 blocks plus the RR row) to 26.4 GB, which takes about 7 GB from the fp32 basis (40 MB per mode). The basis limit drops from ≈ 900–1200 to ≈ 700–1000 modes; the exact figures come from the estimator and replace the Max-locked-modes row and the line in the Shift-invert section ("basis limit ≈ 900–1200 modes").
-     - 100M voxel on one 80 GB GPU ($m = 8$, block 6.4 GB): 11 blocks are 70.4 GB before the preconditioner (12.8 + 5.2 GB), so it does not fit. With the diagonal-operator figure (7 blocks, 44.8 GB) plus the stencil's own apply workspace it might. Decision: the 100M paragraph says that a single-GPU 100M solve fits only if the voxel stencil's in-step cost, measured on the GPU, keeps the low-memory step at ≤ 7.5 blocks at $m = 8$; otherwise 100M needs multi-GPU (PR 19). The Deferred GPU check of PR 11 ("a 100M matvec plus the LOBPCG and preconditioner workspace fits") is reworded to that measurement.
-     - 100M free bodies: $R$ and $MR$ in fp64 take $2 \cdot 8 \cdot 10^8 \cdot 6 = 9.6$ GB (deviation 2), so they need multi-GPU. Appending $R$ to an fp32 basis instead would halve that and cost one M apply per iteration; it is left to PR 19, where the 100M budget is decided.
+     - 100M voxel on one 80 GB GPU ($m = 8$, block 6.4 GB): 11 blocks are 70.4 GB before the preconditioner (12.8 + 5.2 GB), so it does not fit. With the diagonal-operator figure (7 blocks, 44.8 GB) plus the stencil's own apply workspace it might. Decision: the 100M paragraph says that a single-GPU 100M solve fits only if the voxel stencil's in-step cost, measured on the GPU, keeps the low-memory step at ≤ 7.5 blocks at $m = 8$; otherwise 100M needs multi-GPU (PR 19). Review measured the low-memory step with the PR 6 voxel stencil on CPU at $m = 8$: 9.93 blocks at 1.6M DOF and 9.00 at 5.4M (the stencil adds about 2 blocks, its output and accumulator). At 100M, 9 blocks are 57.6 GB, about 79–80 GB in total against the 76 GB usable pool, so a single-GPU 100M solve is expected to need PR 19 unless XLA:GPU's buffer assignment does better. This figure goes into the 100M paragraph and `docs/eigensolvers.md`; the Deferred GPU check confirms it. The Deferred GPU check of PR 11 ("a 100M matvec plus the LOBPCG and preconditioner workspace fits") is reworded to that measurement.
+     - 100M free bodies: $R$ and $MR$ in fp64 take $2 \cdot 8 \cdot 10^8 \cdot 6 = 9.6$ GB (deviation 2), so they need multi-GPU. Appending $R$ to an fp32 basis instead (no $MR$) would cut that to a quarter (2.4 GB) and cost one M apply per iteration; it is left to PR 19, where the 100M budget is decided.
 2. **The rigid modes stay a separate fp64 block** with $MR$ precomputed, as in 9a. They do not fill the first basis columns, as the PR 7 note says.
    - The locked basis $V$ holds only locked modes, in fp64 or fp32.
    - Projecting against $V$ needs $MW$ of the undeflated $W$, which costs one extra M apply per iteration (storing $MV$ would double the basis).
@@ -35,9 +35,9 @@ The PR 9 roadmap items of the 9b row: Contents 1 (the 6-block mode), 3 (chunked 
    - Locking unconverged vectors would corrupt the deflation of every later chunk.
 4. **`V` is returned as a NumPy fp64 array** (host). The roadmap's "returned locked modes come from an fp64 host copy" applies to every solve; 9a returned a device array.
    - fp32 basis: each lock keeps an fp64 host copy of its columns, and `V` is assembled from them.
-   - fp64 basis: no host copies; `V = np.asarray(B[:, :n_modes])` at the end.
+   - fp64 basis: no host copies; `V = np.asarray(B[:, :count])` at the end, cut at `n_modes`. After a failed chunk, its want columns (never inserted) are appended: `np.hstack([B[:, :count], X[:, :want]])`.
 5. **Cluster rule threshold** (interpretation of the roadmap's "relative gap < 100·tol"): the relative gap is $(\lambda_{j+1} - \lambda_j)/|\lambda_j|$, and it is compared with $100\,t_j$, where $t_j \ge$ tol is column $j$'s acceptance threshold. Floor-accepted pairs and the fp32 basis term below are then covered.
-6. **fp32 basis threshold term.** The locked vectors rounded to fp32 are M-orthonormal only to about $u_{32} = 2^{-24} \approx 6\cdot10^{-8}$, so every chunk after the first has a residual floor near $10^{-8}$ (review probe: chunks 2–3 stuck at $1.0\cdot10^{-8}$ and $6.2\cdot10^{-9}$ at tol $10^{-10}$). With an fp32 basis and count > 0, the acceptance threshold becomes $t_i = \max(\text{tol}, \text{floor}_i, 2u_{32})$, about $1.2\cdot10^{-7}$; such chunks floor-accept instead of stopping the solve (deviation 3). Without this term, a tol below about $10^{-8}$ would silently return only the first chunk's modes.
+6. **fp32 basis threshold term.** The locked vectors rounded to fp32 are M-orthonormal only to about $u_{32} = 2^{-24} \approx 6\cdot10^{-8}$, so every chunk after the first has a residual floor near $10^{-8}$ (review probe: chunks 2–3 stuck at $1.0\cdot10^{-8}$ and $6.2\cdot10^{-9}$ at tol $10^{-10}$). With an fp32 basis and count > 0, the acceptance threshold becomes $t_i = \max(\text{tol}, \text{floor}_i, 2u_{32})$, about $1.2\cdot10^{-7}$; such chunks floor-accept instead of stopping the solve (deviation 3). Without this term, a tol below about $10^{-8}$ would silently return only the first chunk's modes. The term assumes $\|Mv_i\|/\|Mx\| = O(1)$ for M-normalized vectors; with strongly heterogeneous density (e.g. SIMP voids) the floor can exceed it, and the chunk then stops loudly (`converged` False). The docs say so; a scale-aware term waits for a case that needs it.
 
 ## Measured facts (prototype `scratchpad/p9b/proto.py`; jax 0.11.2, fp64, M3 Max CPU)
 
@@ -125,8 +125,8 @@ lam, V, info = lobpcg(op, free, n_modes, tol=1e-6, R=None, precond=None, X0=None
 The new parameters are keyword-only.
 
 - **`chunk`:** wanted modes per chunk, default `n_modes` (one chunk). `guards` defaults to $\max(5, \lfloor \text{chunk}/5\rfloor)$, and the block size is $m = \text{chunk} + \text{guards}$, one shape for every chunk (the last chunk wants fewer).
-- **`maxit`** is per chunk. `X0` seeds the first chunk only.
-- **`basis_dtype`:** `"float64"` or `"float32"`, the device dtype of the locked basis.
+- **`maxit`** (≥ 1, 9a's check) is per chunk; the docs repeat this next to `chunk`. `X0` seeds the first chunk only.
+- **`basis_dtype`:** `"float64"` or `"float32"`, the device dtype of the locked basis. With fp32, chunks after the first accept at $\max(\text{tol}, 1.2\cdot10^{-7})$ (deviation 6); use fp64 for a tighter tol.
 - **`low_memory`:** the 6-block mode (a static step variant).
 - **Returns:**
   - `lam` (NumPy, ascending) and `V` (NumPy fp64, $(n_\mathrm{dof}, \cdot)$), `n_modes` columns unless a chunk failed (deviation 3);
@@ -183,7 +183,7 @@ The returned set is the first `n_modes` locked modes. A cluster that straddles `
 6. Rayleigh–Ritz, the pivot test and `_p_coeffs` as in 9a; sequenced update of $X$ and $P$ only.
 
 - `optimization_barrier`s between the phases keep each product's lifetime to its phase.
-- The step reports the residuals of the input $X$. When the wanted columns pass, the host confirms the updated $X$ explicitly (`_confirm_low`: $KX$, $MX$ and residuals) before accepting, as in 9a's exit check.
+- The step reports the residuals of the input $X$. When the wanted columns pass, the host confirms the updated $X$ explicitly (`_confirm_low`: $KX$, $MX$ and residuals; if it differs from 9a's `_confirm` only in the write-back, one helper returning $(KX, MX, r, t)$ serves both) before accepting, as in 9a's exit check.
 - There are no implicit products, so there is no recompute.
 
 **Compile count.** One step variant per solve, 9-block (`lobpcg_step`) or low-memory (`lobpcg_step_low`), compiled once; compile counts filter by exact `fun_name`, since one name is a prefix of the other. The count, the number of wanted columns and the new data are all traced or host-side, so a chunked solve, and a second solve with new data, compile no further steps.
@@ -206,7 +206,7 @@ The 9-block and low-memory Memory budget rows and the "Max locked modes" row are
 
 ## Tests (`tests/test_lobpcg.py`)
 
-1. **Chunked accuracy.** Clamped and free hex20 $6^3$, 30 modes in 3 chunks of 10, tol $10^{-10}$, fp64 basis, default `maxit` (per chunk; the 3 chunks need about 900 iterations in total), in both modes. 9a's `check_modes` applies: λ error, principal angles, M-orthonormality over all modes, constrained rows 0, residuals. Also `info["chunks"]`: 3 chunks, all converged.
+1. **Chunked accuracy.** Clamped and free hex20 $6^3$, 30 modes in 3 chunks of 10, tol $10^{-10}$, fp64 basis, default `maxit` (per chunk; the 3 chunks need about 900 iterations in total), in both modes. 9a's `check_modes` applies: λ error, principal angles, M-orthonormality over all modes, constrained rows 0, residuals. Also `info["chunks"]`: 3 chunks, all converged, none stagnated.
 2. **Both modes on the 9a cases.** `test_modes` is parametrized over `low_memory`. The low-memory λ match the 9-block λ to $\max(10^{-8}, 10\varepsilon\lambda_\max/\lambda)$. 9a's P-invariant test (7b) also runs on the low-memory step.
 3. **Cluster at a chunk boundary.** Free cube $4^3$, 12 modes, chunk 4, tol $10^{-10}$:
    - `[c["locked"] for c in info["chunks"]] == [5, 5, 4]` (each chunk extended over its triple; the last triple, modes 12–14, straddles `n_modes`);
@@ -217,20 +217,22 @@ The 9-block and low-memory Memory budget rows and the "Max locked modes" row are
    - λ match the fp64-basis run to $\max(10^{-8}, 10\varepsilon\lambda_\max/\lambda)$ for relative gaps $\ge 10^{-2}$, $10\,$tol otherwise;
    - $\|V^\top MV - I\| \le 10^{-5}$;
    - with $\sigma = (\lambda^\mathrm{ref}_{30} + \lambda^\mathrm{ref}_{31})/2$, after asserting the reference relative gap there is $\ge 10^{-3}$: `np.sum(lam < σ) == count_below(K, M, σ, free) == 30`. With the orthonormality check this rules out misses and duplicates.
-5b. **fp32 basis at a tight tol.** The same case at tol $10^{-10}$: 3 chunks, `converged` and `stagnated` both True, 30 modes, λ within $\max(10^{-8}, f_\lambda)$ of the reference (deviation 6).
+5b. **fp32 basis at a tight tol.** The same case at tol $10^{-10}$: 3 chunks, `converged` and `stagnated` both True, 30 modes, λ within $\max(10^{-8}, f_\lambda)$ of the reference (deviation 6); `info["chunks"][0]["stagnated"] is False` (no term at count 0).
 6. **Projector.**
-   - With an fp32 basis at $n = 10^5$, $m = 17$: `memory_analysis().temp_size_in_bytes` $\le 1.01(c + m)\,n \cdot 8$, equal for capacities $2m$ and $8m$.
+   - With an fp32 basis at $n = 10^5$, $m = 17$: `memory_analysis().temp_size_in_bytes` $\le 1.01(c + m)\,n \cdot 8$, equal for capacities $c\lceil 2m/c\rceil$ and 4× that (e.g. 64 and 256).
    - A count that is not a multiple of $c$ (e.g. $3c + 5$, basis zero past count) gives the unchunked fp64 projector's result to $10^{-14}$ relative, for an fp64 basis and for an fp32 basis (upcast in the reference). The chunked loop rounds in a different order, so exact equality is not expected.
 7. **In-place insertion.** After `_insert`, the donated input `is_deleted()`, and `unsafe_buffer_pointer()` of the result equals the input's.
 8. **Nearly full.** `_lock(B, count, X, j)` with count + m > capacity raises `RuntimeError`; afterwards `not B.is_deleted()` and `np.asarray(B)` equals a pre-copy bit for bit.
-9. **Step temp vs capacity.** For both modes, with the diagonal operator, at the chosen $c$: temp + alias equal for capacities $2m$ and $8m$. The 9-block step stays $\le 16.5$ blocks (9a test) and the low-memory step $\le 7.5$.
+9. **Step temp vs capacity.** For both modes, with the diagonal operator, at the chosen $c$: temp + alias equal for capacities $c\lceil 2m/c\rceil$ and 4× that (capacity must be a multiple of $c$). The 9-block step stays $\le 16.5$ blocks (9a test) and the low-memory step $\le 7.5$.
 10. **Step temp within the estimator.** For both modes with the hex20 operator at $24^3$ (182k DOF, a fit size), $m = 15$ and 48, and at the held-out $8^3$ (where the PR 5 workspace dominates), $m = 15$; compile only: temp + alias ≤ `lobpcg_memory(...)["step"]`. `memory_analysis` already takes the maximum over the `lax.cond` branches.
 11. **Estimator at 1M DOF** (slow, macOS). Hex20 $44^3$, 40 modes, $m = 48$, 3 iterations, both modes: estimate $\ge 2$ GB and within 20% of the measured `peak_bytes` (harness, as PR 5's estimator test).
 12. **Compile count.** In the `COMPILES` subprocess, a chunked solve (3 chunks) compiles `lobpcg_step` once, and a second chunked solve with new data compiles 0. Also once for `low_memory=True`, counted by the exact `fun_name` `lobpcg_step_low`.
 13. **Failed chunk.** Clamped hex20 $6^3$, 3 chunks of 10, `X0` = the first 15 reference modes (chunk 1 converges in about 1 iteration), `maxit=5` (chunk 2 needs about 276):
     - `len(lam) == 20`, `converged` False;
     - `[c["converged"] for c in info["chunks"]] == [True, False]`;
-    - the first chunk's λ match the reference to $f_\lambda$.
+    - the first chunk's λ match the reference to $f_\lambda$;
+    - $\max|V^\top MV - I| \le 10^{-8}$ over all 20 columns (catches dropped or zero columns of the failed chunk);
+    - `X0` is built on the full DOF vector (the reference returns free rows).
 14. **Errors.** `chunk=0`, `chunk > n_modes`, `guards=0`, `basis_dtype="float16"`, and chunk + guards larger than the free DOFs minus the rank of R raise `ValueError`.
 15. **Low-memory cost** (not asserted): the time per iteration of both modes at 182k DOF goes into `docs/eigensolvers.md` (Measured facts table).
 
@@ -250,12 +252,14 @@ The 9-block and low-memory Memory budget rows and the "Max locked modes" row are
 | straddling cluster not cut at `n_modes` | 3 |
 | guard check off (silent lock inside a cluster) | 4 |
 | fp32 threshold term off | 5b |
+| fp32 threshold term applied at count 0 | 5b |
+| fp32 threshold term applied for an fp64 basis | 1 (`not stagnated`) |
 | seed not carried (random restart per chunk) | none: performance only, expected survivor |
 | low-memory: residuals of the updated X without the explicit confirmation | 2 |
 | low-memory barriers removed | 9 (if the 7.5 bound catches it; measured otherwise and recorded) |
 | insert not donated | 7 |
 | failed chunk locked and continued | 13 |
-| failed chunk drops its want columns | 13 |
+| failed chunk drops its want columns (fp64 return path included) | 13 |
 | `maxit` counted over the whole solve instead of per chunk | 1 |
 | basis cast to fp32 for the fp64 option | 1 (orthonormality) |
 
@@ -271,7 +275,7 @@ The 9-block and low-memory Memory budget rows and the "Max locked modes" row are
   - Validation entries.
 - **`docs/ROADMAP.md`:**
   - the 9b status line (line 16), including that PR 7's note "R fills the first basis columns" is superseded (deviation 2);
-  - line 74: the two step variants are the 9-block and the low-memory step (11 blocks);
+  - line 74: the two step variants are the 9-block and the low-memory step (11 blocks), and "about 3 extra K and M applies per iteration" becomes the measured 4 extra (6 against 2);
   - the six deviations in the PR 9 note;
   - the Memory budget rows (16 and 11 blocks, Max locked modes) recomputed with the estimator, the Rayleigh–Ritz row folded in, and the note under the table updated;
   - the 10M basis limit in the Shift-invert section (line 90);
