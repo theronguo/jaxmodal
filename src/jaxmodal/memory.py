@@ -1,7 +1,10 @@
 """Device memory estimators (bytes). See docs/operators.md and docs/eigensolvers.md."""
 
+import functools
+
 import numpy as np
 
+from .eigen.api import resolve_precond
 from .eigen.lobpcg import _block_size, _capacity  # shared with the solver on purpose
 from .elements import ELEMENTS
 from .materials import phases
@@ -198,7 +201,8 @@ def gmg_memory(mesh, m, dtype="float64", s_K=None):
     while True:
         cs = tuple(c if c <= 2 else -(-c // 2) for c in shape)
         nc = int(np.prod([c + 1 for c in cs]))
-        storage += 4 * (n_fine + nc) + sum(c + 1 for c in shape) * (16 + 2 * dt) + 64  # transfer
+        # transfer: gf, gc int32 node maps; per fine axis node j0, j1 int64 and w0, w1; scalars
+        storage += 4 * (n_fine + nc) + sum(c + 1 for c in shape) * (16 + 2 * dt) + 64
         if max(cs) <= 2:
             break
         rp = _ell_rows(nc)[1]
@@ -239,15 +243,15 @@ def solve_modes_memory(
 ):  # fmt: skip
     """Estimated peak bytes of solve_modes(mesh, ..., bcs, n_modes, ...) with the same options:
     the operator, preconditioner and lobpcg estimates composed (lobpcg_memory's dict).
-    n_rigid=None counts the rigid modes left by bcs on the host."""
-    voxel = mesh.voxel is not None
-    if precond == "auto":
-        precond = "gmg" if voxel else "jacobi"
-    if voxel:
-        op_memory = lambda m: stencil_memory(mesh, m, mass)  # noqa: E731
+    n_rigid=None counts the rigid modes left by bcs on the host (builds the dense rigid modes:
+    about 20 GB at 100M DOF; pass n_rigid for large meshes)."""
+    pc = None
+    if resolve_precond(mesh, precond, precond_dtype) == "gmg":
+        pc = functools.partial(gmg_memory, mesh, dtype=precond_dtype)
+    if mesh.voxel is not None:
+        op_memory = functools.partial(stencil_memory, mesh, mass=mass)
     else:
-        op_memory = lambda m: unstructured_memory(mesh, m, mass=mass)  # noqa: E731
-    pc = (lambda m: gmg_memory(mesh, m, precond_dtype)) if precond == "gmg" else None
+        op_memory = functools.partial(unstructured_memory, mesh, mass=mass)
     if n_rigid is None:
         n_rigid = rigid_modes(mesh, dof_mask(mesh, bcs)).shape[1]
     return lobpcg_memory(

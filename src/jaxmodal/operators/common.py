@@ -13,6 +13,16 @@ def register(cls, meta):
     jax.tree_util.register_dataclass(cls, data_fields=data, meta_fields=meta)
 
 
+def cast_floats(tree, dtype):
+    """tree with its float array leaves in dtype (other leaves unchanged)."""
+
+    def f(a):
+        floating = isinstance(a, jax.Array) and jnp.issubdtype(a.dtype, jnp.floating)
+        return a.astype(dtype) if floating else a
+
+    return jax.tree_util.tree_map(f, tree)
+
+
 def check_x64(name):
     if not jax.config.jax_enable_x64:
         raise ValueError(f"{name} needs float64: call jaxmodal.config.enable_x64() first")

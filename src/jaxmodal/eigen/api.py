@@ -11,6 +11,22 @@ from ..precond import SingularShiftError, gmg, jacobi
 from .lobpcg import lobpcg, sigma_estimate
 
 
+def resolve_precond(mesh, precond, precond_dtype):
+    """The preconditioner name solve_modes uses for these options; raises on bad options."""
+    voxel = mesh.voxel is not None
+    if precond == "auto":
+        precond = "gmg" if voxel else "jacobi"
+    if precond not in ("gmg", "jacobi"):
+        raise ValueError(f"precond must be 'auto', 'gmg' or 'jacobi', got {precond!r}")
+    if precond == "gmg" and not voxel:
+        raise ValueError("precond 'gmg' needs a voxel mesh (voxel_mesh)")
+    if precond_dtype not in ("float64", "float32"):
+        raise ValueError(f"precond_dtype must be 'float64' or 'float32', got {precond_dtype!r}")
+    if precond == "jacobi" and precond_dtype != "float64":
+        raise ValueError("precond_dtype 'float32' needs precond 'gmg'")
+    return precond
+
+
 def _gmg_sigma(op, free, R):
     """(sigma, iterations): the lam_1 estimate (an upper bound) from 1-mode LOBPCG with GMG,
     started at sigma = 0 when gmg proves A_P nonsingular there, else at sigma_estimate's
@@ -46,20 +62,13 @@ def solve_modes(
     pre-estimate; precond_dtype "float32" runs its V-cycle in fp32. Returns lam (ascending),
     V (n_dof, n_modes) and lobpcg's info plus operator, n_rigid, rigid, frequencies
     (sqrt(lam) / 2 pi), precond, sigma, sigma_iterations and time["precond"]."""
-    voxel = mesh.voxel is not None
-    if precond == "auto":
-        precond = "gmg" if voxel else "jacobi"
-    if precond not in ("gmg", "jacobi"):
-        raise ValueError(f"precond must be 'auto', 'gmg' or 'jacobi', got {precond!r}")
-    if precond == "gmg" and not voxel:
-        raise ValueError("precond 'gmg' needs a voxel mesh (voxel_mesh)")
-    if precond_dtype not in ("float64", "float32"):
-        raise ValueError(f"precond_dtype must be 'float64' or 'float32', got {precond_dtype!r}")
-    if precond == "jacobi" and precond_dtype != "float64":
-        raise ValueError("precond_dtype 'float32' needs precond 'gmg'")
-    if sigma is not None and not (math.isfinite(sigma) and sigma >= 0):
-        raise ValueError(f"sigma must be a finite float >= 0, got {sigma}")
+    precond = resolve_precond(mesh, precond, precond_dtype)
+    if sigma is not None:
+        if not (math.isfinite(sigma) and sigma >= 0):
+            raise ValueError(f"sigma must be a finite float >= 0, got {sigma}")
+        sigma = float(sigma)
     free = dof_mask(mesh, bcs)  # before the build: bad bcs fail fast
+    voxel = mesh.voxel is not None
     name, build = ("stencil", stencil) if voxel else ("unstructured", unstructured)
     op = build(mesh, materials, orientations, mass=mass, nodal_mass=nodal_mass)
     t0 = time.perf_counter()
@@ -70,12 +79,11 @@ def solve_modes(
     Rd = R if k else None
     its = 0
     if precond == "jacobi":
-        sigma = 0.0 if sigma is None else float(sigma)
+        sigma = sigma or 0.0
         P = jacobi(op, free, sigma)
     else:
         if sigma is None:
             sigma, its = _gmg_sigma(op, free, Rd)
-        sigma = float(sigma)
         P = gmg(op, free, sigma, dtype=precond_dtype)
     t_p = time.perf_counter() - t0
     lam, V, info = lobpcg(

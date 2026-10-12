@@ -11,7 +11,15 @@ from jax import lax
 from ..elements import ELEMENTS, kernels
 from ..materials import check_materials, phase_table, phases
 from ..mesh.model import CORNERS
-from .common import check_nodal_mass, check_v, check_x64, node_cols, register, scaled
+from .common import (
+    cast_floats,
+    check_nodal_mass,
+    check_v,
+    check_x64,
+    node_cols,
+    register,
+    scaled,
+)
 from .dofmap import check_int32
 
 SLAB_CELLS = 2**16  # default slab: about this many cells per scan step (benchmarks/stencil_slab.py)
@@ -255,16 +263,10 @@ def _m_diag(op, me, el):
     return jnp.broadcast_to((d[:, None, None, None] * w)[:, None, ..., None], (8, 3, *el.shape, 1))
 
 
-def _cast(op, dtype):
-    """op with its float leaves in dtype: the applies run in the vector's precision."""
-    f = lambda a: a.astype(dtype) if jnp.issubdtype(a.dtype, jnp.floating) else a  # noqa: E731
-    return jax.tree_util.tree_map(f, op)
-
-
 @jax.jit
 def _apply_K(op, v):
     check_v(v, op.n_dof)
-    op = _cast(op, v.dtype)
+    op = cast_floats(op, v.dtype)  # the applies run in the vector's precision
     Ke = reference_element(op)[0].astype(v.dtype)
     return _slabs(op, lambda nd, el: _k_apply(op, Ke, v, nd, el), v.shape[1], dtype=v.dtype)
 
@@ -274,7 +276,7 @@ def _apply_M(op, v):
     check_v(v, op.n_dof)
     if op.mass == "lumped":
         return _diag_M(op).astype(v.dtype)[:, None] * v
-    op = _cast(op, v.dtype)
+    op = cast_floats(op, v.dtype)  # the applies run in the vector's precision
     me = reference_element(op)[1].astype(v.dtype)
     kern = lambda nd, el: _m_apply(op, me, v, nd, el)  # noqa: E731
     init = op.nodal[:, None] * v  # adding it after costs a vector

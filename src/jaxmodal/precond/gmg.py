@@ -16,7 +16,7 @@ from scipy import ndimage
 
 from ..linalg.ell import BlockELL
 from ..mesh import voxel_mesh
-from ..operators.common import check_x64, register
+from ..operators.common import cast_floats, check_x64, register
 from ..operators.constraints import ap_operator, rigid_modes
 from ..operators.dofmap import check_int32
 from ..operators.voxel import OFFSETS, Stencil, grid_ids, reference_element
@@ -492,14 +492,8 @@ def gmg(op, free, sigma, *, degree=2, coarse_degree=4, ratio=30.0, dtype="float6
         raise ValueError("coarsest factor is not finite")
     defl = _deflation(A0, F, np.asarray(op.spacing), free, _islands(cell_ids, s_K))
     if dtype == "float32":
-        levels, transfers = _to32(levels), _f32(transfers)
+        levels, transfers = _to32(levels), cast_floats(transfers, jnp.float32)
     return GMG(tuple(levels), tuple(transfers), L, fl, defl, dtype)
-
-
-def _f32(tree):
-    """tree with its float array leaves in fp32."""
-    f = lambda a: a.astype(jnp.float32) if jnp.issubdtype(a.dtype, jnp.floating) else a  # noqa: E731
-    return jax.tree_util.tree_map(lambda a: f(a) if isinstance(a, jax.Array) else a, tree)
 
 
 def _to32(levels):
@@ -507,8 +501,8 @@ def _to32(levels):
     follows the vector's dtype). S.A is the level's A on every level."""
     out = []
     for i, (A, S) in enumerate(levels):
-        A = _f32(A) if i else A
-        D, lmax, ratio = _f32((S.precond, S.lmax, S.ratio))
+        A = cast_floats(A, jnp.float32) if i else A
+        D, lmax, ratio = cast_floats((S.precond, S.lmax, S.ratio), jnp.float32)
         out.append((A, dataclasses.replace(S, A=A, precond=D, lmax=lmax, ratio=ratio)))
     return out
 

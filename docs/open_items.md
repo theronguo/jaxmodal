@@ -32,9 +32,9 @@ On the checked-in SIMP field, 10 modes at tol $10^{-6}$: fp64 GMG at λ₁ stagn
 
 Stiff islands are detected from `s_K` only, so a multi-phase voxel model with $10^3$–$10^5$ material contrast between phases (uniform `s_K`) gets no island deflation. Default: documented. Revisit when a multi-phase contrast case appears (PR 13 or PR 23).
 
-### GMG allocator growth in LOBPCG (PR 11b)
+### GMG intermittent extra peak in LOBPCG (PR 11b)
 
-With GMG the LOBPCG process peak grows over the first ~20 iterations beyond the step's `memory_analysis` (at $64^3$: +1.2 GB against +0.45 GB with Jacobi; heap fragmentation, not live data), and not in proportion to the block size, so `lobpcg_memory` with `gmg_memory` is 11% low at $64^3$ (fp64 cycle) while 10–12% high at $87^3$; both inside the roadmap's ±20% band. Default: keep the `memory_analysis` envelope `GMG_STEP` and document it. Revisit on the GPU (PR 24: the BFC allocator behaves differently) or if a size falls outside the band.
+With GMG the LOBPCG process peak is bimodal: in some runs, from about iteration 5, it is about one V-cycle temporary above the step's `memory_analysis` (+12 blocks at $48^3$), in other identical runs not; synchronous dispatch makes it rarer. So `lobpcg_memory` with `gmg_memory` is not a strict bound at mid sizes: 11% low at $64^3$ (fp64 cycle), 4% high at $48^3$ (worst of three runs), 10–12% high at $87^3$; all inside the roadmap's ±20% band. Default: keep the `memory_analysis` envelope `GMG_STEP` and document it. Revisit on the GPU (PR 24: the BFC allocator behaves differently) or if a size falls outside the band.
 
 ### GMG restriction on the GPU (PR 11 deferred GPU checks)
 
