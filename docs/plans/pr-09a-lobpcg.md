@@ -69,7 +69,15 @@ The prototype is the design below: one module-level jitted step with every array
   - XLA:CPU does not fuse a sum of GEMMs: `X C_x + W C_w + P C_p` holds all three products at once. Sequencing the update with `optimization_barrier` (below) gives 10 + 6 = 16 blocks at the same speed (73 / 215 ms against 72 / 216 ms).
   - The roadmap's "9 blocks + ≈ 2 Rayleigh–Ritz temporaries ≈ 11 blocks" was not reached in any measured variant. A donated buffer takes its output only after every read of it, so the 6 new X/P blocks coexist with the 6 old ones and W (3). One $(n, 3m)$ array or a stacked $(3, n, m)$ layout measured worse (21 + 9).
 
-  9a records the measured temp + alias of the final step in `docs/eigensolvers.md`, with the diagonal operator so that the operator workspace is excluded, and pins it (test 14). The operator workspace adds to it as a max, taken from the operator's own estimator. 9b's estimator models that count and updates the Memory budget rows, for example 1M at $m = 25$: 3.2 GB instead of 1.8 + 0.4 GB. That is noted there as a deviation.
+  9a records the measured temp + alias of the final step in `docs/eigensolvers.md`, with the diagonal operator so that the operator workspace is excluded, and pins it (test 14). With a real operator, the peak is the larger of that and the apply phase plus the operator workspace, measured as (temp + alias) blocks:
+
+  | mesh | DOF | m | blocks |
+  |---|---|---|---|
+  | hex20 $8^3$ | 8k | 15 | 52–56 |
+  | hex20 $24^3$ | 182k | 15 | 18 |
+  | hex20 $32^3$ | 421k | 15 | 16.9 |
+
+  The barrier saving shows only from about 400k DOF. 9b's estimator models the step as max(16 blocks, apply phase + the operator estimator's workspace). Both figures go into `docs/eigensolvers.md`. 9b's estimator models that count and updates the Memory budget rows, for example 1M at $m = 25$: 3.2 GB instead of 1.8 + 0.4 GB. That is noted there as a deviation.
 - **Per-iteration cost** (182k DOF, first prototype):
 
   | m | step | K + M applies | dense part |
