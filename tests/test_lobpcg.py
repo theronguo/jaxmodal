@@ -773,7 +773,6 @@ from jaxmodal import config
 config.enable_x64()
 from jaxmodal.eigen import lobpcg
 from jaxmodal.operators.common import register
-from jaxmodal.precond.jacobi import _jacobi
 @dataclasses.dataclass(frozen=True)
 class Diagonal:
     dK: jax.Array
