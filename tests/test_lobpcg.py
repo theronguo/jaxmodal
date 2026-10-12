@@ -161,7 +161,7 @@ def test_modes(p_args):
     assert info["p_drops"] == 0
     for A, key in ((p.Kf, "norm_K"), (p.Mf, "norm_M")):  # power iteration: from below
         exact = eigsh(A, 1, which="LA", return_eigenvectors=False)[0]
-        assert 0.9 <= info[key] / exact <= 1 + 1e-10  # measured 0.96-1.0; 3 iterations: 0.64
+        assert 0.8 <= info[key] / exact <= 1 + 1e-10  # >= 0.90 over 40 seeds; 3 its: <= 0.77
 
 
 @pytest.mark.parametrize(

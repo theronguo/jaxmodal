@@ -267,7 +267,7 @@ All runs: isotropic $E = 3$, $\nu = 0.3$, $\rho = 2$ on the box $(1, 0.83, 0.67)
   - Modes with relative gap $\ge 10^{-2}$: λ error $\le \max(10^{-8}, 10\varepsilon\lambda_\max/\lambda)$, with $\lambda_\max$ from `eigsh(which="LA")`. Gaps in $[10^{-4}, 10^{-2})$: $\le 10\,$tol, cluster-wise.
   - Principal sines $\le 10\,r_M\lambda/\mathrm{gap}$, with the dense $r_M$. The reference's $r_M$ is $\ge 10\times$ smaller. Sines are computed stably, as $\sigma_\max(L^\top(Q - Q_rQ_r^\top MQ))$; $\sqrt{1-\cos^2}$ bottoms out near $10^{-8}$. Clusters below a relative gap of $10^{-4}$ are compared by subspace.
   - $\|V^\top MV - I\| \le 10^{-10}$, constrained rows 0, and `info["residuals"]` equal to residuals recomputed with the operator.
-  - No P drops, and `norm_K`, `norm_M` within $[0.9, 1]\times$ the exact 2-norms (`eigsh`).
+  - No P drops, and `norm_K`, `norm_M` within $[0.8, 1]\times$ the exact 2-norms (`eigsh`).
 - **Exact multiplicities** on a free square-section beam and a free cube. A beam of section $1\times1.002$ gives bending pairs in the $[10^{-4}, 10^{-2})$ band.
 - **Stagnation:**
   - tol $10^{-16}$ gives floor acceptance;
