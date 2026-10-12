@@ -106,6 +106,7 @@ def test_minres_accuracy():
     xr = spla.spsolve(a_p(K + lam[0] * M, free).tocsc(), b)
     x, info = run(minres, ap_operator(op, free, lam[0]), b, jacobi(op, free, lam[0]), 1e-12)
     assert rel(x[:, keep], xr[:, keep]) <= 1e-10 and info["converged"].all()
+    assert (info["residuals"] <= 1e-12).all()
     assert np.all(x[:, 2] == 0) and info["iterations"][2] == 0
     sb = (lam[5] + lam[6]) / 2
     A = ap_operator(op, free, -sb)
@@ -114,7 +115,18 @@ def test_minres_accuracy():
     xr = spla.spsolve(a_p(K - sb * M, free, s).tocsc(), b)
     x, info = run(minres, A, b, jacobi(op, free, sb), 1e-12)
     assert rel(x[:, keep], xr[:, keep]) <= 1e-10 and info["converged"].all()
+    assert (info["residuals"] <= 1e-12).all()
     assert np.all(x[~free] == 0)
+
+
+def test_minres_stall_count():
+    """CHECK and STALL_C: 3 distinct eigenvalues end MINRES in 3 steps, x then stays frozen
+    by the beta = 0 guards (no NaN) and the column stagnates at exactly (1 + STALL_C) CHECK."""
+    A = Partial(lambda d, x: d[:, None] * x, jnp.array([1.0, 3.0, 3.0, 7.0]))
+    b = jnp.array([[1.0, 0.5], [2.0, 0.0], [0.0, 1.0], [-1.0, 2.0]])
+    x, info = minres(A, b, None, 1e-300, 1000)
+    assert info["stagnated"].all() and (np.asarray(info["iterations"]) == 60).all()
+    assert np.abs(np.asarray(x) - b / A.args[0][:, None]).max() <= 1e-15
 
 
 def test_minres_exits():
