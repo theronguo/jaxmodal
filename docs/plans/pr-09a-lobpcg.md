@@ -69,7 +69,7 @@ The prototype is the design below: one module-level jitted step with every array
   - XLA:CPU does not fuse a sum of GEMMs: `X C_x + W C_w + P C_p` holds all three products at once. Sequencing the update with `optimization_barrier` (below) gives 10 + 6 = 16 blocks at the same speed (73 / 215 ms against 72 / 216 ms).
   - The roadmap's "9 blocks + ≈ 2 Rayleigh–Ritz temporaries ≈ 11 blocks" was not reached in any measured variant. A donated buffer takes its output only after every read of it, so the 6 new X/P blocks coexist with the 6 old ones and W (3). One $(n, 3m)$ array or a stacked $(3, n, m)$ layout measured worse (21 + 9).
 
-  9a records the measured temp + alias of the final step in `docs/eigensolvers.md` and pins it (test 14). 9b's estimator models that count and updates the Memory budget rows, for example 1M at $m = 25$: 3.2 GB instead of 1.8 + 0.4 GB. That is noted there as a deviation.
+  9a records the measured temp + alias of the final step in `docs/eigensolvers.md`, with the diagonal operator so that the operator workspace is excluded, and pins it (test 14). The operator workspace adds to it as a max, taken from the operator's own estimator. 9b's estimator models that count and updates the Memory budget rows, for example 1M at $m = 25$: 3.2 GB instead of 1.8 + 0.4 GB. That is noted there as a deviation.
 - **Per-iteration cost** (182k DOF, first prototype):
 
   | m | step | K + M applies | dense part |
@@ -205,7 +205,7 @@ Hetmaniuk–Lehoucq / Duersch et al. 2018, with fixed shapes: every block is $(n
       - M-orthogonalize $C_P$ against $C_X$ in the $G_M$ inner product, twice, entirely in the small space.
       - A column whose $G_M$-norm falls to $\le 10^{-8}$ of its norm before is masked. This is the column-level noise rule; it counts as a drop.
       - The noise rule is kept. Without it, a pure-noise column ($n_1/n_0 \approx 10^{-12}$) is rescaled to unit norm, and $P'$ picks up about $10^{-4}$ of non-orthogonality to $X'$. The pivot test does not see that ($G_M \approx I$).
-      - Steps 5's small-matrix work is the helper `_p_coeffs(C_X, C_P, G, act)`, so that test 7c can pin it.
+      - Step 5's small-matrix work is the helper `_p_coeffs(C_X, C_P, G, act)`, so that test 7c can pin it.
       - SVQB of the rest in coefficient space.
       - The new $[X', P']$ is then M-orthonormal without any n-space orthogonalization of P.
    6. **Update.** $X' = X C_{X,x} + W C_{X,w} + P C_{X,p}$, and $P'$ likewise from $C_P$; $KX'$, $MX'$, $KP'$, $MP'$ by the same GEMMs.
@@ -291,7 +291,9 @@ All tests compare against `reference_modes`, requesting at least 6 modes past th
 11. **σ pre-estimate.** On clamped hex20 $8^3$ and free hex20 $6^3$ (with `R`): $\lambda_1 \le \sigma \le 2\lambda_1$.
 12. **Jacobi.** `jacobi(op, free, s)(v)` with $s = 0.7\,\bar s \ne 0$ equals $m\odot v/(\mathrm{diag}K + s\,\mathrm{diag}M)$ against the assembled diagonals; constrained rows are 0.
 13. **Errors.** A block size larger than the free DOFs minus the deflation rank raises `ValueError`.
-14. **Step memory.** On hex20 $8^3$, `lobpcg_step.lower(...).compile().memory_analysis()` gives (temp + alias)$/(n m \cdot 8) \le 16.5$, which pins the sequenced update.
+14. **Step memory.** The step is compiled with a diagonal pytree test operator (`apply_K = d_K ⊙ v`, `apply_M = d_M ⊙ v`, the five-method interface) at $n = 10^5$ and $m = 17$: the same configuration as the measurement, with no operator workspace. Only lowering and compilation run.
+    - `memory_analysis()` must give (temp + alias)$/(n m \cdot 8) \le 16.5$, which pins the sequenced update.
+    - With a real operator the temp also holds the K/M apply workspace (PR 5: per element chunk), which does not scale with $nm$.
 
 ### Mutants (each must fail a test)
 
