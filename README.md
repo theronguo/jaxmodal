@@ -2,7 +2,7 @@
 
 Large-scale 3D linear modal analysis, $K v = \lambda M v$, in JAX. It uses matrix-free operators, preconditioned LOBPCG, hex8/hex20/hex27 and solid-shell elements, and linear anisotropic elasticity. The targets are the lowest modes and modes in frequency bands, with FFD shape optimization and topology optimization later.
 
-**Status:** early development. PR 0 (scaffold, benchmark harness, conventions), PR 1 (mesh data model, readers, voxel generator), PR 2 (anisotropic materials, rotations, phases), PR 3 (hex8/hex20/hex27 element kernels), PR 4 (DOF map, assembled SciPy reference operators, Dirichlet masking, box meshes), PR 5 (matrix-free unstructured operator, RCM reordering, memory estimator), PR 6 (voxel stencil operator), PR 7 (rigid body modes, M-orthonormalization, deflation projector), PR 8a (certified SciPy reference eigensolver, dense inertia count, sliding-block verification), PR 8b (Srinivas–Rao plates, anisotropic Visscher box, MAC mode matching), PR 8c (NAFEMS FV52/FV12, Lamb sphere, graded box meshes) and PR 9a (matrix-free LOBPCG with Jacobi) are done; chunked solves and the public `solve_modes` API come next. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+**Status:** early development. PR 0 (scaffold, benchmark harness, conventions), PR 1 (mesh data model, readers, voxel generator), PR 2 (anisotropic materials, rotations, phases), PR 3 (hex8/hex20/hex27 element kernels), PR 4 (DOF map, assembled SciPy reference operators, Dirichlet masking, box meshes), PR 5 (matrix-free unstructured operator, RCM reordering, memory estimator), PR 6 (voxel stencil operator), PR 7 (rigid body modes, M-orthonormalization, deflation projector), PR 8a (certified SciPy reference eigensolver, dense inertia count, sliding-block verification), PR 8b (Srinivas–Rao plates, anisotropic Visscher box, MAC mode matching), PR 8c (NAFEMS FV52/FV12, Lamb sphere, graded box meshes), PR 9a (matrix-free LOBPCG with Jacobi) and PR 9b (chunked LOBPCG with locking, fp32 deflation basis, low-memory mode, LOBPCG memory estimator) are done; the public `solve_modes` API comes next. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Install
 
@@ -139,9 +139,11 @@ op = unstructured(box, materials)  # consistent mass, as K and M above
 R = m_orthonormalize(R, op.apply_M(R))  # again: R above was M-orthonormal for the lumped mass
 mu, V, info = lobpcg(op, free, 5, tol=1e-10, R=R)  # the lowest 5 elastic modes
 assert info["converged"] and np.allclose(mu, lam[3:8], rtol=1e-8)
+mu, V, info = lobpcg(op, free, 6, tol=1e-10, R=R, chunk=3)  # 2 chunks, locked; V on the host
+assert info["converged"] and np.allclose(mu, lam[3:9], rtol=1e-8)
 ```
 
-See [`docs/eigensolvers.md`](docs/eigensolvers.md) for LOBPCG (algorithm, convergence, measured floor and cost), the reference solver, its certification and size limits, and [`docs/verification.md`](docs/verification.md) for the exact solutions and measured convergence.
+See [`docs/eigensolvers.md`](docs/eigensolvers.md) for LOBPCG (algorithm, chunks and locking, low-memory mode, memory model, convergence, measured floor and cost), the reference solver, its certification and size limits, and [`docs/verification.md`](docs/verification.md) for the exact solutions and measured convergence.
 
 ## Development
 

@@ -290,3 +290,11 @@ The 9-block and low-memory Memory budget rows and the "Max locked modes" row are
 - An `np.memmap` for the host copies (roadmap: only if the locked modes exceed RAM).
 - Dropping the low-memory step's KP and MP applies via the coefficient-space invariant (about 138 → 100 ms per iteration at $m = 15$, with a recompute schedule); a lever for 9c's budgets if the 1.9× cost matters.
 - Appending $R$ to an fp32 basis for memory-bound free-body runs (PR 19).
+
+## Implementation notes
+
+Where the implementation differs from the plan above:
+- **Cluster rule gate.** The rule starts once the wanted residuals are $\le \sqrt{t}$, not once they pass $t$. With one guard on the cube triple, the split cluster never converges (the guard's Ritz value is $1.3\cdot10^{-7}$ off after 500 iterations), so the planned gate never fired and the guard error never came. $j$ only grows, and the progress test restarts when it grows (a toggling $j$ caused a false stall in test 3). At a failed exit with the wanted residuals $\le \sqrt t$, the boundary is re-checked with the guards' uncertainty, gap $< \max(100\,t_j, 10\,r_{j+1}^2)$, and the guard error raised if the cluster fills the block.
+- **No basis for a single chunk** (capacity 0, the projector compiled out), and the last chunk is never inserted: `V` = locked columns plus the final chunk's.
+- **Estimator form.** step $= A\,b + f\,w$ with $(A, f) = (16, 2.5)$ and $(11, 1.75)$, the envelope over hex8/20/27 at 6.6k–1.08M DOF, $m$ = 7–48 (23 points; two tiny meshes exceeded a fit on hex20 alone). The max with the diagonal figure is dropped ($A \ge S$). The held-out check uses other element types; hex20 $8^3$ is a fit point but stays in test 10. Measured at 1.08M: 9.71 / 7.39 GB against 10.32 / 8.33 GB.
+- **Tests.** Test 5 compares with the reference (stronger than the fp64-basis run). Test 6 uses capacities $2c$ and $8c$ (at $c$ the slice is the whole basis and XLA skips the copy). Test 9 allows 0.01 blocks between configurations (measured 16.001 vs 16.005).
