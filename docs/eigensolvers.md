@@ -1,6 +1,6 @@
 # Eigensolvers
 
-`jaxmodal.eigen.reference_modes` (module `eigen/reference.py`) is the SciPy reference eigensolver on assembled matrices; `jaxmodal.linalg.count_below` (module `linalg/inertia.py`) is the exact dense inertia count (PR 8a). They are oracles for the matrix-free LOBPCG and for later PRs; both run on the host on the SciPy matrices from `assemble`. `jaxmodal.eigen.lobpcg` (module `eigen/lobpcg.py`, PR 9a) is the matrix-free solver, with `jacobi` and `sigma_estimate`; see [LOBPCG](#lobpcg).
+`jaxmodal.eigen.reference_modes` (module `eigen/reference.py`) is the SciPy reference eigensolver on assembled matrices; `jaxmodal.linalg.count_below` (module `linalg/inertia.py`) is the exact dense inertia count (PR 8a). They are oracles for the matrix-free LOBPCG and for later PRs; both run on the host on the SciPy matrices from `assemble`. `jaxmodal.eigen.lobpcg` (module `eigen/lobpcg.py`, PRs 9a and 9b) is the matrix-free solver, with `jacobi`, `sigma_estimate`, chunked solves and the estimator `jaxmodal.memory.lobpcg_memory`; see [LOBPCG](#lobpcg).
 
 ```python
 from jaxmodal.eigen import reference_modes
@@ -115,17 +115,20 @@ from jaxmodal.eigen import jacobi, lobpcg, sigma_estimate
 lam, V, info = lobpcg(op, free, 20, tol=1e-8, R=R)  # R: M-orthonormal rigid modes or None
 lam, V, info = lobpcg(op, free, 20, precond=jacobi(op, free, sigma))  # any pytree callable
 sigma, its = sigma_estimate(op, free, R)  # lam_1 upper bound, for preconditioners of K + sigma M
+lam, V, info = lobpcg(op, free, 200, R=R, chunk=40, basis_dtype="float32", low_memory=True)
 ```
 
-`lobpcg(op, free, n_modes, tol=1e-6, R=None, precond=None, X0=None, maxit=500, seed=0)` computes the lowest `n_modes` eigenpairs of the masked pencil $K_m v = m \odot K(m \odot v)$, $M_m$ likewise, for any operator with `apply_K`, `apply_M`, `diag_K`, `diag_M` and `n_dof` (PR 5 or PR 6).
+`lobpcg(op, free, n_modes, tol=1e-6, R=None, precond=None, X0=None, maxit=500, seed=0, *, chunk=None, guards=None, basis_dtype="float64", low_memory=False)` computes the lowest `n_modes` eigenpairs of the masked pencil $K_m v = m \odot K(m \odot v)$, $M_m$ likewise, for any operator with `apply_K`, `apply_M`, `diag_K`, `diag_M` and `n_dof` (PR 5 or PR 6).
 
-- **Returns:** `lam` `(n_modes,)` ascending (NumPy); `V` `(n_dof, n_modes)` on the device, M-orthonormal with constrained rows exactly 0; and `info` with `iterations`, `converged`, `stagnated`, `residuals` and `thresholds` (from explicitly recomputed products, on every exit), `p_drops`, `refills`, `norm_K`, `norm_M`, `history` (max wanted residual per iteration) and `time` (`setup`, `iterations`, in seconds).
+- **Returns:** `lam` `(n_modes,)` ascending (NumPy); `V` `(n_dof, n_modes)`, a NumPy fp64 array on the host, M-orthonormal with constrained rows exactly 0; and `info` with `iterations` (total), `converged` (every chunk), `stagnated` (any chunk), `residuals` and `thresholds` (per returned mode, from explicitly recomputed products, on every exit; for locked modes, of the re-orthonormalized columns), `p_drops`, `refills`, `norm_K`, `norm_M`, `history` (max wanted residual per iteration, chunks concatenated), `chunks` (per chunk: `want`, `locked` (columns accepted; the final chunk's are returned, never inserted into the basis), `iterations`, `converged`, `stagnated`) and `time` (`setup`, `iterations`, in seconds). After a failed chunk fewer than `n_modes` come back (see [Chunks and locking](#chunks-and-locking)).
 - **Deflation basis `R`:** `(n_dof, k)`, M-orthonormal (rigid modes after `m_orthonormalize` with the same operator). $MR = M_m R$ is computed once. The start block and every new direction are projected, $W \leftarrow W - R\,(MR^\top W)$, so no extra M apply is needed per iteration. Without `R`, a free body returns its rigid modes as λ ≈ 0; their λ-scaled residual is meaningless, so the solve ends at the no-progress exit (`converged` False, `stagnated` True).
 - **Preconditioner `precond`:** a pytree callable `(n, j) -> (n, j)` (e.g. `jax.tree_util.Partial`), fixed, linear and SPD on the free DOFs, with masked output. It is a step argument, so new preconditioner data does not recompile. The default is `jacobi(op, free)`.
-- **Block size** $m = n_\mathrm{modes} + \max(5, \lfloor 0.2\,n_\mathrm{modes}\rfloor)$.
+- **Chunks and block size:** `chunk` wanted modes per chunk (default `n_modes`, one chunk) and `guards` extra columns (default $\max(5, \lfloor \text{chunk}/5\rfloor)$), block size $m$ = chunk + guards for every chunk. `maxit` ($\ge 1$) counts per chunk; `X0` seeds the first chunk.
+- **`basis_dtype`:** `"float64"` or `"float32"`, the device dtype of the locked basis. With fp32 the chunks after the first accept at $\max(\mathrm{tol}, 1.2\cdot10^{-7})$; use fp64 for a tighter tol.
+- **`low_memory`:** the low-memory step (11 instead of 16 blocks, 1.4–1.9× the time per iteration).
 - **Errors:**
-  - `ValueError` if `n_modes` or `maxit` is below 1, if $m$ exceeds the free DOFs minus the rank of $R$, if $\|R^\top M_mR - I\|_\max > 10^{-8}$ (e.g. R orthonormalized with another mass), or for a bad mask or `X0`;
-  - `RuntimeError` if the start block stays rank-deficient after 3 refills;
+  - `ValueError` if `n_modes` or `maxit` is below 1, if `chunk` is not in $[1, n_\mathrm{modes}]$, `guards` is below 1 or `basis_dtype` is neither fp64 nor fp32, if $m$ exceeds the free DOFs minus the rank of $R$, for the guard error (a cluster at a chunk boundary fills the block), if $\|R^\top M_mR - I\|_\max > 10^{-8}$ (e.g. R orthonormalized with another mass), or for a bad mask or `X0`;
+  - `RuntimeError` if the start block stays rank-deficient after 3 refills, or if a column to be locked lies in the span of the locked modes;
   - `FloatingPointError` for a non-finite step.
 
   Non-convergence never raises: check `info`.
@@ -135,7 +138,7 @@ sigma, its = sigma_estimate(op, free, R)  # lam_1 upper bound, for preconditione
 
 Hetmaniuk–Lehoucq / Duersch et al. (2018), with fixed shapes: every block is $(n, m)$, and inactive columns are exact zeros tracked by boolean masks.
 
-- **One compiled step.** `lobpcg_step(state, op, mask, precond, R, MR, consts, recompute)` is a module-level `jax.jit`.
+- **One compiled step.** `lobpcg_step(state, op, mask, precond, R, MR, B, count, consts, recompute, *, c)` is a module-level `jax.jit` (`lobpcg_step_low` for the [low-memory mode](#low-memory-mode)). `B` and `count` are the locked basis and its traced count, `c` the static projector chunk width; a single-chunk solve passes a basis with no columns, which compiles the projector out.
   - The state $(X, KX, MX, P, KP, MP, \mathrm{act}_P, \lambda)$ is donated.
   - `consts` $= (\|K\|, \|M\|, \mathrm{tol}, c)$ and `recompute` are traced.
   - Nothing is closed over: closing over the operator would embed it in the program (6.4 MB of HLO for a diagonal operator at 100k DOF, against 0.05 MB with arguments; 2.2 GB more compile memory with a real operator at 182k) and recompile on every solve.
@@ -147,7 +150,7 @@ Hetmaniuk–Lehoucq / Duersch et al. (2018), with fixed shapes: every block is $
 - **SVQB.** Inactive rows and columns of $G = V^\top MV$ are zeroed, so they form the exact $\theta = 0$ eigenspace and kept directions carry nothing from them. The rest is scaled to unit diagonal, and directions with $\theta \le 10^{-14}\theta_\max$ are dropped (exact zero columns).
 - **Each iteration:**
   1. Residuals give the active columns $a = r > t$. This is soft locking: converged columns get no new direction but stay in $X$.
-  2. $W = T(R_X) \odot a$ is deflated, then $KW$ and $MW$ are applied. These are the only two width-$m$ applies per iteration.
+  2. $W = T(R_X) \odot a$ is deflated against the locked basis (when count > 0, one extra M apply) and $R$, then $KW$ and $MW$ are applied. Without locked modes these are the only two width-$m$ applies per iteration.
   3. $W$ is M-orthogonalized against $[X, P]$, then SVQB, then orthogonalized again, then SVQB.
   4. Rayleigh–Ritz on $[X, W, P]$, with the Grams built pairwise from $m\times m$ products.
      - Masked rows and columns are zeroed off the diagonal, with $G_M = 1$ and $G_K = \beta = 10\max_i|\lambda_i| + \|K\|/\|M\|$ on it.
@@ -165,6 +168,56 @@ Hetmaniuk–Lehoucq / Duersch et al. (2018), with fixed shapes: every block is $
   6. **Update.** $X' = XC_x + WC_w + PC_p$, and $P'$ likewise, with the same GEMMs for the K and M products. It is sequenced with `optimization_barrier`: XLA does not fuse a sum of GEMMs, and this saves 2 blocks.
   7. Every `RECOMPUTE` = 20 iterations, a traced `lax.cond` replaces the implicitly updated products by explicit applies.
 - **Exit check.** When the wanted pairs meet their thresholds, $KX$ and $MX$ are recomputed explicitly and written back into the state. The solve exits only if the check still passes.
+
+### Chunks and locking
+
+A solve of many modes runs in chunks of `chunk` wanted modes with one block shape; converged chunks are locked into a basis $V$ that later chunks are deflated against.
+
+- **Driver.** For each chunk, `want` = min(chunk, modes still missing). The start block is the previous chunk's unlocked Ritz vectors, padded with random columns, deflated against $V$ and $R$ and SVQB-orthonormalized (the setup's refill rule). The iteration loop is the one above, on the first $j$ columns.
+- **Cluster rule.** A lock must end in a gap. Once the wanted residuals are $\le \sqrt{t}$ (Ritz values are then accurate to about $r^2 \le t$, well inside the window), $j$ extends from `want` while
+  $$\frac{\lambda_{j+1} - \lambda_j}{|\lambda_j|} < 100\,t_j,$$
+  with $t_j \ge$ tol the acceptance threshold (so floor-accepted pairs and the fp32 term count). The rule runs every iteration; $j$ only grows, and the progress test restarts when it does. The extended columns must converge too.
+- **Guard error.** If $j$ reaches $m$, the cluster's end is not visible inside the block: `ValueError` "a cluster at the chunk boundary (from mode i) fills the block: it needs more than g guard vectors; pass guards >= g + 1 or a chunk size that ends in a gap". A cluster split by too few guards converges very slowly (one guard on a triple: the guard's Ritz value is still $10^{-7}$ off after 500 iterations), so at a failed exit with the wanted residuals $\le \sqrt t$ the boundary is re-checked with the guards' Ritz-value uncertainty, gap $< \max(100\,t_j, \min(10\,r_{j+1}^2, 10^{-3}))$, and the guard error is raised if the cluster then fills the block. Only chunks that will be locked raise it: the final chunk (and so every single-chunk solve) keeps `want` when the cluster fills the block, since its tail past `n_modes` is cut anyway, as in 9a.
+- **Locking.** A converged chunk (including floor acceptance) is locked: columns $1..j$ go into $V$, and $X_{:, j+1..m}$ seeds the next chunk. Before insertion they are M-orthogonalized twice against the basis and M-orthonormalized by Cholesky, and their residuals recomputed (4 M applies and one K apply on $m$ columns per lock), which keeps $V$ M-orthonormal to rounding: the in-loop deflation is a single pass, and when the preconditioned residual is dominated by the locked directions (Jacobi on a pencil whose low modes have small diagonals, up to $\|K\|/\lambda$ times) a basis off by $10^{-9}$ leaves enough of them in $W$ to pull the block into span($V$) after 9–22 chunks in the measured cases. A column whose projected M-norm² falls below 0.5 lies in span($V$) and raises `RuntimeError`. A cluster that straddles `n_modes` is computed whole and the return is cut at `n_modes`.
+- **Failed chunk.** A no-progress or `maxit` exit ends the solve: the locked modes plus that chunk's `want` Ritz vectors (upper bounds, M-orthonormal; residuals from the explicit confirmation) are returned with `converged` False. Locking unconverged vectors would corrupt the deflation of every later chunk.
+- **Basis.** `B` is a zero-initialized device array $(n, \text{capacity})$ in `basis_dtype` (column layout; the transposed layout was 2–3× slower), with capacity $\lceil (n_\mathrm{modes} + m)/c\rceil\,c$, no basis for a single chunk. A lock writes $m$ columns (X with the unlocked columns zeroed) with a jitted `dynamic_update_slice`, `B` donated (in place). The host checks count + m ≤ capacity before writing (`dynamic_update_slice` would clamp the start onto earlier columns) and raises `RuntimeError`; the capacity rule never triggers it.
+- **Projector.** $Y \leftarrow Y - V_c(V_c^\top MY)$ in a `fori_loop` over $\lceil \text{count}/c \rceil$ column chunks of width $c$, each `dynamic_slice`d and upcast to fp64, with $MY$ of the undeflated block passed in. Columns past the count are zero, so the last chunk reads past it exactly. The temp is exactly $(c + m)\,n \cdot 8$ B, independent of the capacity. $c = \max(m, \min(4m, 64))$ for the 9-block step (at small $m$ the projector re-reads Y and MY per chunk: 41 / 33 / 26 ms for $c = m, 2m, 4m$ at $m = 15$, 200 locked, 182k DOF; 221 / 167 / 105 ms with 1000 locked; the step stays at 16 blocks for $c \le 4m$) and $c = m$ for the low-memory step ($4m$ would cost 2.3 blocks). One classical pass suffices for an fp64 basis: the coefficients come from the original $MY$, and $X$ does not drift toward $V$ during a chunk (Rayleigh–Ritz gains locked content only to second order; $\max|V^\top MX|$ stays at $10^{-15}$ over 800 iterations).
+- **fp32 basis.** The rounded locked modes are M-orthonormal only to about $u_{32} = 2^{-24}$, and one pass leaves about $u_{32}$ of locked content in $W$: chunks after the first floor near $10^{-8}$ (measured $6\cdot10^{-9}$–$10^{-8}$). Their threshold is $t_i = \max(\mathrm{tol}, \text{floor}_i, 2u_{32})$, about $1.2\cdot10^{-7}$, so they floor-accept (`converged` and `stagnated`) instead of stopping the solve. This assumes $\|Mv_i\|/\|Mx\| = O(1)$; with strongly heterogeneous density (e.g. SIMP voids) the floor can be higher, and the chunk then stops loudly. Use tol $\ge 10^{-6}$ with fp32.
+- **Returned modes.** `V` is a preallocated fp64 host array $(n, n_\mathrm{modes})$: each lock copies its columns into it before inserting them into the basis, and the final chunk (never inserted) adds its columns at the end. No device copy of the basis is made.
+
+| case (hex20 $6^3$, 30 modes, chunks of 10, $m = 15$) | basis | chunk iterations | max rel. λ error | $\max\lvert V^\top MV - I\rvert$ |
+|---|---|---|---|---|
+| clamped, tol $10^{-10}$ | fp64 | 313 / 286 / 268 | $7\cdot10^{-13}$ | $6\cdot10^{-15}$ |
+| free, tol $10^{-10}$ | fp64 | 349 / 363 / 284 | $3\cdot10^{-14}$ | $4\cdot10^{-15}$ |
+| clamped, tol $10^{-6}$ | fp32 | 197 / 175 / 163 | $1\cdot10^{-12}$ | $9\cdot10^{-9}$ |
+| clamped, tol $10^{-10}$ | fp32 | 313 / 191 / 181, chunks 2–3 floor-accepted | $7\cdot10^{-13}$ | $1\cdot10^{-8}$ |
+
+A single chunk of 30 modes ($m = 36$) needs 266 iterations, 2.4 s against 4.9 s for the 3 chunks: chunking trades time for memory.
+
+### Low-memory mode
+
+`lobpcg_step_low` keeps only $(X, P, \mathrm{act}_P, \lambda)$ and recomputes every product when it is needed, in phases separated by `optimization_barrier`s: $KX$, $MX$ (residuals of the input $X$, $W$, Gram blocks; KX dies); deflation; $MP$ and two classical M-orthogonalizations of $W$ against $X$ and $P$ (MX, MP die); $MW$ and SVQB; $KW$; $KP$; Rayleigh–Ritz and the sequenced update of $X$ and $P$. Every Gram block is formed from explicit products, so there is no recompute schedule. It needs 6 applies per iteration instead of 2 (plus the deflation's), and it reports the residuals of the input $X$; the exit check confirms the updated $X$ explicitly before accepting.
+
+- **Memory:** 7 blocks with a diagonal operator; 11.0–11.7 with the hex20 operator at 182k–1.08M DOF ($m$ = 15, 48); 9.0–9.9 with the voxel stencil ($m = 8$, 1.6M–5.4M DOF, CPU). Not 6: XLA copies the donated $X$ and $P$ early so their buffers can take the new ones, and an apply inside the step costs about 4 blocks (input copy, accumulator, output, chunk workspace). Variants without donation, with fewer barriers or fused masks all measured 11–12 blocks.
+- **Accuracy:** same iterations ±2 as the 9-block step, λ matching it to $\le 3\cdot10^{-13}$ (12 modes, tol $10^{-10}$, the four accuracy cases).
+- **Cost:** see the table below.
+
+| hex20 $24^3$ (182k DOF), warm | 9-block | low-memory |
+|---|---|---|
+| $m = 15$, no locked modes | 75 ms | 140 ms |
+| $m = 15$, 200 locked | 123 ms | 201 ms |
+| $m = 48$, no locked modes | 223 ms | 349 ms |
+| $m = 48$, 200 locked | 312 ms | 446 ms |
+
+### Memory model
+
+`jaxmodal.memory.lobpcg_memory(op_memory, n_dof, n_modes, chunk=None, guards=None, low_memory=False, basis_dtype="float64", n_rigid=0)` takes `op_memory`, a callable $m \mapsto$ the operator estimate (e.g. `lambda m: unstructured_memory(mesh, m)`), and returns, in bytes, with $b = 8\,n\,m$ one block:
+
+- **`step`** $= A\,b + f\,w$, with $w$ the operator's `workspace` at width $m$: $(A, f) = (16, 2.5)$ for the 9-block step and $(11, 1.75)$ for the low-memory step. $A$ is the large-n step (it includes the operator's own vectors); $f$ is the upper envelope of `memory_analysis` over hex8/hex20/hex27 at 6.6k–1.08M DOF and $m$ = 7–48 (two applies' workspace can be live at once in the 9-block step). The margin is about 3% at 1M DOF, where $w$ is a fraction of a block, and up to about 2× at 10k–100k DOF, where $w$ is several blocks. With a diagonal operator the steps hold 16 and 7 blocks (pinned by tests).
+- **`basis`** $= n \cdot \text{capacity} \cdot (8$ or $4)$; **`rigid`** $= 2 \cdot 8\,n\,n_\mathrm{rigid}$ ($R$ and $MR$); **`host`** $= b + 8\,n\,n_\mathrm{modes}$ (the asynchronously freed step output and the fp64 modes on the host), plus 4 blocks for a chunked solve (transients between chunks: the start block, the seed, allocator slack; at most 2.6 measured).
+- **`total`** = overhead + operator storage + basis + rigid + host + max(operator build, step).
+
+Measured process peak at hex20 $44^3$ (1.08M DOF), 40 modes in one chunk with 8 guards ($m = 48$), 3 iterations: 8.74 GB against the estimate 8.87 GB (9-block), 6.52 against 6.75 GB (low-memory). Chunked, with a diagonal pencil (300k DOF, 100 modes in chunks of 10): 1.24 against 1.30 GB (fp64 basis), 1.09 against 1.15 GB (fp32). The step term is an envelope fit: up to about 2× high at 10k–100k DOF, and for an operator without workspace (diagonal) a single chunk can come out about 4% low, and many chunks up to 7% low (500k DOF, 400 modes in chunks of 10: allocator growth of about $0.15 \cdot 8\,n\,n_\mathrm{modes}$; real operators add slack through the workspace term).
 
 ### Convergence
 
@@ -232,9 +285,8 @@ All runs: isotropic $E = 3$, $\nu = 0.3$, $\rho = 2$ on the box $(1, 0.83, 0.67)
   - The setup (power iterations, start block, R check) takes about 0.5 s warm (≈ 7 iterations) and 1.1 s with the first-call compiles.
 - **Step memory:**
   - With a diagonal operator, so that no operator workspace counts, the compiled step holds temp + donated state = 16.0 blocks of $(n, m)$ fp64. This is pinned by a test; without the barriers it is 18.
-  - The roadmap's 9 + 2 blocks were not reached in any measured variant. A donated buffer takes its output only after every read of it, so the new $X$ and $P$ coexist with the old ones and $W$.
-  - With a real operator the peak is the larger of that and the apply phase plus the operator workspace: 52–56 blocks at hex20 $8^3$ (8k DOF), 16.05 at 182k and 16.00 at 421k, so the step reaches its 16 blocks by about 180k DOF.
-  - PR 9b's estimator models this as max(16 blocks, apply phase + operator workspace), together with the memory model.
+  - The roadmap's original 9 + 2 blocks were not reached in any measured variant. A donated buffer takes its output only after every read of it, so the new $X$ and $P$ coexist with the old ones and $W$.
+  - With a real operator the operator workspace adds to it: 55.6 blocks at hex20 $8^3$ (8k DOF), 16.05 at 182k and 16.00 at 1.08M, so the step reaches its 16 blocks by about 180k DOF. See [Memory model](#memory-model).
 
 ## Sizes
 
@@ -281,8 +333,20 @@ All runs: isotropic $E = 3$, $\nu = 0.3$, $\rho = 2$ on the box $(1, 0.83, 0.67)
   - `_p_coeffs` masks exactly a noise column;
   - near-singular M within 500 iterations;
   - a NaN preconditioner raises `FloatingPointError`.
-- **Compiles:** one step compile per solve, and 0 for a second solve with a new operator, preconditioner and tol (subprocess, cache off, `jax.monitoring`).
-- **Memory:** step memory $\le 16.5$ blocks.
+- **Compiles:** one step compile per solve, and 0 for a second solve with a new operator, preconditioner and tol (subprocess, cache off, `jax.monitoring`, filtered by the exact `fun_name`); a 3-chunk solve compiles the step once and a second one with new data nothing; the low-memory step is one more variant.
+- **Memory:** with a diagonal operator, step memory $\le 16.5$ blocks (9-block) and $\le 7.5$ (low-memory), the same to 0.01 blocks for capacities $c\lceil 2m/c\rceil$ and 4× that, fp64 or fp32, and without a basis. With the hex20 operator ($24^3$ at $m$ = 15, 48; $8^3$ at $m = 15$) and the held-out hex8 $20^3$ and hex27 $12^3$ ($m = 24$) the step is within `lobpcg_memory`'s step term, in both modes. At 1.08M DOF (slow, macOS, one chunk) the measured peak is within 20% of the estimate (≥ 2 GB); a chunked diagonal-pencil solve (slow, macOS, fp64 and fp32 basis) peaks below the estimate.
+- **Chunks** (PR 9b), against `reference_modes`:
+  - 30 modes in 3 chunks of 10, clamped and free hex20 $6^3$, both modes: the accuracy checks above over all 30 modes, every chunk converged and none stagnated;
+  - the four accuracy cases in the low-memory mode, λ matching the 9-block λ to $\max(10^{-8}, 10\varepsilon\lambda_\max/\lambda)$; the P invariant also holds for the low-memory step;
+  - a free cube (multiplicities 2, 3, 3, 2, 1, 3, 3), 12 modes in chunks of 4: locks of 5, 5 and 4 modes, the return cut at 12 (`V` has 12 columns), exact multiplicities; with one guard the guard error ("guards >= 2"), but not for a single chunk (4 modes, one guard: no error, as in 9a);
+  - `_capacity`: the worst-case lock writes stay within the capacity;
+  - an fp32 basis at tol $10^{-6}$ (λ within the rule above, $\|V^\top MV - I\| \le 10^{-5}$, the count below the λ₃₀/λ₃₁ midpoint equal to `count_below`'s and to 30) and at tol $10^{-10}$ (chunks 2–3 floor-accept, chunk 1 does not);
+  - the projector against the one-pass fp64 one to $10^{-14}$ (count $3c + 5$, fp64 and fp32 basis) and its temp $\le 1.01\,(c + m)\,n \cdot 8$ B, the same for capacities $2c$ and $8c$;
+  - in-place insertion (`is_deleted`, same buffer pointer) and a full basis (raises before writing; the basis is intact);
+  - `_reortho` (M-orthogonal to a basis whose count is not a multiple of the chunk width, inputs with norms ≠ 1): zero tail, M-orthonormal columns M-orthogonal to the basis ($10^{-13}$), column order kept, two projection passes needed for columns $10^{-6}$ off the span, a column inside the basis span flagged by its projected norm, and the solve raising on it (monkeypatched);
+  - 300 modes in 30 chunks on a diagonal pencil (20k DOF, Jacobi residuals up to $10^6\times$ along the locked coordinates; slow): converged, $\|V^\top MV - I\| \le 10^{-13}$, λ exact to $10^{-9}$ (without the re-orthonormalization at lock chunk 9 fails);
+  - a failed second chunk (`X0` = reference modes, `maxit` 5): 20 modes, chunks `[True, False]`, all 20 M-orthonormal;
+  - `ValueError` for `chunk` 0 or above `n_modes`, `guards` 0, `basis_dtype="float16"` and chunk + guards above the free DOFs.
 - **Floor** (slow): within $[0.1, 10]\times\varepsilon\lambda_\max/\lambda_1$.
 - **Jacobi, σ and errors:** Jacobi against the assembled diagonals; σ within $[\lambda_1, 2\lambda_1]$; `ValueError` for a too-large block, a bad `X0`, `n_modes` or `maxit` below 1, and a non-M-orthonormal R; `RuntimeError` after 3 refills; the `maxit` and no-progress exits run the explicit confirmation (counted).
 

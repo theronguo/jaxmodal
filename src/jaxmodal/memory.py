@@ -1,5 +1,6 @@
-"""Device memory estimators (bytes). See docs/operators.md."""
+"""Device memory estimators (bytes). See docs/operators.md and docs/eigensolvers.md."""
 
+from .eigen.lobpcg import _block_size, _capacity  # shared with the solver on purpose
 from .elements import ELEMENTS
 from .materials import phases
 from .operators.matfree import layout
@@ -96,4 +97,40 @@ def stencil_memory(mesh, m, mass="consistent", slab=None):
     out["total"] = (
         out["overhead"] + out["storage"] + max(out["build"], out["vectors"] + out["workspace"])
     )
+    return {k: int(v) for k, v in out.items()}
+
+
+# LOBPCG step temp + aliased state = A blocks + f * operator workspace: A is the large-n value,
+# f the upper envelope of memory_analysis over hex8/20/27 at 6.6k-1.08M DOF, m = 7-48
+# (docs/eigensolvers.md).
+STEP_FIT = {"9-block": (16, 2.5), "low": (11, 1.75)}
+
+
+def lobpcg_memory(
+    op_memory, n_dof, n_modes, chunk=None, guards=None, low_memory=False, basis_dtype="float64",
+    n_rigid=0,
+):  # fmt: skip
+    """Estimated peak bytes of lobpcg(...). op_memory: m -> the operator estimate at block width
+    m, e.g. lambda m: unstructured_memory(mesh, m).
+
+    Returns step, basis, rigid, host and
+    total = overhead + storage + basis + rigid + host + max(build, step).
+    """
+    chunk, guards, k = _block_size(n_modes, chunk, guards)
+    _, cap = _capacity(n_modes, chunk, k, low_memory)
+    op = op_memory(k)
+    b = 8 * n_dof * k
+    A, f = STEP_FIT["low" if low_memory else "9-block"]
+    out = dict(
+        step=A * b + f * op["workspace"],
+        basis=n_dof * cap * (4 if basis_dtype == "float32" else 8),
+        rigid=2 * 8 * n_dof * n_rigid,  # R and M R, fp64
+        # freed step output and the fp64 modes on the host; a chunked solve adds 4 blocks of
+        # transients between chunks (start block, seed, allocator slack: <= 2.6 measured)
+        host=(5 if cap else 1) * b + 8 * n_dof * n_modes,
+    )
+    out["total"] = (
+        op["overhead"] + op["storage"] + out["basis"] + out["rigid"] + out["host"]
+        + max(op["build"], out["step"])
+    )  # fmt: skip
     return {k: int(v) for k, v in out.items()}
