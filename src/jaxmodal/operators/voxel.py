@@ -150,6 +150,22 @@ def reference_element(op):
     return Ke, jnp.einsum("q,qa,qb->ab", wdet, N, N)
 
 
+def grid_ids(op):
+    """Host (cell, node) id grids of a Stencil in (x, y, z) axis order, shapes (nx, ny, nz) and
+    (nx+1, ny+1, nz+1), -1 for inactive cells and unused nodes. The slab padding and any empty
+    trailing layers along the scan axis are cropped. The only reader of the stored layout
+    outside this module (PR 11's GMG)."""
+    perm = [op.axes.index(d) for d in range(3)]
+    cell = np.asarray(op.cell).transpose(perm).astype(np.int64)
+    node = np.asarray(op.node).transpose(perm).astype(np.int64)
+    scan = op.axes[0]
+    used = np.flatnonzero((cell < op.n_el).any(axis=tuple(d for d in range(3) if d != scan)))
+    n = used[-1] + 1
+    cell = np.take(cell, np.arange(n), scan)
+    node = np.take(node, np.arange(n + 1), scan)
+    return np.where(cell < op.n_el, cell, -1), np.where(node < op.n_nodes, node, -1)
+
+
 # ---------------------------------------------------------------- slab loop
 
 

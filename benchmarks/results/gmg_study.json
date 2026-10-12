@@ -1,0 +1,578 @@
+{
+  "runs": [
+    {
+      "case": "box8",
+      "shape": [
+        8,
+        8,
+        8
+      ],
+      "n_dof": 2187,
+      "sigma": 12243236.8811708,
+      "sigma_estimate": 12247599.373400955,
+      "iterations": [
+        13,
+        13,
+        13,
+        13
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 1.2754397089593112
+    },
+    {
+      "case": "box16",
+      "shape": [
+        16,
+        16,
+        16
+      ],
+      "n_dof": 14739,
+      "sigma": 12243236.8811708,
+      "sigma_estimate": 12153599.035717541,
+      "iterations": [
+        13,
+        13,
+        13,
+        13
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.7463664580136538
+    },
+    {
+      "case": "box32",
+      "shape": [
+        32,
+        32,
+        32
+      ],
+      "n_dof": 107811,
+      "sigma": 12243236.8811708,
+      "sigma_estimate": 12580452.161915252,
+      "iterations": [
+        13,
+        13,
+        13,
+        13
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.7471755830338225
+    },
+    {
+      "case": "box64",
+      "shape": [
+        64,
+        64,
+        64
+      ],
+      "n_dof": 823875,
+      "sigma": 12243236.8811708,
+      "sigma_estimate": 13238026.3508588,
+      "iterations": [
+        13,
+        13,
+        13,
+        13
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 1.2350225419504568
+    },
+    {
+      "case": "odd9",
+      "shape": [
+        9,
+        8,
+        8
+      ],
+      "n_dof": 2430,
+      "sigma": 10928055.461880669,
+      "sigma_estimate": 10950971.61120709,
+      "iterations": [
+        13,
+        13,
+        13,
+        13
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 1.4488014590460807
+    },
+    {
+      "case": "odd17",
+      "shape": [
+        17,
+        8,
+        8
+      ],
+      "n_dof": 4374,
+      "sigma": 4806989.9990639,
+      "sigma_estimate": 4819528.6420054035,
+      "iterations": [
+        13,
+        13,
+        13,
+        13
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 1.3767025830456987
+    },
+    {
+      "case": "odd33",
+      "shape": [
+        33,
+        8,
+        8
+      ],
+      "n_dof": 8262,
+      "sigma": 1533891.8904092524,
+      "sigma_estimate": 1555964.8057527938,
+      "iterations": [
+        14,
+        14,
+        14,
+        14
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 1.337437832960859
+    },
+    {
+      "case": "free32",
+      "shape": [
+        32,
+        32,
+        32
+      ],
+      "n_dof": 107811,
+      "sigma": 84095876.71717408,
+      "sigma_estimate": 86589488.94428058,
+      "iterations": [
+        13,
+        13,
+        13,
+        13
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.10879774997010827
+    },
+    {
+      "case": "plate16",
+      "shape": [
+        16,
+        16,
+        1
+      ],
+      "n_dof": 1734,
+      "sigma": 177915.6706314667,
+      "sigma_estimate": 181692.86591974105,
+      "iterations": [
+        22,
+        22,
+        23,
+        23
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 1.436326166964136
+    },
+    {
+      "case": "plate32",
+      "shape": [
+        32,
+        32,
+        1
+      ],
+      "n_dof": 6534,
+      "sigma": 44817.53240836365,
+      "sigma_estimate": 59947.59396420043,
+      "iterations": [
+        36,
+        35,
+        37,
+        36
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.7411550829419866
+    },
+    {
+      "case": "plate64",
+      "shape": [
+        64,
+        64,
+        1
+      ],
+      "n_dof": 25350,
+      "sigma": 11230.470135085518,
+      "sigma_estimate": 1248972.4154979757,
+      "iterations": [
+        70,
+        66,
+        71,
+        67
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.630613041925244
+    },
+    {
+      "case": "plate128",
+      "shape": [
+        128,
+        128,
+        1
+      ],
+      "n_dof": 99846,
+      "sigma": 2809.6438176978263,
+      "sigma_estimate": 10623600.533665122,
+      "iterations": [
+        132,
+        134,
+        136,
+        132
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.8167671669507399
+    },
+    {
+      "case": "plate64x2",
+      "shape": [
+        64,
+        64,
+        2
+      ],
+      "n_dof": 38025,
+      "sigma": 32859.93332830351,
+      "sigma_estimate": 499716.168372179,
+      "iterations": [
+        40,
+        40,
+        39,
+        39
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 2.3327070829691365
+    },
+    {
+      "case": "beam64x2",
+      "shape": [
+        64,
+        2,
+        2
+      ],
+      "n_dof": 1755,
+      "sigma": 30666.33707864117,
+      "sigma_estimate": 49201.706671103544,
+      "iterations": [
+        23,
+        23,
+        23,
+        23
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 2.2415592500474304
+    },
+    {
+      "case": "beam128",
+      "shape": [
+        128,
+        1,
+        1
+      ],
+      "n_dof": 1548,
+      "sigma": 2590.600003116764,
+      "sigma_estimate": 3456167.8425299837,
+      "iterations": [
+        54,
+        54,
+        58,
+        54
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 2.6162682090653107
+    },
+    {
+      "case": "simp32@solid",
+      "shape": [
+        32,
+        32,
+        32
+      ],
+      "n_dof": 107811,
+      "sigma": 12243236.8811708,
+      "sigma_estimate": 1839.0917014187398,
+      "iterations": [
+        33,
+        33,
+        33,
+        33
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.4617163749644533
+    },
+    {
+      "case": "simp32@own",
+      "shape": [
+        32,
+        32,
+        32
+      ],
+      "n_dof": 107811,
+      "sigma": 15.124775535299483,
+      "sigma_estimate": 1839.0917014187398,
+      "iterations": [
+        87,
+        87,
+        87,
+        87
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.12205429200548679
+    },
+    {
+      "case": "simp32s4@own",
+      "shape": [
+        32,
+        32,
+        32
+      ],
+      "n_dof": 107811,
+      "sigma": 4.063056848914869,
+      "sigma_estimate": 1303.3914363044655,
+      "iterations": [
+        134,
+        135,
+        134,
+        135
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.26027845800854266
+    },
+    {
+      "case": "simp32s5@own",
+      "shape": [
+        32,
+        32,
+        32
+      ],
+      "n_dof": 107811,
+      "sigma": 2001.8535370396855,
+      "sigma_estimate": 2003.0896062321606,
+      "iterations": [
+        109,
+        109,
+        107,
+        109
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.10190529096871614
+    },
+    {
+      "case": "binary32@own",
+      "shape": [
+        32,
+        32,
+        32
+      ],
+      "n_dof": 107811,
+      "sigma": 41.248915863764545,
+      "sigma_estimate": 16089.017277841638,
+      "iterations": [
+        446,
+        409,
+        452,
+        449
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.10902124992571771
+    },
+    {
+      "case": "aniso0.5",
+      "shape": [
+        32,
+        32,
+        32
+      ],
+      "n_dof": 107811,
+      "sigma": 5290887.988588986,
+      "sigma_estimate": 12426218.769937314,
+      "iterations": [
+        14,
+        14,
+        14,
+        14
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.1074019999941811
+    },
+    {
+      "case": "aniso0.25",
+      "shape": [
+        32,
+        32,
+        32
+      ],
+      "n_dof": 107811,
+      "sigma": 1680208.5966941814,
+      "sigma_estimate": 12566564.590453936,
+      "iterations": [
+        28,
+        28,
+        28,
+        28
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.10151975008193403
+    },
+    {
+      "case": "aniso0.1",
+      "shape": [
+        32,
+        32,
+        32
+      ],
+      "n_dof": 107811,
+      "sigma": 301455.19037720934,
+      "sigma_estimate": 13939164.520573312,
+      "iterations": [
+        105,
+        105,
+        106,
+        102
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.10236295801587403
+    }
+  ],
+  "tol": 1e-08,
+  "system": "benchmarks/results/system.json",
+  "large": {
+    "n": 87,
+    "n_dof": 2044416,
+    "m": 15,
+    "setup_peak_bytes": 1120879480,
+    "vcycle_s": 1.921931374934502,
+    "apply_s": 0.3704310830216855,
+    "timing_peak_bytes": 4293676560
+  },
+  "versions": {
+    "jax": "0.11.2",
+    "jaxlib": "0.11.2",
+    "numpy": "2.5.3",
+    "platform": "macOS-27.2-arm64-arm-64bit",
+    "cpu_count": 16,
+    "p_cores": 12,
+    "e_cores": 4,
+    "xla_flags": null,
+    "jax_num_cpu_devices": true
+  }
+}
