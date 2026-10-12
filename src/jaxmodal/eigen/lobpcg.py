@@ -147,14 +147,16 @@ def lobpcg_step(state, op, m, precond, R, MR, consts, recompute):
     th, C, G = jnp.where(ok, th, th2), jnp.where(ok, C, C2), jnp.where(ok, G, G2)
     Cx = C[:, :k]
     Cp, live, keep = _p_coeffs(Cx, Cx.at[:k].set(0.0), G)
-    noisy = (jnp.abs(Cx[k:]).sum(0) > 0) & ~live
-    dropped = ~ok | noisy.any() | (keep.sum() < live.sum())
-    new = [_update(tuple(b[j] for b in blocks), Cx, Cp) for j in range(3)]
+    # a P column was lost (noise rule or SVQB drop) iff fewer kept than nonzero inputs
+    dropped = ~ok | (keep.sum() < (jnp.abs(Cx[k:]).sum(0) > 0).sum())
+    (Xn, Pn), (KXn, KPn), (MXn, MPn) = (
+        _update(tuple(b[j] for b in blocks), Cx, Cp) for j in range(3)
+    )
     Xn, KXn, MXn, Pn, KPn, MPn = jax.lax.cond(
         recompute,
         lambda a: (a[0], _K(op, m, a[0]), _M(op, m, a[0]), a[3], _K(op, m, a[3]), _M(op, m, a[3])),
         lambda a: a,
-        (new[0][0], new[1][0], new[2][0], new[0][1], new[1][1], new[2][1]),
+        (Xn, KXn, MXn, Pn, KPn, MPn),
     )
     lam = th[:k]
     r, t = _resid(Xn, KXn, MXn, lam, consts)
@@ -162,8 +164,8 @@ def lobpcg_step(state, op, m, precond, R, MR, consts, recompute):
     return (Xn, KXn, MXn, Pn, KPn, MPn, keep, lam), out
 
 
-@functools.partial(jax.jit, static_argnums=3)
-def _norms(op, m, v, its):
+@jax.jit
+def _norms(op, m, v):
     """||K_m||_2 and ||M_m||_2 by power iteration from v."""
 
     def power(A):
@@ -171,7 +173,7 @@ def _norms(op, m, v, its):
             y = A(op, m, xn[0])
             return y / jnp.linalg.norm(y), jnp.linalg.norm(y)
 
-        return jax.lax.fori_loop(0, its, body, (v / jnp.linalg.norm(v), 0.0))[1]
+        return jax.lax.fori_loop(0, POWER, body, (v / jnp.linalg.norm(v), 0.0))[1]
 
     return power(_K), power(_M)
 
@@ -197,6 +199,31 @@ def _confirm(state, op, m, consts):
     return (X, KX, MX) + state[3:], *_resid(X, KX, MX, lam, consts)
 
 
+def _setup(op, m, k, R, MR, X0, seed):
+    """Norms, start block (X0 padded with random columns) and the initial state, with P a
+    masked zero block: (state, ||K||, ||M||, refills)."""
+    n = m.shape[0]
+    key, sub = jax.random.split(jax.random.key(seed))
+    nK, nM = map(float, _norms(op, m, m * jax.random.normal(sub, (n, 1))))
+    key, sub = jax.random.split(key)
+    X = jax.random.normal(sub, (n, k))
+    if X0 is not None:
+        X = X.at[:, : X0.shape[1]].set(X0)
+    refills = 0
+    while True:  # SVQB drops dependent columns; refill them with random vectors
+        X, KX, MX, keep = _start(X, op, m, R, MR)
+        if keep.all():
+            break
+        if refills == 3:
+            raise RuntimeError("start block still rank-deficient after 3 refills")
+        refills += 1
+        key, sub = jax.random.split(key)
+        X = jnp.where(keep, X, jax.random.normal(sub, X.shape))
+    X, KX, MX, lam = _rr_start(X, KX, MX)
+    P = [jnp.zeros_like(X) for _ in range(3)]  # separate buffers: the state is donated
+    return (X, KX, MX, *P, jnp.zeros(k, bool), lam), nK, nM, refills
+
+
 def lobpcg(op, free, n_modes, tol=1e-6, R=None, precond=None, X0=None, maxit=500, seed=0):
     """Lowest n_modes eigenpairs of the masked pencil (K_m, M_m). Returns lam (n_modes,)
     ascending (NumPy), V (n_dof, n_modes) M-orthonormal with constrained rows 0 (device), and
@@ -217,7 +244,9 @@ def _solve(op, free, n_modes, tol, R, precond, X0, maxit, seed, stop=None):
         raise ValueError(f"free must be a ({n},) bool mask")
     R = jnp.zeros((n, 0)) if R is None else jnp.asarray(R, jnp.float64)
     k = n_modes + max(5, n_modes // 5)
-    if n_modes < 1 or k > free.sum() - R.shape[1]:
+    if n_modes < 1 or maxit < 1:
+        raise ValueError(f"n_modes and maxit must be >= 1, got {n_modes}, {maxit}")
+    if k > free.sum() - R.shape[1]:
         raise ValueError(
             f"block size {k} for n_modes = {n_modes} exceeds the {free.sum()} free DOFs minus "
             f"the deflation rank {R.shape[1]}"
@@ -226,29 +255,12 @@ def _solve(op, free, n_modes, tol, R, precond, X0, maxit, seed, stop=None):
     MR = _M(op, m, R) if R.shape[1] else R
     if R.shape[1] and np.abs(np.asarray(R.T @ MR) - np.eye(R.shape[1])).max() > 1e-8:
         raise ValueError("R must be M-orthonormal on the free DOFs (m_orthonormalize with this op)")
-    precond = jacobi(op, free) if precond is None else precond
-    key, sub = jax.random.split(jax.random.key(seed))
-    nK, nM = map(float, _norms(op, m, m * jax.random.normal(sub, (n, 1)), POWER))
-    key, sub = jax.random.split(key)
-    X = jax.random.normal(sub, (n, k))
     if X0 is not None:
         X0 = jnp.asarray(X0, jnp.float64)
         if X0.ndim != 2 or X0.shape[0] != n or X0.shape[1] > k:
             raise ValueError(f"X0 must have shape ({n}, j) with j <= {k}, got {X0.shape}")
-        X = X.at[:, : X0.shape[1]].set(X0)
-    refills = 0
-    while True:  # SVQB drops dependent columns; refill them with random vectors
-        X, KX, MX, keep = _start(X, op, m, R, MR)
-        if keep.all():
-            break
-        if refills == 3:
-            raise RuntimeError("start block still rank-deficient after 3 refills")
-        refills += 1
-        key, sub = jax.random.split(key)
-        X = jnp.where(keep, X, jax.random.normal(sub, X.shape))
-    X, KX, MX, lam = _rr_start(X, KX, MX)
-    state = (X, KX, MX, jnp.zeros_like(X), jnp.zeros_like(X), jnp.zeros_like(X),
-             jnp.zeros(k, bool), lam)  # fmt: skip
+    precond = jacobi(op, free) if precond is None else precond
+    state, nK, nM, refills = _setup(op, m, k, R, MR, X0, seed)
     consts = jnp.array([nK, nM, tol, C_FLOOR])
     t1 = time.perf_counter()
     hist, lsum, drops = [], [], 0
@@ -277,6 +289,9 @@ def _solve(op, free, n_modes, tol, R, precond, X0, maxit, seed, stop=None):
                 r, t, converged = r2, t2, True
                 stagnated = bool((r[:n_modes] > tol).any())
                 break
+    if not converged:  # report residuals of explicit products on every exit
+        state, r, t = _confirm(state, op, m, consts)
+        r, t = np.asarray(r), np.asarray(t)
     info = dict(
         iterations=it + 1,
         converged=converged,

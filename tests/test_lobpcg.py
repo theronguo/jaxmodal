@@ -196,6 +196,9 @@ def test_stagnation(monkeypatch):
     monkeypatch.setattr(lob, "C_FLOOR", 0.0)  # floor unreachable: the no-progress exit
     _, _, info = lobpcg(p.op, p.free, 10, tol=1e-16, maxit=2000)
     assert not info["converged"] and info["stagnated"] and info["iterations"] < 2000
+    lam, V, info = lobpcg(p.op, p.free, 10, tol=1e-10, maxit=30)  # the maxit exit
+    assert not info["converged"] and not info["stagnated"] and info["iterations"] == 30
+    assert np.allclose(info["residuals"], residuals(p, lam, V), rtol=1e-5)
 
 
 def test_one_mode_no_false_stagnation():
@@ -217,18 +220,12 @@ def test_rank_deficient_start():
 
 
 def start(p, k, seed=0):
-    """A converging solver state as lobpcg builds it, plus the step's other arguments."""
+    """A solver state as lobpcg builds it, plus the step's other arguments."""
     m = jnp.asarray(p.free, float)[:, None]
     R = jnp.zeros((p.op.n_dof, 0))
-    X = jax.random.normal(jax.random.key(seed), (p.op.n_dof, k))
-    X, KX, MX, _ = lob._start(X, p.op, m, R, R)
-    X, KX, MX, lam = lob._rr_start(X, KX, MX)
-    Z = [jnp.zeros_like(X) for _ in range(3)]
-    nK, nM = map(
-        float, lob._norms(p.op, m, m * jax.random.normal(jax.random.key(9), (len(m), 1)), 30)
-    )
+    state, nK, nM, _ = lob._setup(p.op, m, k, R, R, None, seed)
     consts = jnp.array([nK, nM, 1e-10, lob.C_FLOOR])
-    return [X, KX, MX, *Z, jnp.zeros(k, bool), lam], (p.op, m, jacobi(p.op, p.free), R, R, consts)
+    return list(state), (p.op, m, jacobi(p.op, p.free), R, R, consts)
 
 
 def test_forced_p_drop():
@@ -238,9 +235,8 @@ def test_forced_p_drop():
     rng = jax.random.split(jax.random.key(1), 3)
     for noise in (1e-12, None):
         if noise:  # P inside span(X) up to noise: breaks the invariant, the pivot test fires
-            P = X @ jax.random.normal(rng[0], (15, 15)) + noise * m * jax.random.normal(
-                rng[1], X.shape
-            )
+            C, xi = jax.random.normal(rng[0], (15, 15)), m * jax.random.normal(rng[1], X.shape)
+            P = X @ C + noise * xi
         else:  # a random P, M-orthonormal and M-orthogonal to X
             P = m * jax.random.normal(rng[2], X.shape)
             P = P - X @ (state[2].T @ P)
@@ -311,6 +307,7 @@ COMPILES = """
 import json, jax
 from jaxmodal import config
 config.enable_x64()
+jax.config.update("jax_enable_compilation_cache", False)
 n = [0]
 def count(event, duration, **kw):
     if "backend_compile" in event and "lobpcg_step" in str(kw.get("fun_name")):
@@ -370,6 +367,8 @@ def test_errors():
     free = dof_mask(m, {"xmin": "xyz"})  # 12 free DOFs
     with pytest.raises(ValueError, match="block size 13"):
         lobpcg(op, free, 8)
+    with pytest.raises(ValueError, match="n_modes and maxit"):
+        lobpcg(op, free, 2, maxit=0)
     with pytest.raises(ValueError, match="free must be"):
         lobpcg(op, free.astype(int), 2)
     R = np.zeros((op.n_dof, 1))

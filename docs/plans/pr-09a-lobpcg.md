@@ -74,8 +74,8 @@ The prototype is the design below: one module-level jitted step with every array
   | mesh | DOF | m | blocks |
   |---|---|---|---|
   | hex20 $8^3$ | 8k | 15 | 52–56 |
-  | hex20 $24^3$ | 182k | 15 | 18 |
-  | hex20 $32^3$ | 421k | 15 | 16.9 |
+  | hex20 $24^3$ | 182k | 15 | 18 (prototype; 16.05 implemented) |
+  | hex20 $32^3$ | 421k | 15 | 16.9 (prototype; 16.00 implemented) |
 
   The barrier saving shows only from about 400k DOF. 9b's estimator models the step as max(16 blocks, apply phase + the operator estimator's workspace) and updates the Memory budget rows, for example 1M at $m = 25$: at least 3.2 GB (16 blocks) instead of 1.8 + 0.4 GB. That is noted there as a deviation. Both figures go into `docs/eigensolvers.md`.
 - **Per-iteration cost** (182k DOF, first prototype):
@@ -363,3 +363,8 @@ All tests compare against `reference_modes`, requesting at least 6 modes past th
 - `lobpcg` also raises `ValueError` when $\|R^\top M_mR - I\|_\max > 10^{-8}$. The README snippet first passed an R that was M-orthonormalized with a lumped-mass operator; one rigid mode leaked into the result, and the solve stagnated silently.
 - The sequenced update passes the remaining blocks through `optimization_barrier` along with the partial sums; without them the step holds 18 blocks (measured 16.00 with them).
 - Mutants: all 18 in the table are killed, including the soft-lock mutant.
+- Code review round 1:
+  - The floor varies with the seed: $0.5$–$1.9\times\varepsilon\lambda_\max/\lambda_1$ over seeds 0–3 (clamped and free hex20 $4^3$). This supersedes the single figure in "Measured facts"; test 9's $[0.1, 10]$ window covers it.
+  - The iteration table in `docs/eigensolvers.md` is re-measured with `lobpcg` (the prototype's counts differed by up to 8%).
+  - Non-converged exits also run `_confirm`, so `info["residuals"]` always come from explicit products. `maxit < 1` and `n_modes < 1` raise their own `ValueError`.
+  - `_setup` is shared by `_solve` and the step tests; the P drop flag is `~ok | (keep.sum() < nonzero input columns)`, equivalent to the noise rule or an SVQB drop.

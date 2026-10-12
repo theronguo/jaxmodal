@@ -119,12 +119,12 @@ sigma, its = sigma_estimate(op, free, R)  # lam_1 upper bound, for preconditione
 
 `lobpcg(op, free, n_modes, tol=1e-6, R=None, precond=None, X0=None, maxit=500, seed=0)` computes the lowest `n_modes` eigenpairs of the masked pencil $K_m v = m \odot K(m \odot v)$, $M_m$ likewise, for any operator with `apply_K`, `apply_M`, `diag_K`, `diag_M` and `n_dof` (PR 5 or PR 6).
 
-- **Returns:** `lam` `(n_modes,)` ascending (NumPy); `V` `(n_dof, n_modes)` on the device, M-orthonormal with constrained rows exactly 0; and `info` with `iterations`, `converged`, `stagnated`, `residuals` and `thresholds` (from explicitly recomputed products), `p_drops`, `refills`, `norm_K`, `norm_M`, `history` (max wanted residual per iteration) and `time` (`setup`, `iterations`, in seconds).
-- **Deflation basis `R`:** `(n_dof, k)`, M-orthonormal (rigid modes after `m_orthonormalize`). $MR = M_m R$ is computed once. The start block and every new direction are projected, $W \leftarrow W - R\,(MR^\top W)$, so no extra M apply is needed per iteration.
+- **Returns:** `lam` `(n_modes,)` ascending (NumPy); `V` `(n_dof, n_modes)` on the device, M-orthonormal with constrained rows exactly 0; and `info` with `iterations`, `converged`, `stagnated`, `residuals` and `thresholds` (from explicitly recomputed products, on every exit), `p_drops`, `refills`, `norm_K`, `norm_M`, `history` (max wanted residual per iteration) and `time` (`setup`, `iterations`, in seconds).
+- **Deflation basis `R`:** `(n_dof, k)`, M-orthonormal (rigid modes after `m_orthonormalize` with the same operator). $MR = M_m R$ is computed once. The start block and every new direction are projected, $W \leftarrow W - R\,(MR^\top W)$, so no extra M apply is needed per iteration. Without `R`, a free body returns its rigid modes as λ ≈ 0; their λ-scaled residual is meaningless, so the solve ends stagnated.
 - **Preconditioner `precond`:** a pytree callable `(n, j) -> (n, j)` (e.g. `jax.tree_util.Partial`), fixed, linear and SPD on the free DOFs, with masked output. It is a step argument, so new preconditioner data does not recompile. The default is `jacobi(op, free)`.
 - **Block size** $m = n_\mathrm{modes} + \max(5, \lfloor 0.2\,n_\mathrm{modes}\rfloor)$.
 - **Errors:**
-  - `ValueError` if $m$ exceeds the free DOFs minus the rank of $R$, if $\|R^\top M_mR - I\|_\max > 10^{-8}$ (e.g. R orthonormalized with another mass), or for a bad mask or `X0`;
+  - `ValueError` if `n_modes` or `maxit` is below 1, if $m$ exceeds the free DOFs minus the rank of $R$, if $\|R^\top M_mR - I\|_\max > 10^{-8}$ (e.g. R orthonormalized with another mass), or for a bad mask or `X0`;
   - `RuntimeError` if the start block stays rank-deficient after 3 refills;
   - `FloatingPointError` for a non-finite step.
 
@@ -138,7 +138,7 @@ Hetmaniuk–Lehoucq / Duersch et al. (2018), with fixed shapes: every block is $
 - **One compiled step.** `lobpcg_step(state, op, mask, precond, R, MR, consts, recompute)` is a module-level `jax.jit`.
   - The state $(X, KX, MX, P, KP, MP, \mathrm{act}_P, \lambda)$ is donated.
   - `consts` $= (\|K\|, \|M\|, \mathrm{tol}, c)$ and `recompute` are traced.
-  - Nothing is closed over: closing over the operator would embed it in the program (6–16 MB of HLO at 100k DOF, 2.2 GB more compile memory with a real operator at 182k) and recompile on every solve.
+  - Nothing is closed over: closing over the operator would embed it in the program (6.4 MB of HLO for a diagonal operator at 100k DOF, against 0.05 MB with arguments; 2.2 GB more compile memory with a real operator at 182k) and recompile on every solve.
   - $P$ starts as a masked zero block, so there is one compiled variant per shape, and a second solve with new data (`op.scaled`, a new preconditioner, a new tol) compiles nothing.
 - **Setup.**
   - $\|K_m\|_2$ and $\|M_m\|_2$ come from 30 power iterations each.
@@ -152,16 +152,18 @@ Hetmaniuk–Lehoucq / Duersch et al. (2018), with fixed shapes: every block is $
   4. Rayleigh–Ritz on $[X, W, P]$, with the Grams built pairwise from $m\times m$ products.
      - Masked rows and columns are zeroed off the diagonal, with $G_M = 1$ and $G_K = \beta = 10\max_i|\lambda_i| + \|K\|/\|M\|$ on it.
      - $X$ is fully active and M-orthonormal, so by Courant–Fischer the lowest $m$ active Ritz values are $\le \max_i\lambda_i < \beta$. Masked slots never enter, and no $\hat\lambda_\max$ estimate is needed.
+     - **Pivot test:** if the Cholesky of $G_M$ is not finite or $\min\mathrm{diag}(L)^2 \le 10^{-10}$, the small problem is redone with the P block masked: a `jnp.where` between two small solutions. This bounds $\lambda_\min(G_M)$ only from above, not the condition number; in practice the pivots are about 1.
   5. The new P coefficients are built as in Duersch:
      - start from the Ritz coefficients with the $X$ rows zeroed;
      - $G_M$-orthogonalize them against $C_X$ twice, in the small space;
      - mask columns whose $G_M$-norm fell to $\le 10^{-8}$ of their norm before (the **noise rule**; without it a noise column would carry about $10^{-4}$ of non-orthogonality into $P$);
      - SVQB in coefficient space.
+
+     `p_drops` counts the iterations in which the pivot fallback, the noise rule or this SVQB lost a P column.
      
      $[X', P']$ is then M-orthonormal without any n-sized orthogonalization of $P$ (measured: $\max|G_M - I| \le 7\cdot10^{-8}$).
-  6. **Pivot test.** If the Cholesky of $G_M$ is not finite or $\min\mathrm{diag}(L)^2 \le 10^{-10}$, the small problem is redone with the P block masked: a `jnp.where` between two small solutions. This bounds $\lambda_\min(G_M)$ only from above, not the condition number; in practice the pivots are about 1. Both P levels count in `p_drops`.
-  7. **Update.** $X' = XC_x + WC_w + PC_p$, and $P'$ likewise, with the same GEMMs for the K and M products. It is sequenced with `optimization_barrier`: XLA does not fuse a sum of GEMMs, and this saves 2 blocks.
-  8. Every `RECOMPUTE` = 20 iterations, a traced `lax.cond` replaces the implicitly updated products by explicit applies.
+  6. **Update.** $X' = XC_x + WC_w + PC_p$, and $P'$ likewise, with the same GEMMs for the K and M products. It is sequenced with `optimization_barrier`: XLA does not fuse a sum of GEMMs, and this saves 2 blocks.
+  7. Every `RECOMPUTE` = 20 iterations, a traced `lax.cond` replaces the implicitly updated products by explicit applies.
 - **Exit check.** When the wanted pairs meet their thresholds, $KX$ and $MX$ are recomputed explicitly and written back into the state. The solve exits only if the check still passes.
 
 ### Convergence
@@ -210,14 +212,14 @@ All runs: isotropic $E = 3$, $\nu = 0.3$, $\rho = 2$ on the box $(1, 0.83, 0.67)
 
 | mesh | DOF | tol $10^{-6}$ | tol $10^{-10}$ | max rel. λ error |
 |---|---|---|---|---|
-| hex20 $6^3$ clamped | 3675 | 182 its | 310 its (1.2 s) | $3\cdot10^{-13}$ |
-| hex20 $6^3$ free (rigid deflation) | 3675 | 209 | 343 (1.3 s) | $3\cdot10^{-14}$ |
-| hex27 $4^3$ clamped | 2187 | 106 | 163 (0.4 s) | $7\cdot10^{-13}$ |
-| hex8 $10^3$ clamped | 3993 | 109 | 161 (0.6 s) | $3\cdot10^{-13}$ |
-| hex20 $8^3$ clamped | 8019 | 277 | 444 (1.9 s) | $1\cdot10^{-12}$ |
+| hex20 $6^3$ clamped | 3675 | 197 its | 320 its (1.5 s) | $1\cdot10^{-13}$ |
+| hex20 $6^3$ free (rigid deflation) | 3675 | 209 | 346 (1.5 s) | $4\cdot10^{-14}$ |
+| hex27 $4^3$ clamped | 2187 | 109 | 169 (0.5 s) | $2\cdot10^{-13}$ |
+| hex8 $10^3$ clamped | 3993 | 103 | 159 (0.7 s) | $1\cdot10^{-12}$ |
+| hex20 $8^3$ clamped | 8019 | 281 | 439 (2.1 s) | $1\cdot10^{-12}$ |
 
 - **Iterations:** these grow roughly like $h^{-1}$, as expected for Jacobi ($\sqrt\kappa$). No P drops occurred in these runs.
-- **Floor:** at tol $10^{-16}$ on hex20 $4^3$ the solve accepts at the floor threshold (`converged` and `stagnated`). The lowest max wanted residual is $3.4\cdot10^{-12}$ clamped and $3.5\cdot10^{-13}$ free, that is $1.5\times\varepsilon\lambda_\max/\lambda_1$ in both cases.
+- **Floor:** at tol $10^{-16}$ on hex20 $4^3$ the solve accepts at the floor threshold (`converged` and `stagnated`). Over seeds 0–3, the lowest max wanted residual is $1.2$–$3.4\cdot10^{-12}$ clamped and $3.4$–$4.4\cdot10^{-13}$ free, that is $0.5$–$1.9\times\varepsilon\lambda_\max/\lambda_1$.
 - **Near-singular M:** hex20 $6^3$ with 30% void elements ($E\cdot10^{-9}$, $\rho\cdot10^{-12}$) converges to $10^{-8}$ in 337–374 iterations (3 seeds), with λ errors of $10^{-12}$.
 - **Thin plates are out of reach for Jacobi.**
   - A clamped hex20 plate $10\times10\times1$ with $L/t = 100$ has $\lambda_\max/\lambda_1 = 7\cdot10^{13}$. After 6000 iterations λ̃₁ is still $8\cdot10^4$ times too high.
@@ -227,11 +229,11 @@ All runs: isotropic $E = 3$, $\nu = 0.3$, $\rho = 2$ on the box $(1, 0.83, 0.67)
 - **Cost per iteration** (hex20 $24^3$, 182k DOF):
   - 72 ms at $m = 15$ (K and M applies about 40 ms) and 216 ms at $m = 48$ (about 90 ms). The rest is GEMMs at about 450 GFLOP/s.
   - Recompute iterations cost 150 / 390 ms.
-  - The setup (power iterations, start block) takes about 20 iterations' worth.
+  - The setup (power iterations, start block, R check) takes about 0.5 s warm (≈ 7 iterations) and 1.1 s with the first-call compiles.
 - **Step memory:**
   - With a diagonal operator, so that no operator workspace counts, the compiled step holds temp + donated state = 16.0 blocks of $(n, m)$ fp64. This is pinned by a test; without the barriers it is 18.
   - The roadmap's 9 + 2 blocks were not reached in any measured variant. A donated buffer takes its output only after every read of it, so the new $X$ and $P$ coexist with the old ones and $W$.
-  - With a real operator the peak is the larger of that and the apply phase plus the operator workspace: 52–56 blocks at hex20 $8^3$ (8k DOF), 18 at 182k, and 16.9 at 421k.
+  - With a real operator the peak is the larger of that and the apply phase plus the operator workspace: 52–56 blocks at hex20 $8^3$ (8k DOF), 16.05 at 182k and 16.00 at 421k, so the step reaches its 16 blocks by about 180k DOF.
   - PR 9b's estimator models this as max(16 blocks, apply phase + operator workspace), together with the memory model.
 
 ## Sizes
