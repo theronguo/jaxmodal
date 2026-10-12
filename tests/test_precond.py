@@ -112,8 +112,9 @@ def test_node_blocks(name):
     ref = v / (K + sigma * M).diagonal()[:, None] * free[:, None]
     assert np.abs(d - ref).max() <= 1e-12 * np.abs(ref).max() and np.all(d[~free] == 0)
     for f in (jacobi, block_jacobi):
-        with pytest.raises(ValueError, match="sigma"):
-            f(op, free, -0.1)
+        for bad in (-0.1, float("nan")):
+            with pytest.raises(ValueError, match="sigma"):
+                f(op, free, bad)
 
 
 def test_inverse_blocks_fp32():

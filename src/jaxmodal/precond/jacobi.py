@@ -10,8 +10,8 @@ from ..operators.common import check_x64
 
 
 def _check_sigma(sigma):
-    """Preconditioners are SPD: a concrete sigma < 0 raises (a traced one is not checked)."""
-    if not isinstance(sigma, jax.core.Tracer) and np.any(np.asarray(sigma) < 0):
+    """Preconditioners are SPD: a concrete sigma < 0 or NaN raises (a traced one is not checked)."""
+    if not isinstance(sigma, jax.core.Tracer) and not np.all(np.asarray(sigma) >= 0):
         raise ValueError(
             f"sigma must be >= 0 (preconditioners approximate K + sigma M), got {sigma}"
         )

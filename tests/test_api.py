@@ -1,17 +1,24 @@
 """solve_modes against reference_modes (SciPy) on the assembled matrices."""
 
 import importlib
+import sys
 
+import jax.numpy as jnp
 import numpy as np
 import pytest
+from exact import mac
 from scipy.sparse.linalg import eigsh
 
-from jaxmodal.eigen import reference_modes, solve_modes
+from benchmarks import gmg_study
+from jaxmodal.eigen import lobpcg, reference_modes, solve_modes
 from jaxmodal.materials import Material, from_euler, isotropic, transversely_isotropic
+from jaxmodal.memory import solve_modes_memory
 from jaxmodal.mesh import Mesh, box_mesh, voxel_mesh
-from jaxmodal.operators import assemble, dof_mask, restrict
+from jaxmodal.operators import assemble, dof_mask, m_orthonormalize, restrict, rigid_modes
+from jaxmodal.precond import GMG, SingularShiftError, gmg, jacobi
 
 api = importlib.import_module("jaxmodal.eigen.api")
+G = importlib.import_module("jaxmodal.precond.gmg")
 
 EPS = np.finfo(float).eps
 MAT = {0: Material(isotropic(3.0, 0.3), 2.0)}
@@ -194,3 +201,228 @@ def test_host_checks(monkeypatch, case):
         monkeypatch.setattr(api, "lobpcg", fail)
     with pytest.raises(ValueError, match=match):
         solve_modes(mesh, mats, bcs, 2)
+
+
+# ---------------------------------------------------------------- PR 11b: GMG in solve_modes
+
+STEEL = {0: Material(isotropic(210e9, 0.3), 7850.0)}
+
+
+@pytest.fixture
+def built(monkeypatch):
+    """The sigma of every successful gmg build inside eigen/api.py (forwarded to the real
+    gmg; a refused sigma = 0 is not recorded)."""
+    sigmas = []
+
+    def spy(op, free, sigma, **kw):
+        P = gmg(op, free, sigma, **kw)
+        sigmas.append(sigma)
+        return P
+
+    monkeypatch.setattr(api, "gmg", spy)
+    return sigmas
+
+
+@pytest.fixture
+def preconds(monkeypatch):
+    """The precond of every lobpcg call inside eigen/api.py (the last is the final solve's)."""
+    calls = []
+
+    def spy(op, free, n_modes, tol, R, precond, *a, **kw):
+        calls.append(precond)
+        return lobpcg(op, free, n_modes, tol, R, precond, *a, **kw)
+
+    monkeypatch.setattr(api, "lobpcg", spy)
+    return calls
+
+
+def rigid(op, mesh, free):
+    R = jnp.asarray(rigid_modes(mesh, free))
+    return m_orthonormalize(R, op.apply_M(R)) if R.shape[1] else None
+
+
+SIGMA_CASES = [
+    ("box8", (8,) * 3, "clamped", None, None),
+    ("odd9", (9, 8, 8), "clamped", None, None),
+    ("plate32", (32, 32, 1), "clamped", None, None),
+    ("beam64x2", (64, 2, 2), "clamped", None, None),
+    ("free_box8", (8,) * 3, "free", None, None),
+    ("free_plate16", (16, 16, 1), "free", None, None),
+    ("free_beam128", (128, 1, 1), "free", None, None),  # 2.7 lam_1 after one round
+    pytest.param("aniso16", (16,) * 3, "clamped", (1, 1, 0.1), None, marks=pytest.mark.slow),
+    pytest.param("simp32", (32,) * 3, "clamped", None, "simp", marks=pytest.mark.slow),
+]
+
+
+@pytest.mark.parametrize("name,shape,bcs,factors,density", SIGMA_CASES)
+def test_sigma_estimate(built, name, shape, bcs, factors, density):
+    """Test 1: the GMG-refined pre-estimate is within [lam_1, 2 lam_1] (SciPy lam_1); clamped
+    bodies build once at sigma = 0, free ones start above 0 and never raise sigma."""
+    op, free, mesh = gmg_study.case(shape, bcs, factors, density)
+    lam1 = gmg_study.lam1(op, free, mesh)
+    sigma, its = api._gmg_sigma(op, free, rigid(op, mesh, free))
+    # lower bound: the Rayleigh quotient and the reference round at eps ||K|| (4e-8 on SIMP)
+    assert lam1 * (1 - 1e-6) <= sigma <= 2 * lam1, sigma / lam1
+    if bcs == "clamped":
+        assert built == [0.0]
+    else:  # rebuilt only after a drop by more than 3x; stopped on a smaller drop or at 4 rounds
+        assert built[0] > 0 and all(b < a / 3 for a, b in zip(built, built[1:], strict=False))
+        assert sigma > built[-1] / 3 or len(built) == 4
+    assert 0 < its <= 20 * len(built)
+
+
+def test_sigma_rounds(monkeypatch):
+    """The pre-estimate's round logic on scripted probes: rebuild while sigma drops by more
+    than 3x, keep the smaller of the last two, at most 4 rounds."""
+
+    def run(probes):
+        builds, probes = [], iter(probes)
+
+        def fake_gmg(op, free, sigma):
+            if sigma == 0:
+                raise SingularShiftError("free")
+            builds.append(sigma)
+            return object()
+
+        monkeypatch.setattr(api, "gmg", fake_gmg)
+        monkeypatch.setattr(api, "sigma_estimate", lambda *a, **kw: (100.0, None))
+        monkeypatch.setattr(
+            api, "lobpcg", lambda *a, **kw: ([next(probes)], None, {"iterations": 2})
+        )
+        return api._gmg_sigma(None, None, None), builds
+
+    assert run([10.0, 20.0]) == ((10.0, 4), [100.0, 10.0])  # a rising probe keeps the minimum
+    assert run([50.0]) == ((50.0, 2), [100.0])
+    assert run([30.0, 9.0, 2.0, 0.5]) == ((0.5, 8), [100.0, 30.0, 9.0, 2.0])
+
+
+def test_sigma_hint(built, monkeypatch):
+    """Test 2: a sigma hint skips the pre-estimate (one build, at the hint) and gives the same
+    modes; sigma = 0 on a free body raises instead of being replaced."""
+    mesh, bcs = voxel_mesh((9, 6, 5), (1 / 9,) * 3), {"xmin": "xyz"}
+    lam0, _, info0 = solve_modes(mesh, STEEL, bcs, 4, tol=1e-8)
+    hint = 1.5 * info0["sigma"]
+    del built[:]
+
+    def fail(*a, **kw):
+        raise AssertionError("pre-estimate ran despite the hint")
+
+    monkeypatch.setattr(api, "_gmg_sigma", fail)
+    lam, _, info = solve_modes(mesh, STEEL, bcs, 4, tol=1e-8, sigma=hint)
+    assert info["sigma"] == hint and info["sigma_iterations"] == 0 and built == [hint]
+    np.testing.assert_allclose(lam, lam0, rtol=1e-7)
+    with pytest.raises(SingularShiftError):
+        solve_modes(mesh, STEEL, {}, 4, sigma=0.0)
+
+
+def odd_case(name):
+    """(mesh, bcs, nodal_mass) on the odd 9x6x5 unit voxel grid."""
+    if name == "masked":
+        mask = np.ones((9, 6, 5), bool)
+        mask[6:, 3:, 2:] = False  # an L-shape with a notch, face-connected
+        mask[3:5, 2, 1:3] = False
+        mesh = voxel_mesh((9, 6, 5), (1 / 9,) * 3, mask=mask)
+        nodal = np.random.default_rng(3).uniform(0, 2e-3, len(mesh.points)) * 7850.0 / 729
+        return mesh, {"xmin": "xyz"}, nodal
+    return voxel_mesh((9, 6, 5), (1 / 9,) * 3), {"xmin": "xyz"} if name == "clamped" else {}, None
+
+
+@pytest.mark.parametrize("name", ["clamped", "free", "masked"])
+def test_gmg_modes(built, preconds, name):
+    """Test 3: solve_modes with GMG on odd voxel meshes matches reference_modes (lam 1e-8, MAC
+    1 - 1e-8); the final build is at info["sigma"]."""
+    mesh, bcs, nodal = odd_case(name)
+    lam, V, info = solve_modes(mesh, STEEL, bcs, 6, nodal_mass=nodal, tol=1e-10)
+    K, M = assemble(mesh, STEEL, nodal_mass=nodal)
+    free = dof_mask(mesh, bcs)
+    nr = info["n_rigid"]
+    lr, Vr = reference_modes(K, M, nr + 6, free, points=mesh.points)
+    assert info["converged"] and info["precond"] == "gmg" and nr == (6 if name == "free" else 0)
+    assert np.abs(lam / lr[nr:] - 1).max() <= 1e-8
+    assert np.diag(mac(V, Vr[:, nr:], M)).min() >= 1 - 1e-8
+    assert built[-1] == info["sigma"] > 0
+    assert isinstance(preconds[-1], GMG) and preconds[-1].dtype == "float64"
+    if name != "free":
+        assert built == [0.0, info["sigma"]]
+
+
+def test_dispatch(preconds):
+    """Test 4: "auto" picks GMG on voxel meshes and Jacobi otherwise; option errors."""
+    lam, _, info = solve_modes(box((3, 3, 2)), MAT, {"xmin": "xyz"}, 2)
+    assert info["precond"] == "jacobi" and info["sigma"] == 0.0 and info["sigma_iterations"] == 0
+    assert info["time"]["precond"] >= 0
+    vox = voxel_mesh((5, 4, 3), (0.2,) * 3)
+    _, _, info = solve_modes(vox, MAT, {"xmin": "xyz"}, 2, precond="jacobi")
+    assert info["precond"] == "jacobi" and info["sigma"] == 0.0 and info["sigma_iterations"] == 0
+    _, _, info = solve_modes(vox, MAT, {"xmin": "xyz"}, 2, precond="jacobi", sigma=2e5)
+    ref = jacobi(api.stencil(vox, MAT), dof_mask(vox, {"xmin": "xyz"}), 2e5)
+    np.testing.assert_array_equal(preconds[-1].args[0], ref.args[0])  # built at the hint
+    _, _, info = solve_modes(vox, MAT, {"xmin": "xyz"}, 2)
+    assert info["precond"] == "gmg" and info["sigma"] > 0 and info["sigma_iterations"] > 0
+    assert isinstance(preconds[-1], GMG) and preconds[-1].dtype == "float64"
+    _, _, info = solve_modes(vox, MAT, {"xmin": "xyz"}, 2, precond_dtype="float32")
+    assert isinstance(preconds[-1], GMG) and preconds[-1].dtype == "float32"
+    assert {"setup", "iterations", "precond"} <= info["time"].keys()
+    bad = [
+        (box((2, 2, 2)), dict(precond="gmg"), "voxel mesh"),
+        (vox, dict(precond="amg"), "precond must be"),
+        (vox, dict(precond="jacobi", precond_dtype="float32"), "needs precond 'gmg'"),
+        (vox, dict(precond_dtype="float16"), "precond_dtype must be"),
+        (vox, dict(sigma=-1.0), "sigma must be"),
+        (vox, dict(sigma=float("nan")), "sigma must be"),
+    ]
+    for mesh, kw, match in bad:
+        with pytest.raises(ValueError, match=match):
+            solve_modes(mesh, MAT, {"xmin": "xyz"}, 2, **kw)
+
+
+def test_singular_narrow(monkeypatch):
+    """Test 4: only the sigma = 0 refusals are SingularShiftError; the finite backstops and
+    any other ValueError at sigma = 0 propagate out of solve_modes."""
+    vox = voxel_mesh((5, 4, 3), (0.2,) * 3)
+    op, free = api.stencil(vox, MAT), dof_mask(vox, {})
+    with pytest.raises(SingularShiftError):
+        gmg(op, free, 0.0)
+    with monkeypatch.context() as mp:
+        mp.setattr(G, "_inverse_blocks", lambda B, f: (jnp.full_like(B, jnp.nan), None))
+        with pytest.raises(ValueError, match="not finite") as e:
+            gmg(op, dof_mask(vox, {"xmin": "xyz"}), 1.0)
+        assert not isinstance(e.value, SingularShiftError)
+
+    def plain(op, free, sigma, **kw):
+        if sigma == 0:
+            raise ValueError("plain")
+        return gmg(op, free, sigma, **kw)
+
+    def no_estimate(*a, **kw):
+        raise AssertionError("fell back to sigma_estimate")
+
+    monkeypatch.setattr(api, "gmg", plain)
+    monkeypatch.setattr(api, "sigma_estimate", no_estimate)
+    with pytest.raises(ValueError, match="plain"):
+        solve_modes(vox, MAT, {"xmin": "xyz"}, 2)
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(sys.platform != "darwin", reason="Mac acceptance")
+def test_mac_acceptance():
+    """Test 10: 87^3 steel box (2.04M DOF), 10 modes, tol 1e-6, defaults: a cold run within
+    10 min, all converged, and the larger of two warm peaks within 20% of solve_modes_memory,
+    for the fp64 and fp32 V-cycles."""
+    for dtype, r in gmg_study.acceptance(87).items():
+        assert r["converged"] and r["time_s"] <= 600, (dtype, r["time_s"])
+        peak, est = max(r["peaks_bytes"]), r["estimate_bytes"]
+        assert est >= 2e9 and abs(est - peak) <= 0.2 * peak, (dtype, peak, est)
+
+
+@pytest.mark.slow
+def test_acceptance_smoke():
+    """Test 11: gmg_study.acceptance runs and records times, iterations, peaks and estimates;
+    the estimate is solve_modes_memory's."""
+    r = gmg_study.acceptance(8)
+    mesh = voxel_mesh((8,) * 3, (1 / 8,) * 3)
+    for dtype in ("float64", "float32"):
+        assert r[dtype]["converged"] and r[dtype]["iterations"] > 0 and r[dtype]["time_s"] > 0
+        assert len(r[dtype]["peaks_bytes"]) == 2 and r[dtype]["sigma_iterations"] > 0
+        est = solve_modes_memory(mesh, {"xmin": "xyz"}, 10, precond_dtype=dtype)["total"]
+        assert r[dtype]["estimate_bytes"] == est

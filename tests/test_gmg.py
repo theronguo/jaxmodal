@@ -13,6 +13,7 @@ import pytest
 from jaxmodal.eigen import lobpcg, reference_modes, sigma_estimate
 from jaxmodal.linalg import pcg
 from jaxmodal.materials import Material, isotropic
+from jaxmodal.memory import GMG_STEP, gmg_memory, lobpcg_memory, stencil_memory
 from jaxmodal.mesh import box_mesh, rcm, voxel_mesh
 from jaxmodal.operators import (
     a_p,
@@ -24,7 +25,7 @@ from jaxmodal.operators import (
     stencil,
     unstructured,
 )
-from jaxmodal.precond import gmg, jacobi
+from jaxmodal.precond import SingularShiftError, gmg, jacobi
 
 G = importlib.import_module("jaxmodal.precond.gmg")
 krylov = importlib.import_module("jaxmodal.linalg.krylov")
@@ -447,15 +448,15 @@ def test_guard_raises():
     """Test 9 (guard): sigma = 0 with rigid modes, zero-stiffness cells or meshes rigid_modes
     rejects raises the guard's message; the backstop has its own."""
     op, free, _ = unit((16, 16, 16))
-    with pytest.raises(ValueError, match="sigma > 0"):
+    with pytest.raises(SingularShiftError, match="sigma > 0"):
         gmg(op, free, 0.0)
     op, free, _ = unit((64, 64, 1), bcs={"xmin": "x"})
-    with pytest.raises(ValueError, match="sigma > 0"):
+    with pytest.raises(SingularShiftError, match="sigma > 0"):
         gmg(op, free, 0.0)
     op, free, _ = unit((8, 8, 8), bcs={"xmin": "xyz"})
     s_K = np.ones(op.n_el)
     s_K[np.asarray(voxel_mesh((8, 8, 8)).voxel.element_map).reshape(8, 8, 8)[:, :, 4].ravel()] = 0
-    with pytest.raises(ValueError, match="zero-stiffness"):
+    with pytest.raises(SingularShiftError, match="zero-stiffness"):
         gmg(op.scaled(s_K=s_K), free, 0.0)
     edge = np.zeros((2, 2, 1), bool)
     edge[0, 0, 0] = edge[1, 1, 0] = True
@@ -463,7 +464,7 @@ def test_guard_raises():
     islands[:, ::2] = True
     for mask, bcs in ((edge, {"xmin": "xyz", "xmax": "xyz"}), (islands, {"xmin": "xyz"})):
         op, free, _ = unit(mask.shape, mask, bcs)
-        with pytest.raises(ValueError, match="sigma > 0") as err:
+        with pytest.raises(SingularShiftError, match="sigma > 0") as err:
             gmg(op, free, 0.0)
         assert isinstance(err.value.__cause__, ValueError)
     op, free, _ = unit(edge.shape, edge, {"xmin": "xyz", "xmax": "xyz"})
@@ -534,13 +535,14 @@ def test_no_recompile():
 
 
 def test_errors():
-    """Test 13: unstructured operator, sigma < 0, renumbered voxel mesh, x64 off."""
+    """Test 13: unstructured operator, sigma < 0 or NaN, renumbered voxel mesh, x64 off."""
     b = box_mesh((2, 2, 2))
     with pytest.raises(TypeError):
         gmg(unstructured(b, UNIT), dof_mask(b, {"xmin": "xyz"}), 1.0)
     op, free, m = unit((4, 3, 3), bcs={"xmin": "xyz"})
-    with pytest.raises(ValueError, match="sigma"):
-        gmg(op, free, -1.0)
+    for bad in (-1.0, float("nan")):
+        with pytest.raises(ValueError, match="sigma must be >= 0"):
+            gmg(op, free, bad)
     r = rcm(m)[0]
     with pytest.raises(ValueError, match="renumber"):
         gmg(stencil(r, UNIT), dof_mask(r, {"xmin": "xyz"}), 1.0)
@@ -562,3 +564,147 @@ def test_study_smoke():
     ]
     r = gmg_study.main(cases=cases, n_large=0, write=False)
     assert len(r["runs"]) == 2 and all(all(x["converged"]) for x in r["runs"])
+
+
+# ---------------------------------------------------------------- PR 11b: fp32 V-cycle, memory
+
+
+def f32_leaves(P):
+    """Float leaves of the fp32 hierarchy that must be fp32."""
+    out = []
+    for i, (A, S) in enumerate(P.levels):
+        out += jax.tree_util.tree_leaves(S.precond) + [S.lmax, S.ratio]
+        out += list(A.vals) if i else []
+    for T in P.transfers:
+        out += [w for t in T.tabs for w in t[2:]]
+    return [a for a in out if jnp.issubdtype(a.dtype, jnp.floating)]
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [(16,) * 3]
+    + [pytest.param(s, marks=pytest.mark.slow) for s in [(32,) * 3, (32, 32, 1), (33, 8, 8)]],
+)
+def test_fp32(shape):
+    """Test 6: the fp32 hierarchy is fp32 except the fine operator, free, L and defl; the cycle
+    returns fp64 within 1e-5 of the fp64 cycle and symmetric to 1e-5 (3e-4 on the plate),
+    positive, with <= 0.75x the temporaries; LOBPCG with it needs <= 1.2x the iterations and
+    gives lam within 1e-9."""
+    op, free, m = steel(shape, {"xmin": "xyz"})
+    P64, P32 = gmg(op, free, 0.0), gmg(op, free, 0.0, dtype="float32")
+    assert all(a.dtype == jnp.float32 for a in f32_leaves(P32))
+    assert all(A is S.A for A, S in P32.levels) and P32.levels[0][0].op is op
+    keep = {id(a) for a in jax.tree_util.tree_leaves((op, P32.free, P32.L, P32.defl))}
+    f64 = [a for a in jax.tree_util.tree_leaves(P32) if a.dtype == jnp.float64]
+    assert all(id(a) in keep or a.ndim == 0 for a in f64)  # A_P's sigma and s scalars
+    rng = np.random.default_rng(0)
+    U = jnp.asarray(rng.standard_normal((op.n_dof, 4)) * free[:, None])
+    Y64, Y32 = P64(U), P32(U)
+    tol = 3e-4 if shape[2] == 1 else 1e-5  # the plate amplifies fp32 rounding (measured 1e-4)
+    assert Y32.dtype == jnp.float64 and rel(Y32, Y64) <= tol
+    G2 = np.asarray(U.T @ Y32)
+    d = np.sqrt(np.diag(G2))
+    assert (np.abs(G2 - G2.T) / np.outer(d, d)).max() <= tol and (np.diag(G2) > 0).all()
+    if shape == (16,) * 3:
+        r = jax.ShapeDtypeStruct((op.n_dof, 15), jnp.float64)
+        t = [
+            G._vcycle_apply.lower(P, r).compile().memory_analysis().temp_size_in_bytes
+            for P in (P64, P32)
+        ]
+        assert t[1] <= 0.75 * t[0], t
+    lam64, _, i64 = lobpcg(op, free, 10, 1e-6, precond=P64)
+    lam32, _, i32 = lobpcg(op, free, 10, 1e-6, precond=P32)
+    assert i64["converged"] and i32["converged"]
+    assert i32["iterations"] <= 1.2 * i64["iterations"], (i32["iterations"], i64["iterations"])
+    assert np.abs(lam32 / lam64 - 1).max() <= 1e-9
+
+
+def buffers(P, op):
+    """Bytes of the unique device buffers of P, without the operator's own leaves."""
+    opl = {id(a) for a in jax.tree_util.tree_leaves(op)}
+    leaves = jax.tree_util.tree_leaves(P)
+    return sum({id(a): a.nbytes for a in leaves if id(a) not in opl}.values())
+
+
+def storage_cases():
+    rng = np.random.default_rng(3)
+    mask = rng.random((9, 7, 6)) < 0.8
+    mask[0] = True
+    crop = np.zeros((10, 10, 10), bool)
+    crop[:, :, :2] = True  # scan axis z cropped to 2 layers: k = 3 fine groups
+    m, op, free, _, s = island_case()
+    return {
+        "box16": (voxel_mesh((16,) * 3, (1 / 16,) * 3), None, True),
+        "plate32": (voxel_mesh((32, 32, 1), (1 / 32,) * 3), None, True),
+        "masked": (voxel_mesh((9, 7, 6), (1 / 9,) * 3, mask=mask), None, False),
+        "crop": (voxel_mesh((10, 10, 10), (0.1,) * 3, mask=crop), None, True),
+        "islands": (m, s.ravel(), False),
+    }
+
+
+@pytest.mark.parametrize("dtype", ["float64", "float32"])
+def test_gmg_storage(dtype):
+    """Test 7: gmg_memory's storage bounds the built hierarchy's unique buffers, within 5% on
+    full boxes and the cropped grid (measured 1.0001-1.005: Chebyshev and A_P scalars)."""
+    for name, (m, s_K, full) in storage_cases().items():
+        op = stencil(m, STEEL if s_K is None else UNIT)
+        if s_K is not None:
+            op = op.scaled(s_K=s_K, s_M=s_K)
+        P = gmg(op, dof_mask(m, {"xmin": "xyz"}), 0.37, dtype=dtype)
+        assert (P.defl is not None) == (s_K is not None), name
+        got, est = buffers(P, op), gmg_memory(m, 15, dtype, s_K)["storage"]
+        print(f"{name} {dtype}: {got} B, estimate {est / got:.4f}x")
+        assert got <= est and (not full or est <= 1.05 * got), name
+
+
+@pytest.mark.parametrize("n", [16, pytest.param(32, marks=pytest.mark.slow)])
+def test_gmg_workspace(n):
+    """Test 8: V-cycle temporaries (m = 15) <= gmg_memory's workspace, within 1.25x at 32^3."""
+    op, free, m = steel((n,) * 3, {"xmin": "xyz"})
+    r = jax.ShapeDtypeStruct((op.n_dof, 15), jnp.float64)
+    for dtype in ("float64", "float32"):
+        P = gmg(op, free, 1e5, dtype=dtype)
+        got = G._vcycle_apply.lower(P, r).compile().memory_analysis().temp_size_in_bytes
+        est = gmg_memory(m, 15, dtype)["workspace"]
+        print(f"{n}^3 {dtype}: {got / (8 * op.n_dof * 15):.2f} blocks, estimate {est / got:.3f}x")
+        assert got <= est and (n < 32 or est <= 1.25 * got)
+
+
+def step_bytes(op, P, low, k=15):
+    """Temporaries + aliased bytes of the compiled LOBPCG step (block k) with precond P."""
+    from test_lobpcg import step_args
+
+    c, _ = lob._capacity(100, 1, k, low)
+    f = lob.lobpcg_step_low if low else lob.lobpcg_step
+    args = list(step_args(op, op.n_dof, k, low, 0))
+    args[1], args[3] = op, P
+    mem = f.lower(*args, c=c).compile().memory_analysis()
+    return mem.temp_size_in_bytes + mem.alias_size_in_bytes
+
+
+@pytest.mark.parametrize("low", [False, True], ids=["9-block", "low"])
+def test_gmg_step(low):
+    """Test 8: the LOBPCG step with the GMG cycle (fp64, fp32) <= lobpcg_memory's step term."""
+    op, free, m = steel((16,) * 3, {"xmin": "xyz"})
+    b = 8 * op.n_dof * 15
+    for dtype in ("float64", "float32"):
+        got = step_bytes(op, gmg(op, free, 1e5, dtype=dtype), low)
+        pc = functools.partial(gmg_memory, m, dtype=dtype)
+        est = lobpcg_memory(
+            lambda w: stencil_memory(m, w), op.n_dof, 10, low_memory=low, precond_memory=pc
+        )["step"]
+        assert got <= est, (dtype, got / b, est / b)
+
+
+@pytest.mark.slow
+def test_gmg_step_tight():
+    """Test 8: at 48^3 (m = 15) the GMG step's extra temporaries over the Jacobi step are
+    within 0.6 blocks below GMG_STEP for every step and V-cycle dtype (pins the constants)."""
+    op, free, _ = steel((48,) * 3, {"xmin": "xyz"})
+    b = 8 * op.n_dof * 15
+    for low, key in ((False, "9-block"), (True, "low")):
+        jac = step_bytes(op, jacobi(op, free, 0.0), low)
+        for dtype in ("float64", "float32"):
+            extra = (step_bytes(op, gmg(op, free, 1e5, dtype=dtype), low) - jac) / b
+            model = GMG_STEP[(key, dtype)]
+            assert model - 0.6 <= extra <= model, f"{key} {dtype}: {extra:.2f}; re-fit GMG_STEP"

@@ -1,4 +1,5 @@
-"""Voxel GMG study: PCG iterations per case, the setup peak and the V-cycle cost at 87^3.
+"""Voxel GMG study: PCG iterations per case, the setup peak and the V-cycle cost at 87^3, and
+the solve_modes acceptance run (87^3, 10 modes, fp64 and fp32 V-cycles).
 
 Unit-length steel voxel grids (spacing 1 / max(shape)), xmin clamped unless "free"; sigma = lam_1
 of the case from reference_modes (SciPy), or of the named case; the sigma_estimate value is
@@ -6,7 +7,9 @@ recorded too (it overestimates lam_1 on slender bodies). 4 random masked right-h
 relative residual 1e-8; Chebyshev degree 2 over the group block smoother. build_s includes
 compilation on the first build of each grid.
 The setup peak is the build's process peak RSS above the operator + block Jacobi + lambda_max
-baseline, in a fresh subprocess (harness.measure). Writes results/gmg_study.json.
+baseline, in a fresh subprocess (harness.measure). The acceptance run times one cold
+subprocess (compilation included) and takes the peaks of two warm ones (after a full run), next
+to solve_modes_memory. Writes results/gmg_study.json.
 """
 
 import argparse
@@ -23,6 +26,7 @@ from jaxmodal import config
 from jaxmodal.eigen import reference_modes, sigma_estimate
 from jaxmodal.linalg import pcg
 from jaxmodal.materials import Material, isotropic
+from jaxmodal.memory import solve_modes_memory
 from jaxmodal.mesh import voxel_mesh
 from jaxmodal.operators import (
     ap_operator,
@@ -128,16 +132,19 @@ BUILD = "P = gmg(op, free, {sigma}); jax.block_until_ready(P)"
 
 TIMING = """
 import time
-P = gmg(op, free, {sigma})
 X = jnp.asarray(np.random.default_rng(0).standard_normal((op.n_dof, {m})))
 def best(f):
     jax.block_until_ready(f(X))
     ts = []
-    for _ in range(3):
+    for _ in range(5):
         t = time.perf_counter(); jax.block_until_ready(f(X)); ts.append(time.perf_counter() - t)
     return min(ts)
+P = gmg(op, free, {sigma})
+t64 = best(P)
+P = None
+P = gmg(op, free, {sigma}, dtype="float32")
 import json
-json.dump(dict(vcycle_s=best(P), apply_s=best(A)), open("{out}", "w"))
+json.dump(dict(vcycle_s=t64, vcycle32_s=best(P), apply_s=best(A)), open("{out}", "w"))
 """
 
 
@@ -148,6 +155,47 @@ def large(n, sigma, m=15):
     t = harness.measure_json(TIMING.format(sigma=sigma, m=m, out="{out}"), setup)
     t["timing_peak_bytes"] = t.pop("peak_bytes")
     return dict(n=n, n_dof=3 * (n + 1) ** 3, m=m, setup_peak_bytes=peak["peak_bytes"], **t)
+
+
+SOLVE = """
+from jaxmodal import config
+config.enable_x64()
+import json, time
+from jaxmodal.eigen import solve_modes
+from jaxmodal.materials import Material, isotropic
+from jaxmodal.mesh import voxel_mesh
+mesh = voxel_mesh(({n},) * 3, (1 / {n},) * 3)
+mats, bcs = {{0: Material(isotropic(210e9, 0.3), 7850.0)}}, {{"xmin": "xyz"}}
+def run():
+    return solve_modes(mesh, mats, bcs, 10, tol=1e-6, precond_dtype="{dtype}")
+"""
+
+RUN = """
+t = time.perf_counter()
+lam, V, info = run()
+t = time.perf_counter() - t
+keys = ("iterations", "converged", "sigma", "sigma_iterations", "time")
+json.dump({{k: info[k] for k in keys}} | dict(time_s=t, lam=lam.tolist()), open("{out}", "w"))
+"""
+
+
+def acceptance(n=87, dtypes=("float64", "float32")):
+    """solve_modes on the n^3 steel box (xmin clamped, 10 modes, tol 1e-6, defaults) per V-cycle
+    dtype: the cold run (time_s with compilation, its info) and the peaks of two warm runs,
+    next to solve_modes_memory's estimate."""
+    mesh = voxel_mesh((n,) * 3, (1 / n,) * 3)
+    out = {}
+    for dtype in dtypes:
+        setup = SOLVE.format(n=n, dtype=dtype)
+        r = harness.measure_json(RUN, setup)
+        r["cold_peak_bytes"] = r.pop("peak_bytes")
+        r["peaks_bytes"] = [
+            harness.measure_json(RUN, setup + "run()\n")["peak_bytes"] for _ in range(2)
+        ]
+        est = solve_modes_memory(mesh, {"xmin": "xyz"}, 10, precond_dtype=dtype)
+        out[dtype] = r | dict(n=n, n_dof=3 * (n + 1) ** 3, estimate_bytes=est["total"])
+        print(json.dumps({dtype: out[dtype]}), flush=True)
+    return out
 
 
 def main(cases=CASES, n_large=87, out=harness.RESULTS, write=True):
@@ -164,6 +212,7 @@ def main(cases=CASES, n_large=87, out=harness.RESULTS, write=True):
     if n_large:
         result["large"] = large(n_large, lam1(*case((8,) * 3, "clamped", None, None)))
         print(json.dumps(result["large"]), flush=True)
+        result["acceptance"] = acceptance(n_large)
     if write:
         harness.write_result("gmg_study", result, out)
     return result
