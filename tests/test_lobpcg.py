@@ -17,7 +17,9 @@ from jax.tree_util import Partial
 from scipy.sparse.linalg import eigsh
 
 from jaxmodal.eigen import jacobi, lobpcg, reference_modes, sigma_estimate
+from jaxmodal.linalg import count_below
 from jaxmodal.materials import Material, isotropic
+from jaxmodal.memory import lobpcg_memory, unstructured_memory
 from jaxmodal.mesh import box_mesh
 from jaxmodal.operators import (
     assemble,
@@ -153,12 +155,21 @@ CASES = [
 ]
 
 
-@pytest.mark.parametrize("p_args", CASES, ids=lambda c: f"{c[0]}-{c[2]}")
-def test_modes(p_args):
+@functools.cache
+def solve12(p_args, low=False):
     p = problem(*p_args)
-    lam, V, info = lobpcg(p.op, p.free, 12, tol=1e-10, R=p.R)
+    return lobpcg(p.op, p.free, 12, tol=1e-10, R=p.R, low_memory=low)
+
+
+@pytest.mark.parametrize("low", [False, True], ids=["9-block", "low"])
+@pytest.mark.parametrize("p_args", CASES, ids=lambda c: f"{c[0]}-{c[2]}")
+def test_modes(p_args, low):
+    p = problem(*p_args)
+    lam, V, info = solve12(p_args, low)
     check_modes(p_args, lam, V, info, 1e-10)
     assert info["p_drops"] == 0
+    if low:  # test 2: the low-memory step finds the same lam
+        assert np.all(np.abs(lam - solve12(p_args)[0]) / lam <= f_lam(p, lam))
     for A, key in ((p.Kf, "norm_K"), (p.Mf, "norm_M")):  # power iteration: from below
         exact = eigsh(A, 1, which="LA", return_eigenvectors=False)[0]
         assert 0.8 <= info[key] / exact <= 1 + 1e-10  # >= 0.90 over 40 seeds; 3 its: <= 0.77
@@ -234,13 +245,17 @@ def test_rank_deficient_start():
     assert np.all(np.abs(lam - lr[:10]) / lr[:10] <= f_lam(p, lr[:10]))
 
 
-def start(p, k, seed=0):
-    """A solver state as lobpcg builds it, plus the step's other arguments."""
+def start(p, k, seed=0, low=False):
+    """A single-chunk solver state as lobpcg builds it, plus the step's other arguments."""
+    n = p.op.n_dof
     m = jnp.asarray(p.free, float)[:, None]
-    R = jnp.zeros((p.op.n_dof, 0))
-    state, nK, nM, _ = lob._setup(p.op, m, k, R, R, None, seed)
+    R = B = jnp.zeros((n, 0))
+    key = jax.random.key(seed)
+    nK, nM = map(float, lob._norms(p.op, m, m * jax.random.normal(key, (n, 1))))
+    X = jax.random.normal(jax.random.fold_in(key, 1), (n, k))
+    state, _, _ = lob._begin(X, key, p.op, m, R, R, B, jnp.int32(0), 1, low)
     consts = jnp.array([nK, nM, 1e-10, lob.C_FLOOR])
-    return list(state), (p.op, m, jacobi(p.op, p.free), R, R, consts)
+    return list(state), (p.op, m, jacobi(p.op, p.free), R, R, B, jnp.int32(0), consts)
 
 
 def test_forced_p_drop():
@@ -260,7 +275,7 @@ def test_forced_p_drop():
             P = m_orthonormalize(P, m * p.op.apply_M(m * P))
         KP, MP = m * p.op.apply_K(m * P), m * p.op.apply_M(m * P)
         st = [a + 0 for a in state[:3]] + [P, KP, MP, jnp.ones(15, bool), state[7] + 0]
-        new, out = lob.lobpcg_step(tuple(st), *args, False)
+        new, out = lob.lobpcg_step(tuple(st), *args, False, c=1)
         assert np.isfinite(np.asarray(out)).all()
         assert bool(out[-1]) == (noise is not None)
         Xn = new[0]
@@ -268,18 +283,22 @@ def test_forced_p_drop():
         assert np.abs(G - np.eye(15)).max() <= 1e-10
 
 
-def test_p_invariant():
+@pytest.mark.parametrize("low", [False, True], ids=["9-block", "low"])
+def test_p_invariant(low):
     p = problem("hex20", (4, 4, 4), "clamped")
-    state, args = start(p, 15)
+    state, args = start(p, 15, low=low)
     state = tuple(state)
     m = args[1]
     for it in range(30):
-        state, _ = lob.lobpcg_step(state, *args, (it + 1) % lob.RECOMPUTE == 0)
+        if low:
+            state, _ = lob.lobpcg_step_low(state, *args, c=1)
+            continue
+        state, _ = lob.lobpcg_step(state, *args, (it + 1) % lob.RECOMPUTE == 0, c=1)
         if it + 1 == lob.RECOMPUTE:  # the products were just recomputed explicitly
             X = state[0]
             KX = m * p.op.apply_K(m * X)
             assert np.linalg.norm(state[1] - KX) <= 1e-15 * np.linalg.norm(KX)
-    X, P, live = state[0], state[3], np.asarray(state[6])
+    X, P, live = state[0], state[-3 if low else 3], np.asarray(state[-2])
     assert live.any()
     MX, MP = m * p.op.apply_M(m * X), m * p.op.apply_M(m * P)
     assert np.abs(np.asarray(P.T @ MX)[live]).max() <= 1e-6
@@ -291,9 +310,9 @@ def test_recompute_schedule(monkeypatch):
     p = problem("hex8", (2, 2, 2), "clamped")
     step, flags = lob.lobpcg_step, []
 
-    def record(*args):
+    def record(*args, **kw):
         flags.append(bool(args[-1]))
-        return step(*args)
+        return step(*args, **kw)
 
     monkeypatch.setattr(lob, "lobpcg_step", record)
     lobpcg(p.op, p.free, 2, tol=1e-16, maxit=40)
@@ -346,34 +365,46 @@ import json, jax
 from jaxmodal import config
 config.enable_x64()
 jax.config.update("jax_enable_compilation_cache", False)
-n = [0]
+n = {"jit(lobpcg_step)": 0, "jit(lobpcg_step_low)": 0}
 def count(event, duration, **kw):
-    if "backend_compile" in event and "lobpcg_step" in str(kw.get("fun_name")):
-        n[0] += 1
+    if "backend_compile" in event and kw.get("fun_name") in n:
+        n[kw["fun_name"]] += 1
 jax.monitoring.register_event_duration_secs_listener(count)
 from jaxmodal.eigen import jacobi, lobpcg, sigma_estimate
 from jaxmodal.materials import Material, isotropic
+from jaxmodal.memory import lobpcg_memory, unstructured_memory
 from jaxmodal.mesh import box_mesh
 from jaxmodal.operators import dof_mask, unstructured
 m = box_mesh((3, 3, 3), type="hex20")
 op = unstructured(m, {0: Material(isotropic(3.0, 0.3), 2.0)})
 free = dof_mask(m, {"xmin": "xyz"})
-out = []
-lobpcg(op, free, 6, tol=1e-8); out.append(n[0])
 op2 = op.scaled(s_K=jax.numpy.full(m.n_el, 2.0))
-lobpcg(op2, free, 6, tol=1e-6, precond=jacobi(op2, free, 0.5)); out.append(n[0])
-sigma_estimate(op, free); out.append(n[0])
-print(json.dumps(out))
+out = []
+def solve(*args, **kw):
+    lobpcg(*args, **kw)
+    out.append(dict(n))
+solve(op, free, 6, tol=1e-8)
+solve(op2, free, 6, tol=1e-6, precond=jacobi(op2, free, 0.5))
+sigma_estimate(op, free); out.append(dict(n))
+solve(op, free, 9, tol=1e-8, chunk=3, guards=3)
+solve(op2, free, 9, tol=1e-6, chunk=3, guards=3, precond=jacobi(op2, free, 0.5))
+solve(op, free, 9, tol=1e-8, chunk=3, guards=3, low_memory=True)
+solve(op2, free, 9, tol=1e-8, chunk=3, guards=3, low_memory=True)
+print(json.dumps([[d["jit(lobpcg_step)"], d["jit(lobpcg_step_low)"]] for d in out]))
 """
 
 
 def test_compiles():
-    """One step compile per solve; new data (operator, preconditioner, tol) does not recompile."""
+    """One step compile per solve shape; new data (operator, preconditioner, tol) and the
+    chunk count (traced) never recompile; the low-memory step is one more variant."""
     res = subprocess.run(
         [sys.executable, "-c", COMPILES], capture_output=True, text=True, check=True
     )
-    first, second, sigma = json.loads(res.stdout.strip().splitlines()[-1])
-    assert (first, second) == (1, 1) and sigma - second <= 1
+    out = json.loads(res.stdout.strip().splitlines()[-1])
+    nine = [o[0] for o in out]
+    assert nine[:2] == [1, 1] and nine[2] - nine[1] <= 1  # sigma_estimate: one mode
+    assert nine[3] - nine[2] == 1 and nine[4] == nine[3]  # chunked: 3 chunks, one compile
+    assert [o[1] for o in out] == [0, 0, 0, 0, 0, 1, 1] and nine[6] == nine[4]
 
 
 @pytest.mark.parametrize(
@@ -424,8 +455,8 @@ def test_refill_limit(monkeypatch):
     p = problem("hex8", (2, 2, 2), "clamped")
     start = lob._start
 
-    def never_full(*args):  # SVQB always drops every column
-        X, KX, MX, keep = start(*args)
+    def never_full(*args, **kw):  # SVQB always drops every column
+        X, KX, MX, keep = start(*args, **kw)
         return X, KX, MX, jnp.zeros_like(keep)
 
     monkeypatch.setattr(lob, "_start", never_full)
@@ -460,24 +491,248 @@ class Diagonal:
 register(Diagonal, [])
 
 
-def test_step_memory():
-    """temp + aliased state of the compiled step <= 16.5 blocks of (n, m) fp64 (sequenced
-    update; 18 without the barriers). A diagonal operator keeps operator workspace out."""
-    n, k = 100_000, 17
-    S = jax.ShapeDtypeStruct
+S = jax.ShapeDtypeStruct
+
+
+def step_args(op, n, k, low, cap, basis=jnp.float64):
+    """Abstract arguments of a step on op with block size k and basis capacity cap."""
     blk, vec = S((n, k), jnp.float64), S((n,), jnp.float64)
-    state = (blk,) * 6 + (S((k,), bool), S((k,), jnp.float64))
+    tail = (S((k,), bool), S((k,), jnp.float64))
+    state = (blk,) * 2 + tail if low else (blk,) * 6 + tail
     R = S((n, 6), jnp.float64)
-    op = Diagonal(vec, vec)
     args = (state, op, S((n, 1), jnp.float64), Partial(lob._jacobi, vec), R, R,
-            S((4,), jnp.float64), S((), bool))  # fmt: skip
-    mem = lob.lobpcg_step.lower(*args).compile().memory_analysis()
-    blocks = (mem.temp_size_in_bytes + mem.alias_size_in_bytes) / (n * k * 8)
-    print(f"step memory: {blocks:.2f} blocks")
-    assert blocks <= 16.5, blocks
+            S((n, cap), basis), S((), jnp.int32), S((4,), jnp.float64))  # fmt: skip
+    return args if low else args + (S((), bool),)
+
+
+def step_blocks(op, n, k, low, cap, basis=jnp.float64):
+    """temp + aliased state of the compiled step, in blocks of (n, k) fp64."""
+    c, _ = lob._capacity(100, 1, k, low)
+    f = lob.lobpcg_step_low if low else lob.lobpcg_step
+    mem = f.lower(*step_args(op, n, k, low, cap, basis), c=c).compile().memory_analysis()
+    return (mem.temp_size_in_bytes + mem.alias_size_in_bytes) / (n * k * 8)
+
+
+@pytest.mark.parametrize("low", [False, True], ids=["9-block", "low"])
+def test_step_memory(low):
+    """Test 9: temp + aliased state with a diagonal operator (no operator workspace) is the
+    same (to 0.01) for basis capacities c ceil(2m / c) and 4x that, fp64 or fp32: <= 16.5
+    blocks for the 9-block step (sequenced update; 18 without barriers), <= 7.5 low-memory."""
+    n, k = 100_000, 17
+    vec = S((n,), jnp.float64)
+    op = Diagonal(vec, vec)
+    c, _ = lob._capacity(100, 1, k, low)
+    cap = c * -(-2 * k // c)
+    got = {
+        step_blocks(op, n, k, low, x, d) for x in (cap, 4 * cap) for d in (jnp.float64, jnp.float32)
+    }
+    print(f"step memory ({'low' if low else '9-block'}): {got}")
+    assert max(got) - min(got) <= 0.01 and max(got) <= (7.5 if low else 16.5)
+    assert step_blocks(op, n, k, low, 0) <= (7.5 if low else 16.5)  # single chunk: no basis
 
 
 def test_non_finite_step():
     p = problem("hex20", (4, 4, 4), "clamped")
     with pytest.raises(FloatingPointError, match="iteration 1"):
         lobpcg(p.op, p.free, 6, precond=Partial(lambda r: r * jnp.nan))
+
+
+# ---------------------------------------------------------------- PR 9b: chunks and locking
+
+
+@pytest.mark.parametrize("low", [False, True], ids=["9-block", "low"])
+@pytest.mark.parametrize("bc", ["clamped", "free"])
+def test_chunks(bc, low):
+    """Test 1: 30 modes in 3 chunks of 10 (default maxit, per chunk: about 900 in total)."""
+    p_args = ("hex20", (6, 6, 6), bc)
+    p = problem(*p_args)
+    lam, V, info = lobpcg(p.op, p.free, 30, tol=1e-10, R=p.R, chunk=10, low_memory=low)
+    check_modes(p_args, lam, V, info, 1e-10)
+    assert [(c["want"], c["converged"], c["stagnated"]) for c in info["chunks"]] == [
+        (10, True, False)
+    ] * 3
+
+
+CUBE = ("hex20", (4, 4, 4), "free", (1.0, 1.0, 1.0))
+
+
+def test_cluster_at_chunk_boundary():
+    """Test 3: elastic multiplicities 2, 3, 3, 2, 1, 3, 3: chunks of 4 extend over their
+    triples, and the last triple (modes 12-14) straddles n_modes, so the return is cut."""
+    p = problem(*CUBE)
+    lr, _ = reference(CUBE, 12)
+    lam, _, info = lobpcg(p.op, p.free, 12, tol=1e-10, R=p.R, chunk=4)
+    assert info["converged"] and [c["locked"] for c in info["chunks"]] == [5, 5, 4]
+    assert len(lam) == 12
+    for g in clusters(lr, 1e-8):
+        if g[-1] < 12:
+            c = lr[g[0]]
+            assert np.sum(np.abs(lam - c) <= f_lam(p, c) * c) == len(g)
+
+
+def test_guard_error():
+    """Test 4: one guard cannot show the end of the triple at the chunk boundary."""
+    p = problem(*CUBE)
+    with pytest.raises(ValueError, match="guards >= 2"):
+        lobpcg(p.op, p.free, 12, tol=1e-10, R=p.R, chunk=4, guards=1)
+
+
+@pytest.mark.parametrize("tol", [1e-6, 1e-10])
+def test_fp32_basis(tol):
+    """Tests 5 and 5b: chunked solve with an fp32 basis; at tol 1e-10 the chunks after the
+    first floor-accept at the 2 u_32 term (converged and stagnated)."""
+    p_args = ("hex20", (6, 6, 6), "clamped")
+    p = problem(*p_args)
+    lr, _ = reference(p_args, 31)
+    lam, V, info = lobpcg(p.op, p.free, 30, tol=tol, chunk=10, basis_dtype="float32")
+    assert info["converged"] and len(lam) == 30
+    assert [c["stagnated"] for c in info["chunks"]] == [False] + [tol < 1e-7] * 2
+    Vf = V[p.idx]
+    assert np.abs(Vf.T @ (p.Mf @ Vf) - np.eye(30)).max() <= 1e-5
+    for g in clusters(lr, 1e-4):
+        if g[0] >= 30:
+            break
+        gap = np.abs(np.delete(lr, g)[:, None] - lr[g][None]).min() / lr[g].max()
+        bound = f_lam(p, lr[g]) if gap >= 1e-2 else np.maximum(10 * tol, f_lam(p, lr[g]))
+        assert np.all(np.abs(lam[g] - lr[g]) / lr[g] <= np.maximum(1e-8, bound))
+    assert (lr[30] - lr[29]) / lr[29] >= 1e-3
+    sigma = (lr[29] + lr[30]) / 2
+    assert np.sum(lam < sigma) == count_below(p.K, p.M, sigma, p.free) == 30
+
+
+@pytest.mark.parametrize("dtype", [jnp.float64, jnp.float32])
+def test_projector(dtype):
+    """Test 6: the chunked projector equals the one-pass fp64 one (to rounding: the chunks
+    subtract in a different order), with a count that is not a multiple of c; its temp is
+    (c + m) n 8 bytes, independent of the capacity."""
+    n, k, c = 2000, 17, 17
+    rng = np.random.default_rng(0)
+    count = 3 * c + 5
+    B = np.zeros((n, 6 * c))
+    B[:, :count] = np.linalg.qr(rng.standard_normal((n, count)))[0]
+    B = jnp.asarray(B, dtype)
+    Y, MY = jnp.asarray(rng.standard_normal((n, k))), jnp.asarray(rng.standard_normal((n, k)))
+    V = jnp.asarray(B[:, :count], jnp.float64)
+    want = np.asarray(Y - V @ (V.T @ MY))
+    got = np.asarray(jax.jit(lob._project, static_argnums=4)(B, jnp.int32(count), Y, MY, c))
+    assert np.abs(got - want).max() <= 1e-14 * np.abs(want).max()
+    n, c = 100_000, 64
+    temps = set()
+    for cap in (2 * c, 8 * c):  # cap = c: the slice is the whole basis (no copy)
+        args = (
+            S((n, cap), dtype),
+            S((), jnp.int32),
+            S((n, k), jnp.float64),
+            S((n, k), jnp.float64),
+        )
+        f = jax.jit(lob._project, static_argnums=4)
+        temps.add(f.lower(*args, c).compile().memory_analysis().temp_size_in_bytes)
+    assert len(temps) == 1 and temps.pop() <= 1.01 * (c + k) * n * 8
+
+
+@pytest.mark.parametrize("dtype", [jnp.float64, jnp.float32])
+def test_insert_in_place(dtype):
+    """Test 7: the lock writes into the donated basis buffer."""
+    B = jnp.zeros((1000, 40), dtype)
+    ptr = B.unsafe_buffer_pointer()
+    B2 = lob._insert(B, jnp.ones((1000, 10)), jnp.int32(10))
+    assert B.is_deleted() and B2.unsafe_buffer_pointer() == ptr
+    assert np.all(np.asarray(B2)[:, 10:20] == 1) and np.all(np.asarray(B2)[:, 20:] == 0)
+
+
+def test_lock_full():
+    """Test 8: a lock past the capacity raises before writing (dynamic_update_slice would
+    clamp the start onto earlier columns) and leaves the basis intact."""
+    B = jnp.asarray(np.random.default_rng(0).standard_normal((100, 40)))
+    before = np.asarray(B).copy()
+    with pytest.raises(RuntimeError, match="locked basis full"):
+        lob._lock(B, 35, jnp.ones((100, 10)), 10)
+    assert not B.is_deleted() and np.array_equal(np.asarray(B), before)
+    B = lob._lock(B, 30, jnp.ones((100, 10)), 4)  # exactly full; unlocked columns zeroed
+    assert np.all(np.asarray(B)[:, 30:34] == 1) and np.all(np.asarray(B)[:, 34:] == 0)
+
+
+@pytest.mark.parametrize("low", [False, True], ids=["9-block", "low"])
+@pytest.mark.parametrize("s,k", [(24, 15), (24, 48), (8, 15)])
+def test_step_within_estimate(s, k, low):
+    """Test 10: compiled step temp + aliased state <= lobpcg_memory's step term with the
+    hex20 operator (8^3: operator workspace dominates)."""
+    mesh = box_mesh((s, s, s), type="hex20")
+    op = unstructured(mesh, MAT)
+    n = op.n_dof
+    got = step_blocks(op, n, k, low, 4 * k)
+    est = lobpcg_memory(lambda m: unstructured_memory(mesh, m), n, k, chunk=k, guards=0,
+                        low_memory=low)["step"]  # fmt: skip
+    print(f"hex20 {s}^3 m={k} low={low}: {got:.2f} blocks, estimate {est / (8 * n * k):.2f}")
+    assert got * 8 * n * k <= est
+
+
+PEAK_SETUP = """
+from jaxmodal import config
+config.enable_x64()
+from jaxmodal.eigen import lobpcg
+from jaxmodal.memory import lobpcg_memory, unstructured_memory
+from jaxmodal.mesh import box_mesh
+from jaxmodal.materials import Material, isotropic
+from jaxmodal.operators import dof_mask, unstructured
+mats = {0: Material(isotropic(3.0, 0.3), 2.0)}
+mesh = box_mesh((44, 44, 44), type="hex20")
+free = dof_mask(mesh, {"xmin": "xyz"})
+op = unstructured(mesh, mats)  # warm-up: full run, freed below
+lobpcg(op, free, 80, chunk=40, guards=8, maxit=3, low_memory=LOW)
+del op
+"""
+PEAK = """
+op = unstructured(mesh, mats)
+lobpcg(op, free, 80, chunk=40, guards=8, maxit=3, low_memory=LOW)
+"""
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(sys.platform != "darwin", reason="peak_bytes needs macOS")
+@pytest.mark.parametrize("low", [False, True], ids=["9-block", "low"])
+def test_estimate_1m(low):
+    """Test 11: hex20 44^3 (1.08M DOF), block 48, basis capacity 128, 3 iterations: measured
+    peak within 20% of lobpcg_memory's total."""
+    from benchmarks import harness
+
+    mesh = box_mesh((44, 44, 44), type="hex20")
+    n = 3 * len(mesh.points)
+    est = lobpcg_memory(lambda m: unstructured_memory(mesh, m), n, 80, chunk=40, guards=8,
+                        low_memory=low)["total"]  # fmt: skip
+    peak = harness.measure(PEAK.replace("LOW", str(low)), PEAK_SETUP.replace("LOW", str(low)))
+    peak = peak["peak_bytes"]
+    print(f"1M low={low}: estimate {est / 1e9:.2f} GB, peak {peak / 1e9:.2f} GB")
+    assert est >= 2e9 and abs(est - peak) <= 0.2 * peak, (est, peak)
+
+
+def test_failed_chunk():
+    """Test 13: chunk 1 converges at once from the reference modes, chunk 2 hits maxit: the
+    solve stops and returns the 10 locked modes plus chunk 2's 10 Ritz vectors."""
+    p_args = ("hex20", (6, 6, 6), "clamped")
+    p = problem(*p_args)
+    lr, Vr = reference(p_args, 15)
+    X0 = np.zeros((p.op.n_dof, 15))
+    X0[p.idx] = Vr[:, :15]  # the reference returns the free rows
+    lam, V, info = lobpcg(p.op, p.free, 30, tol=1e-10, chunk=10, X0=X0, maxit=5)
+    assert len(lam) == 20 and not info["converged"]
+    assert [c["converged"] for c in info["chunks"]] == [True, False]
+    assert np.all(np.abs(lam[:10] - lr[:10]) / lr[:10] <= f_lam(p, lr[:10]))
+    Vf = V[p.idx]
+    assert np.abs(Vf.T @ (p.Mf @ Vf) - np.eye(20)).max() <= 1e-8
+    assert np.allclose(info["residuals"], residuals(p, lam, jnp.asarray(V)), rtol=1e-5)
+
+
+def test_chunk_errors():
+    """Test 14."""
+    p = problem("hex8", (2, 2, 2), "clamped")
+    for kw in (dict(chunk=0), dict(chunk=5), dict(guards=0)):
+        with pytest.raises(ValueError, match="chunk <= n_modes"):
+            lobpcg(p.op, p.free, 4, **kw)
+    with pytest.raises(ValueError, match="basis_dtype"):
+        lobpcg(p.op, p.free, 4, chunk=2, basis_dtype="float16")
+    m = box_mesh((1, 1, 1), type="hex8")
+    op = unstructured(m, MAT)
+    free = dof_mask(m, {"xmin": "xyz"})  # 12 free DOFs
+    with pytest.raises(ValueError, match="block size 13"):
+        lobpcg(op, free, 10, chunk=3, guards=10)

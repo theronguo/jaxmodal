@@ -120,26 +120,30 @@ def _update(V, Cx, Cp):
     return x, p
 
 
-@functools.partial(jax.jit, donate_argnums=0)
-def lobpcg_step(state, op, m, precond, R, MR, consts, recompute):
-    """One LOBPCG iteration. state = (X, KX, MX, P, KP, MP, actP, lam), donated; everything is
-    an argument, so new data never recompiles. Returns the new state and one packed array:
-    residuals, thresholds and lam of the new X, and the P drop flag."""
-    X, KX, MX, P, KP, MP, actP, lam = state
-    k = X.shape[1]
-    r, t = _resid(X, KX, MX, lam, consts)
-    act = r > t  # soft locking: converged columns get no new direction
-    W = precond(KX - MX * lam) * act
-    W = m * (W - R @ (MR.T @ W))
-    W = (W, _K(op, m, W), _M(op, m, W))
-    Xb, Pb = (X, KX, MX), (P, KP, MP)
-    W = _ortho(Pb, _ortho(Xb, W))
-    *W, actW = _svqb(*W, act)
-    W = _ortho(Pb, _ortho(Xb, W))
-    *W, actW = _svqb(*W, actW)
-    blocks = (Xb, tuple(W), Pb)
-    GK = jnp.block([[a[0].T @ b[1] for b in blocks] for a in blocks])
-    GM = jnp.block([[a[0].T @ b[2] for b in blocks] for a in blocks])
+def _project(B, count, Y, MY, c):
+    """Y - V (V^T MY) with V = B[:, :count], over column chunks of width c (upcast to fp64).
+    Columns past count are zero, so the last chunk may read past it."""
+
+    def body(i, Y):
+        Bc = jax.lax.dynamic_slice_in_dim(B, i * c, c, 1).astype(Y.dtype)
+        return Y - Bc @ (Bc.T @ MY)
+
+    return jax.lax.fori_loop(0, (count + c - 1) // c, body, Y)
+
+
+def _deflate(op, m, R, MR, B, count, Y, c):
+    """Y M-orthogonalized against the locked basis B[:, :count] (one extra M apply, skipped
+    while count = 0) and the rigid modes R, masked. B with no columns: a single-chunk solve."""
+    if B.shape[1]:
+        Y = jax.lax.cond(
+            count > 0, lambda Y: _project(B, count, Y, _M(op, m, Y), c), lambda Y: Y, Y
+        )
+    return m * (Y - R @ (MR.T @ Y))
+
+
+def _rr_coeffs(GK, GM, k, actW, actP, lam, consts):
+    """Rayleigh-Ritz with the pivot-test fallback, and the new P coefficients:
+    (theta, Cx, Cp, keep, dropped)."""
     beta = 10 * jnp.max(jnp.abs(lam)) + consts[0] / consts[1]
     ones, none = jnp.ones(k, bool), jnp.zeros(k, bool)
     th, C, G, ok = _rr(GK, GM, jnp.concatenate([ones, actW, actP]), beta)
@@ -149,6 +153,30 @@ def lobpcg_step(state, op, m, precond, R, MR, consts, recompute):
     Cp, live, keep = _p_coeffs(Cx, Cx.at[:k].set(0.0), G)
     # a P column was lost (noise rule or SVQB drop) iff fewer kept than nonzero inputs
     dropped = ~ok | (keep.sum() < (jnp.abs(Cx[k:]).sum(0) > 0).sum())
+    return th[:k], Cx, Cp, keep, dropped
+
+
+@functools.partial(jax.jit, donate_argnums=0, static_argnames="c")
+def lobpcg_step(state, op, m, precond, R, MR, B, count, consts, recompute, *, c):
+    """One LOBPCG iteration. state = (X, KX, MX, P, KP, MP, actP, lam), donated; everything is
+    an argument, so new data never recompiles. B, count: the locked basis (projector chunk
+    width c). Returns the new state and one packed array: residuals, thresholds and lam of the
+    new X, and the P drop flag."""
+    X, KX, MX, P, KP, MP, actP, lam = state
+    k = X.shape[1]
+    r, t = _resid(X, KX, MX, lam, consts)
+    act = r > t  # soft locking: converged columns get no new direction
+    W = _deflate(op, m, R, MR, B, count, precond(KX - MX * lam) * act, c)
+    W = (W, _K(op, m, W), _M(op, m, W))
+    Xb, Pb = (X, KX, MX), (P, KP, MP)
+    W = _ortho(Pb, _ortho(Xb, W))
+    *W, actW = _svqb(*W, act)
+    W = _ortho(Pb, _ortho(Xb, W))
+    *W, actW = _svqb(*W, actW)
+    blocks = (Xb, tuple(W), Pb)
+    GK = jnp.block([[a[0].T @ b[1] for b in blocks] for a in blocks])
+    GM = jnp.block([[a[0].T @ b[2] for b in blocks] for a in blocks])
+    lam, Cx, Cp, keep, dropped = _rr_coeffs(GK, GM, k, actW, actP, lam, consts)
     (Xn, Pn), (KXn, KPn), (MXn, MPn) = (
         _update(tuple(b[j] for b in blocks), Cx, Cp) for j in range(3)
     )
@@ -158,10 +186,66 @@ def lobpcg_step(state, op, m, precond, R, MR, consts, recompute):
         lambda a: a,
         (Xn, KXn, MXn, Pn, KPn, MPn),
     )
-    lam = th[:k]
     r, t = _resid(Xn, KXn, MXn, lam, consts)
     out = jnp.concatenate([r, t, lam, dropped[None].astype(r.dtype)])
     return (Xn, KXn, MXn, Pn, KPn, MPn, keep, lam), out
+
+
+def _bar(*a):
+    return jax.lax.optimization_barrier(a)
+
+
+@functools.partial(jax.jit, donate_argnums=0, static_argnames="c")
+def lobpcg_step_low(state, op, m, precond, R, MR, B, count, consts, *, c):
+    """Low-memory iteration: state = (X, P, actP, lam), donated. Every K and M product is
+    formed when needed, used for its Gram blocks and freed (the barriers bound each lifetime).
+    Returns the new state and the packed residuals, thresholds and lam of the INPUT X."""
+    X, P, actP, lam = state
+    k = X.shape[1]
+    KX = _K(op, m, X)
+    X, P, KX = _bar(X, P, KX)
+    MX = _M(op, m, X)
+    r, t = _resid(X, KX, MX, lam, consts)
+    act = r > t
+    W = precond(KX - MX * lam) * act
+    GK_XX, GK_PX = X.T @ KX, P.T @ KX
+    X, P, MX, W = _bar(X, P, MX, W)  # KX dies
+    W = _deflate(op, m, R, MR, B, count, W, c)
+    X, P, MX, W = _bar(X, P, MX, W)
+    MP = _M(op, m, P)
+    for _ in range(2):
+        W = W - X @ (MX.T @ W)
+        W = W - P @ (MP.T @ W)
+    GM_XX, GM_PX, GM_PP = X.T @ MX, P.T @ MX, P.T @ MP
+    X, W, P = _bar(X, W, P)  # MX, MP die
+    MW = _M(op, m, W)
+    T, actW = _svqb_t(W.T @ MW, act)
+    W, MW = W @ T, MW @ T
+    GM_XW, GM_WW, GM_PW = X.T @ MW, W.T @ MW, P.T @ MW
+    X, W, P = _bar(X, W, P)
+    KW = _K(op, m, W)
+    GK_XW, GK_WW, GK_PW = X.T @ KW, W.T @ KW, P.T @ KW
+    X, W, P = _bar(X, W, P)
+    GK_PP = P.T @ _K(op, m, P)
+    X, W, P = _bar(X, W, P)
+    GK = jnp.block([[GK_XX, GK_XW, GK_PX.T], [GK_XW.T, GK_WW, GK_PW.T], [GK_PX, GK_PW, GK_PP]])
+    GM = jnp.block([[GM_XX, GM_XW, GM_PX.T], [GM_XW.T, GM_WW, GM_PW.T], [GM_PX, GM_PW, GM_PP]])
+    th, Cx, Cp, keep, dropped = _rr_coeffs(GK, GM, k, actW, actP, lam, consts)
+    Xn, Pn = _update((X, W, P), Cx, Cp)
+    return (Xn, Pn, keep, th), jnp.concatenate([r, t, lam, dropped[None].astype(r.dtype)])
+
+
+@functools.partial(jax.jit, donate_argnums=0)
+def _insert(B, X, count):
+    return jax.lax.dynamic_update_slice_in_dim(B, X.astype(B.dtype), count, 1)
+
+
+def _lock(B, count, X, j):
+    """B with columns count .. count + m holding X[:, :j] and zeros (m = X.shape[1]); B is
+    donated. Checks the capacity before writing, so B stays intact when full."""
+    if count + X.shape[1] > B.shape[1]:
+        raise RuntimeError(f"locked basis full: {count} + {X.shape[1]} > {B.shape[1]} columns")
+    return _insert(B, X * (jnp.arange(X.shape[1]) < j), jnp.asarray(count, jnp.int32))
 
 
 @jax.jit
@@ -178,10 +262,10 @@ def _norms(op, m, v):
     return power(_K), power(_M)
 
 
-@jax.jit
-def _start(X, op, m, R, MR):
+@functools.partial(jax.jit, static_argnames="c")
+def _start(X, op, m, R, MR, B, count, c):
     """Mask, deflate and M-orthonormalize a start block: (X, KX, MX, keep)."""
-    X = m * (X - R @ (MR.T @ X))
+    X = _deflate(op, m, R, MR, B, count, m * X, c)
     return _svqb(X, _K(op, m, X), _M(op, m, X), jnp.ones(X.shape[1], bool))
 
 
@@ -192,26 +276,19 @@ def _rr_start(X, KX, MX):
 
 
 @jax.jit
-def _confirm(state, op, m, consts):
-    """Explicit K X, M X written back into the state, with their residuals and thresholds."""
-    X, lam = state[0], state[7]
+def _confirm(X, lam, op, m, consts):
+    """Explicit K X and M X with their residuals and thresholds: (KX, MX, r, t)."""
     KX, MX = _K(op, m, X), _M(op, m, X)
-    return (X, KX, MX) + state[3:], *_resid(X, KX, MX, lam, consts)
+    return KX, MX, *_resid(X, KX, MX, lam, consts)
 
 
-def _setup(op, m, k, R, MR, X0, seed):
-    """Norms, start block (X0 padded with random columns) and the initial state, with P a
-    masked zero block: (state, ||K||, ||M||, refills)."""
-    n = m.shape[0]
-    key, sub = jax.random.split(jax.random.key(seed))
-    nK, nM = map(float, _norms(op, m, m * jax.random.normal(sub, (n, 1))))
-    key, sub = jax.random.split(key)
-    X = jax.random.normal(sub, (n, k))
-    if X0 is not None:
-        X = X.at[:, : X0.shape[1]].set(X0)
+def _begin(X, key, op, m, R, MR, B, count, c, low):
+    """Initial state from start columns X: deflated and SVQB-orthonormalized (dependent columns
+    refilled with random ones, at most 3 times), Rayleigh-Ritz, P a masked zero block.
+    Returns (state, key, refills)."""
     refills = 0
-    while True:  # SVQB drops dependent columns; refill them with random vectors
-        X, KX, MX, keep = _start(X, op, m, R, MR)
+    while True:
+        X, KX, MX, keep = _start(X, op, m, R, MR, B, count, c=c)
         if keep.all():
             break
         if refills == 3:
@@ -220,22 +297,125 @@ def _setup(op, m, k, R, MR, X0, seed):
         key, sub = jax.random.split(key)
         X = jnp.where(keep, X, jax.random.normal(sub, X.shape))
     X, KX, MX, lam = _rr_start(X, KX, MX)
+    actP = jnp.zeros(X.shape[1], bool)
+    if low:
+        return (X, jnp.zeros_like(X), actP, lam), key, refills
     P = [jnp.zeros_like(X) for _ in range(3)]  # separate buffers: the state is donated
-    return (X, KX, MX, *P, jnp.zeros(k, bool), lam), nK, nM, refills
+    return (X, KX, MX, *P, actP, lam), key, refills
 
 
-def lobpcg(op, free, n_modes, tol=1e-6, R=None, precond=None, X0=None, maxit=500, seed=0):
+def _block_size(n_modes, chunk, guards):
+    """(chunk, guards, block size m) with the defaults: one chunk, max(5, chunk // 5) guards."""
+    chunk = n_modes if chunk is None else chunk
+    guards = max(5, chunk // 5) if guards is None else guards
+    return chunk, guards, chunk + guards
+
+
+def _capacity(n_modes, chunk, k, low):
+    """(projector chunk width c, basis capacity): c = m in the low-memory step, else
+    max(m, min(4m, 64)); no basis for a single chunk."""
+    c = k if low else max(k, min(4 * k, 64))
+    return c, (0 if chunk >= n_modes else -(-(n_modes + k) // c) * c)
+
+
+def lobpcg(
+    op, free, n_modes, tol=1e-6, R=None, precond=None, X0=None, maxit=500, seed=0, *,
+    chunk=None, guards=None, basis_dtype="float64", low_memory=False,
+):  # fmt: skip
     """Lowest n_modes eigenpairs of the masked pencil (K_m, M_m). Returns lam (n_modes,)
-    ascending (NumPy), V (n_dof, n_modes) M-orthonormal with constrained rows 0 (device), and
-    info. op: operator with apply_K, apply_M, diag_K, diag_M, n_dof; free: (n_dof,) bool;
+    ascending (NumPy), V (n_dof, n_modes) M-orthonormal with constrained rows 0 (NumPy fp64),
+    and info. op: operator with apply_K, apply_M, diag_K, diag_M, n_dof; free: (n_dof,) bool;
     R: (n_dof, k) M-orthonormal deflation basis (rigid modes) or None; precond: pytree callable
     (n, j) -> (n, j), fixed, linear, SPD on the free DOFs, masked output (default
-    jacobi(op, free)); X0: (n_dof, j <= block size) start columns. Never raises on
-    non-convergence: check info["converged"] and info["stagnated"]."""
-    return _solve(op, free, n_modes, tol, R, precond, X0, maxit, seed)
+    jacobi(op, free)); X0: (n_dof, j <= block size) start columns of the first chunk.
+    chunk: wanted modes per chunk (default n_modes), block size chunk + guards (default
+    max(5, chunk // 5)); converged chunks are locked into a basis of dtype basis_dtype
+    ("float64" or "float32"; with float32, chunks after the first accept at
+    max(tol, 1.2e-7)). maxit counts per chunk. low_memory: the low-memory step (11 instead of
+    16 blocks, about 1.6-1.9x the time). Never raises on non-convergence: check
+    info["converged"] and info["stagnated"]; a failed chunk ends the solve, so fewer than
+    n_modes can come back."""
+    return _solve(
+        op, free, n_modes, tol, R, precond, X0, maxit, seed, chunk, guards, basis_dtype, low_memory
+    )
 
 
-def _solve(op, free, n_modes, tol, R, precond, X0, maxit, seed, stop=None):
+def _extent(lam, r, t, want, guards, failed=False):
+    """want extended over a cluster at the block boundary: relative gaps < 100 t, or, at a
+    failed exit, within 10 r^2 (the Ritz value uncertainty of a slowly converging guard).
+    Raises the guard error if the cluster reaches the block end."""
+    j, k = want, len(lam)
+    while j < k and lam[j] - lam[j - 1] < max(100 * t[j - 1], 10 * failed * r[j] ** 2) * abs(
+        lam[j - 1]
+    ):
+        j += 1
+    if j == k:
+        raise ValueError(
+            f"a cluster at the chunk boundary (from mode {want}) fills the block: it needs more "
+            f"than {guards} guard vectors; pass guards >= {guards + 1} or a chunk size that "
+            "ends in a gap"
+        )
+    return j
+
+
+def _iterate(state, args, k, want, guards, tol, consts, maxit, low, c, stop):
+    """The iteration loop of one chunk. Returns (state, r, t, j, iterations, converged,
+    stagnated, history, drops): j = want, extended over a cluster at the block boundary."""
+    op, m = args[0], args[1]
+    hist, lsum, drops = [], [], 0
+    best, best_l, it_best = np.inf, np.inf, 0
+    converged = stagnated = False
+    j = want
+    for it in range(maxit):
+        if low:
+            state, out = lobpcg_step_low(state, *args, consts, c=c)
+        else:
+            recompute = (it + 1) % RECOMPUTE == 0
+            state, out = lobpcg_step(state, *args, consts, recompute, c=c)
+        out = np.asarray(out)
+        if not np.isfinite(out).all():
+            raise FloatingPointError(f"non-finite LOBPCG step at iteration {it + 1}")
+        r, t, lam = out[:k], out[k : 2 * k], out[2 * k : 3 * k]
+        drops += int(out[-1])
+        # cluster rule once the wanted residuals are <= sqrt(t): Ritz values are then accurate
+        # to about t, well inside the 100 t window. j only grows; progress restarts with it
+        if (r[:want] ** 2 <= t[:want]).all() and (jn := _extent(lam, r, t, want, guards)) > j:
+            j, best, best_l, it_best = jn, np.inf, np.inf, it
+        hist.append(r[:j].max())
+        lsum.append(lam[:j].sum())
+        if stop is not None and stop(lsum):
+            break
+        if hist[-1] < 0.9 * best or lsum[-1] < (1 - 1e-10) * best_l:
+            best, best_l, it_best = min(best, hist[-1]), min(best_l, lsum[-1]), it
+        if it - it_best >= STALL:
+            stagnated = True
+            break
+        if (r[:j] <= t[:j]).all():
+            state, r2, t2 = _explicit(state, op, m, consts, low)
+            if (r2[:j] <= t2[:j]).all():
+                r, t, converged = r2, t2, True
+                stagnated = bool((r[:j] > tol).any())
+                break
+    if not converged:  # report residuals of explicit products on every exit
+        # wanted columns near convergence but a failed chunk: a split cluster (guard error)
+        if stop is None and (r[:want] ** 2 <= t[:want]).all():
+            _extent(lam, r, t, want, guards, failed=True)
+        state, r, t = _explicit(state, op, m, consts, low)
+    return state, r, t, j, it + 1, converged, stagnated, hist, drops
+
+
+def _explicit(state, op, m, consts, low):
+    """_confirm on the state's X; the 9-block state takes the explicit products."""
+    KX, MX, r, t = _confirm(state[0], state[-1], op, m, consts)
+    if not low:
+        state = (state[0], KX, MX) + state[3:]
+    return state, np.asarray(r), np.asarray(t)
+
+
+def _solve(
+    op, free, n_modes, tol, R, precond, X0, maxit, seed, chunk=None, guards=None,
+    basis_dtype="float64", low=False, stop=None,
+):  # fmt: skip
     check_x64("lobpcg")
     t0 = time.perf_counter()
     n = op.n_dof
@@ -243,9 +423,13 @@ def _solve(op, free, n_modes, tol, R, precond, X0, maxit, seed, stop=None):
     if free.shape != (n,) or free.dtype != bool:
         raise ValueError(f"free must be a ({n},) bool mask")
     R = jnp.zeros((n, 0)) if R is None else jnp.asarray(R, jnp.float64)
-    k = n_modes + max(5, n_modes // 5)
     if n_modes < 1 or maxit < 1:
         raise ValueError(f"n_modes and maxit must be >= 1, got {n_modes}, {maxit}")
+    chunk, guards, k = _block_size(n_modes, chunk, guards)
+    if not 1 <= chunk <= n_modes or guards < 1:
+        raise ValueError(f"need 1 <= chunk <= n_modes and guards >= 1, got {chunk}, {guards}")
+    if basis_dtype not in ("float64", "float32"):
+        raise ValueError(f"basis_dtype must be 'float64' or 'float32', got {basis_dtype!r}")
     if k > free.sum() - R.shape[1]:
         raise ValueError(
             f"block size {k} for n_modes = {n_modes} exceeds the {free.sum()} free DOFs minus "
@@ -260,52 +444,63 @@ def _solve(op, free, n_modes, tol, R, precond, X0, maxit, seed, stop=None):
         if X0.ndim != 2 or X0.shape[0] != n or X0.shape[1] > k:
             raise ValueError(f"X0 must have shape ({n}, j) with j <= {k}, got {X0.shape}")
     precond = jacobi(op, free) if precond is None else precond
-    state, nK, nM, refills = _setup(op, m, k, R, MR, X0, seed)
-    consts = jnp.array([nK, nM, tol, C_FLOOR])
+    c, cap = _capacity(n_modes, chunk, k, low)
+    fp32 = basis_dtype == "float32"
+    B = jnp.zeros((n, cap), basis_dtype)
+    key, sub = jax.random.split(jax.random.key(seed))
+    nK, nM = map(float, _norms(op, m, m * jax.random.normal(sub, (n, 1))))
     t1 = time.perf_counter()
-    hist, lsum, drops = [], [], 0
-    best, best_l, it_best = np.inf, np.inf, 0
-    converged = stagnated = False
-    for it in range(maxit):
-        state, out = lobpcg_step(state, op, m, precond, R, MR, consts, (it + 1) % RECOMPUTE == 0)
-        out = np.asarray(out)
-        if not np.isfinite(out).all():
-            raise FloatingPointError(f"non-finite LOBPCG step at iteration {it + 1}")
-        r, t, lam = out[:k], out[k : 2 * k], out[2 * k : 3 * k]
-        drops += int(out[-1])
-        hist.append(r[:n_modes].max())
-        lsum.append(lam[:n_modes].sum())
-        if stop is not None and stop(lsum):
+    count, lams, res, thr, host, chunks, hist = 0, [], [], [], [], [], []
+    drops = refills = iterations = 0
+    while True:
+        want = min(chunk, n_modes - count)
+        key, sub = jax.random.split(key)
+        X = jax.random.normal(sub, (n, k))
+        if X0 is not None:
+            X = X.at[:, : X0.shape[1]].set(X0)
+        cnt = jnp.asarray(count, jnp.int32)
+        state, key, nref = _begin(X, key, op, m, R, MR, B, cnt, c, low)
+        # fp32 basis: residuals floor near 1e-8 against the rounded locked modes (2 u_32 term)
+        t_eff = max(tol, 2.0**-23) if fp32 and count else tol
+        consts = jnp.array([nK, nM, t_eff, C_FLOOR])
+        args = (op, m, precond, R, MR, B, cnt)
+        state, r, t, j, its, ok, stag, h, d = _iterate(
+            state, args, k, want, guards, tol, consts, maxit, low, c, stop
+        )
+        refills, iterations, drops = refills + nref, iterations + its, drops + d
+        hist += h
+        jj = j if ok else want
+        chunks.append(dict(want=want, locked=j if ok else 0, iterations=its, converged=ok,
+                           stagnated=stag))  # fmt: skip
+        lams.append(np.asarray(state[-1][:jj]))
+        res.append(r[:jj])
+        thr.append(t[:jj])
+        if not ok or count + j >= n_modes:
             break
-        if hist[-1] < 0.9 * best or lsum[-1] < (1 - 1e-10) * best_l:
-            best, best_l, it_best = min(best, hist[-1]), min(best_l, lsum[-1]), it
-        if it - it_best >= STALL:
-            stagnated = True
-            break
-        if (r[:n_modes] <= t[:n_modes]).all():
-            state, r2, t2 = _confirm(state, op, m, consts)
-            r2, t2 = np.asarray(r2), np.asarray(t2)
-            if (r2[:n_modes] <= t2[:n_modes]).all():
-                r, t, converged = r2, t2, True
-                stagnated = bool((r[:n_modes] > tol).any())
-                break
-    if not converged:  # report residuals of explicit products on every exit
-        state, r, t = _confirm(state, op, m, consts)
-        r, t = np.asarray(r), np.asarray(t)
+        if fp32:
+            host.append(np.asarray(state[0][:, :j]))
+        B = _lock(B, count, state[0], j)
+        count += j
+        X0 = state[0][:, j:]
+    Xf = np.asarray(state[0])[:, :jj]
+    del state, X0  # free the step state before the basis comes to the host
+    V = np.hstack((host if fp32 or not count else [np.asarray(B)[:, :count]]) + [Xf])
+    V = V[:, :n_modes]
     info = dict(
-        iterations=it + 1,
-        converged=converged,
-        stagnated=stagnated,
-        residuals=r[:n_modes],
-        thresholds=t[:n_modes],
+        iterations=iterations,
+        converged=all(ch["converged"] for ch in chunks),
+        stagnated=any(ch["stagnated"] for ch in chunks),
+        residuals=np.concatenate(res)[:n_modes],
+        thresholds=np.concatenate(thr)[:n_modes],
         p_drops=drops,
         refills=refills,
         norm_K=nK,
         norm_M=nM,
         history=np.array(hist),
+        chunks=chunks,
         time=dict(setup=t1 - t0, iterations=time.perf_counter() - t1),
     )
-    return np.asarray(state[7][:n_modes]), state[0][:, :n_modes], info
+    return np.concatenate(lams)[:n_modes], V, info
 
 
 def sigma_estimate(op, free, R=None, maxit=300, seed=0):
@@ -316,5 +511,5 @@ def sigma_estimate(op, free, R=None, maxit=300, seed=0):
     def stop(lsum):
         return len(lsum) > 10 and lsum[-11] - lsum[-1] < 0.05 * lsum[-1]
 
-    lam, _, info = _solve(op, free, 1, 0.0, R, None, None, maxit, seed, stop)
+    lam, _, info = _solve(op, free, 1, 0.0, R, None, None, maxit, seed, stop=stop)
     return float(lam[0]), info["iterations"]
