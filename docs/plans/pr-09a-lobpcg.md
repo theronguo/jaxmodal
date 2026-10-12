@@ -77,7 +77,7 @@ The prototype is the design below: one module-level jitted step with every array
   | hex20 $24^3$ | 182k | 15 | 18 |
   | hex20 $32^3$ | 421k | 15 | 16.9 |
 
-  The barrier saving shows only from about 400k DOF. 9b's estimator models the step as max(16 blocks, apply phase + the operator estimator's workspace). Both figures go into `docs/eigensolvers.md`. 9b's estimator models that count and updates the Memory budget rows, for example 1M at $m = 25$: 3.2 GB instead of 1.8 + 0.4 GB. That is noted there as a deviation.
+  The barrier saving shows only from about 400k DOF. 9b's estimator models the step as max(16 blocks, apply phase + the operator estimator's workspace) and updates the Memory budget rows, for example 1M at $m = 25$: 3.2 GB instead of 1.8 + 0.4 GB. That is noted there as a deviation. Both figures go into `docs/eigensolvers.md`.
 - **Per-iteration cost** (182k DOF, first prototype):
 
   | m | step | K + M applies | dense part |
