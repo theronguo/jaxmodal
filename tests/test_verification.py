@@ -294,7 +294,7 @@ def test_fv52(t):
     lam, lmax_ = fv_plate(t, 12, 2, 1.0, 10, faces=True)
     assert np.abs(lam[:3]).max() <= 10 * EPS * lmax_  # 3 in-plane rigid modes
     f = hz(lam[3:])
-    assert abs(f[4] / FV52_TARGET[4] - 1) <= 1e-2
+    assert abs(f[4] / FV52_TARGET[4] - 1) <= 1e-2  # mode 8
     assert np.abs(f / FV52_FINE - 1).max() <= 1e-2
 
 
@@ -308,13 +308,15 @@ def test_fv12(t):
     assert np.abs(f / FV12_FINE - 1).max() <= 1e-2
 
 
-def test_nafems_nested():
+@pytest.mark.parametrize(
+    "coarse,fine,h,k,faces,first",
+    [((6, 1), (12, 2), 1.0, 10, True, 3), ((10, 1), (20, 1), 0.05, 13, False, 6)],
+)
+def test_nafems_nested(coarse, fine, h, k, faces, first):
     """Upper bound on nested uniform hex20 meshes, from mode 4 (FV52) and 7 (FV12)."""
-    for (a, b), h, k, faces, first in [(((6, 1), (12, 2)), 1.0, 10, True, 3),
-                                       (((10, 1), (20, 1)), 0.05, 13, False, 6)]:  # fmt: skip
-        lam_a = fv_plate("hex20", *a, h, k, faces=faces)[0]
-        lam_b, lmax_ = fv_plate("hex20", *b, h, k, faces=faces)
-        assert np.all(lam_b[first:] <= lam_a[first:] + 10 * EPS * lmax_)
+    lam_a = fv_plate("hex20", *coarse, h, k, faces=faces)[0]
+    lam_b, lmax_ = fv_plate("hex20", *fine, h, k, faces=faces)
+    assert np.all(lam_b[first:] <= lam_a[first:] + 10 * EPS * lmax_)
 
 
 @pytest.mark.slow
@@ -341,13 +343,8 @@ LAMB_LEVELS = {
 def test_lamb_oracle():
     roots = lamb_sphere(LAMB_NU, 9)
     eta = {(kind, n): e for e, kind, n in reversed(roots)}  # lowest root per (kind, n)
-    assert [(kind, n) for _, kind, n in roots[:5]] == [
-        ("T", 2),
-        ("S", 2),
-        ("S", 1),
-        ("T", 3),
-        ("S", 3),
-    ]
+    order = [("T", 2), ("S", 2), ("S", 1), ("T", 3), ("S", 3)]
+    assert [(kind, n) for _, kind, n in roots[:5]] == order
     assert abs(eta["T", 2] - LAMB_T2) <= 1e-6 and abs(eta["S", 2] - LAMB_S2) <= 1e-6
     assert abs(eta["T", 1] - 5.763459) <= 1e-6  # first zero of j_2 (A&S table 10.6)
     assert lamb_sphere(0.1, 1)[0][:2] == pytest.approx((LAMB_T2, "T"), abs=1e-6)  # nu-free

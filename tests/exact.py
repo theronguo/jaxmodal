@@ -167,12 +167,8 @@ def lamb_sphere(nu, k, nmax=8, top=12.0):
 
     def spher(e, n):
         x = r * e
-        je, jx, ge, gx = (
-            spherical_jn(n, e),
-            spherical_jn(n, x),
-            e * spherical_jn(n + 1, e),
-            x * spherical_jn(n + 1, x),
-        )
+        je, ge = spherical_jn(n, e), e * spherical_jn(n + 1, e)
+        jx, gx = spherical_jn(n, x), x * spherical_jn(n + 1, x)
         a = (n - 1) * (n + 2)
         return (2 * (e**2 * je + a * (ge - (n + 1) * je)) * gx
                 + (-(e**4) / 2 + (n - 1) * (2 * n + 1) * e**2) * je * jx
@@ -183,7 +179,7 @@ def lamb_sphere(nu, k, nmax=8, top=12.0):
         y = f(grid, n)
         for i in np.flatnonzero(y[:-1] * y[1:] < 0):
             out.append((brentq(f, grid[i], grid[i + 1], (n,), xtol=1e-14), kind, n))
-    out, edge = sorted(out), min(e for e, _, n in out if n == nmax)
+    out, edge = sorted(out), min((e for e, _, n in out if n == nmax), default=top)
     if len(out) < k or out[k - 1][0] >= edge:  # lowest roots rise with n: a check, not a bound
         raise ValueError(f"nmax = {nmax}, top = {top} too small for {k} roots")
     return out[:k]

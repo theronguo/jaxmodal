@@ -79,7 +79,7 @@ def test_box_coords(t):
     uniform = [o + s * np.arange(n + 1) for o, s, n in zip(ORIGIN, SPACING, SHAPE, strict=True)]
     m = box_mesh(SHAPE, type=t, coords=uniform, spacing=(9.0, 9.0, 9.0))  # spacing ignored
     assert np.allclose(m.points, box_mesh(SHAPE, SPACING, ORIGIN, t).points, rtol=0, atol=1e-15)
-    graded = [np.cumsum(np.r_[0, rng]) for rng in ([1, 3, 2], [0.5, 4], [1, 2, 5, 3])]
+    graded = [np.cumsum(np.r_[0, w]) for w in ([1, 3, 2], [0.5, 4], [1, 2, 5, 3])]
     m = box_mesh(SHAPE, type=t, coords=graded)
     nodes = ELEMENTS[t].nodes
     for d in range(3):
