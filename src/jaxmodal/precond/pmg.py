@@ -139,11 +139,14 @@ def _cells(op, b, sigma, m, d, own):
     return lax.map(f, xs).reshape(-1, 24, 24)
 
 
-def _hex8_galerkin(op, free, sigma):
-    """(Ac, T): the SciPy CSR hex8 Galerkin matrix P^T A_P P on the corner nodes (symmetrized
-    once after assembly) and the NodalTransfer P. The fine operator is never assembled."""
-    A = ap_operator(op, free, sigma)
-    d = sigma * op.nodal * A.free + A.s * (1 - A.free)  # nodal masses, constrained diagonal
+def _hex8_galerkin(A):
+    """(Ac, T) for an APOperator A of an Unstructured operator: the SciPy CSR hex8 Galerkin
+    matrix P^T A P on the corner nodes and the NodalTransfer P. The fine operator is never
+    assembled. The pattern is structural (every cell pair, no pruned zeros) and the values are
+    symmetrized on it exactly."""
+    op = A.op
+    # owned diagonal (added once per node, by its owner): nodal masses, constrained diagonal
+    d = A.sigma * op.nodal * A.free + A.s * (1 - A.free)
     cid, T, owns = _tables(op)
     n_c = 3 * int(T.child.shape[0])
     check_int32(coarse_dofs=n_c)
@@ -151,15 +154,19 @@ def _hex8_galerkin(op, free, sigma):
     for b, own in zip(op.blocks, owns, strict=True):
         ownp = np.zeros((b.dofs.shape[0], own.shape[1]))
         ownp[: b.n_el] = own
-        C = np.asarray(_cells(op, b, jnp.float64(sigma), A.free, d, jnp.asarray(ownp)))[: b.n_el]
+        C = np.asarray(_cells(op, b, A.sigma, A.free, d, jnp.asarray(ownp)))[: b.n_el]
         cd = (3 * cid[_nodes(b)[:, :8]][:, :, None] + np.arange(3)).reshape(-1, 24).astype(np.int32)
         rows.append(np.repeat(cd, 24, axis=1).ravel())
         cols.append(np.tile(cd, (1, 24)).ravel())
         vals.append(C.ravel())
     Ac = sp.coo_array(
         (np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))), shape=(n_c, n_c)
-    ).tocsr()
-    return (Ac + Ac.T) / 2, T
+    ).tocsr()  # sums duplicates, keeps explicit zeros
+    At = Ac.T.tocsr()
+    At.sort_indices()
+    assert (At.indptr == Ac.indptr).all() and (At.indices == Ac.indices).all()  # symmetric pattern
+    Ac.data = (Ac.data + At.data) / 2
+    return Ac, T
 
 
 def pmg(op, free, sigma, *, degree=2, ratio=30.0):
@@ -178,8 +185,8 @@ def pmg(op, free, sigma, *, degree=2, ratio=30.0):
         raise SingularShiftError(
             "pmg needs sigma > 0: A_P at sigma = 0 is singular when the BCs leave rigid modes"
         )
-    Ac, T = _hex8_galerkin(op, free, sigma)
     A = ap_operator(op, free, sigma)
+    Ac, T = _hex8_galerkin(A)
     D = block_jacobi(op, free, sigma)
     S = chebyshev(A, D, lmax_estimate(A, D), degree, ratio)
     return GMG(((A, S),), (T,), HostLU(spla.splu(Ac.tocsc())), A.free, None)

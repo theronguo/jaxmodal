@@ -49,11 +49,11 @@ CASES = [
     ("checkerboard 4^3 s_K 1e-3", "hex20", (4,) * 3, None, "clamped", "own", 2, 30.0, "checker"),
     ("nodal 6^3", "hex20", (6,) * 3, None, "clamped", "own", 2, 30.0, "nodal"),
     *[(f"cube 8^3 ratio {r:g}", "hex20", (8,) * 3, None, "clamped", "own", 2, r, None)
-      for r in (10.0, 20.0, 60.0)],
+      for r in (10.0, 20.0, 30.0, 60.0)],
     *[(f"plate 16^2x1 a={a}", "hex20", (16, 16, 1), (1, 1, 1 / a), "clamped", "own", 2, 30.0,
        None) for a in (1, 2, 4, 10)],
     *[(f"box 8^3 hz=h/{a}", "hex20", (8,) * 3, (1, 1, 1 / a), "clamped", "own", 2, 30.0, None)
-      for a in (2, 4, 10)],
+      for a in (1, 2, 4, 10)],
 ]  # fmt: skip
 LOBPCG = [("hex20", (12,) * 3), ("hex20", (20, 2, 2)), ("hex27", (16,) * 3)]
 
@@ -133,7 +133,7 @@ def galerkin_1m(n=44):
         mesh = box_mesh((n,) * 3, (1 / n,) * 3, type="hex20")
         op, free = unstructured(mesh, STEEL, mode=mode), dof_mask(mesh, {"xmin": "xyz"})
         t = time.perf_counter()
-        Ac, _ = _hex8_galerkin(op, free, 1e7)
+        Ac, _ = _hex8_galerkin(ap_operator(op, free, 1e7))
         out[mode] = dict(n_dof=op.n_dof, time_s=time.perf_counter() - t, nnz=int(Ac.nnz))
         del op, Ac
         jax.clear_caches()

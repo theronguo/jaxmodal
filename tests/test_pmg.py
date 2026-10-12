@@ -125,9 +125,17 @@ def test_galerkin(name, mode, mass):
     """Test 2: _hex8_galerkin = P_ref^T a_p(K + sigma M, free, s) P_ref, exactly symmetric."""
     mesh, op, free, sigma, A = galerkin_case(name, mode, mass)
     Pr, _ = p_ref(mesh)
-    Ac, _ = PM._hex8_galerkin(op, free, sigma)
+    Ac, _ = PM._hex8_galerkin(ap_operator(op, free, sigma))
     assert rel(Ac.toarray(), Pr.T @ A.toarray() @ Pr) <= 1e-12
     assert (Ac != Ac.T).nnz == 0
+
+
+def test_galerkin_pattern():
+    """Stored and otf give the same structural pattern (no pruned cancellations)."""
+    _, op, free, sigma, _ = galerkin_case("hex20", "stored")
+    _, op2, *_ = galerkin_case("hex20", "otf")
+    a, b = (PM._hex8_galerkin(ap_operator(o, free, sigma))[0] for o in (op, op2))
+    assert (a.indptr == b.indptr).all() and (a.indices == b.indices).all()
 
 
 def test_galerkin_padded():
@@ -136,7 +144,7 @@ def test_galerkin_padded():
     b = op.blocks[0]
     assert b.dofs.shape[0] > b.n_el
     Pr, _ = p_ref(mesh)
-    Ac, _ = PM._hex8_galerkin(op, free, sigma)
+    Ac, _ = PM._hex8_galerkin(ap_operator(op, free, sigma))
     assert rel(Ac.toarray(), Pr.T @ A.toarray() @ Pr) <= 1e-12
     d = {k: v[-b.chunk :] for k, v in mf._block_data(op, b).items()}
     K, M = mf.element_matrices(op, b, d)
@@ -152,7 +160,7 @@ def test_galerkin_hex8():
     op = unstructured(mesh, MATERIALS)
     K, M = assemble(mesh, MATERIALS)
     A = a_p(K + 0.37 * M, free, float(ap_operator(op, free, 0.37).s))
-    assert rel(PM._hex8_galerkin(op, free, 0.37)[0].toarray(), A.toarray()) <= 1e-12
+    assert rel(PM._hex8_galerkin(ap_operator(op, free, 0.37))[0].toarray(), A.toarray()) <= 1e-12
 
 
 # ---------------------------------------------------------------- 3-4: the cycle
@@ -203,25 +211,25 @@ def test_symmetric(bcs):
     u, v = np.random.default_rng(7).standard_normal((2, op.n_dof, 1))
     Vu, Vv = np.asarray(P(jnp.asarray(u))), np.asarray(P(jnp.asarray(v)))
     assert abs((u * Vv).sum() - (v * Vu).sum()) <= 1e-12 * abs((u * Vv).sum())
-    assert (Vu[~free] == 0).all()
+    if (~free).any():
+        assert (Vu[~free] == 0).all()
 
 
 def test_hex8_exact():
     """Test 4: on a pure hex8 box P = I and the coarse solve is exact: PCG in <= 2 iterations."""
     mesh = box_mesh((6, 4, 3), (1 / 6,) * 3)
     op, free = unstructured(mesh, STEEL), dof_mask(mesh, {"xmin": "xyz"})
-    info = pcg(ap_operator(op, free, 1e7), jnp.asarray(rhs(free, 2)), pmg(op, free, 1e7), 1e-8, 50)[
-        1
-    ]
+    A, b = ap_operator(op, free, 1e7), jnp.asarray(rhs(free, 2))
+    _, info = pcg(A, b, pmg(op, free, 1e7), 1e-8, 50)
     assert np.asarray(info["converged"]).all() and np.asarray(info["iterations"]).max() <= 2
 
 
 # ---------------------------------------------------------------- 5-7: iterations (steel)
 
 
-def lam1(mesh, free):
-    """Lowest nonzero eigenvalue by eigsh (fixed v0)."""
-    K, M = assemble(mesh, STEEL)
+def lam1(mesh, free, **kw):
+    """Lowest nonzero eigenvalue by eigsh (fixed v0); kw go to assemble (nodal_mass, s_K)."""
+    K, M = assemble(mesh, STEEL, **kw)
     Kf, Mf, _ = restrict(K, M, free)
     lam = spla.eigsh(Kf, 8, M=Mf, sigma=-1.0, v0=np.ones(Kf.shape[0]))[0]
     return float(np.sort(lam[lam > 1e-6 * lam.max()])[0])
@@ -242,8 +250,8 @@ def iterations(mesh, bcs, sigma=None, op=None):
     free = dof_mask(mesh, bcs)
     op = unstructured(mesh, STEEL) if op is None else op
     sigma = lam1(mesh, free) if sigma is None else sigma
-    info = pcg(ap_operator(op, free, sigma), jnp.asarray(rhs(free, 4)), pmg(op, free, sigma),
-               1e-8, 1000)[1]  # fmt: skip
+    A, b = ap_operator(op, free, sigma), jnp.asarray(rhs(free, 4))
+    _, info = pcg(A, b, pmg(op, free, sigma), 1e-8, 1000)
     assert np.asarray(info["converged"]).all()
     return int(np.asarray(info["iterations"]).max())
 
@@ -285,19 +293,11 @@ def test_robust(case):
         me = 7850.0 / 6**3
         nodal = me * (rng.random(len(m.points)) < 0.5)
         op = unstructured(m, STEEL, nodal_mass=nodal)
-        free = dof_mask(m, clamp)
-        K, M = assemble(m, STEEL, nodal_mass=nodal)
-        Kf, Mf, _ = restrict(K, M, free)
-        sigma = float(np.sort(spla.eigsh(Kf, 3, M=Mf, sigma=-1.0, v0=np.ones(Kf.shape[0]))[0])[0])
-        its = iterations(m, clamp, sigma, op)
+        its = iterations(m, clamp, lam1(m, dof_mask(m, clamp), nodal_mass=nodal), op)
     else:
         m = cube(t, 4)
         op = checkerboard(m, unstructured(m, STEEL))
-        free = dof_mask(m, clamp)
-        K, M = assemble(m, STEEL, s_K=np.asarray(op.s_K))
-        Kf, Mf, _ = restrict(K, M, free)
-        sigma = float(np.sort(spla.eigsh(Kf, 3, M=Mf, sigma=-1.0, v0=np.ones(Kf.shape[0]))[0])[0])
-        its = iterations(m, clamp, sigma, op)
+        its = iterations(m, clamp, lam1(m, dof_mask(m, clamp), s_K=np.asarray(op.s_K)), op)
     assert its <= 30
 
 
@@ -312,7 +312,12 @@ def test_lobpcg(t):
     lam, V, info = lobpcg(op, free, 6, tol=1e-8, precond=pmg(op, free, lr[0]))
     assert info["converged"] and info["iterations"] <= 40
     assert np.abs(np.asarray(lam) / lr[:6] - 1).max() <= 1e-8
-    assert (np.asarray(V)[~free] == 0).all()
+    V, lam = np.asarray(V), np.asarray(lam)
+    assert (V[~free] == 0).all()
+    KV, MV = K @ V, M @ V
+    assert (
+        np.linalg.norm((KV - MV * lam)[free], axis=0) / np.linalg.norm(KV[free], axis=0)
+    ).max() <= 1e-6
 
 
 # ---------------------------------------------------------------- 8-9: errors, jit, lifetime

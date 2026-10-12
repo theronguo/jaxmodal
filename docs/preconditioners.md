@@ -222,7 +222,7 @@ x, info = pcg(ap_operator(op, free, sigma), b, P, tol=1e-8)  # or minres / lobpc
 - `coarse = HostLU(...)`;
 - no deflation.
 
-Masking ($m\odot V(m\odot r)$), symmetry and the `precond` interface are therefore those of `gmg`. On an all-hex8 mesh, $P = I$ and the coarse matrix is the assembled hex8 $A_P$, so the coarse solve is exact and PCG converges in one iteration.
+Masking ($m\odot V(m\odot r)$), symmetry and the `precond` interface are therefore those of `gmg`. On an all-hex8 mesh, $P = I$ and the coarse matrix is the assembled hex8 $A_P$, so the coarse solve is exact and PCG converges in one iteration (in exact arithmetic; the test allows 2).
 
 **Shared cycle.** `_vcycle` and `_vcycle_apply` are the same code for both preconditioners:
 - `GMG.coarse` takes any pytree callable: `Cholesky` for `gmg`, `HostLU` for `pmg`, and PR 13's device AMG next.
@@ -258,10 +258,10 @@ where $Z_e$ maps the element's 8 corners to the coarse numbering. $D_e$ is the o
 Assembly:
 1. `element_matrices` ([`operators.md`](operators.md)) gives $s_K K_e$ and $\rho s_M M_e$ per chunk.
 2. One jitted `lax.map` per block runs over the operator's padded chunks. It contracts the $(c, n, 3, n, 3)$ view with $P_\text{loc}$ into $(n_\text{pad}, 24, 24)$ cells. Pads are zero and own nothing.
-3. The host drops the pads and sums the cells into a SciPy CSR over the coarse DOFs $3c + i$ (int32 indices).
-4. The host symmetrizes once, $A_c = (A_c + A_c^\top)/2$. Without this, CSR duplicate summation adds the $(i,j)$ and $(j,i)$ terms in different orders and leaves about $10^{-17}$ relative asymmetry.
+3. The host drops the pads and sums the cells into a SciPy CSR over the coarse DOFs $3c + i$ (int32 indices). Summing duplicates keeps entries that cancel to 0.0, so the pattern is structural (every pair of corners sharing an element) and does not depend on rounding, storage mode or density: PR 13 may rely on it.
+4. The host symmetrizes once on that pattern, averaging each value with its transpose's ($A_c \leftarrow (A_c + A_c^\top)/2$ value by value, the two patterns being identical). Without this, CSR duplicate summation adds the $(i,j)$ and $(j,i)$ terms in different orders and leaves about $10^{-17}$ relative asymmetry; SciPy's `A + A.T` instead would prune exact cancellations and make the pattern numerical.
 
-The matrix is affine in σ: $G_K + \sigma G_M$, with the masked diagonal folded in. PR 13's σ rounds may use this. `_hex8_galerkin(op, free, sigma)` returns $A_c$ and the transfer. It is PR 13's input and stays private until then.
+The matrix is affine in σ: $G_K + \sigma G_M$, with the masked diagonal folded in. PR 13's σ rounds may use this. `_hex8_galerkin(A)` takes the `APOperator` and returns $A_c$ and the transfer. It is PR 13's input and stays private until then.
 
 **Smoother and V-cycle.** $S$ = `chebyshev(A_P, block_jacobi(op, free, σ), lmax_estimate(...), degree, ratio)`, with degree 2 and ratio 30 by default (PR 10). The cycle is gmg's with one level:
 $$x = S b,\qquad x \mathrel{+}= P\,A_c^{-1}P^\top(b - A_P x),\qquad x \mathrel{+}= S(b - A_P x).$$
@@ -321,7 +321,7 @@ Degree 2 is the default. Per PCG solve (V-cycle $2d$ applies plus PCG's one):
 | degree | $A_P$ applies | $t_A$ with a ~1 $t_A$ production coarse solve |
 |---|---|---|
 | 2 | 70 | ~84 |
-| 3 | 66–77 | ~80 |
+| 3 | 70–77 | ~80 |
 | 4 | 81 | ~90 |
 
 The cost is a tie, and degree 2 needs the least smoother workspace. At hex20 $24^3$ ($m = 25$): $t_A$ = 53 ms; the V-cycle takes 994 ms, of which the test-only `splu` solve is 772 ms (14.5 $t_A$) and the rest 4.2 $t_A$ ($2d$ = 4 applies plus transfers). The build takes 13.3 s, mostly `splu`. `_hex8_galerkin` alone at hex20 $44^3$ (1,075,275 DOF, 21.2M nonzeros) takes 1.4 s stored and 2.9 s otf, compilation included (about +1.5 GB host, measured in review).

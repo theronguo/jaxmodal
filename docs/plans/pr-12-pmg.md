@@ -63,7 +63,7 @@ New module `precond/pmg.py`, exported from `jaxmodal.precond`:
 P = pmg(op, free, sigma, *, degree=2, ratio=30.0)  # a GMG: one V-cycle per call
 ```
 
-`_hex8_galerkin(op, free, sigma)` returns the SciPy CSR $P^\top A_P P$ and the transfer. It stays private; PR 13 (same package) consumes it and decides its public form.
+`_hex8_galerkin(A)` (the `APOperator`; review round 1 of the code) returns the SciPy CSR $P^\top A_P P$ and the transfer. It stays private; PR 13 (same package) consumes it and decides its public form.
 
 - **`op`** must be an `Unstructured` operator (PR 5). Anything else raises `TypeError`; the message points voxel stencils to `gmg`.
   - All blocks may be hex8. Then $P = I$, and the Galerkin matrix is the assembled hex8 $A_P$, which is what PR 13 feeds to AMG for pure hex8 meshes.
