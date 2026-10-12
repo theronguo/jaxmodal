@@ -124,10 +124,9 @@ def check_modes(p_args, lam, V, info, tol):
     assert np.all(V[~p.free] == 0)
     Vf = V[p.idx]
     assert np.abs(Vf.T @ (p.Mf @ Vf) - np.eye(n)).max() <= 1e-10
-    # rounding differs between the jitted and eager products (about 1e-7 relative at r ~ 1e-11),
-    # and the re-orthonormalization at lock moves locked columns by rounding (about 2e-5);
-    # residuals from implicitly updated products would differ by about 1e-3
-    assert np.allclose(info["residuals"], residuals(p, lam, jnp.asarray(V)), rtol=1e-4, atol=0)
+    # rounding differs between the jitted and eager products (about 1e-7 relative at r ~ 1e-11);
+    # residuals from implicitly updated products would differ by 1e-4 or more
+    assert np.allclose(info["residuals"], residuals(p, lam, jnp.asarray(V)), rtol=1e-5, atol=0)
     if p.R is not None:
         assert np.abs(np.asarray(p.R).T @ (p.M @ V)).max() <= 1e-10
     rm, rm_ref = r_M(p_args, lam, Vf), r_M(p_args, lr[:n], Vr[:, :n])
@@ -653,6 +652,31 @@ def test_capacity():
             assert count + k <= cap
             count += k - 1
     assert lob._capacity(12, 12, 17, False)[1] == 0  # one chunk: no basis
+
+
+def test_reortho():
+    """_reortho: columns past j zero, the rest M-orthonormal and M-orthogonal to B; a column
+    inside span(B) shows as a small projected norm (the solve raises on it)."""
+    n, k, c = 50, 4, 3
+    rng = np.random.default_rng(0)
+    op = Diagonal(jnp.ones(n), jnp.asarray(rng.uniform(1, 2, n)))
+    m = jnp.ones((n, 1))
+    Bq, _ = np.linalg.qr(rng.standard_normal((n, 5)) / np.sqrt(np.asarray(op.dM))[:, None])
+    Bm = Bq / np.sqrt(np.asarray(op.dM))[:, None]  # M-orthonormal
+    B = jnp.zeros((n, 6)).at[:, :5].set(Bm)
+    X = jnp.asarray(rng.standard_normal((n, k)))
+    Y, g = lob._reortho(X, 3, op, m, B, jnp.int32(5), c=c)
+    MY = np.asarray(op.dM)[:, None] * np.asarray(Y)
+    assert np.all(np.asarray(Y)[:, 3:] == 0) and g > 0.5
+    assert np.abs(MY[:, :3].T @ np.asarray(Y)[:, :3] - np.eye(3)).max() < 1e-13
+    assert np.abs(Bm.T @ MY).max() < 1e-13
+    x0 = np.asarray(X[:, 0]) - Bm @ (Bm.T @ (np.asarray(op.dM) * np.asarray(X[:, 0])))
+    assert (
+        abs(abs(x0 @ np.asarray(Y[:, 0])) / np.linalg.norm(x0) / np.linalg.norm(Y[:, 0]) - 1)
+        < 1e-12
+    )
+    _, g = lob._reortho(X.at[:, 1].set(B[:, 2]), 3, op, m, B, jnp.int32(5), c=c)
+    assert g < 1e-20
 
 
 def test_lock_full():

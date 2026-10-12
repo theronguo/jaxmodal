@@ -251,16 +251,17 @@ def _lock(B, count, X, j):
 @functools.partial(jax.jit, static_argnames="c")
 def _reortho(X, j, op, m, B, count, c):
     """X[:, :j] M-orthogonalized twice against B[:, :count], then M-orthonormalized by
-    Cholesky (keeps the column order); the other columns zero. The locked basis then stays
-    M-orthonormal to rounding: a single deflation pass leaves the Jacobi-amplified locked
-    directions in W otherwise, and the block drifts into span(B) after many chunks."""
+    Cholesky (keeps the column order); the other columns zero, as `_lock` expects. Also
+    returns the smallest projected M-norm^2 (about 1; near 0 means a column lies in span(B)).
+    The locked basis then stays M-orthonormal to rounding: a single deflation pass leaves the
+    Jacobi-amplified locked directions in W otherwise, and the block drifts into span(B)."""
     act = jnp.arange(X.shape[1]) < j
     X = X * act
     for _ in range(2):
         X = _project(B, count, X, _M(op, m, X), c)
     G = jnp.where(act[:, None] & act[None, :], X.T @ _M(op, m, X), jnp.eye(X.shape[1]))
     L = jnp.linalg.cholesky((G + G.T) / 2)
-    return jax.scipy.linalg.solve_triangular(L, X.T, lower=True).T
+    return jax.scipy.linalg.solve_triangular(L, X.T, lower=True).T, jnp.diag(G).min()
 
 
 @jax.jit
@@ -505,7 +506,11 @@ def _solve(
         thr.append(t[:jj])
         if not ok or count + j >= n_modes:
             break
-        X = _reortho(state[0], j, op, m, B, cnt, c=c)
+        X, g = _reortho(state[0], j, op, m, B, cnt, c=c)
+        if not g > 0.5:
+            raise RuntimeError(f"a locked mode lies in the span of the earlier ones ({g:.1e})")
+        rl, tl = _confirm(X, state[-1], op, m, consts)[2:]  # of the columns actually locked
+        res[-1], thr[-1] = np.asarray(rl[:j]), np.asarray(tl[:j])
         V[:, count : count + j] = np.asarray(X[:, :j])
         B = _lock(B, count, X, j)
         count += j
