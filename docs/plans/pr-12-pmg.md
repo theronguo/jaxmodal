@@ -83,7 +83,7 @@ Two small generalizations, no behaviour change for `gmg`:
 - **Coarse slot.** `GMG.L` becomes `GMG.coarse`, any pytree callable on an $(n_c, k)$ block. `gmg` stores `Cholesky(L)`, a pytree whose `__call__` keeps today's fp64 cast and `cho_solve`; `pmg` stores `HostLU`. `_vcycle` calls `P.coarse(b)`.
 - **Restriction.** `_restrict(T, r)` becomes a method `T.restrict(r)`. The voxel `Transfer` keeps `jax.linear_transpose` of its prolongation; the p-MG transfer gathers from a child table (below).
 
-The GMG docstring and `docs/preconditioners.md` name the slot; existing tests switch `P.L` to `P.coarse.L` and `G._restrict(T, r)` to `T.restrict(r)`.
+The GMG docstring says it is the shared multilevel cycle (`pmg` returns one with a p-level and a host coarse solve); `docs/preconditioners.md` names the slot and renames `L` to `coarse` (a `Cholesky`) in the GMG fp32 and tests text. `tests/test_gmg.py` switches `P.L` → `P.coarse.L` (lines 115, 425, 597) and `G._restrict(T, r)` → `T.restrict(r)` (line 142).
 
 ### Transfer (host build, device apply)
 
@@ -152,12 +152,12 @@ $$
 - It is positive definite when $\|I - SA\|_A < 1$, which Chebyshev on $[\hat\lambda/\text{ratio}, \hat\lambda]$ with $\hat\lambda \ge \lambda_\max(D^{-1}A)$ gives.
 - **Coarse solve.**
   - `scipy.sparse.linalg.splu(Ac.tocsc())` on the host.
-  - Applied inside the jitted cycle by `jax.pure_callback(solve, ShapeDtypeStruct((n_c, k), float64), rc, vmap_method="sequential")`; the callback converts explicitly, `lu.solve(np.asarray(rc, np.float64))`, and casts back to the block dtype.
+  - Applied inside the jitted cycle by `jax.pure_callback(solve, ShapeDtypeStruct((n_c, k), float64), rc, vmap_method="sequential")`; the callback converts explicitly, `lu.solve(np.asarray(rc, np.float64))`, and the result is declared as `ShapeDtypeStruct(rc.shape, rc.dtype)` (always fp64: `_v` runs p-MG in fp64).
   - The factor is a static field of a small pytree `HostLU`, hashed by identity. This is the one closure exception that principle 3 allows.
   - Consequences, documented next to each other in `docs/preconditioners.md`:
     - every new `pmg` build is a new static value, so jitted callers (`pcg`, `lobpcg_step`) recompile once per build;
     - the jit cache holds the treedef, hence the factor (1.5 GB at hex20 $24^3$), and the compiled executables, until `jax.clear_caches()`; `del` and `gc.collect()` do not free it (measured 3 of 3 factors alive).
-  - `tests/test_pmg.py` gets a module-scoped autouse fixture calling `jax.clear_caches()`; `benchmarks/pmg_study.py` clears between cases. PR 13's device AMG has only array leaves and has neither issue.
+  - `tests/test_pmg.py` gets a function-scoped autouse fixture that yields, then calls `jax.clear_caches()`; `benchmarks/pmg_study.py` clears between cases. PR 13's device AMG has only array leaves and has neither issue.
 
 ### Limitations (documented, `docs/open_items.md`)
 
@@ -192,12 +192,12 @@ Common setup:
 - Exactness tests use the PR 10 unit materials (`helpers.MATERIALS`, two phases and orientations) with σ = 0.37.
 - The reference $P$ is built independently in the test: a Python loop over elements evaluates `np.prod(1 + ξ_a ξ_c)/8` at `REFERENCE_NODES`, then densified. Hand-written rows pin the formula itself: a hex20 edge node has two ½ entries, a hex27 face node four ¼, the hex27 centre eight ⅛. The trilinear reproduction (test 1) is the independent oracle.
 - The reference $A_c^{-1}$ is from $P_\text{ref}^\top a_p P_\text{ref}$ (SciPy `assemble`), never from `_hex8_galerkin`.
-- A module-scoped autouse fixture calls `jax.clear_caches()` (HostLU retention).
+- A function-scoped autouse fixture yields, then calls `jax.clear_caches()` (HostLU retention).
 
 1. **Transfers** (roadmap).
    - On graded hex20 and hex27 boxes (`box_mesh(..., coords=...)`, uneven spacings), prolongation of the coarse values of a random trilinear field $f = a + bx + cy + dz + exy + fyz + gzx + hxyz$ reproduces $f$ at every fine node to $10^{-12}$.
    - Restriction equals the densified $P^\top$ to $10^{-14}$; corner rows are identity rows.
-   - On `helpers.mixed_mesh` the hex8 nodes have $w = 1$ identity rows.
+   - On `helpers.mixed_mesh` the hex8 nodes have $w = 1$ identity rows, and restriction equals the densified $P^\top$ (hex8/hex20 interface).
 2. **Galerkin vs SciPy** (roadmap). `_hex8_galerkin` equals $P_\text{ref}^\top\, a_p(K + \sigma M, free, s)\, P_\text{ref}$ from `assemble` to $10^{-12}$ relative and is exactly symmetric (`(Ac != Ac.T).nnz == 0`). Cases:
    - hex20 and hex27 boxes with a mixed mask (`xmin: xyz`, `ymin: y`), random `s_K`/`s_M` and nodal masses on half the nodes;
    - stored and otf; consistent and lumped;
@@ -215,7 +215,7 @@ Common setup:
    - The free block of the dense $V$ from test 3 is symmetric and its smallest eigenvalue is > 0.
    - Constrained outputs are exactly 0.
    - A pure hex8 box ($P = I$, exact coarse solve): PCG converges in ≤ 2 iterations.
-   - `pmg` and `gmg` both run through `gmg._vcycle_apply` (the same jitted function object).
+   - `type(pmg(...)) is GMG` (shared cycle).
 5. **h-independence** (roadmap). Iterations grow ≤ 20% from the first to the last size:
    - hex20 boxes $3^3$, $6^3$, $12^3$, $24^3$ ($24^3$ `slow`);
    - hex27 $3^3$, $6^3$, $12^3$.
@@ -223,13 +223,13 @@ Common setup:
    - beam $20\times2\times2$;
    - a free $6^3$ box at σ > 0;
    - a curved distorted $6^3$ box;
-   - a hex20 $6^3$ box with nodal masses of one element mass on a seeded half of the nodes;
-   - a hex20 $4^3$ box with `s_K` = $10^{-3}$ on a checkerboard of elements (the worst measured pattern).
+   - a hex20 $6^3$ box with nodal masses of one element mass on a seeded half of the nodes (own λ₁);
+   - a hex20 $4^3$ box with `s_K` = $10^{-3}$ on a checkerboard of elements (the worst measured pattern; own λ₁).
 7. **LOBPCG.** `lobpcg(op, free, 6, tol=1e-8, precond=pmg(...))` on a clamped hex20 $6\times4\times3$ box matches `reference_modes` with the 9a check helper in ≤ 40 iterations (measured about 15). Also on hex27.
 8. **Errors.**
    - A `Stencil` raises `TypeError` with a message naming `gmg`.
    - σ < 0 and NaN raise `ValueError` ("sigma must be >= 0").
-   - After `jax.clear_caches()` and `gc.collect()`, a weak reference to a used `HostLU` is dead.
+   - After deleting the `pmg` result and its outputs, `jax.clear_caches()` and `gc.collect()`, a weak reference to a used `HostLU` is dead (documents jax 0.11's retention; drop if jax changes it).
    - σ = 0 raises `SingularShiftError`.
    - x64 off raises.
 9. **Jit and callback.** The V-cycle runs inside `pcg` and `lobpcg` (tests 5 and 7). A second application with the same `pmg` result reuses the compiled `pcg` (cache size unchanged). Recompiling on a new build is documented behaviour, not tested.
