@@ -121,7 +121,7 @@ def reference_modes(K, M, n_modes, free=None, sigma=None, points=None):
         lam, v = _solve(Kf, Mf, k, s0, p, spec)
         # near-zero modes below a lam_k that is not itself zero: re-solve near lam_k
         if lam[0] < 100 * abs(s0) and lam[-1] > GAP_ABS * EPS * s_bar:
-            lam, v = _solve(Kf, Mf, k, -0.01 * lam[-1], p, spec)
+            lam, v = _solve(Kf, Mf, k, -0.3 * lam[-1], p, spec)
     else:
         lam, v = _solve(Kf, Mf, k, sigma, p, spec)
     _certify(Kf, Mf, lam, v, n_modes, s_bar, p, spec)

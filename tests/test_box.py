@@ -74,6 +74,26 @@ def test_box_raises():
             box_mesh(*args)
 
 
+@pytest.mark.parametrize("t", ["hex8", "hex20", "hex27"])
+def test_box_coords(t):
+    uniform = [o + s * np.arange(n + 1) for o, s, n in zip(ORIGIN, SPACING, SHAPE, strict=True)]
+    m = box_mesh(SHAPE, type=t, coords=uniform, spacing=(9.0, 9.0, 9.0))  # spacing ignored
+    assert np.allclose(m.points, box_mesh(SHAPE, SPACING, ORIGIN, t).points, rtol=0, atol=1e-15)
+    graded = [np.cumsum(np.r_[0, rng]) for rng in ([1, 3, 2], [0.5, 4], [1, 2, 5, 3])]
+    m = box_mesh(SHAPE, type=t, coords=graded)
+    nodes = ELEMENTS[t].nodes
+    for d in range(3):
+        c = graded[d]
+        cell = np.searchsorted(c, m.points[m.blocks[t][:, 0], d], side="right") - 1
+        lo, hi = c[cell], c[cell + 1]
+        expect = lo[:, None] + (hi - lo)[:, None] * (nodes[:, d] + 1) / 2  # affine per element
+        assert np.allclose(m.points[m.blocks[t]][..., d], expect, rtol=0, atol=1e-15)
+    gx, gy, gz = graded
+    for bad in [(gx, gy), (gx, gy, gz[:-1]), (gx[::-1], gy, gz), (gx, [0, np.nan, 1], gz)]:
+        with pytest.raises(ValueError, match="coords"):
+            box_mesh(SHAPE, type=t, coords=bad)
+
+
 def test_mesh_imports_no_jax():
     code = "import sys, jaxmodal.mesh; assert 'jax' not in sys.modules, 'jax imported'"
     subprocess.run([sys.executable, "-c", code], check=True)

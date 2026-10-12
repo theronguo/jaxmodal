@@ -277,3 +277,14 @@ docs/ROADMAP.md, README.md      status; FV52 and FV12 wording
 - FV52's bottom-edge line support (singular, does not converge; documented).
 - Breathing and higher Lamb modes; Lamb on curved (non-voxel) meshes.
 - The FV12 80×80 fine run in the suite (9.5 GB); its 60×60 check is in the suite.
+
+## Implementation notes
+
+- **Rigid-mode checks** use $|\lambda| \le 10\,\varepsilon\,\hat\lambda_\max$ (as in `test_reference.py`) instead of $10^{-8}\lambda_{4/7}$. On the thin FV12 plate the rigid eigenvalues are about $2\cdot10^{-7}\lambda_7$, which is round-off ($\kappa$ is large), so the relative threshold was wrong. A hidden constraint still lifts a rigid mode far above the round-off bound.
+- **`lamb_sphere` truncation:** besides raising on fewer than `k` roots, it raises unless the `k`-th root lies below the lowest root of order `nmax`. That catches higher orders missing from the list, like `plate_modes`' `mmax` check; `k` = 20 passes and 24 raises at the defaults.
+- **`fv_plate`** skips $\hat\lambda_\max$ on the graded fine runs (no bound is checked there; it would cost about 10 s at 114k DOF).
+- **Recorded values** were rerun with the test code: FV52 fine and FV12 80×80 match the prototype to its printed digits. Lamb level 32 takes 34 s.
+- **Measured runtimes:**
+  - fast additions about 6 s;
+  - slow: `test_nafems_fine` 57 s, `test_lamb_rates` 43 s.
+- **$L/t = 1600$ plate** re-measured under $-0.3$: $0.09 f_\lambda$ at 12 modes, unchanged.

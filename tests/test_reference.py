@@ -87,7 +87,7 @@ def test_dense(name):
     free, w = dense(name)
     lam, V = reference_modes(K, M, 20, free, points=m.points)
     check(name, lam, V, n_rigid)
-    lam2, _ = reference_modes(K, M, 20, free, sigma=-0.01 * w[20], points=m.points)
+    lam2, _ = reference_modes(K, M, 20, free, sigma=-0.3 * w[20], points=m.points)
     assert np.all(np.abs(lam2 - lam) <= 2 * 10 * EPS * w[-1])
     if name == "box":  # without points (MMD): the same as with nested dissection
         lam3, V3 = reference_modes(K, M, 20, free)
