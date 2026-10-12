@@ -169,7 +169,7 @@ def grid_ids(op):
 # ---------------------------------------------------------------- slab loop
 
 
-def _slabs(op, kern, m, init=None):
+def _slabs(op, kern, m, init=None, dtype=jnp.float64):
     """init (default 0) + the sum over cells of the shifted corner contributions, (n_dof, m);
     kern(nd, el) gives (8, 3, slab, B, A, m) corner-DOF-major values for the slab's cells."""
     L, B, A = op.cell.shape
@@ -179,12 +179,12 @@ def _slabs(op, kern, m, init=None):
         nd = lax.dynamic_slice_in_dim(op.node, j * s, s + 1)
         el = lax.dynamic_slice_in_dim(op.cell, j * s, s)
         Y = kern(nd, el)
-        y = jnp.zeros((3, s + 1, B + 1, A + 1, m))
+        y = jnp.zeros((3, s + 1, B + 1, A + 1, m), dtype)
         for a, (d0, d1, d2) in enumerate(_shifts(op)):
             y = y.at[:, d0 : d0 + s, d1 : d1 + B, d2 : d2 + A].add(Y[a])
         return out.at[nd].add(jnp.moveaxis(y, 0, -2), mode="drop"), None
 
-    out = jnp.zeros((op.n_dof, m)) if init is None else init  # carried, updated in place
+    out = jnp.zeros((op.n_dof, m), dtype) if init is None else init  # carried, updated in place
     out, _ = lax.scan(step, out.reshape(op.n_nodes, 3, m), jnp.arange(L // s, dtype=jnp.int32))
     return out.reshape(-1, m)
 
@@ -219,7 +219,8 @@ def _k_apply(op, Ke, v, nd, el):
     def phase_step(Y, p):  # one accumulator: workspace independent of the phase count
         return Y + (Ke[p] @ U).reshape(shape) * jnp.where(ph == p, s, 0.0), None
 
-    return lax.scan(phase_step, jnp.zeros(shape), jnp.arange(op.rho.shape[0], dtype=jnp.int32))[0]
+    phases = jnp.arange(op.rho.shape[0], dtype=jnp.int32)
+    return lax.scan(phase_step, jnp.zeros(shape, U.dtype), phases)[0]
 
 
 def _m_weight(op, el):
@@ -228,7 +229,7 @@ def _m_weight(op, el):
 
 def _m_apply(op, me, v, nd, el):
     U = _corners(op, v, nd)
-    Me = jnp.kron(me, jnp.eye(3))  # (24, 24): the same GEMM as K (fewer temporaries than 8 x 8)
+    Me = jnp.kron(me, jnp.eye(3, dtype=me.dtype))  # (24, 24): K's GEMM (fewer temps than 8 x 8)
     return (Me @ U.reshape(24, -1)).reshape(U.shape) * _m_weight(op, el)
 
 
@@ -254,21 +255,30 @@ def _m_diag(op, me, el):
     return jnp.broadcast_to((d[:, None, None, None] * w)[:, None, ..., None], (8, 3, *el.shape, 1))
 
 
+def _cast(op, dtype):
+    """op with its float leaves in dtype: the applies run in the vector's precision."""
+    f = lambda a: a.astype(dtype) if jnp.issubdtype(a.dtype, jnp.floating) else a  # noqa: E731
+    return jax.tree_util.tree_map(f, op)
+
+
 @jax.jit
 def _apply_K(op, v):
     check_v(v, op.n_dof)
-    Ke, _ = reference_element(op)
-    return _slabs(op, lambda nd, el: _k_apply(op, Ke, v, nd, el), v.shape[1])
+    op = _cast(op, v.dtype)
+    Ke = reference_element(op)[0].astype(v.dtype)
+    return _slabs(op, lambda nd, el: _k_apply(op, Ke, v, nd, el), v.shape[1], dtype=v.dtype)
 
 
 @jax.jit
 def _apply_M(op, v):
     check_v(v, op.n_dof)
     if op.mass == "lumped":
-        return _diag_M(op)[:, None] * v
-    _, me = reference_element(op)
+        return _diag_M(op).astype(v.dtype)[:, None] * v
+    op = _cast(op, v.dtype)
+    me = reference_element(op)[1].astype(v.dtype)
     kern = lambda nd, el: _m_apply(op, me, v, nd, el)  # noqa: E731
-    return _slabs(op, kern, v.shape[1], op.nodal[:, None] * v)  # adding it after costs a vector
+    init = op.nodal[:, None] * v  # adding it after costs a vector
+    return _slabs(op, kern, v.shape[1], init, v.dtype)
 
 
 @jax.jit

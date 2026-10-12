@@ -19,8 +19,14 @@ from scipy.sparse.linalg import eigsh
 from jaxmodal.eigen import jacobi, lobpcg, reference_modes, sigma_estimate
 from jaxmodal.linalg import count_below
 from jaxmodal.materials import Material, isotropic
-from jaxmodal.memory import lobpcg_memory, unstructured_memory
-from jaxmodal.mesh import box_mesh
+from jaxmodal.memory import (
+    gmg_memory,
+    lobpcg_memory,
+    solve_modes_memory,
+    stencil_memory,
+    unstructured_memory,
+)
+from jaxmodal.mesh import box_mesh, voxel_mesh
 from jaxmodal.operators import (
     assemble,
     dof_mask,
@@ -861,3 +867,34 @@ def test_chunk_errors():
     free = dof_mask(m, {"xmin": "xyz"})  # 12 free DOFs
     with pytest.raises(ValueError, match="block size 13"):
         lobpcg(op, free, 10, chunk=3, guards=10)
+
+
+def test_precond_composition():
+    """PR 11b test 9: precond_memory adds the preconditioner's storage and step bytes and enters
+    its build into the max; solve_modes_memory is the composition of the three estimators."""
+    mesh = voxel_mesh((12, 10, 8), (0.1,) * 3)
+    n = 3 * len(mesh.points)
+
+    def op_mem(m):
+        return stencil_memory(mesh, m)
+
+    for dtype in ("float64", "float32"):
+        pc = functools.partial(gmg_memory, mesh, dtype=dtype)
+        g, o = pc(15), op_mem(15)  # block 15 for 10 modes
+        for low in (False, True):
+            a = lobpcg_memory(op_mem, n, 10, low_memory=low)
+            b = lobpcg_memory(op_mem, n, 10, low_memory=low, precond_memory=pc)
+            assert b["step"] - a["step"] == g["step_low" if low else "step"]
+            assert b["precond"] == g["storage"] and a["precond"] == 0
+            extra = (
+                g["storage"] + max(o["build"], g["build"], b["step"]) - max(o["build"], a["step"])
+            )
+            assert abs(b["total"] - a["total"] - extra) <= 1
+    for bcs, nr in (({"xmin": "xyz"}, 0), ({}, 6)):
+        for precond, dtype in (("auto", "float64"), ("gmg", "float32"), ("jacobi", "float64")):
+            got = solve_modes_memory(mesh, bcs, 10, precond=precond, precond_dtype=dtype)
+            pc = None if precond == "jacobi" else functools.partial(gmg_memory, mesh, dtype=dtype)
+            assert got == lobpcg_memory(op_mem, n, 10, n_rigid=nr, precond_memory=pc)
+    box = box_mesh((3, 3, 3), type="hex20")
+    um = functools.partial(unstructured_memory, box)
+    assert solve_modes_memory(box, {}, 4) == lobpcg_memory(um, 3 * len(box.points), 4, n_rigid=6)

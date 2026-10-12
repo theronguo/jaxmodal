@@ -30,6 +30,10 @@ MAX_ISLANDS = 16  # largest islands deflated (6 rigid modes each)
 SLOT = (OFFSETS[None, :] - OFFSETS[:, None] + 1) @ np.array([1, 3, 9])  # (8, 8) ELL slot of (a, b)
 
 
+class SingularShiftError(ValueError):
+    """gmg at sigma = 0 cannot verify that A_P is nonsingular: build at a sigma > 0."""
+
+
 # ---------------------------------------------------------------- host hierarchy
 
 
@@ -238,13 +242,14 @@ def _group_apply(inv, idx, pos, r):
 class GMG:
     """V-cycle approximating A_P^{-1}, deflated: r -> Q r + (I - Q A) m V(m (I - A Q) r),
     Q = Z E^+ Z^T. Levels are (A, S) for all but the coarsest, transfers[l] maps level l+1 to
-    l, L is the coarsest Cholesky factor."""
+    l, L is the coarsest Cholesky factor. V runs in dtype; L, free and defl stay fp64."""
 
     levels: tuple
     transfers: tuple
     L: jax.Array
     free: jax.Array
     defl: tuple | None  # (rows, isl, Z, AZ, Einv): island rigid modes, A_P Z per support row
+    dtype: str = "float64"
 
     @property
     def n_dof(self):
@@ -254,12 +259,12 @@ class GMG:
         return _vcycle_apply(self, r)
 
 
-register(GMG, [])
+register(GMG, ["dtype"])
 
 
 def _vcycle(P, b, lvl):
     if lvl == len(P.levels):
-        return cho_solve((P.L, True), b)
+        return cho_solve((P.L, True), b.astype(P.L.dtype)).astype(b.dtype)
     A, S = P.levels[lvl]
     T = P.transfers[lvl]
     x = S(b)
@@ -280,15 +285,19 @@ def _wy(rows, isl, W, y, r):
     return jnp.zeros_like(r).at[rows].add(v)
 
 
+def _v(P, r):
+    return _vcycle(P, r.astype(P.dtype), 0).astype(r.dtype)
+
+
 @jax.jit
 def _vcycle_apply(P, r):
     m = P.free[:, None]
     r = m * r
     if P.defl is None:
-        return m * _vcycle(P, r, 0)
+        return m * _v(P, r)
     rows, isl, Z, AZ, Einv = P.defl
     y = Einv @ _wt(rows, isl, Z, r)
-    v = m * _vcycle(P, r - _wy(rows, isl, AZ, y, r), 0)
+    v = m * _v(P, r - _wy(rows, isl, AZ, y, r))
     w = Einv @ _wt(rows, isl, AZ, v)
     return v + _wy(rows, isl, Z, y - w, r)
 
@@ -301,14 +310,16 @@ def _check_sigma0(op, free, shape, cells, s_K):
     mode left by the BCs on a mesh rigid_modes accepts)."""
     msg = "cannot verify that A_P is nonsingular at sigma = 0"
     if (s_K == 0).any():
-        raise ValueError(f"zero-stiffness cells at sigma = 0: {msg}; use sigma > 0")
+        raise SingularShiftError(f"zero-stiffness cells at sigma = 0: {msg}; use sigma > 0")
     mesh = voxel_mesh(shape, tuple(np.asarray(op.spacing)), mask=cells >= 0)
     try:
         k = rigid_modes(mesh, free).shape[1]
     except ValueError as err:
-        raise ValueError(f"{msg} ({err}); use sigma > 0") from err
+        raise SingularShiftError(f"{msg} ({err}); use sigma > 0") from err
     if k:
-        raise ValueError(f"A_P is singular at sigma = 0 ({k} rigid modes left); use sigma > 0")
+        raise SingularShiftError(
+            f"A_P is singular at sigma = 0 ({k} rigid modes left); use sigma > 0"
+        )
 
 
 def _islands(cell_ids, s_K):
@@ -401,15 +412,18 @@ def _ell(vals, cols):
     return BlockELL((jnp.asarray(colsp),), (vals,), None, 3 * n, (n,), (c,), 27 * n / nnz)
 
 
-def gmg(op, free, sigma, *, degree=2, coarse_degree=4, ratio=30.0):
+def gmg(op, free, sigma, *, degree=2, coarse_degree=4, ratio=30.0, dtype="float64"):
     """Geometric multigrid V-cycle for A_P = m (K + sigma M) m + s (I - m) of a voxel Stencil,
     as a pytree callable on (n_dof, k) blocks (masked output). sigma >= 0 is concrete and
-    required: choose it physically (the sigma pre-estimate); sigma = 0 is refused unless A_P
-    is provably nonsingular. Chebyshev degree `degree` on the fine level, `coarse_degree` on
-    the others. Needs the voxel_mesh node order (no rcm/renumber)."""
+    required: choose it physically (the sigma pre-estimate); sigma = 0 raises
+    SingularShiftError unless A_P is provably nonsingular. Chebyshev degree `degree` on the
+    fine level, `coarse_degree` on the others. dtype "float32" runs the V-cycle in fp32 (the
+    coarsest solve and the deflation stay fp64). Needs the voxel_mesh node order."""
     check_x64("gmg")
     if not isinstance(op, Stencil):
         raise TypeError(f"gmg needs a voxel Stencil operator, got {type(op).__name__}")
+    if dtype not in ("float64", "float32"):
+        raise ValueError(f"dtype must be 'float64' or 'float32', got {dtype!r}")
     _check_sigma(sigma)
     sigma = float(sigma)
     free = np.asarray(free)
@@ -477,7 +491,26 @@ def gmg(op, free, sigma, *, degree=2, coarse_degree=4, ratio=30.0):
     if not bool(jnp.isfinite(L).all()):
         raise ValueError("coarsest factor is not finite")
     defl = _deflation(A0, F, np.asarray(op.spacing), free, _islands(cell_ids, s_K))
-    return GMG(tuple(levels), tuple(transfers), L, fl, defl)
+    if dtype == "float32":
+        levels, transfers = _to32(levels), _f32(transfers)
+    return GMG(tuple(levels), tuple(transfers), L, fl, defl, dtype)
+
+
+def _f32(tree):
+    """tree with its float array leaves in fp32."""
+    f = lambda a: a.astype(jnp.float32) if jnp.issubdtype(a.dtype, jnp.floating) else a  # noqa: E731
+    return jax.tree_util.tree_map(lambda a: f(a) if isinstance(a, jax.Array) else a, tree)
+
+
+def _to32(levels):
+    """fp32 levels: coarse matrices, smoother blocks and scalars; the fine A_P stays (its apply
+    follows the vector's dtype). S.A is the level's A on every level."""
+    out = []
+    for i, (A, S) in enumerate(levels):
+        A = _f32(A) if i else A
+        D, lmax, ratio = _f32((S.precond, S.lmax, S.ratio))
+        out.append((A, dataclasses.replace(S, A=A, precond=D, lmax=lmax, ratio=ratio)))
+    return out
 
 
 def _dense(cells, conn, n):

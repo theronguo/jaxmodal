@@ -2,7 +2,7 @@
 
 Large-scale 3D linear modal analysis, $K v = \lambda M v$, in JAX. It uses matrix-free operators, preconditioned LOBPCG, hex8/hex20/hex27 and solid-shell elements, and linear anisotropic elasticity. The targets are the lowest modes and modes in frequency bands, with FFD shape optimization and topology optimization later.
 
-**Status:** early development. PR 0 (scaffold, benchmark harness, conventions), PR 1 (mesh data model, readers, voxel generator), PR 2 (anisotropic materials, rotations, phases), PR 3 (hex8/hex20/hex27 element kernels), PR 4 (DOF map, assembled SciPy reference operators, Dirichlet masking, box meshes), PR 5 (matrix-free unstructured operator, RCM reordering, memory estimator), PR 6 (voxel stencil operator), PR 7 (rigid body modes, M-orthonormalization, deflation projector), PR 8a (certified SciPy reference eigensolver, dense inertia count, sliding-block verification), PR 8b (Srinivas–Rao plates, anisotropic Visscher box, MAC mode matching), PR 8c (NAFEMS FV52/FV12, Lamb sphere, graded box meshes), PR 9a (matrix-free LOBPCG with Jacobi), PR 9b (chunked LOBPCG with locking, fp32 deflation basis, low-memory mode, LOBPCG memory estimator), PR 9c (the public `solve_modes` API, milestone examples, Mac acceptance budgets), PR 10 (PCG, MINRES, block-ELL, node-block Jacobi, Chebyshev, the matrix-free $A_P$) and PR 11a (voxel geometric multigrid) are done: milestone M2, first modes end to end. PR 11b (GMG in `solve_modes`, fp32 V-cycle, estimator, 2M-DOF acceptance) comes next, then PRs 12–13. See [`docs/ROADMAP.md`](docs/ROADMAP.md); decisions taken without user input and deferred weaknesses are in [`docs/open_items.md`](docs/open_items.md).
+**Status:** early development. PR 0 (scaffold, benchmark harness, conventions), PR 1 (mesh data model, readers, voxel generator), PR 2 (anisotropic materials, rotations, phases), PR 3 (hex8/hex20/hex27 element kernels), PR 4 (DOF map, assembled SciPy reference operators, Dirichlet masking, box meshes), PR 5 (matrix-free unstructured operator, RCM reordering, memory estimator), PR 6 (voxel stencil operator), PR 7 (rigid body modes, M-orthonormalization, deflation projector), PR 8a (certified SciPy reference eigensolver, dense inertia count, sliding-block verification), PR 8b (Srinivas–Rao plates, anisotropic Visscher box, MAC mode matching), PR 8c (NAFEMS FV52/FV12, Lamb sphere, graded box meshes), PR 9a (matrix-free LOBPCG with Jacobi), PR 9b (chunked LOBPCG with locking, fp32 deflation basis, low-memory mode, LOBPCG memory estimator), PR 9c (the public `solve_modes` API, milestone examples, Mac acceptance budgets), PR 10 (PCG, MINRES, block-ELL, node-block Jacobi, Chebyshev, the matrix-free $A_P$), PR 11a (voxel geometric multigrid) and PR 11b (GMG by default in `solve_modes` with a GMG-refined σ pre-estimate, fp32 V-cycle, GMG memory estimator, `solve_modes_memory`; a 2M-DOF voxel solve in about 1 min on a laptop) are done: milestone M2, first modes end to end. PRs 12–13 (multigrid for unstructured meshes) come next. See [`docs/ROADMAP.md`](docs/ROADMAP.md); decisions taken without user input and deferred weaknesses are in [`docs/open_items.md`](docs/open_items.md).
 
 ## Install
 
@@ -175,7 +175,7 @@ from jaxmodal.precond import gmg
 
 cube = voxel_mesh((16, 16, 16), spacing=(1 / 16,) * 3)
 vop, vfree = stencil(cube, materials), dof_mask(cube, {"xmin": "xyz"})
-sigma = 1e7  # the sigma pre-estimate (sigma_estimate); sigma = 0 is refused unless provably safe
+sigma = 1e7  # any sigma in [0, 3 lam_1] works; sigma = 0 is refused unless provably safe
 P = gmg(vop, vfree, sigma)  # pytree V-cycle on (n_dof, k) blocks, masked output
 b = jnp.asarray(np.random.default_rng(0).standard_normal((vop.n_dof, 2)) * vfree[:, None])
 x, info = pcg(ap_operator(vop, vfree, sigma), b, P, tol=1e-8)
@@ -184,7 +184,17 @@ mu, V, info = lobpcg(vop, vfree, 4, tol=1e-8, precond=P)
 assert info["converged"]
 ```
 
-See [`docs/preconditioners.md`](docs/preconditioners.md) for the solvers' stopping rules, the preconditioners, block-ELL, the measured h-study and the voxel GMG.
+`solve_modes` uses this GMG automatically on voxel meshes (PR 11b): it pre-estimates σ with GMG itself (or takes a `sigma` hint), and `precond_dtype="float32"` runs the V-cycle in fp32 (same iterations, a 39% faster V-cycle, half its memory). `solve_modes_memory` estimates the peak of the same call beforehand:
+
+```python
+from jaxmodal.memory import solve_modes_memory
+
+mu, V, info = solve_modes(cube, materials, {"xmin": "xyz"}, 6, precond_dtype="float32")
+assert info["precond"] == "gmg" and info["converged"]  # info["sigma"]: the shift GMG used
+solve_modes_memory(cube, {"xmin": "xyz"}, 6, precond_dtype="float32")["total"]  # bytes
+```
+
+See [`docs/preconditioners.md`](docs/preconditioners.md) for the solvers' stopping rules, the preconditioners, block-ELL, the measured h-study and the voxel GMG (fp32 V-cycle, memory estimator).
 
 The scripts in [`examples/`](examples) walk through each milestone (`m0_foundations.py`: meshes, VTU, materials; `m1_operators.py`: element matrices and operators against the assembled matrices; `m2_modes.py`: a cantilever against Euler–Bernoulli and a free voxel cube); each ends with a check and runs as a smoke test.
 

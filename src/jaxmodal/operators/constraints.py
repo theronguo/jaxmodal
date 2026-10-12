@@ -91,9 +91,9 @@ register(APOperator, [])
 
 @jax.jit
 def _ap_apply(A, x):
-    m = A.free[:, None]
+    m, sigma, s = (a.astype(x.dtype) for a in (A.free[:, None], A.sigma, A.s))
     mx = m * x
-    return m * (A.op.apply_K(mx) + A.sigma * A.op.apply_M(mx)) + A.s * (1 - m) * x
+    return m * (A.op.apply_K(mx) + sigma * A.op.apply_M(mx)) + s * (1 - m) * x
 
 
 def ap_operator(op, free, sigma=0.0, s=None):

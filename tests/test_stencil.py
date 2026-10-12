@@ -16,7 +16,15 @@ from jaxmodal.elements import ELEMENTS, kernels
 from jaxmodal.materials import Material, phase_table, phases, rotate
 from jaxmodal.memory import stencil_memory
 from jaxmodal.mesh import box_mesh, rcm, voxel_mesh
-from jaxmodal.operators import assemble, reference_element, stencil, unstructured, voxel
+from jaxmodal.operators import (
+    ap_operator,
+    assemble,
+    dof_mask,
+    reference_element,
+    stencil,
+    unstructured,
+    voxel,
+)
 from jaxmodal.operators.voxel import grid_layout
 
 ORIENT = {1: R}
@@ -370,3 +378,25 @@ def test_benchmark_smoke():
 
     r = stencil_slab.main(n=4, write=False)
     assert len(r["runs"]) >= 2 and set(r["slab_rule_ok"]) == {"m1", "m16"}
+
+
+@pytest.mark.parametrize("mass", MASSES)
+def test_fp32_applies(mass):
+    """PR 11b test 5: on fp32 vectors apply_K, apply_M and ap_operator return fp32 within 1e-6
+    of fp64 (two materials and orientations, masked, nodal masses, zero s_K/s_M cells); the
+    fp32 apply_K and consistent apply_M use <= 0.6x the fp64 temporaries (computed in fp32)."""
+    m, *_ = case("Tmix")
+    op = operator("Tmix", mass, None)
+    v = jnp.asarray(np.random.default_rng(0).standard_normal((op.n_dof, 3)))
+    A = ap_operator(op, dof_mask(m, {"xmin": "xyz"}), 0.3)
+    for f in (op.apply_K, op.apply_M, A):
+        y64, y32 = f(v), f(v.astype(jnp.float32))
+        assert y32.dtype == jnp.float32 and rel(y32, y64) <= 1e-6
+    big = stencil(voxel_mesh((16,) * 3), MATERIALS, mass=mass)
+    fs = (voxel._apply_K,) + ((voxel._apply_M,) if mass == "consistent" else ())
+    for f in fs:
+        t = [
+            f.lower(big, jax.ShapeDtypeStruct((big.n_dof, 8), d)).compile().memory_analysis()
+            for d in (jnp.float64, jnp.float32)
+        ]
+        assert t[1].temp_size_in_bytes <= 0.6 * t[0].temp_size_in_bytes

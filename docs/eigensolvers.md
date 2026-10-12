@@ -22,16 +22,21 @@ lam, V, info = solve_modes(mesh, materials, {"xmin": "xyz"}, 20, orientations, m
 f = info["frequencies"]  # Hz for SI inputs
 ```
 
-`solve_modes(mesh, materials, bcs, n_modes, orientations=None, *, mass="consistent", nodal_mass=None, tol=1e-6, maxit=500, seed=0, chunk=None, guards=None, basis_dtype="float64", low_memory=False)` (module `eigen/api.py`, PR 9c) is the modal-analysis entry point:
+`solve_modes(mesh, materials, bcs, n_modes, orientations=None, *, mass="consistent", nodal_mass=None, tol=1e-6, maxit=500, seed=0, chunk=None, guards=None, basis_dtype="float64", low_memory=False, precond="auto", sigma=None, precond_dtype="float64")` (module `eigen/api.py`, PRs 9c and 11b) is the modal-analysis entry point:
 
 1. `dof_mask(mesh, bcs)` first, so a bad BC dict fails before the operator build ([`boundary_conditions.md`](boundary_conditions.md)).
 2. **Dispatch:** a voxel mesh (`mesh.voxel is not None`) gets `stencil`, any other mesh `unstructured` in its default stored mode, with `orientations`, `mass` and `nodal_mass` forwarded (`nodal_mass` `(n_nodes,)` is added to M, isotropically). Both builders run the host checks (`check_materials`; `check_elements` or the voxel grid check) before any trace. `info["operator"]` is `"stencil"` or `"unstructured"`.
 3. **Rigid deflation:** `rigid_modes(mesh, free)` gives the rigid modes the BCs leave (per face-connected part), M-orthonormalized with the operator's own mass (nodal masses included) and passed to `lobpcg` as `R`. The lowest `n_modes` *elastic* modes come back; `info["rigid"]` is the M-orthonormal rigid basis $(n_\mathrm{dof}, k)$, NumPy fp64, and `info["n_rigid"]` $= k$ (for PR 17's effective-mass sum rule).
-4. `lobpcg` with the default Jacobi; the solver options are forwarded unchanged ([LOBPCG](#lobpcg)).
+4. **Preconditioner** (PR 11b), by `precond`:
+   - `"auto"` (default): `"gmg"` on a voxel mesh, `"jacobi"` otherwise (PRs 12–13 add `"pmg"`/`"amg"` for unstructured meshes).
+   - `"gmg"`: the voxel geometric multigrid ([`preconditioners.md`](preconditioners.md#voxel-geometric-multigrid-gmg)) built at σ: the hint `sigma` (a finite float ≥ 0) if given, else the [GMG-refined pre-estimate](#σ-pre-estimate). `precond_dtype="float32"` runs its V-cycle in fp32. `"gmg"` on a non-voxel mesh raises `ValueError`.
+   - `"jacobi"`: `jacobi(op, free, sigma or 0.0)`; no pre-estimate (σ changes Jacobi's iterations by < 3%), and only `precond_dtype="float64"`.
+   - A negative or non-finite `sigma`, an unknown name or dtype raise `ValueError`; `sigma=0.0` on a body `gmg` cannot prove nonsingular raises `SingularShiftError` (the hint is never replaced).
+5. `lobpcg` with that preconditioner; the solver options are forwarded unchanged ([LOBPCG](#lobpcg)).
 
-- **Returns:** `lobpcg`'s `lam`, `V` and `info`, plus `operator`, `n_rigid`, `rigid` and `frequencies` $= \sqrt{\max(\lambda, 0)}/(2\pi)$.
+- **Returns:** `lobpcg`'s `lam`, `V` and `info`, plus `operator`, `n_rigid`, `rigid`, `frequencies` $= \sqrt{\max(\lambda, 0)}/(2\pi)$, `precond` (the name used), `sigma` (the shift the preconditioner was built at; 0.0 for Jacobi without a hint), `sigma_iterations` (the pre-estimate's LOBPCG iterations, 0 when skipped) and `time["precond"]` (rigid modes, pre-estimate and final build; `time["setup"]` stays `lobpcg`'s).
 - **Errors:** those of `dof_mask`, the builders and `lobpcg`, and from the rigid-mode setup: parts that touch only at an edge or vertex (hinged) or nonconformingly raise from `parts`, and more than `MAX_PARTS` = 10 parts raise from `rigid_modes` (R is dense).
-- **Slender models under Jacobi:** iterations grow with the stiffness ratio. A hex20 cantilever $20\times2\times2$ ($L/h = 10$) needs 403 iterations at tol $10^{-6}$, so raise `maxit`; thin plates are out of reach until PRs 10–13 (see [Measured behaviour](#measured-behaviour)).
+- **Slender models:** voxel meshes get GMG, whose iterations stay low on slender beams and grow only slowly on thin plates (`preconditioners.md`). Unstructured meshes still use Jacobi until PRs 12–13: its iterations grow with the stiffness ratio. A hex20 cantilever $20\times2\times2$ ($L/h = 10$) needs 403 iterations at tol $10^{-6}$, so raise `maxit`; thin unstructured plates are out of reach until then (see [Measured behaviour](#measured-behaviour)).
 
 Measured (isotropic $E = 3$, $\nu = 0.3$, $\rho = 2$; 10 modes, tol $10^{-10}$; M3 Max CPU):
 
@@ -39,8 +44,8 @@ Measured (isotropic $E = 3$, $\nu = 0.3$, $\rho = 2$; 10 modes, tol $10^{-10}$; 
 |---|---|---|---|---|---|---|
 | hex20 box $6\times5\times4$ | `xmin` clamped | unstructured | 0 | 236 | 1.9 s | $2.5\cdot10^{-13}$ |
 | hex20 box $6\times5\times4$ | free | unstructured | 6 | 271 | 1.2 s | $2.0\cdot10^{-14}$ |
-| voxel $10\times8\times6$ | `zmin` clamped | stencil | 0 | 120 | 1.8 s | $5.8\cdot10^{-14}$ |
-| voxel $10\times8\times6$ | free | stencil | 6 | 125 | 1.1 s | $2.6\cdot10^{-14}$ |
+| voxel $10\times8\times6$ | `zmin` clamped | stencil + GMG | 0 | 22 (+4 σ) | 0.16 s (warm) | $6.6\cdot10^{-14}$ |
+| voxel $10\times8\times6$ | free | stencil + GMG | 6 | 22 (+5 σ) | 0.18 s (warm) | $5.5\cdot10^{-14}$ |
 
 The host steps at the acceptance sizes (hex20 $44^3$, voxel $87^3$) take under 3 s together: element check 0.05–0.09 s, operator build 2.0 / 0.2 s, `rigid_modes` 0.1 / 0.5 s, `m_orthonormalize` 0.1 / 0.2 s.
 
@@ -59,14 +64,15 @@ Model for a preconditioned solve:
 
 $$T \approx T_\text{setup} + T_\sigma + T_\text{compile} + N_\text{it}\,(t_\text{step} + c_V\,t_A + t_\text{axpy}),$$
 
-with $t_A = t_K + t_M$ (the preconditioners approximate $K + \sigma M$, $\sigma > 0$, with no fused apply); $c_V$ the fine-level applies per V-cycle in $t_A$ units (Chebyshev degree 2 pre- and post-smoothing plus the residual: 5; coarse levels about 0.5 for the voxel GMG and about 1 for hex20 p-MG plus hex8 AMG); $t_\text{axpy} \approx 0.1$ s the smoother's vector updates; and $N_\text{it} = 150$ LOBPCG iterations, an assumption PRs 11 and 13 must check.
+with $t_A = t_K + t_M$ (the preconditioners approximate $K + \sigma M$, $\sigma > 0$, with no fused apply); $c_V$ the fine-level applies per V-cycle in $t_A$ units (Chebyshev degree 2 pre- and post-smoothing plus the residual: 5; coarse levels about 0.5 for the voxel GMG and about 1 for hex20 p-MG plus hex8 AMG); $t_\text{axpy} \approx 0.1$ s the smoother's vector updates; and $N_\text{it}$ the LOBPCG iterations, assumed 150 before PR 11 measured them.
 
 | case | per iteration | $N_\text{it} = 150$ | setup + σ + compile | total | budget | margin |
 |---|---|---|---|---|---|---|
-| voxel 2M, 10 modes | $0.79 + 5.5 \cdot 0.32 + 0.1 = 2.65$ s | 6.6 min | about 1.5 min | about 8 min | 10 min | 1.25× |
+| voxel 2M, 10 modes (assumed) | $0.79 + 5.5 \cdot 0.32 + 0.1 = 2.65$ s | 6.6 min | about 1.5 min | about 8 min | 10 min | 1.25× |
+| voxel 2M, measured (PR 11b), fp64 / fp32 V-cycle | 2.7 / 2.1 s ($c_V$ = 5.2 / 3.2) | $N_\text{it}$ = 16: 43 / 33 s | 17.5 / 18.1 s | 61 / 51 s | 10 min | 10× / 12× |
 | hex20 1M, 20 modes | $0.73 + 6 \cdot 0.31 + 0.1 = 2.69$ s | 6.7 min | about 1.5 min | about 8 min | 15 min | 1.8× |
 
-The hex20 setup includes pyamg smoothed aggregation on the hex8 $A_P$ (1.9 s at $44^3$), its assembly (2.6 s), PR 12's Galerkin product, σ and compilation. The budgets keep the roadmap's figures rather than the model's, which leaves margin for the two unmeasured inputs ($N_\text{it}$, the V-cycle cost). If PR 11 or 13 measures $N_\text{it} > 150$ or a costlier V-cycle, it revisits its budget with this model; a fused $K + \sigma M$ apply ($t_A \approx t_K$) is the first lever.
+The hex20 setup includes pyamg smoothed aggregation on the hex8 $A_P$ (1.9 s at $44^3$), its assembly (2.6 s), PR 12's Galerkin product, σ and compilation. The budgets keep the roadmap's figures rather than the model's, which leaves margin for the two unmeasured inputs ($N_\text{it}$, the V-cycle cost). If PR 13 measures $N_\text{it} > 150$ or a costlier V-cycle, it revisits its budget with this model; a fused $K + \sigma M$ apply ($t_A \approx t_K$) is the first lever. PR 11b measured the voxel case (`docs/preconditioners.md`, Acceptance): GMG needs 16 iterations, not 150, and the σ pre-estimate (13–15 s at 2M DOF) replaces the 73 s Jacobi `sigma_estimate`.
 
 ## Reference solver (`reference_modes`)
 
@@ -266,11 +272,14 @@ A single chunk of 30 modes ($m = 36$) needs 266 iterations, 2.4 s against 4.9 s 
 
 ### Memory model
 
-`jaxmodal.memory.lobpcg_memory(op_memory, n_dof, n_modes, chunk=None, guards=None, low_memory=False, basis_dtype="float64", n_rigid=0)` takes `op_memory`, a callable $m \mapsto$ the operator estimate (e.g. `lambda m: unstructured_memory(mesh, m)`), and returns, in bytes, with $b = 8\,n\,m$ one block:
+`jaxmodal.memory.lobpcg_memory(op_memory, n_dof, n_modes, chunk=None, guards=None, low_memory=False, basis_dtype="float64", n_rigid=0, precond_memory=None)` takes `op_memory`, a callable $m \mapsto$ the operator estimate (e.g. `lambda m: unstructured_memory(mesh, m)`), and `precond_memory`, a callable $m \mapsto$ the preconditioner estimate (e.g. `lambda m: gmg_memory(mesh, m)`; `None` is the default Jacobi, already inside $A$). It returns, in bytes, with $b = 8\,n\,m$ one block:
 
-- **`step`** $= A\,b + f\,w$, with $w$ the operator's `workspace` at width $m$: $(A, f) = (16, 2.5)$ for the 9-block step and $(11, 1.75)$ for the low-memory step. $A$ is the large-n step (it includes the operator's own vectors); $f$ is the upper envelope of `memory_analysis` over hex8/hex20/hex27 at 6.6k–1.08M DOF and $m$ = 7–48 (two applies' workspace can be live at once in the 9-block step). The margin is about 3% at 1M DOF, where $w$ is a fraction of a block, and up to about 2× at 10k–100k DOF, where $w$ is several blocks. With a diagonal operator the steps hold 16 and 7 blocks (pinned by tests).
+- **`step`** $= A\,b + f\,w + A_P\,b$, with $w$ the operator's `workspace` at width $m$: $(A, f) = (16, 2.5)$ for the 9-block step and $(11, 1.75)$ for the low-memory step. $A$ is the large-n step (it includes the operator's own vectors); $f$ is the upper envelope of `memory_analysis` over hex8/hex20/hex27 at 6.6k–1.08M DOF and $m$ = 7–48 (two applies' workspace can be live at once in the 9-block step). The margin is about 3% at 1M DOF, where $w$ is a fraction of a block, and up to about 2× at 10k–100k DOF, where $w$ is several blocks. With a diagonal operator the steps hold 16 and 7 blocks (pinned by tests). $A_P\,b$ is the preconditioner's `step` (9-block) or `step_low` entry: 0 for Jacobi; for GMG the extra blocks over Jacobi, `GMG_STEP` = 5.1 / 0 (9-block, fp64 / fp32 V-cycle) and 9.9 / 4.5 (low-memory), the upper envelope of `memory_analysis` of the steps at $16^3$–$87^3$, $m = 15$ (at $32^3$ and below the stencil's slab workspace dominates and the 9-block step adds nothing; the fp32 cycle fits under the 9-block step's existing peak at every size). **Allocator growth with GMG:** the measured process peak with GMG grows over the first ~20 iterations by more than with Jacobi (at $64^3$, P built beforehand: after 1 iteration GMG − Jacobi = 0.68 GB, matching `memory_analysis`; after 20, 1.6 GB: +1.2 GB for GMG, +0.45 GB for Jacobi, then flat), heap fragmentation from the cycle's many buffer sizes rather than live data. It is not proportional to the block (12.6 extra blocks at $64^3$, about 6 at $87^3$), so `GMG_STEP` stays the `memory_analysis` envelope: `solve_modes`-sized totals are 11% low at $64^3$ with the fp64 cycle (3.37 against 3.78 GB; fp32 +4%) and 10–12% high at $87^3$, inside the ±20% band (`docs/open_items.md`).
 - **`basis`** $= n \cdot \text{capacity} \cdot (8$ or $4)$; **`rigid`** $= 2 \cdot 8\,n\,n_\mathrm{rigid}$ ($R$ and $MR$); **`host`** $= b + 8\,n\,n_\mathrm{modes}$ (the asynchronously freed step output and the fp64 modes on the host), plus 4 blocks for a chunked solve (transients between chunks: the start block, the seed, allocator slack; at most 2.6 measured).
-- **`total`** = overhead + operator storage + basis + rigid + host + max(operator build, step).
+- **`precond`**: the preconditioner's `storage` (0 for Jacobi).
+- **`total`** = overhead + operator storage + precond + basis + rigid + host + max(operator build, precond build, step).
+
+`jaxmodal.memory.solve_modes_memory(mesh, bcs, n_modes, *, mass="consistent", chunk=None, guards=None, basis_dtype="float64", low_memory=False, precond="auto", precond_dtype="float64", n_rigid=None)` is the one-call estimate of a `solve_modes` run with the same options: `stencil_memory` or `unstructured_memory`, `gmg_memory` for GMG (no islands: `solve_modes` builds uniform `s_K`) and `lobpcg_memory`, composed; it returns `lobpcg_memory`'s dict. `n_rigid=None` counts the rigid modes with `rigid_modes(mesh, dof_mask(mesh, bcs))` on the host; pass it to skip that at large sizes. The pre-estimate's hierarchy is freed before the final build, and its 6-column LOBPCG is smaller than the solve's, so it adds nothing to the peak.
 
 Measured process peak at hex20 $44^3$ (1.08M DOF), 40 modes in one chunk with 8 guards ($m = 48$), 3 iterations: 8.74 GB against the estimate 8.87 GB (9-block), 6.52 against 6.75 GB (low-memory). At the PR 13 acceptance width ($m = 25$, 10 iterations, 9-block) the estimate is 4–7% low: 5.50 against 5.28 GB clamped, 5.63–5.79 against 5.39 GB free; at the PR 11 voxel size ($87^3$, $m = 15$, free, 9-block) 5.26 against 5.47 GB. Chunked, with a diagonal pencil (300k DOF, 100 modes in chunks of 10): 1.24 against 1.30 GB (fp64 basis), 1.09 against 1.15 GB (fp32). The step term is an envelope fit: up to about 2× high at 10k–100k DOF, and for an operator without workspace (diagonal) a single chunk can come out about 4% low, and many chunks up to 7% low (500k DOF, 400 modes in chunks of 10: allocator growth of about $0.15 \cdot 8\,n\,n_\mathrm{modes}$; real operators usually add slack through the workspace term, but at narrow blocks such as hex20 at $m = 25$ the fit is 4–7% low, as measured above).
 
@@ -312,7 +321,28 @@ These are Davis–Kahan and Kato–Temple in the M-inner product. The 2-norm $r$
 
 The ratio grows slowly with size. That costs 60–110 iterations at $m = 6$, about 10–15% of a solve.
 
-**The default Jacobi uses σ = 0.** For Jacobi, σ·diag M/diag K ≤ 4·10⁻⁴, and the iterations to $10^{-8}$ barely change: 330 / 338 / 334 for σ = 0 / λ₁ / λ₁₀ on hex20 $8^3$, and 231 / 231 / 229 on hex8 $16^3$. `lobpcg` therefore never runs the pre-estimate. It is meant for the preconditioners of K + σM in PRs 11–13, whose `solve_modes` dispatch runs it.
+**The default Jacobi uses σ = 0.** For Jacobi, σ·diag M/diag K ≤ 4·10⁻⁴, and the iterations to $10^{-8}$ barely change: 330 / 338 / 334 for σ = 0 / λ₁ / λ₁₀ on hex20 $8^3$, and 231 / 231 / 229 on hex8 $16^3$. `lobpcg` therefore never runs a pre-estimate, and `solve_modes` runs one only for GMG (below).
+
+**GMG-refined pre-estimate** (PR 11b, `_gmg_sigma` in `eigen/api.py`, run by `solve_modes` for `precond="gmg"` without a hint). `sigma_estimate` is up to 3800× above λ₁ on thin plates, slender beams, anisotropic grids and SIMP fields, takes 73 s (252 iterations) at 2M DOF, and capped at 3–10 iterations is $10^2$–$10^7$× above. GMG at any σ in $[0, 3\lambda_1]$ preconditions as well as at λ₁ (σ ≥ 10λ₁ costs iterations on bulky and free bodies), so the estimate refines itself with GMG:
+
+1. **Start:** `gmg(op, free, 0.0)` when the singular guard proves $A_P$ nonsingular (clamped bodies), σ = 0. On `SingularShiftError` (free bodies, zero-stiffness cells), start from the upper bound σ₀ = `sigma_estimate(op, free, R, maxit=10)` and build `gmg(op, free, σ₀)`.
+2. **Round:** 1-mode `lobpcg(op, free, 1, 0.1, R, P, maxit=20)` gives the Rayleigh quotient $\tilde\lambda \ge \lambda_1$; σ becomes $\tilde\lambda$ (from 0) or $\min(\sigma, \tilde\lambda)$.
+3. **Stop:** from σ = 0 after one round (GMG at σ = 0 approximates $K^{-1}$ on the free DOFs, the best preconditioner for λ₁); from σ₀ when $\tilde\lambda$ > previous/3, or after 4 rounds. Otherwise rebuild at σ (the old hierarchy freed first) and repeat.
+
+The residual stop at 0.1 is safe here though not with Jacobi (above): with GMG the residual reaches 0.1 only near an eigenpair, so the probes stop early (4–14 iterations) only where σ is within 1% of λ₁, and otherwise run to 20.
+
+| case | start σ/λ₁ | σ/λ₁ after each round |
+|---|---|---|
+| boxes, odd grid, plates $32^2$ / $64^2\times1$, beams $64\times2\times2$ / $128\times1\times1$, aniso $h_z = h/10$, SIMP field, clamped beam with a 200× tip mass | 0 | 1.00 |
+| free box $8^3$ | 1.82 | 1.00 |
+| free plate $16^2\times1$ | 81 | 1.00, 1.00 |
+| free beam $128\times1\times1$ | $5.1\cdot10^4$ | 2.7, 1.00 |
+| free aniso $h_z = h/10$ | $8.9\cdot10^3$ | 6.83, 1.00, 1.00 |
+| free SIMP field | 277 | 1.05, 1.00 |
+| unfiltered binary SIMP field $32^3$ | 0 | 390 |
+
+- **Cost** at 2M DOF (clamped, one round): the σ = 0 build 5–6 s plus 5 LOBPCG iterations 7–9 s, against 73 s for Jacobi `sigma_estimate`. Free bodies add `sigma_estimate(maxit=10)` and up to 3 more rounds (worst case about 2 min at 2M).
+- **Known miss:** on an unfiltered binary SIMP field λ₁ is a void-region mode that 20 iterations from a random start miss (100 find it), so σ lands at 390 λ₁ (`docs/open_items.md`); 10-mode LOBPCG does not converge on that field at any σ either.
 
 ### Measured behaviour
 
@@ -406,6 +436,8 @@ All runs: isotropic $E = 3$, $\nu = 0.3$, $\rho = 2$ on the box $(1, 0.83, 0.67)
 - **Jacobi, σ and errors:** Jacobi against the assembled diagonals; σ within $[\lambda_1, 2\lambda_1]$; `ValueError` for a too-large block, a bad `X0`, `n_modes` or `maxit` below 1, and a non-M-orthonormal R; `RuntimeError` after 3 refills; the `maxit` and no-progress exits run the explicit confirmation (counted).
 
 `tests/test_api.py`, `solve_modes` against `reference_modes` (10 modes, tol $10^{-10}$, the λ rule above; the rigid count pinned by the reference's zero eigenvalues):
+
+- PR 11b: the GMG-refined σ pre-estimate within $[\lambda_1(1 - 10^{-8}), 2\lambda_1]$ of the SciPy $\lambda_1$ on boxes, an odd grid, a thin plate, beams, free boxes, plates and the free $128\times1\times1$ beam (slow: anisotropic spacing and the SIMP field), with a spy on the builds (clamped: once at 0; free: from σ₀ > 0, never rising); the hint skipping the pre-estimate (one build at the hint, same modes) and `sigma=0` on a free body raising; GMG solves on odd $9\times6\times5$ meshes (clamped, free, masked with nodal masses) within $10^{-8}$ in λ and MAC $\ge 1 - 10^{-8}$, the final build at `info["sigma"]`; the dispatch and option errors; that only the σ = 0 refusals are `SingularShiftError` (a backstop and a plain `ValueError` propagate); the $87^3$ Mac acceptance (slow, macOS) and its benchmark entry's smoke run;
 
 - clamped hex20 box (unstructured dispatch, `V` M-orthonormal with constrained rows 0, `frequencies`); free with random nodal masses (6 rigid modes, `info["rigid"]` M-orthonormal and M-orthogonal to `V` under the full mass; the nodal masses change λ observably); sliding `xmin: x` (3 rigid modes);
 - voxel, clamped and free (stencil dispatch, counted by spies on the builders);
