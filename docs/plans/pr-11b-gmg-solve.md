@@ -1,5 +1,7 @@
 # PR 11b plan: GMG in `solve_modes`, σ pre-estimate, fp32 V-cycle, estimator, Mac acceptance
 
+Status: approved (plan review round 3, 5/5 satisfied).
+
 PR 11b completes PR 11 (M3) on top of 11a's `gmg(op, free, sigma)`. It makes the voxel GMG the default preconditioner of `solve_modes`. It also adds:
 
 - a σ pre-estimate that works on slender and high-contrast bodies (`docs/open_items.md`);
@@ -98,12 +100,16 @@ The budget model assumed $N_\text{it}$ = 150 and $c_V$ = 5.5, about 8 min (`docs
   |---|---|---|---|
   | 9-block, $87^3$ | 16.00 | 21.11 (+5.1) | 17.43 (+1.4) |
   | 9-block, $64^3$ | 18.82 | 23.51 (+4.7) | 19.83 (+1.0) |
+  | 9-block, $32^3$ | 48.53 | 48.53 (+0) | 48.53 (+0) |
+  | 9-block, $48^3$ | 23.77 | 28.65 (+4.9) | (+1.0) |
   | low-memory, $87^3$ | 9.42 | 19.11 (+9.7) | 14.94 (+5.5) |
   | low-memory, $64^3$ | 11.83 | 21.51 (+9.7) | 18.37 (+6.5) |
+  | low-memory, $48^3$ | 16.79 | 26.65 (+9.9) | (+6.7) |
+  | low-memory, $32^3$ | 27.93 | 35.19 (+7.3) | 31.28 (+3.4) |
 
   These are temporaries plus aliased state, in fp64 blocks of $(n, 15)$.
 - A stencil-specific workspace factor $f$ would not tighten the Jacobi part: the fitted $f$ is 0 at $87^3$, 0.7 at $64^3$ and 2.2 at $32^3$, so the envelope stays about 2.2–2.5.
-- The roadmap band, $|\text{est} - \text{peak}| \le 0.2\,\text{peak}$ (as in the PR 6 and PR 9 tests), allows 5.39–8.08 GB for fp64 and 4.51–6.77 GB for fp32. Both projections sit well inside.
+- The roadmap band, $|\text{est} - \text{peak}| \le 0.2\,\text{peak}$ (as in the PR 6 and PR 9 tests), allows 4.90–7.34 GB for fp64 (at the lower peak 6.12 GB) and 4.04–6.06 GB for fp32 (at 5.05 GB). Both projections are inside; fp32 at +14% is the tighter one, with room for about 2.6 extra 9-block step blocks against the 1.4 fitted. The envelope over $32^3$–$87^3$ is the $87^3$ value for the 9-block step (at $32^3$ the stencil workspace dominates and GMG adds nothing), so it does not widen the fp32 estimate.
 - With `maxit = 3` the peaks are about 0.5 GB lower (4.47 / 6.21 / 5.11 GB). Test 10 measures the whole `solve_modes` run.
 
 **fp32 V-cycle prototype** (hierarchy cast to fp32; coarsest Cholesky and deflation in fp64; `lob32.py`, `c11b-plan1/lob32b.py`):
@@ -216,8 +222,8 @@ The residual tolerance 0.1 is `lobpcg`'s own λ-scaled residual. With Jacobi a r
   - **Coarsest factor:** $(3n_c)^2\cdot 8$ (≤ 27 nodes).
   - **Islands:** with `s_K` given, the island deflation from `_islands` and the padded row count (104 B per row, $96^2\cdot8$ for $E^+$).
   - The measure is the unique device buffers of the built `GMG` by identity, excluding the operator's own leaves (counted by `stencil_memory`). The Chebyshev and APOperator scalars are negligible and covered by the bound.
-- **`workspace`** $= c_\text{dt}\cdot 8\,n_\text{dof}\,m$: the V-cycle temporaries alone, for PCG users. $c_\text{dt}$ is an upper envelope of `memory_analysis` of the jitted cycle at $16^3$–$64^3$ ($c$ = 12.1 for fp64 and 8.45 for fp32 at $87^3$). With islands, add $3\,n_\text{rows}/n_\text{dof}$ blocks.
-- **`build`:** max(the per-node setup fit (+1.12 GB at $87^3$), fp64 storage + `dtype` storage). The cast runs after the fp64 build's sweep temporaries are freed, so the fp32 build holds at most both hierarchies. Test 10's band confirms it.
+- **`workspace`** $= c_\text{dt}\cdot 8\,n_\text{dof}\,m$: the V-cycle temporaries alone, for PCG users. $c_\text{dt}$ is an upper envelope of `memory_analysis` of the jitted cycle at $16^3$–$64^3$ ($c$ = 12.1 for fp64 and 7.80 for fp32 at $87^3$). With islands, add $3\,n_\text{rows}/n_\text{dof}$ blocks.
+- **`build`:** the per-node setup fit (+1.12 GB at $87^3$); for fp32, max(that fit, fp64 storage + fp32 storage). The cast runs after the fp64 build's sweep temporaries are freed, so the fp32 build holds at most both hierarchies. Test 10's band confirms it.
 
 **`lobpcg_memory(..., precond_memory=None)`** takes a callable $m \mapsto$ preconditioner estimate (`lambda m: gmg_memory(mesh, m)`).
 - The step term becomes $(A + A_P)\,b + f\,w$. $A_P$ is a per-(step type, dtype) table `GMG_STEP` of extra blocks, an upper envelope from `memory_analysis` of the 9-block and low-memory steps with GMG at $32^3$–$87^3$ (table above). It is one fit, not a fit times a fit. The fit is checked once against a harness peak difference (GMG minus Jacobi) at $64^3$, so that an underestimate of the GMG part cannot hide behind the Jacobi part's slack.
@@ -243,7 +249,7 @@ The residual tolerance 0.1 is `lobpcg`'s own λ-scaled residual. With Jacobi a r
   - Mac acceptance: the measured runs. In the model table, $N_\text{it}$ = 16 and $c_V$ = 5.3 / 4.3 (re-measured on the shipped code) replace 150 and 5.5.
   - The memory model: `precond_memory`, `GMG_STEP`, `solve_modes_memory`.
 - **`docs/preconditioners.md`:**
-  - the fp32 V-cycle: what is cast, the fp64 coarse solve and deflation, the measured iterations, time (1.76 → 1.48 s) and temporaries, and that PCG to $10^{-8}$ is not promised;
+  - the fp32 V-cycle: what is cast, the fp64 coarse solve and deflation, the measured iterations, time (1.76 → 1.41 s, re-measured on the shipped code) and temporaries, and that PCG to $10^{-8}$ is not promised;
   - `gmg_memory`;
   - the 2M acceptance;
   - correct "18 at $87^3$" to the shipped 16.
@@ -268,7 +274,7 @@ The residual tolerance 0.1 is `lobpcg`'s own λ-scaled residual. With Jacobi a r
 - `src/jaxmodal/operators/voxel.py`, `operators/constraints.py`: dtype-following applies.
 - `src/jaxmodal/memory.py`: `gmg_memory`, `lobpcg_memory(precond_memory=)`, `GMG_STEP`, `solve_modes_memory`.
 - Tests: `tests/test_api.py`, `tests/test_gmg.py`, `tests/test_stencil.py`, `tests/test_lobpcg.py` (memory).
-- `benchmarks/gmg_study.py`: an `acceptance(n)` entry (the 2M solve, fp64 and fp32: times, iterations, peaks, estimates) into `results/gmg_study.json`.
+- `benchmarks/gmg_study.py`: an `acceptance(n)` entry (the 2M solve, fp64 and fp32: times, iterations, both warm peak readings, estimates) into `results/gmg_study.json`.
 - The docs above.
 
 ## Tests
@@ -313,7 +319,7 @@ Runtime budget: the fast suite (`-m "not slow and not gpu"`) stays under 5 min i
 9. **Estimator composition** (fast, exact). `lobpcg_memory` with `precond_memory` minus without equals the preconditioner storage plus the change in max(build, step) per the documented rule. `solve_modes_memory(...)["total"]` equals the hand-composed sum from the three estimators, for GMG fp64, GMG fp32 and Jacobi, clamped and free.
 10. **Mac acceptance** (slow, macOS; `test_api.py`). $87^3$ voxel box (2.04M DOF), steel, `xmin` clamped, `solve_modes(..., 10, tol=1e-6)` with defaults (GMG, pre-estimate, 9-block, fp64 basis), once with `precond_dtype="float64"` and once with `"float32"`.
     - **Wall time:** one cold subprocess per dtype (`harness.measure` with an empty setup; it drops the compilation cache, so compilation counts). `time_s` ≤ 600 s, and all modes converged.
-    - **Peak:** one warm subprocess per dtype (setup = a full run, freed). $|\text{est} - \text{peak}| \le 0.2\,\text{peak}$ with est = `solve_modes_memory(mesh, bcs, 10, precond_dtype=...)["total"]`, and est ≥ 2 GB.
+    - **Peak:** the larger of two warm subprocesses per dtype (setup = a full run, freed). The fp64 peak varies by about 10% between runs (allocator reuse), and the larger peak is the one nearer the upper-envelope estimate. $|\text{est} - \text{peak}| \le 0.2\,\text{peak}$ with est = `solve_modes_memory(mesh, bcs, 10, precond_dtype=...)["total"]`, and est ≥ 2 GB.
     - Expected: 59 / 55 s, peaks 6.1–6.7 / 5.1 GB, estimates about 6.8 / 5.8 GB.
 11. **Gmg-study acceptance entry smoke** (slow): `gmg_study.acceptance(n=8)` runs and records the times, iterations, peak and estimate keys.
 
