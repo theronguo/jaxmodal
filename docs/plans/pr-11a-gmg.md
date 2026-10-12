@@ -158,8 +158,8 @@ Iteration bounds were measured with the prototype (the tests review got 50 for t
 
 ## Docs
 
-- `docs/preconditioners.md`: a GMG section (coarsening rule with the odd-axis cell and physical-position weights, Galerkin cell matrices with the LaTeX above, the nodal terms on owner elements, the dropped coarse nodes, the direct 27-slot `BlockELL` construction and how it relates to `block_ell`, transfers, group smoother and why, V-cycle with the $\lambda_\max(D_l^{-1}A_l)$ condition and input/output masking, the singular guard, limitations, the measured iteration and setup-memory table).
-- `docs/operators.md`: `active_cells(op)`, and that GMG reads the stencil's stored grid layout through it.
+- `docs/preconditioners.md`: a GMG section (coarsening rule with the odd-axis cell and physical-position weights, Galerkin cell matrices with the LaTeX above, the nodal terms on owner elements, the dropped coarse nodes, the direct 27-slot `BlockELL` construction and how it relates to `block_ell`, transfers, group smoother and why, V-cycle with the $\lambda_\max(D_l^{-1}A_l)$ condition and input/output masking, the singular guard in full (zero-stiffness refusal, rigid-mode check, chained refusal for meshes `rigid_modes` rejects, non-finite backstop, the caller's responsibility for a physical σ), limitations, the measured iteration and setup-memory table).
+- `docs/operators.md`: `active_cells(op)`, that GMG reads the stencil's stored grid layout through it, and that GMG needs the `voxel_mesh` node order (no `rcm`/`renumber` on voxel meshes; also one line where `rcm`/`renumber` are documented).
 - `README.md`: GMG in the feature list with a short `pcg(..., precond=gmg(...))` snippet (run by `test_readme`).
 - `docs/ROADMAP.md`: the PR 11 split note (like PR 9's) with the 11a/11b test table, the status line, the changed Galerkin test text ("dropped coarse DOFs (zero $P$ columns)" instead of "masked coarse DOFs with diagonal s"), the group smoother, and the anisotropic-spacing limitation next to the semi-coarsening key decision.
 
