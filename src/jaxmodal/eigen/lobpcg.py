@@ -350,7 +350,9 @@ def lobpcg(
     max(tol, 1.2e-7)). maxit counts per chunk. low_memory: the low-memory step (11 instead of
     16 blocks, about 1.4-1.9x the time). Never raises on non-convergence: check
     info["converged"] and info["stagnated"]; a failed chunk ends the solve, so fewer than
-    n_modes can come back."""
+    n_modes can come back. Breakdowns raise: RuntimeError (start block rank-deficient after 3
+    refills, a locked column in the span of the earlier ones), FloatingPointError (non-finite
+    step)."""
     return _solve(
         op, free, n_modes, tol, R, precond, X0, maxit, seed,
         chunk=chunk, guards=guards, basis_dtype=basis_dtype, low=low_memory,

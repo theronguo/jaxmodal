@@ -661,7 +661,7 @@ def test_reortho():
     rng = np.random.default_rng(0)
     op = Diagonal(jnp.ones(n), jnp.asarray(rng.uniform(1, 2, n)))
     m = jnp.ones((n, 1))
-    Bq, _ = np.linalg.qr(rng.standard_normal((n, 5)) / np.sqrt(np.asarray(op.dM))[:, None])
+    Bq, _ = np.linalg.qr(rng.standard_normal((n, 5)))
     Bm = Bq / np.sqrt(np.asarray(op.dM))[:, None]  # M-orthonormal
     B = jnp.zeros((n, 6)).at[:, :5].set(Bm)
     X = jnp.asarray(rng.standard_normal((n, k)))
@@ -671,10 +671,9 @@ def test_reortho():
     assert np.abs(MY[:, :3].T @ np.asarray(Y)[:, :3] - np.eye(3)).max() < 1e-13
     assert np.abs(Bm.T @ MY).max() < 1e-13
     x0 = np.asarray(X[:, 0]) - Bm @ (Bm.T @ (np.asarray(op.dM) * np.asarray(X[:, 0])))
-    assert (
-        abs(abs(x0 @ np.asarray(Y[:, 0])) / np.linalg.norm(x0) / np.linalg.norm(Y[:, 0]) - 1)
-        < 1e-12
-    )
+    y0 = np.asarray(Y[:, 0])
+    cos = abs(x0 @ y0) / np.linalg.norm(x0) / np.linalg.norm(y0)
+    assert abs(cos - 1) < 1e-12  # column order kept
     _, g = lob._reortho(X.at[:, 1].set(B[:, 2]), 3, op, m, B, jnp.int32(5), c=c)
     assert g < 1e-20
 

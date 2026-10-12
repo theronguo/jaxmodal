@@ -128,7 +128,7 @@ lam, V, info = lobpcg(op, free, 200, R=R, chunk=40, basis_dtype="float32", low_m
 - **`low_memory`:** the low-memory step (11 instead of 16 blocks, 1.4–1.9× the time per iteration).
 - **Errors:**
   - `ValueError` if `n_modes` or `maxit` is below 1, if `chunk` is not in $[1, n_\mathrm{modes}]$, `guards` is below 1 or `basis_dtype` is neither fp64 nor fp32, if $m$ exceeds the free DOFs minus the rank of $R$, for the guard error (a cluster at a chunk boundary fills the block), if $\|R^\top M_mR - I\|_\max > 10^{-8}$ (e.g. R orthonormalized with another mass), or for a bad mask or `X0`;
-  - `RuntimeError` if the start block stays rank-deficient after 3 refills;
+  - `RuntimeError` if the start block stays rank-deficient after 3 refills, or if a column to be locked lies in the span of the locked modes;
   - `FloatingPointError` for a non-finite step.
 
   Non-convergence never raises: check `info`.
