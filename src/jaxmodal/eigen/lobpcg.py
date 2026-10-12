@@ -9,9 +9,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.scipy.linalg import solve_triangular
-from jax.tree_util import Partial
 
 from ..operators.common import check_x64
+from ..precond.jacobi import jacobi
 
 EPS = np.finfo(float).eps
 RECOMPUTE = 20  # explicit K and M products every RECOMPUTE iterations
@@ -29,18 +29,6 @@ def _K(op, m, v):
 
 def _M(op, m, v):
     return m * op.apply_M(m * v)
-
-
-def _jacobi(inv, r):
-    return inv[:, None] * r
-
-
-def jacobi(op, free, sigma=0.0):
-    """Jacobi on A_P = K + sigma M as a pytree callable: v -> m * v / (diag K + sigma diag M),
-    0 on constrained DOFs (masked output)."""
-    free = jnp.asarray(free)
-    d = op.diag_K() + sigma * op.diag_M()
-    return Partial(_jacobi, jnp.where(free, 1 / jnp.where(free, d, 1.0), 0.0))
 
 
 def _svqb_t(G, act):

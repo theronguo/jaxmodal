@@ -42,3 +42,8 @@ def scaled(op, s_K=None, s_M=None):
                 raise ValueError(f"{name} must have shape ({op.n_el},), got {jnp.shape(s)}")
             new[name] = jnp.asarray(s, jnp.float64)
     return dataclasses.replace(op, **new)
+
+
+def node_cols(k):
+    """(k, 3): the columns 3a + j of row 3a + i's node block (element DOF 3a + i)."""
+    return 3 * (np.arange(k) // 3)[:, None] + np.arange(3)

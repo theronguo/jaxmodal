@@ -1,6 +1,6 @@
 # Boundary conditions, rigid modes and deflation
 
-`jaxmodal.operators` (module `operators/constraints.py`) holds the Dirichlet masks, the masked eigen-operator and $A_P$ (SciPy, PR 4), the free-DOF restriction (PR 8a), and the rigid body modes, their M-orthonormalization and the deflation projector (PR 7). `jaxmodal.mesh.parts` finds the face-connected parts.
+`jaxmodal.operators` (module `operators/constraints.py`) holds the Dirichlet masks, the masked eigen-operator and $A_P$ (SciPy, PR 4; matrix-free `ap_operator`, PR 10), the free-DOF restriction (PR 8a), and the rigid body modes, their M-orthonormalization and the deflation projector (PR 7). `jaxmodal.mesh.parts` finds the face-connected parts.
 
 ```python
 import jax.numpy as jnp
@@ -37,6 +37,12 @@ which puts the scalar $s$ on the constrained diagonal:
 - **Default** $s$ = mean of $\mathrm{diag}(A)$ over free DOFs, for SPD $A = K + \sigma M$. Then $A_P$ is SPD exactly when $A_{ff}$ is (the constrained block is $sI$), its diagonal is positive (Jacobi divides by no zero), and it scales with $A$ (independent of the unit system). A default $s \le 0$ raises, so `a_p` never silently returns a non-SPD $A_P$.
 - **Indefinite shift-invert** $K - \sigma M$ (PRs 10, 15): the roadmap (Key design decisions, interior bands) fixes $s = \overline{\mathrm{diag}\,K} + \sigma\,\overline{\mathrm{diag}\,M}$ over free DOFs, which the caller passes as `a_p(K - sigma * M, m, s=...)`.
 - A mask with no free DOF raises.
+
+**Matrix-free `ap_operator(op, free, sigma=0.0, s=None)`** (PR 10) is the counterpart of `a_p(K + sigma * M, free, s)` for any operator with `apply_K`, `apply_M`, `diag_K`, `diag_M` and `n_dof`: a pytree `APOperator` with $x \mapsto m \odot (K + \sigma M)(m \odot x) + s\,(1 - m) \odot x$ on `(n, k)` blocks, `n_dof`, and the leaves `op`, `free` (float mask), `sigma` and `s`, so new data never recompiles.
+
+- **Default** $s$ = mean over free DOFs of $\mathrm{diag}K + |\sigma|\,\mathrm{diag}M$. For $\sigma \ge 0$ that is the rule above; for $\sigma < 0$ it is the roadmap's shift-invert $s$, so the indefinite operator needs no explicit `s`. An explicit `s` overrides it.
+- **Sign convention:** `sigma` is the shift in $K + \sigma M$. The shift-invert operator $K - \sigma_b M$ is `ap_operator(op, free, -sigma_b)`, and its SPD preconditioner is built at $+\sigma_b$, e.g. `jacobi(op, free, sigma_b)` ([`preconditioners.md`](preconditioners.md)).
+- **Masked $M_P$** (PR 14): `ap_operator(op.scaled(s_K=zeros), free, 1.0)` is exactly $mMm + \overline{\mathrm{diag}M}\,(I - m)$. It is a correctness shortcut: it still pays the zero-scaled K apply, about 2× the cost of M alone.
 
 ## Parts (`parts`)
 

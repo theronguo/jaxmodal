@@ -30,6 +30,7 @@ from jaxmodal.operators import (
     unstructured,
 )
 from jaxmodal.operators.common import register
+from jaxmodal.precond.jacobi import _jacobi
 
 # the module itself: the package exports the function under the same name
 lob = importlib.import_module("jaxmodal.eigen.lobpcg")
@@ -500,7 +501,7 @@ def step_args(op, n, k, low, cap, basis=jnp.float64):
     tail = (S((k,), bool), S((k,), jnp.float64))
     state = (blk,) * 2 + tail if low else (blk,) * 6 + tail
     R = S((n, 6), jnp.float64)
-    args = (state, op, S((n, 1), jnp.float64), Partial(lob._jacobi, vec), R, R,
+    args = (state, op, S((n, 1), jnp.float64), Partial(_jacobi, vec), R, R,
             S((n, cap), basis), S((), jnp.int32), S((4,), jnp.float64))  # fmt: skip
     return args if low else args + (S((), bool),)
 

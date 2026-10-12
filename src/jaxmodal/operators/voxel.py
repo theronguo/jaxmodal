@@ -11,7 +11,7 @@ from jax import lax
 from ..elements import ELEMENTS, kernels
 from ..materials import check_materials, phase_table, phases
 from ..mesh.model import CORNERS
-from .common import check_nodal_mass, check_v, check_x64, register, scaled
+from .common import check_nodal_mass, check_v, check_x64, node_cols, register, scaled
 from .dofmap import check_int32
 
 SLAB_CELLS = 2**16  # default slab: about this many cells per scan step (benchmarks/stencil_slab.py)
@@ -96,6 +96,9 @@ class Stencil:
     def diag_M(self):
         return _diag_M(self)
 
+    def block_diag_K(self):
+        return _block_diag_K(self)
+
     def scaled(self, s_K=None, s_M=None):
         """Copy with new per-element scalings (n_el,); None keeps the current one. Traceable."""
         return scaled(self, s_K, s_M)
@@ -105,7 +108,8 @@ register(Stencil, ["slab", "axes", "mass", "n_nodes", "n_el"])
 
 
 def stencil(mesh, materials, orientations=None, mass="consistent", nodal_mass=None, slab=None):
-    """Voxel stencil operator with apply_K, apply_M, diag_K, diag_M and scaled methods."""
+    """Voxel stencil operator with apply_K, apply_M, diag_K, diag_M, block_diag_K and scaled
+    methods."""
     if mass not in ("consistent", "lumped"):
         raise ValueError(f"mass must be 'consistent' or 'lumped', got {mass!r}")
     check_x64("stencil")
@@ -220,6 +224,14 @@ def _k_diag(op, Ke, el):
     return jnp.einsum("pk,p...->k...", d, w).reshape(8, 3, *el.shape, 1)
 
 
+def _k_blocks(op, Ke, el):
+    P = op.rho.shape[0]
+    blocks = Ke[:, np.arange(24)[:, None], node_cols(24)].reshape(P, 8, 3, 3)
+    ph, s = _gather(op.phase, el), _gather(op.s_K, el)
+    w = jnp.where(ph == jnp.arange(P, dtype=jnp.int32)[:, None, None, None], s, 0.0)
+    return jnp.einsum("paij,psyx->aisyxj", blocks, w)
+
+
 def _m_diag(op, me, el):
     d = me.sum(1) if op.mass == "lumped" else jnp.diagonal(me)  # (8,): row-sum = V/8, or m_aa
     w = _m_weight(op, el)[..., 0]
@@ -247,6 +259,12 @@ def _apply_M(op, v):
 def _diag_K(op):
     Ke, _ = reference_element(op)
     return _slabs(op, lambda nd, el: _k_diag(op, Ke, el), 1)[:, 0]
+
+
+@jax.jit
+def _block_diag_K(op):
+    Ke, _ = reference_element(op)
+    return _slabs(op, lambda nd, el: _k_blocks(op, Ke, el), 3).reshape(op.n_nodes, 3, 3)
 
 
 @jax.jit

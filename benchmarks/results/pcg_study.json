@@ -1,0 +1,363 @@
+{
+  "runs": [
+    {
+      "family": "hex20",
+      "n": 4,
+      "n_dof": 1275,
+      "precond": "jacobi",
+      "time_s": 0.03592495899647474,
+      "iterations": [
+        170,
+        175,
+        175,
+        175
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "family": "hex20",
+      "n": 4,
+      "n_dof": 1275,
+      "precond": "block_jacobi",
+      "time_s": 0.03534987510647625,
+      "iterations": [
+        171,
+        172,
+        173,
+        172
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "family": "hex20",
+      "n": 4,
+      "n_dof": 1275,
+      "precond": "chebyshev2",
+      "time_s": 0.03920033294707537,
+      "iterations": [
+        97,
+        98,
+        98,
+        98
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "family": "hex20",
+      "n": 8,
+      "n_dof": 8019,
+      "precond": "jacobi",
+      "time_s": 0.5222440420184284,
+      "iterations": [
+        330,
+        336,
+        333,
+        335
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "family": "hex20",
+      "n": 8,
+      "n_dof": 8019,
+      "precond": "block_jacobi",
+      "time_s": 0.5398919580038637,
+      "iterations": [
+        330,
+        335,
+        332,
+        334
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "family": "hex20",
+      "n": 8,
+      "n_dof": 8019,
+      "precond": "chebyshev2",
+      "time_s": 0.49869216699153185,
+      "iterations": [
+        179,
+        182,
+        181,
+        181
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "family": "hex20",
+      "n": 16,
+      "n_dof": 56355,
+      "precond": "jacobi",
+      "time_s": 3.5210889999289066,
+      "iterations": [
+        657,
+        652,
+        651,
+        654
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "family": "hex20",
+      "n": 16,
+      "n_dof": 56355,
+      "precond": "block_jacobi",
+      "time_s": 3.625854082987644,
+      "iterations": [
+        658,
+        654,
+        650,
+        654
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "family": "hex20",
+      "n": 16,
+      "n_dof": 56355,
+      "precond": "chebyshev2",
+      "time_s": 3.7539336669724435,
+      "iterations": [
+        350,
+        347,
+        347,
+        348
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "family": "voxel",
+      "n": 8,
+      "n_dof": 2187,
+      "precond": "jacobi",
+      "time_s": 0.022209040937013924,
+      "iterations": [
+        104,
+        102,
+        103,
+        104
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "family": "voxel",
+      "n": 8,
+      "n_dof": 2187,
+      "precond": "block_jacobi",
+      "time_s": 0.021862333989702165,
+      "iterations": [
+        101,
+        99,
+        99,
+        101
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "family": "voxel",
+      "n": 8,
+      "n_dof": 2187,
+      "precond": "chebyshev2",
+      "time_s": 0.022983833914622664,
+      "iterations": [
+        54,
+        53,
+        53,
+        54
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "family": "voxel",
+      "n": 16,
+      "n_dof": 14739,
+      "precond": "jacobi",
+      "time_s": 0.13862358301412314,
+      "iterations": [
+        201,
+        199,
+        202,
+        199
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "family": "voxel",
+      "n": 16,
+      "n_dof": 14739,
+      "precond": "block_jacobi",
+      "time_s": 0.1497889580205083,
+      "iterations": [
+        198,
+        195,
+        198,
+        196
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "family": "voxel",
+      "n": 16,
+      "n_dof": 14739,
+      "precond": "chebyshev2",
+      "time_s": 0.1513070409419015,
+      "iterations": [
+        105,
+        104,
+        105,
+        104
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "family": "voxel",
+      "n": 32,
+      "n_dof": 107811,
+      "precond": "jacobi",
+      "time_s": 1.4277716659707949,
+      "iterations": [
+        389,
+        387,
+        387,
+        380
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "family": "voxel",
+      "n": 32,
+      "n_dof": 107811,
+      "precond": "block_jacobi",
+      "time_s": 1.5341790000675246,
+      "iterations": [
+        384,
+        382,
+        382,
+        376
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "family": "voxel",
+      "n": 32,
+      "n_dof": 107811,
+      "precond": "chebyshev2",
+      "time_s": 1.5560951249208301,
+      "iterations": [
+        204,
+        202,
+        203,
+        199
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ]
+    }
+  ],
+  "sigma": {
+    "hex20": 12186205.451960104,
+    "voxel": 12247599.373400955
+  },
+  "tol": 1e-08,
+  "system": "benchmarks/results/system.json",
+  "versions": {
+    "jax": "0.11.2",
+    "jaxlib": "0.11.2",
+    "numpy": "2.5.3",
+    "platform": "macOS-27.2-arm64-arm-64bit",
+    "cpu_count": 16,
+    "p_cores": 12,
+    "e_cores": 4,
+    "xla_flags": null,
+    "jax_num_cpu_devices": true
+  }
+}
