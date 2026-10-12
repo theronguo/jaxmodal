@@ -1,6 +1,6 @@
 # Eigensolvers
 
-`jaxmodal.eigen.reference_modes` (module `eigen/reference.py`) is the SciPy reference eigensolver on assembled matrices; `jaxmodal.linalg.count_below` (module `linalg/inertia.py`) is the exact dense inertia count (PR 8a). They are oracles for the matrix-free LOBPCG (PR 9 adds it here) and for later PRs. Both run on the host on the SciPy matrices from `assemble`.
+`jaxmodal.eigen.reference_modes` (module `eigen/reference.py`) is the SciPy reference eigensolver on assembled matrices; `jaxmodal.linalg.count_below` (module `linalg/inertia.py`) is the exact dense inertia count (PR 8a). They are oracles for the matrix-free LOBPCG and for later PRs; both run on the host on the SciPy matrices from `assemble`. `jaxmodal.eigen.lobpcg` (module `eigen/lobpcg.py`, PR 9a) is the matrix-free solver, with `jacobi` and `sigma_estimate`; see [LOBPCG](#lobpcg).
 
 ```python
 from jaxmodal.eigen import reference_modes
@@ -107,6 +107,135 @@ The tests (`tests/test_reference.py`) assert $2 f_\lambda$, $10^{-12}$ and $100\
 
 The factorizations dominate; the check is about 20–45% of the time. The largest supported size is about 100k free DOF on bulky meshes with `points` (2 minutes, 7 GB), and about 35k without. Plate-like meshes factor much faster and go further; on the plate MMD is as good as ND.
 
+## LOBPCG
+
+```python
+from jaxmodal.eigen import jacobi, lobpcg, sigma_estimate
+
+lam, V, info = lobpcg(op, free, 20, tol=1e-8, R=R)  # R: M-orthonormal rigid modes or None
+lam, V, info = lobpcg(op, free, 20, precond=jacobi(op, free, sigma))  # any pytree callable
+sigma, its = sigma_estimate(op, free, R)  # lam_1 upper bound, for preconditioners of K + sigma M
+```
+
+`lobpcg(op, free, n_modes, tol=1e-6, R=None, precond=None, X0=None, maxit=500, seed=0)` computes the lowest `n_modes` eigenpairs of the masked pencil $K_m v = m \odot K(m \odot v)$, $M_m$ likewise, for any operator with `apply_K`, `apply_M`, `diag_K`, `diag_M` and `n_dof` (PR 5 or PR 6).
+
+- **Returns:** `lam` `(n_modes,)` ascending (NumPy); `V` `(n_dof, n_modes)` on the device, M-orthonormal with constrained rows exactly 0; and `info` with `iterations`, `converged`, `stagnated`, `residuals` and `thresholds` (from explicitly recomputed products, on every exit), `p_drops`, `refills`, `norm_K`, `norm_M`, `history` (max wanted residual per iteration) and `time` (`setup`, `iterations`, in seconds).
+- **Deflation basis `R`:** `(n_dof, k)`, M-orthonormal (rigid modes after `m_orthonormalize` with the same operator). $MR = M_m R$ is computed once. The start block and every new direction are projected, $W \leftarrow W - R\,(MR^\top W)$, so no extra M apply is needed per iteration. Without `R`, a free body returns its rigid modes as λ ≈ 0; their λ-scaled residual is meaningless, so the solve ends at the no-progress exit (`converged` False, `stagnated` True).
+- **Preconditioner `precond`:** a pytree callable `(n, j) -> (n, j)` (e.g. `jax.tree_util.Partial`), fixed, linear and SPD on the free DOFs, with masked output. It is a step argument, so new preconditioner data does not recompile. The default is `jacobi(op, free)`.
+- **Block size** $m = n_\mathrm{modes} + \max(5, \lfloor 0.2\,n_\mathrm{modes}\rfloor)$.
+- **Errors:**
+  - `ValueError` if `n_modes` or `maxit` is below 1, if $m$ exceeds the free DOFs minus the rank of $R$, if $\|R^\top M_mR - I\|_\max > 10^{-8}$ (e.g. R orthonormalized with another mass), or for a bad mask or `X0`;
+  - `RuntimeError` if the start block stays rank-deficient after 3 refills;
+  - `FloatingPointError` for a non-finite step.
+
+  Non-convergence never raises: check `info`.
+- **`jacobi(op, free, sigma=0.0)`:** Jacobi on $A_P = K + \sigma M$, i.e. $v \mapsto m \odot v / (\mathrm{diag}K + \sigma\,\mathrm{diag}M)$, with output 0 on constrained DOFs. The constrained diagonal $s$ of $A_P$ ([`boundary_conditions.md`](boundary_conditions.md)) never reaches the output.
+
+### Algorithm
+
+Hetmaniuk–Lehoucq / Duersch et al. (2018), with fixed shapes: every block is $(n, m)$, and inactive columns are exact zeros tracked by boolean masks.
+
+- **One compiled step.** `lobpcg_step(state, op, mask, precond, R, MR, consts, recompute)` is a module-level `jax.jit`.
+  - The state $(X, KX, MX, P, KP, MP, \mathrm{act}_P, \lambda)$ is donated.
+  - `consts` $= (\|K\|, \|M\|, \mathrm{tol}, c)$ and `recompute` are traced.
+  - Nothing is closed over: closing over the operator would embed it in the program (6.4 MB of HLO for a diagonal operator at 100k DOF, against 0.05 MB with arguments; 2.2 GB more compile memory with a real operator at 182k) and recompile on every solve.
+  - $P$ starts as a masked zero block, so there is one compiled variant per shape, and a second solve with new data (`op.scaled`, a new preconditioner, a new tol) compiles nothing.
+- **Setup.**
+  - $\|K_m\|_2$ and $\|M_m\|_2$ come from 30 power iterations each.
+  - The start block (random, or `X0` padded with random columns) is masked, deflated and SVQB-orthonormalized. Columns SVQB drops (a rank-deficient `X0`) are refilled with random vectors, up to 3 times.
+  - Rayleigh–Ritz on $X$ completes the setup.
+- **SVQB.** Inactive rows and columns of $G = V^\top MV$ are zeroed, so they form the exact $\theta = 0$ eigenspace and kept directions carry nothing from them. The rest is scaled to unit diagonal, and directions with $\theta \le 10^{-14}\theta_\max$ are dropped (exact zero columns).
+- **Each iteration:**
+  1. Residuals give the active columns $a = r > t$. This is soft locking: converged columns get no new direction but stay in $X$.
+  2. $W = T(R_X) \odot a$ is deflated, then $KW$ and $MW$ are applied. These are the only two width-$m$ applies per iteration.
+  3. $W$ is M-orthogonalized against $[X, P]$, then SVQB, then orthogonalized again, then SVQB.
+  4. Rayleigh–Ritz on $[X, W, P]$, with the Grams built pairwise from $m\times m$ products.
+     - Masked rows and columns are zeroed off the diagonal, with $G_M = 1$ and $G_K = \beta = 10\max_i|\lambda_i| + \|K\|/\|M\|$ on it.
+     - $X$ is fully active and M-orthonormal, so by Courant–Fischer the lowest $m$ active Ritz values are $\le \max_i\lambda_i < \beta$. Masked slots never enter, and no $\hat\lambda_\max$ estimate is needed.
+     - **Pivot test:** if the Cholesky of $G_M$ is not finite or $\min\mathrm{diag}(L)^2 \le 10^{-10}$, the small problem is redone with the P block masked: a `jnp.where` between two small solutions. This bounds $\lambda_\min(G_M)$ only from above, not the condition number; in practice the pivots are about 1.
+  5. The new P coefficients are built as in Duersch:
+     - start from the Ritz coefficients with the $X$ rows zeroed;
+     - $G_M$-orthogonalize them against $C_X$ twice, in the small space;
+     - mask columns whose $G_M$-norm fell to $\le 10^{-8}$ of their norm before (the **noise rule**; without it a noise column would carry about $10^{-4}$ of non-orthogonality into $P$);
+     - SVQB in coefficient space.
+
+     `p_drops` counts the iterations in which the pivot fallback, the noise rule or this SVQB lost a P column. It can also fire under heavy soft locking, when the active W and P columns span fewer than $m$ directions; it is a diagnostic, not a failure.
+     
+     $[X', P']$ is then M-orthonormal without any n-sized orthogonalization of $P$ (measured: $\max|G_M - I| \le 7\cdot10^{-8}$).
+  6. **Update.** $X' = XC_x + WC_w + PC_p$, and $P'$ likewise, with the same GEMMs for the K and M products. It is sequenced with `optimization_barrier`: XLA does not fuse a sum of GEMMs, and this saves 2 blocks.
+  7. Every `RECOMPUTE` = 20 iterations, a traced `lax.cond` replaces the implicitly updated products by explicit applies.
+- **Exit check.** When the wanted pairs meet their thresholds, $KX$ and $MX$ are recomputed explicitly and written back into the state. The solve exits only if the check still passes.
+
+### Convergence
+
+- **Residual:** the λ-scaled $r_i = \|K_mx_i - \lambda_iM_mx_i\| / (|\lambda_i|\,\|M_mx_i\|)$.
+- **Threshold:** $t_i = \max(\mathrm{tol},\ c\,\varepsilon\,(\|K\| + |\lambda_i|\,\|M\|)\,\|x_i\| / (|\lambda_i|\,\|M_mx_i\|))$ with $c = 10$. It stays bounded as M becomes singular.
+- **Progress** is a new minimum of the max wanted residual by a factor 0.9, or a decrease of the sum of the wanted Ritz values by more than a relative $10^{-10}$. Both clauses are needed: while λ̃ falls, the λ-scaled residual rises. On a 1-mode hex20 $6^3$ run, the residual alone had no new minimum for 85 iterations.
+
+| exit | `converged` | `stagnated` |
+|---|---|---|
+| all wanted $r_i \le$ tol (explicitly confirmed) | True | False |
+| all wanted $r_i \le t_i$, some above tol: accepted at the floor | True | True |
+| no progress for 50 iterations | False | True |
+| `maxit` reached | False | False |
+
+**Theory.** For M-normalized $x$ and the M⁻¹-norm residual $r_M = \|Kx - \lambda Mx\|_{M^{-1}}/|\lambda|$, with the absolute gap to the rest of the spectrum:
+
+$$\sin\theta \le \frac{r_M\,\lambda}{\mathrm{gap}}, \qquad \frac{|\delta\lambda|}{\lambda} \le \frac{r_M^2\,\lambda}{\mathrm{gap}}$$
+
+These are Davis–Kahan and Kato–Temple in the M-inner product. The 2-norm $r$ is the cheap proxy; it equals $r_M$ up to the conditioning of M.
+
+### σ pre-estimate
+
+`sigma_estimate(op, free, R=None, maxit=300, seed=0)` returns `(sigma, iterations)`.
+- It runs the same loop with 1 mode ($m = 6$) and Jacobi at σ = 0, and returns the Rayleigh quotient λ̃₁ ≥ λ₁.
+- It stops when λ̃₁ has decreased by less than 5% over the last 10 iterations.
+- The λ-scaled residual is no stop criterion here: it is small while λ̃ is huge (a stop at 0.5 gave 432× λ₁). A fixed count is no good either: 20 iterations give 4–98× λ₁.
+- A free body needs `R`; without it σ is a rigid mode.
+
+| mesh | DOF | iterations | λ̃₁/λ₁ |
+|---|---|---|---|
+| hex20 $8^3$ clamped | 8019 | 89 | 1.29 |
+| hex20 $8^3$ free | 8019 | 102 | 1.04 |
+| hex8 $16^3$ clamped | 14739 | 59 | 1.27 |
+| hex27 $6^3$ clamped | 6591 | 76 | 1.01 |
+| hex20 $12^3$ clamped | 24843 | 106 | 1.32 |
+| hex8 $24^3$ free | 46875 | 82 | 1.02 |
+
+The ratio grows slowly with size. That costs 60–110 iterations at $m = 6$, about 10–15% of a solve.
+
+**The default Jacobi uses σ = 0.** For Jacobi, σ·diag M/diag K ≤ 4·10⁻⁴, and the iterations to $10^{-8}$ barely change: 330 / 338 / 334 for σ = 0 / λ₁ / λ₁₀ on hex20 $8^3$, and 231 / 231 / 229 on hex8 $16^3$. `lobpcg` therefore never runs the pre-estimate. It is meant for the preconditioners of K + σM in PRs 11–13, whose `solve_modes` dispatch runs it.
+
+### Measured behaviour
+
+All runs: isotropic $E = 3$, $\nu = 0.3$, $\rho = 2$ on the box $(1, 0.83, 0.67)$, `xmin` clamped unless free, 12 modes, Jacobi, M3 Max CPU, warm.
+
+| mesh | DOF | tol $10^{-6}$ | tol $10^{-10}$ | max rel. λ error |
+|---|---|---|---|---|
+| hex20 $6^3$ clamped | 3675 | 197 its | 320 its (1.5 s) | $1\cdot10^{-13}$ |
+| hex20 $6^3$ free (rigid deflation) | 3675 | 209 | 346 (1.5 s) | $4\cdot10^{-14}$ |
+| hex27 $4^3$ clamped | 2187 | 109 | 169 (0.5 s) | $2\cdot10^{-13}$ |
+| hex8 $10^3$ clamped | 3993 | 103 | 159 (0.7 s) | $1\cdot10^{-12}$ |
+| hex20 $8^3$ clamped | 8019 | 281 | 439 (2.1 s) | $1\cdot10^{-12}$ |
+
+- **Iterations:** these grow roughly like $h^{-1}$, as expected for Jacobi ($\sqrt\kappa$). No P drops occurred in these runs.
+- **Floor:** at tol $10^{-16}$ on hex20 $4^3$ the solve accepts at the floor threshold (`converged` and `stagnated`). Over seeds 0–3, the lowest max wanted residual is $1.2$–$3.4\cdot10^{-12}$ clamped and $3.4$–$4.4\cdot10^{-13}$ free, that is $0.5$–$1.9\times\varepsilon\lambda_\max/\lambda_1$.
+- **Near-singular M:** hex20 $6^3$ with 30% void elements ($E\cdot10^{-9}$, $\rho\cdot10^{-12}$) converges to $10^{-8}$ in 337–374 iterations (3 seeds), with λ errors of $10^{-12}$.
+- **Thin plates are out of reach for Jacobi.**
+  - A clamped hex20 plate $10\times10\times1$ with $L/t = 100$ has $\lambda_\max/\lambda_1 = 7\cdot10^{13}$. After 6000 iterations λ̃₁ is still $8\cdot10^4$ times too high.
+  - λ̃₁ decreases monotonically. The λ-scaled residual grows (3 → 70), because λ̃ shrinks faster than the absolute residual.
+  
+  Plates need the preconditioners of PRs 10–13.
+- **Cost per iteration** (hex20 $24^3$, 182k DOF):
+  - 72 ms at $m = 15$ (K and M applies about 40 ms) and 216 ms at $m = 48$ (about 90 ms). The rest is GEMMs at about 450 GFLOP/s.
+  - Recompute iterations cost 150 / 390 ms.
+  - The setup (power iterations, start block, R check) takes about 0.5 s warm (≈ 7 iterations) and 1.1 s with the first-call compiles.
+- **Step memory:**
+  - With a diagonal operator, so that no operator workspace counts, the compiled step holds temp + donated state = 16.0 blocks of $(n, m)$ fp64. This is pinned by a test; without the barriers it is 18.
+  - The roadmap's 9 + 2 blocks were not reached in any measured variant. A donated buffer takes its output only after every read of it, so the new $X$ and $P$ coexist with the old ones and $W$.
+  - With a real operator the peak is the larger of that and the apply phase plus the operator workspace: 52–56 blocks at hex20 $8^3$ (8k DOF), 16.05 at 182k and 16.00 at 421k, so the step reaches its 16 blocks by about 180k DOF.
+  - PR 9b's estimator models this as max(16 blocks, apply phase + operator workspace), together with the memory model.
+
 ## Sizes
 
 - **Reference size** means $\le$ `MAX_DENSE` = 20k free DOF: dense `eigh`, $M^{-1}$ and `count_below` are affordable (PR 9's dense $r_M$ and inertia comparisons, PR 14's exact count).
@@ -131,5 +260,30 @@ The factorizations dominate; the check is about 20–45% of the time. The larges
 - **Clusters:** the first four `n_modes` ending inside an exact multiplicity of a free isotropic hex20 $4^3$ cube certify and match up to the last gap; `n_modes = 3` on a free box raises; on the $L/t = 1600$ plate, `n_modes` 7, 10, 12, 17, 21, 25 certify under the automatic σ rule (a purely relative gap threshold falsely raises at 10, 12, 17).
 - **Inputs** raise `ValueError`; `restrict` matches dense slicing.
 - **`count_below`** matches the dense `eigh` count at mid-gap $\sigma$ (relative gap $\ge 10^{-3}$, including the first gap above the rigid cluster) on a clamped hex27 and a free hex20 box, consistent and lumped; these cases have $2\times2$ pivots.
+
+`tests/test_lobpcg.py`, against `reference_modes` and dense linear algebra:
+
+- **Accuracy** at tol $10^{-10}$, 12 modes, on clamped hex20 $6^3$, free hex20 $6^3$ (rigid deflation, $\|R^\top MV\| \le 10^{-10}$), clamped hex27 $4^3$ and clamped hex8 $10^3$.
+  - Modes with relative gap $\ge 10^{-2}$: λ error $\le \max(10^{-8}, 10\varepsilon\lambda_\max/\lambda)$, with $\lambda_\max$ from `eigsh(which="LA")`. Gaps in $[10^{-4}, 10^{-2})$: $\le 10\,$tol, cluster-wise.
+  - Principal sines $\le 10\,r_M\lambda/\mathrm{gap}$, with the dense $r_M$. The reference's $r_M$ is $\ge 10\times$ smaller. Sines are computed stably, as $\sigma_\max(L^\top(Q - Q_rQ_r^\top MQ))$; $\sqrt{1-\cos^2}$ bottoms out near $10^{-8}$. Clusters below a relative gap of $10^{-4}$ are compared by subspace.
+  - $\|V^\top MV - I\| \le 10^{-10}$, constrained rows 0, and `info["residuals"]` equal to residuals recomputed with the operator.
+  - No P drops, and `norm_K`, `norm_M` within $[0.8, 1]\times$ the exact 2-norms (`eigsh`).
+- **Exact multiplicities** on a free square-section beam and a free cube. A beam of section $1\times1.002$ gives bending pairs in the $[10^{-4}, 10^{-2})$ band.
+- **Stagnation:**
+  - tol $10^{-16}$ gives floor acceptance;
+  - with the floor term patched to 0, the no-progress exit;
+  - a 1-mode run is not flagged.
+- **Robustness:**
+  - a start block with duplicated columns (refill);
+  - a forced $P \approx XC$ at noise $10^{-12}$ (the Cholesky fails) and $10^{-6}$ (finite, pivot below `PIVOT`): P is dropped, the new $X$ stays M-orthonormal;
+  - the recompute schedule (iterations 20, 40) and explicit products after a recompute step;
+  - the P invariant after 30 steps ($\le 10^{-6}$);
+  - `_p_coeffs` masks exactly a noise column;
+  - near-singular M within 500 iterations;
+  - a NaN preconditioner raises `FloatingPointError`.
+- **Compiles:** one step compile per solve, and 0 for a second solve with a new operator, preconditioner and tol (subprocess, cache off, `jax.monitoring`).
+- **Memory:** step memory $\le 16.5$ blocks.
+- **Floor** (slow): within $[0.1, 10]\times\varepsilon\lambda_\max/\lambda_1$.
+- **Jacobi, σ and errors:** Jacobi against the assembled diagonals; σ within $[\lambda_1, 2\lambda_1]$; `ValueError` for a too-large block, a bad `X0`, `n_modes` or `maxit` below 1, and a non-M-orthonormal R; `RuntimeError` after 3 refills; the `maxit` and no-progress exits run the explicit confirmation (counted).
 
 The discretization itself is verified in [`verification.md`](verification.md).
