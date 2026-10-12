@@ -225,7 +225,7 @@ Common setup:
    - a curved distorted $6^3$ box;
    - a hex20 $6^3$ box with nodal masses of one element mass on a seeded half of the nodes (own λ₁);
    - a hex20 $4^3$ box with `s_K` = $10^{-3}$ on a checkerboard of elements (the worst measured pattern; own λ₁).
-7. **LOBPCG.** `lobpcg(op, free, 6, tol=1e-8, precond=pmg(...))` on a clamped hex20 $6\times4\times3$ box matches `reference_modes` with the 9a check helper in ≤ 40 iterations (measured about 15). Also on hex27.
+7. **LOBPCG.** `lobpcg(op, free, 6, tol=1e-8, precond=pmg(...))` on a clamped hex20 $6\times4\times3$ box matches `reference_modes` (eigenvalues to $10^{-8}$, masked modes, as `test_gmg.test_lobpcg`) in ≤ 40 iterations (measured about 15). Also on hex27.
 8. **Errors.**
    - A `Stencil` raises `TypeError` with a message naming `gmg`.
    - σ < 0 and NaN raise `ValueError` ("sigma must be >= 0").

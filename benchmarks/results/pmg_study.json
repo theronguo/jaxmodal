@@ -1,0 +1,724 @@
+{
+  "runs": [
+    {
+      "case": "hex20 6^3",
+      "n_dof": 3675,
+      "sigma": 12026017.941605447,
+      "degree": 2,
+      "ratio": 30.0,
+      "iterations": [
+        14,
+        14,
+        14,
+        14
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.502464208053425,
+      "n_coarse": 1029
+    },
+    {
+      "case": "hex20 3^3",
+      "n_dof": 624,
+      "sigma": 12026017.941605447,
+      "degree": 2,
+      "ratio": 30.0,
+      "iterations": [
+        14,
+        14,
+        14,
+        14
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.4712559999898076,
+      "n_coarse": 192
+    },
+    {
+      "case": "hex20 12^3",
+      "n_dof": 24843,
+      "sigma": 12026017.941605447,
+      "degree": 2,
+      "ratio": 30.0,
+      "iterations": [
+        14,
+        14,
+        14,
+        14
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.8032445829594508,
+      "n_coarse": 6591
+    },
+    {
+      "case": "hex20 24^3",
+      "n_dof": 181875,
+      "sigma": 12026017.941605447,
+      "degree": 2,
+      "ratio": 30.0,
+      "iterations": [
+        14,
+        14,
+        14,
+        14
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 13.071676500025205,
+      "n_coarse": 46875
+    },
+    {
+      "case": "hex20 3^3 d4",
+      "n_dof": 624,
+      "sigma": 12026017.941605447,
+      "degree": 4,
+      "ratio": 30.0,
+      "iterations": [
+        9,
+        9,
+        9,
+        9
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.4585144999437034,
+      "n_coarse": 192
+    },
+    {
+      "case": "hex20 6^3 d4",
+      "n_dof": 3675,
+      "sigma": 12026017.941605447,
+      "degree": 4,
+      "ratio": 30.0,
+      "iterations": [
+        9,
+        9,
+        9,
+        9
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.5333821249660105,
+      "n_coarse": 1029
+    },
+    {
+      "case": "hex20 12^3 d4",
+      "n_dof": 24843,
+      "sigma": 12026017.941605447,
+      "degree": 4,
+      "ratio": 30.0,
+      "iterations": [
+        9,
+        9,
+        9,
+        9
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.7957559579517692,
+      "n_coarse": 6591
+    },
+    {
+      "case": "hex20 3^3 d3",
+      "n_dof": 624,
+      "sigma": 12026017.941605447,
+      "degree": 3,
+      "ratio": 30.0,
+      "iterations": [
+        11,
+        11,
+        11,
+        11
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.4754336249316111,
+      "n_coarse": 192
+    },
+    {
+      "case": "hex20 6^3 d3",
+      "n_dof": 3675,
+      "sigma": 12026017.941605447,
+      "degree": 3,
+      "ratio": 30.0,
+      "iterations": [
+        10,
+        10,
+        10,
+        10
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.4917940420564264,
+      "n_coarse": 1029
+    },
+    {
+      "case": "hex27 6^3",
+      "n_dof": 6591,
+      "sigma": 11979092.898337135,
+      "degree": 2,
+      "ratio": 30.0,
+      "iterations": [
+        13,
+        13,
+        13,
+        13
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.5227762090507895,
+      "n_coarse": 1029
+    },
+    {
+      "case": "hex27 3^3",
+      "n_dof": 1029,
+      "sigma": 11979092.898337135,
+      "degree": 2,
+      "ratio": 30.0,
+      "iterations": [
+        13,
+        13,
+        13,
+        13
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.4749602909432724,
+      "n_coarse": 192
+    },
+    {
+      "case": "hex27 12^3",
+      "n_dof": 46875,
+      "sigma": 11979092.898337135,
+      "degree": 2,
+      "ratio": 30.0,
+      "iterations": [
+        13,
+        13,
+        13,
+        13
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.7701496670488268,
+      "n_coarse": 6591
+    },
+    {
+      "case": "beam 20x2x2",
+      "n_dof": 1863,
+      "sigma": 275116.6548036112,
+      "degree": 2,
+      "ratio": 30.0,
+      "iterations": [
+        16,
+        16,
+        15,
+        16
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.5057217919966206,
+      "n_coarse": 567
+    },
+    {
+      "case": "free 6^3",
+      "n_dof": 3675,
+      "sigma": 83990979.28500436,
+      "degree": 2,
+      "ratio": 30.0,
+      "iterations": [
+        14,
+        14,
+        14,
+        14
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.49902870890218765,
+      "n_coarse": 1029
+    },
+    {
+      "case": "curved 6^3",
+      "n_dof": 3675,
+      "sigma": 12030431.380846037,
+      "degree": 2,
+      "ratio": 30.0,
+      "iterations": [
+        14,
+        14,
+        14,
+        14
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.5013316660188138,
+      "n_coarse": 1029
+    },
+    {
+      "case": "checkerboard 4^3 s_K 1e-3",
+      "n_dof": 1275,
+      "sigma": 1567319.918695683,
+      "degree": 2,
+      "ratio": 30.0,
+      "iterations": [
+        19,
+        19,
+        18,
+        19
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.48520058405119926,
+      "n_coarse": 375
+    },
+    {
+      "case": "nodal 6^3",
+      "n_dof": 3675,
+      "sigma": 2817053.192453414,
+      "degree": 2,
+      "ratio": 30.0,
+      "iterations": [
+        14,
+        14,
+        14,
+        14
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.4978618749883026,
+      "n_coarse": 1029
+    },
+    {
+      "case": "cube 8^3 ratio 10",
+      "n_dof": 8019,
+      "sigma": 11988567.727187516,
+      "degree": 2,
+      "ratio": 10.0,
+      "iterations": [
+        14,
+        14,
+        14,
+        14
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.5589533749734983,
+      "n_coarse": 2187
+    },
+    {
+      "case": "cube 8^3 ratio 20",
+      "n_dof": 8019,
+      "sigma": 11988567.727187516,
+      "degree": 2,
+      "ratio": 20.0,
+      "iterations": [
+        13,
+        13,
+        13,
+        13
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.5549850839888677,
+      "n_coarse": 2187
+    },
+    {
+      "case": "cube 8^3 ratio 60",
+      "n_dof": 8019,
+      "sigma": 11988567.727187516,
+      "degree": 2,
+      "ratio": 60.0,
+      "iterations": [
+        18,
+        18,
+        18,
+        18
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.5567301249830052,
+      "n_coarse": 2187
+    },
+    {
+      "case": "plate 16^2x1 a=1",
+      "n_dof": 5865,
+      "sigma": 115811.48028086731,
+      "degree": 2,
+      "ratio": 30.0,
+      "iterations": [
+        15,
+        15,
+        15,
+        15
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.5009870419744402,
+      "n_coarse": 1734
+    },
+    {
+      "case": "plate 16^2x1 a=2",
+      "n_dof": 5865,
+      "sigma": 29146.600870322785,
+      "degree": 2,
+      "ratio": 30.0,
+      "iterations": [
+        21,
+        21,
+        21,
+        21
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.5005824160762131,
+      "n_coarse": 1734
+    },
+    {
+      "case": "plate 16^2x1 a=4",
+      "n_dof": 5865,
+      "sigma": 7308.503666853503,
+      "degree": 2,
+      "ratio": 30.0,
+      "iterations": [
+        63,
+        61,
+        61,
+        61
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.5027082080487162,
+      "n_coarse": 1734
+    },
+    {
+      "case": "plate 16^2x1 a=10",
+      "n_dof": 5865,
+      "sigma": 1171.9878546197615,
+      "degree": 2,
+      "ratio": 30.0,
+      "iterations": [
+        736,
+        603,
+        647,
+        648
+      ],
+      "converged": [
+        false,
+        false,
+        false,
+        false
+      ],
+      "build_s": 0.4936137079494074,
+      "n_coarse": 1734
+    },
+    {
+      "case": "box 8^3 hz=h/2",
+      "n_dof": 8019,
+      "sigma": 5300740.539275825,
+      "degree": 2,
+      "ratio": 30.0,
+      "iterations": [
+        17,
+        17,
+        17,
+        16
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.6632469169562683,
+      "n_coarse": 2187
+    },
+    {
+      "case": "box 8^3 hz=h/4",
+      "n_dof": 8019,
+      "sigma": 1676386.6642353723,
+      "degree": 2,
+      "ratio": 30.0,
+      "iterations": [
+        28,
+        28,
+        28,
+        28
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.6175157079705968,
+      "n_coarse": 2187
+    },
+    {
+      "case": "box 8^3 hz=h/10",
+      "n_dof": 8019,
+      "sigma": 292473.57260561176,
+      "degree": 2,
+      "ratio": 30.0,
+      "iterations": [
+        76,
+        76,
+        73,
+        74
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.6176645420491695,
+      "n_coarse": 2187
+    }
+  ],
+  "tol": 1e-08,
+  "system": "benchmarks/results/system.json",
+  "lobpcg": [
+    {
+      "case": "hex20 12x12x12",
+      "n_dof": 24843,
+      "sigma": 11956957.474086791,
+      "jacobi": {
+        "iterations": 435,
+        "converged": true,
+        "time_s": 6.056390375015326,
+        "lam": [
+          11956957.47408789,
+          11956957.474095073,
+          22064062.447770916,
+          68218160.17922518,
+          83528491.0496869,
+          83528491.04969718,
+          126971585.33495624,
+          178122678.9263536,
+          193065847.73260063,
+          201779363.22976294
+        ]
+      },
+      "pmg": {
+        "iterations": 15,
+        "converged": true,
+        "time_s": 1.2500458339927718,
+        "lam": [
+          11956957.474088779,
+          11956957.474095624,
+          22064062.44776798,
+          68218160.17922851,
+          83528491.04969941,
+          83528491.04970206,
+          126971585.33494411,
+          178122678.9263488,
+          193065847.73261076,
+          201779363.2296963
+        ]
+      }
+    },
+    {
+      "case": "hex20 20x2x2",
+      "n_dof": 1863,
+      "sigma": 275116.6548036112,
+      "jacobi": {
+        "iterations": 309,
+        "converged": true,
+        "time_s": 1.615776541060768,
+        "lam": [
+          275116.65479272994,
+          275116.6548129974,
+          9902875.500780728,
+          9902875.500842763,
+          21852707.10885664,
+          66488438.54739699,
+          68725881.3685542,
+          68725881.36856648,
+          196717744.66621825,
+          227057190.6017395
+        ]
+      },
+      "pmg": {
+        "iterations": 14,
+        "converged": true,
+        "time_s": 0.3385773750487715,
+        "lam": [
+          275116.65477706026,
+          275116.65478851774,
+          9902875.500820827,
+          9902875.500841258,
+          21852707.108878456,
+          66488438.54745359,
+          68725881.36850423,
+          68725881.36854513,
+          196717744.66578794,
+          227057190.6016299
+        ]
+      }
+    },
+    {
+      "case": "hex27 16x16x16",
+      "n_dof": 107811,
+      "sigma": 11931729.24621173,
+      "jacobi": {
+        "iterations": 509,
+        "converged": true,
+        "time_s": 21.717117166961543,
+        "lam": [
+          11931729.246212076,
+          11931729.246231705,
+          22050958.24586926,
+          68142537.04071233,
+          83497243.37714382,
+          83497243.3771952,
+          126956184.08113684,
+          178106859.42872715,
+          192921771.83297905,
+          201730953.1929344
+        ]
+      },
+      "pmg": {
+        "iterations": 15,
+        "converged": true,
+        "time_s": 3.3795898749958724,
+        "lam": [
+          11931729.246209217,
+          11931729.246229177,
+          22050958.245899547,
+          68142537.04066314,
+          83497243.37713696,
+          83497243.3771672,
+          126956184.08114937,
+          178106859.4287572,
+          192921771.83305615,
+          201730953.19291914
+        ]
+      }
+    }
+  ],
+  "cost": {
+    "n": 24,
+    "m": 25,
+    "n_dof": 181875,
+    "build_s": 13.284694249974564,
+    "t_A_s": 0.05312737496569753,
+    "vcycle_s": 0.9935293749440461,
+    "coarse_s": 0.7722664999309927
+  },
+  "galerkin_1m": {
+    "stored": {
+      "n_dof": 1075275,
+      "time_s": 1.4368697919417173,
+      "nnz": 21156333
+    },
+    "otf": {
+      "n_dof": 1075275,
+      "time_s": 2.871231041965075,
+      "nnz": 21157829
+    }
+  },
+  "versions": {
+    "jax": "0.11.2",
+    "jaxlib": "0.11.2",
+    "numpy": "2.5.3",
+    "platform": "macOS-27.2-arm64-arm-64bit",
+    "cpu_count": 16,
+    "p_cores": 12,
+    "e_cores": 4,
+    "xla_flags": null,
+    "jax_num_cpu_devices": true
+  }
+}

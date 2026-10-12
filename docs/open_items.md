@@ -16,6 +16,8 @@ At a SIMP field's own $\lambda_1$ ($s_K = \rho^3$, $s_M = \rho$, $\rho_\min = 10
 
 At σ = $\lambda_1$ the GMG iterations grow like $h^{-1}$ on one-element-thick plates (23 / 37 / 71 / 136 from $16^2$ to $128^2$): coarse hex8 layers lock in bending. Default: documented limitation; the roadmap single-layer test uses $32^2\times1$. Revisit in PR 13 (algebraic coarsening) and M4 (solid-shell element).
 
+p-MG (PR 12) has the same cause on flat elements: its hex8 coarse space locks in bending when the element aspect ratio $a \gg 1$. Single-layer hex20 plates $16^2\times1$ take 15 / 21 / 63 iterations for $a$ = 1 / 2 / 4 and stagnate at $a = 10$; a box with $h_z = h/a$ takes 14 / 17 / 28 / 76; the hex27 plate $32^2\times1$ at $a = 10$ exceeds 1000. Slenderness with $a = 1$ is fine (beam $20\times2\times2$: 16). Revisit in PR 13 (AMG on the high-order level, or a near-null space that keeps bending) and M4.
+
 ### Anisotropic voxel spacing (PR 11a)
 
 Coarsening is by element count, not spacing: $h_z = h/10$ needs 106 iterations. Default: documented limitation. Spacing-aware semi-coarsening needs line smoothers; no PR owns it yet.
@@ -35,6 +37,18 @@ Stiff islands are detected from `s_K` only, so a multi-phase voxel model with $1
 ### GMG intermittent extra peak in LOBPCG (PR 11b)
 
 With GMG the LOBPCG process peak is bimodal: in some runs, from about iteration 5, it is about one V-cycle temporary above the step's `memory_analysis` (+12 blocks at $48^3$), in other identical runs not; synchronous dispatch makes it rarer. So `lobpcg_memory` with `gmg_memory` is not a strict bound at mid sizes: 11% low at $64^3$ (fp64 cycle), 4% high at $48^3$ (worst of three runs), 10–12% high at $87^3$; all inside the roadmap's ±20% band. Default: keep the `memory_analysis` envelope `GMG_STEP` and document it. Revisit on the GPU (PR 24: the BFC allocator behaves differently) or if a size falls outside the band.
+
+### p-MG refuses σ = 0 (PR 12, decision without user input)
+
+`pmg` raises `SingularShiftError` at σ = 0 because it has no mesh to prove $A_P$ nonsingular. Cost: a σ pre-estimate started at σ = 0 needs fewer rounds and iterations on clamped bodies (cube: 1 round / 4 iterations against 2 / 10; plate $a = 4$: 1 / 20 against 3 / 60). Default: σ > 0 required. Revisit in PR 13, which owns the pre-estimate: accept σ = 0 when `solve_modes` has found no rigid modes and every `s_K > 0`.
+
+### p-MG on curved elements: approximate rigid rotations (PR 12 → PR 13)
+
+On curved elements the p-MG coarse space is trilinear in the reference coordinates, so rigid rotations lie in it only approximately. Harmless for PR 12's exact coarse solve; PR 13's AMG near-null space should use the fine rigid modes restricted, not assume they are exact on the coarse level.
+
+### `splu` ordering for the test-only coarse solve (PR 12, decision without user input)
+
+Geometric nested dissection on the corner coordinates factors 4–8× faster than COLAMD (hex20 $24^3$: 3.5 s / 0.69 GB against 14 s / 1.5 GB), but `Unstructured` carries no coordinates. Default: keep COLAMD instead of adding a `points` argument to a test-only path. Revisit only if PR 13 keeps a host direct solve.
 
 ### GMG restriction on the GPU (PR 11 deferred GPU checks)
 

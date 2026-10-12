@@ -112,7 +112,7 @@ def test_galerkin(name, mass, chunk, monkeypatch):
     assert len(P.levels) >= 2 and len(P.transfers) == len(P.levels)
     for lvl in range(1, len(P.levels)):
         assert rel(dense(P.levels[lvl][0], As[lvl].shape[0]), As[lvl]) <= 1e-12
-    assert rel(np.asarray(P.L @ P.L.T), As[-1]) <= 1e-12
+    assert rel(np.asarray(P.coarse.L @ P.coarse.L.T), As[-1]) <= 1e-12
     mass_part = sigma * Ps[0].T @ (M.toarray() * np.outer(free, free)) @ Ps[0]
     assert np.abs(mass_part).max() / np.abs(As[1]).max() > 1e-4
 
@@ -139,7 +139,7 @@ def test_transfers(name):
         assert rel(u.ravel(), (xf @ g[:, :3].T + g[:, 3]).ravel()) <= 1e-12
         Pm = dense(T, 3 * T.n_coarse)
         r = rng.standard_normal((Pm.shape[0], 2))
-        assert rel(G._restrict(T, jnp.asarray(r)), Pm.T @ r) <= 1e-14
+        assert rel(T.restrict(jnp.asarray(r)), Pm.T @ r) <= 1e-14
         assert (np.abs(Pm).sum(0) > 0).all()
         if name == "A" and lvl == 0:  # the full coarse grid: dropped nodes give zero columns
             nx, ny, nz = C.shape
@@ -422,7 +422,7 @@ def test_free():
     factor."""
     op, free, m = steel((32,) * 3, {})
     its, P = iterations(op, free, sigma_of(op, free, m))
-    assert its <= 100 and np.isfinite(np.asarray(P.L)).all()
+    assert its <= 100 and np.isfinite(np.asarray(P.coarse.L)).all()
 
 
 @pytest.mark.parametrize(
@@ -594,7 +594,7 @@ def test_fp32(shape):
     P64, P32 = gmg(op, free, 0.0), gmg(op, free, 0.0, dtype="float32")
     assert all(a.dtype == jnp.float32 for a in f32_leaves(P32))
     assert all(A is S.A for A, S in P32.levels) and P32.levels[0][0].op is op
-    keep = {id(a) for a in jax.tree_util.tree_leaves((op, P32.free, P32.L, P32.defl))}
+    keep = {id(a) for a in jax.tree_util.tree_leaves((op, P32.free, P32.coarse.L, P32.defl))}
     f64 = [a for a in jax.tree_util.tree_leaves(P32) if a.dtype == jnp.float64]
     assert all(id(a) in keep or a.ndim == 0 for a in f64)  # A_P's sigma and s scalars
     rng = np.random.default_rng(0)
