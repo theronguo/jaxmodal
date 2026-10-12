@@ -209,7 +209,8 @@ Hetmaniuk–Lehoucq / Duersch et al. 2018, with fixed shapes: every block is $(n
       - Take $C_P$ = the Ritz coefficients with the X rows zeroed.
       - M-orthogonalize $C_P$ against $C_X$ in the $G_M$ inner product, twice, entirely in the small space.
       - A column whose $G_M$-norm falls to $\le 10^{-8}$ of its norm before is masked. This is the column-level noise rule; it counts as a drop.
-      - If removing the noise rule is caught by no test (the pivot test may cover it), it is dropped in the implementation rather than kept unpinned.
+      - The noise rule is kept. Without it, a pure-noise column ($n_1/n_0 \approx 10^{-12}$) is rescaled to unit norm, and $P'$ picks up about $10^{-4}$ of non-orthogonality to $X'$. The pivot test does not see that ($G_M \approx I$).
+      - Steps 5's small-matrix work is the helper `_p_coeffs(C_X, C_P, G, act)`, so that test 7c can pin it.
       - SVQB of the rest in coefficient space.
       - The new $[X', P']$ is then M-orthonormal without any n-space orthogonalization of P.
    6. **Update.** $X' = X C_{X,x} + W C_{X,w} + P C_{X,p}$, and $P'$ likewise from $C_P$; $KX'$, $MX'$, $KP'$, $MP'$ by the same GEMMs.
@@ -284,6 +285,7 @@ All tests compare against `reference_modes`, requesting at least 6 modes past th
 6. **Rank-deficient start.** `X0` with duplicated columns: `refills ≥ 1`, converges, λ match as in test 1.
 7. **Forced P drop and the P invariant.**
    - (a) Call `lobpcg_step` on a state whose $P = XC + 10^{-12}\xi$ (random $C$, $\xi$, P mask all True): the drop flag is set and the output is finite. With a random $P$ (M-orthonormalized against $X$), the flag is not set.
+   - (c) `_p_coeffs` with $C_P = C_X B + 10^{-12}\xi$ in one column and random elsewhere masks exactly that column. The other columns come out $G$-orthonormal and $G$-orthogonal to $C_X$ to $10^{-12}$.
    - (b) After 30 steps from a real start on hex20 $4^3$, explicit M applies give $\|P'^\top M X'\|_\max \le 10^{-6}$ and $\|P'^\top M P' - I\|_\max \le 10^{-6}$ on the live columns. Correct code measures $\le 7\cdot10^{-8}$; without the coefficient-space orthogonalization it is about 0.6.
 8. **Near-singular M.** hex20 $6^3$ with 30% void elements ($E\cdot10^{-9}$, $\rho\cdot10^{-12}$, seed 0) at tol $10^{-8}$, seed 0: converged within 500 iterations (measured 358), λ error $\le f_\lambda$ against `reference_modes` on the same materials.
 9. **Floor** (slow). At tol $10^{-16}$ on the clamped and the free hex20 $4^3$ (clamped measured: ratio 0.9), the lowest attained max residual (`min(history)`) is within $[0.1, 10]\times\varepsilon\lambda_\max/\lambda_1$. The values are recorded in `docs/eigensolvers.md`.
@@ -303,9 +305,9 @@ All tests compare against `reference_modes`, requesting at least 6 modes past th
 | start block not deflated | 3 |
 | mask diagonal $G_K = 0$ instead of β | 6 (spurious zero Ritz values) |
 | no refill of dropped start columns | 6 |
-| pivot-test fallback removed | 7a (non-finite output; the flag alone is not set) |
+| pivot-test fallback removed | 7a (non-finite output; the flag is still set, since it includes the failed pivot test) |
 | coefficient-space orthogonalization of $C_P$ removed | 7b (measured 0.6 vs $\le 7\cdot10^{-8}$; tests 1 and 7a do not see it) |
-| noise rule removed | 7a or dropped from the code (Algorithm) |
+| noise rule removed | 7c |
 | floor term removed ($c = 0$) | 5a |
 | no-progress exit removed | 5b (runs to `maxit`) |
 | λ-sum progress clause removed | 5c |
