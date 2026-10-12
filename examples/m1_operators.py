@@ -33,7 +33,7 @@ Ke, Me = stiffness("hex20", X, steel[0].C), mass("hex20", X, steel[0].rho)
 print(f"element matrices: Ke {Ke.shape}, Me {Me.shape}; total mass {float(Me.sum()) / 3:.3f} kg")
 
 v = jnp.asarray(np.random.default_rng(0).standard_normal((3 * len(beam.points), 4)))
-K, M = assemble(beam, steel)
+K = assemble(beam, steel)[0]
 op = unstructured(beam, steel)
 err = np.abs(op.apply_K(v) - K @ v).max() / np.abs(K @ v).max()
 print(f"unstructured: n_dof {op.n_dof}, apply_K vs assembled: {err:.1e}")
@@ -53,4 +53,5 @@ R = m_orthonormalize(R, op.apply_M(R))
 Y = project(R, v, op.apply_M(v))
 orth = np.abs(R.T @ op.apply_M(Y)).max()
 print(f"rigid modes left by sliding: {R.shape[1]}; |R^T M Y| = {orth:.1e}")
-print("check passed: both operators match the assembled K")
+assert R.shape[1] == 3 and orth <= 1e-12
+print("check passed: both operators match the assembled K; the projector deflates R")

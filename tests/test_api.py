@@ -23,15 +23,15 @@ def box(shape=(6, 5, 4), t="hex20"):
 
 
 def reference(mesh, mats, bcs, n, orientations=None, **kw):
-    """(elastic lam, rigid count, lam_max, full lam): n + 6 elastic modes (to finish clusters);
-    the rigid count is pinned by the zero eigenvalues, independently of solve_modes."""
+    """(elastic lam, rigid count, lam_max): n + 6 elastic modes (to finish clusters); the rigid
+    count (at most 6 here) is pinned by the zero eigenvalues, independently of solve_modes."""
     K, M = assemble(mesh, mats, orientations, **kw)
     free = dof_mask(mesh, bcs)
-    lam = reference_modes(K, M, n + 12 + 6, free, points=mesh.points)[0]
+    lam = reference_modes(K, M, n + 6 + 6, free, points=mesh.points)[0]
     nr = int(np.sum(lam <= 1e-8 * lam[lam > 1e-8][0]))
     Kf, Mf, _ = restrict(K, M, free)
     lmax = eigsh(Kf, 1, M=Mf, which="LA", tol=1e-3, return_eigenvectors=False)[0]
-    return lam[nr : nr + n + 6], nr, lmax, lam
+    return lam[nr : nr + n + 6], nr, lmax
 
 
 def check_lam(lam, lr, lmax, tol):
@@ -71,7 +71,7 @@ def test_clamped(spies):
     modes, frequencies."""
     mesh, bcs = box(), {"xmin": "xyz"}
     lam, V, info = solve_modes(mesh, MAT, bcs, 10, tol=1e-10)
-    lr, nr, lmax, _ = reference(mesh, MAT, bcs, 10)
+    lr, nr, lmax = reference(mesh, MAT, bcs, 10)
     assert nr == 0 and info["converged"]
     check_lam(lam, lr, lmax, 1e-10)
     free = dof_mask(mesh, bcs)
@@ -87,9 +87,11 @@ def test_free_nodal_mass():
     """Test 2: free-free with nodal masses: 6 rigid modes deflated and returned M-orthonormal
     (full mass), lam above them; the nodal masses change lam observably."""
     mesh = box()
-    nodal = np.random.default_rng(0).uniform(0.5, 1.5, len(mesh.points)) * 2.0 * 0.67 / 480
+    nodal = (
+        np.random.default_rng(0).uniform(0.5, 1.5, len(mesh.points)) * 2.0 * 0.67 / 480
+    )  # ~2x body
     lam, V, info = solve_modes(mesh, MAT, {}, 10, nodal_mass=nodal, tol=1e-10)
-    lr, nr, lmax, _ = reference(mesh, MAT, {}, 10, nodal_mass=nodal)
+    lr, nr, lmax = reference(mesh, MAT, {}, 10, nodal_mass=nodal)
     assert nr == 6 and info["n_rigid"] == 6 and info["converged"]
     check_lam(lam, lr, lmax, 1e-10)
     R = info["rigid"]
@@ -103,7 +105,7 @@ def test_sliding():
     """Test 3: sliding on xmin leaves T_y, T_z and R_x."""
     mesh, bcs = box(), {"xmin": "x"}
     lam, _, info = solve_modes(mesh, MAT, bcs, 10, tol=1e-10)
-    lr, nr, lmax, _ = reference(mesh, MAT, bcs, 10)
+    lr, nr, lmax = reference(mesh, MAT, bcs, 10)
     assert nr == 3 and info["n_rigid"] == 3 and info["converged"]
     check_lam(lam, lr, lmax, 1e-10)
 
@@ -113,7 +115,7 @@ def test_voxel(spies, bcs, n_rigid):
     """Test 4: voxel meshes get the stencil."""
     mesh = voxel_mesh((10, 8, 6), spacing=(0.1, 0.1, 0.1))
     lam, _, info = solve_modes(mesh, MAT, bcs, 10, tol=1e-10)
-    lr, nr, lmax, _ = reference(mesh, MAT, bcs, 10)
+    lr, nr, lmax = reference(mesh, MAT, bcs, 10)
     assert nr == n_rigid == info["n_rigid"] and info["converged"]
     check_lam(lam, lr, lmax, 1e-10)
     assert info["operator"] == "stencil"
@@ -129,7 +131,7 @@ def test_rotated_lumped():
     mats = {**MAT, 1: Material(transversely_isotropic(9.0, 2.0, 0.3, 0.4, 1.0), 1.5)}
     rot = {1: from_euler(np.array([0.4, 0.9, -0.3]))}
     lam, _, info = solve_modes(mesh, mats, {"xmin": "xyz"}, 10, rot, mass="lumped", tol=1e-10)
-    lr, nr, lmax, _ = reference(mesh, mats, {"xmin": "xyz"}, 10, rot, mass="lumped")
+    lr, nr, lmax = reference(mesh, mats, {"xmin": "xyz"}, 10, rot, mass="lumped")
     assert nr == 0 and info["converged"]
     check_lam(lam, lr, lmax, 1e-10)
     plain = reference(mesh, mats, {"xmin": "xyz"}, 10, {1: np.eye(3)}, mass="lumped")[0]
@@ -139,7 +141,7 @@ def test_rotated_lumped():
 def test_forwarding(spies):
     """Test 6: every lobpcg option reaches lobpcg."""
     mesh, bcs = box(), {"xmin": "xyz"}
-    lr, _, lmax, _ = reference(mesh, MAT, bcs, 12)
+    lr, _, lmax = reference(mesh, MAT, bcs, 12)
     opts = [
         dict(tol=1e-9, maxit=900, seed=3, chunk=4, guards=2),
         dict(tol=1e-6, chunk=4, basis_dtype="float32", low_memory=True),
@@ -165,7 +167,7 @@ def inverted():
     "case",
     ["unknown set", "bad components", "missing material", "density", "inverted"],
 )
-def test_host_checks(spies, monkeypatch, case):
+def test_host_checks(monkeypatch, case):
     """Test 7: bad bcs raise before any operator is built; material and element errors raise
     in the builders' host checks, before lobpcg is reached."""
     mesh, mats, bcs = box((2, 2, 2)), MAT, {"xmin": "xyz"}

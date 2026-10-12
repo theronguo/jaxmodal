@@ -48,7 +48,7 @@ The host steps at the acceptance sizes (hex20 $44^3$, voxel $87^3$) take under 3
 
 PRs 11 and 13 accept on wall-time budgets: **10 min** for a 2M-DOF voxel solve, 10 modes (PR 11, also with fp32 V-cycles), and **15 min** for a 1M-DOF hex20 solve, 20 modes (PR 13). The run is specified as tol $= 10^{-6}$, the 9-block step, an fp64 basis, and wall time including setup, the σ pre-estimate and compilation. The peak criteria (within 20% of the estimators) are separate.
 
-Throughput at the acceptance sizes (steel, Jacobi):
+Throughput at the acceptance sizes (steel, Jacobi; setup is `lobpcg`'s own, clamped: a free body adds about 1 s at 2M DOF for $R$ and $MR$, and the operator build is separate):
 
 | case | DOF | $m$ | $t_K$ | $t_M$ | 9-block step | low-memory step | setup |
 |---|---|---|---|---|---|---|---|
@@ -272,7 +272,7 @@ A single chunk of 30 modes ($m = 36$) needs 266 iterations, 2.4 s against 4.9 s 
 - **`basis`** $= n \cdot \text{capacity} \cdot (8$ or $4)$; **`rigid`** $= 2 \cdot 8\,n\,n_\mathrm{rigid}$ ($R$ and $MR$); **`host`** $= b + 8\,n\,n_\mathrm{modes}$ (the asynchronously freed step output and the fp64 modes on the host), plus 4 blocks for a chunked solve (transients between chunks: the start block, the seed, allocator slack; at most 2.6 measured).
 - **`total`** = overhead + operator storage + basis + rigid + host + max(operator build, step).
 
-Measured process peak at hex20 $44^3$ (1.08M DOF), 40 modes in one chunk with 8 guards ($m = 48$), 3 iterations: 8.74 GB against the estimate 8.87 GB (9-block), 6.52 against 6.75 GB (low-memory). Chunked, with a diagonal pencil (300k DOF, 100 modes in chunks of 10): 1.24 against 1.30 GB (fp64 basis), 1.09 against 1.15 GB (fp32). The step term is an envelope fit: up to about 2× high at 10k–100k DOF, and for an operator without workspace (diagonal) a single chunk can come out about 4% low, and many chunks up to 7% low (500k DOF, 400 modes in chunks of 10: allocator growth of about $0.15 \cdot 8\,n\,n_\mathrm{modes}$; real operators add slack through the workspace term).
+Measured process peak at hex20 $44^3$ (1.08M DOF), 40 modes in one chunk with 8 guards ($m = 48$), 3 iterations: 8.74 GB against the estimate 8.87 GB (9-block), 6.52 against 6.75 GB (low-memory). At the PR 13 acceptance width ($m = 25$, 10 iterations) the estimate is 4–7% low: 5.50 against 5.28 GB clamped, 5.63–5.79 against 5.39 GB free; at the PR 11 voxel size ($87^3$, $m = 15$, free) 5.26 against 5.47 GB. Chunked, with a diagonal pencil (300k DOF, 100 modes in chunks of 10): 1.24 against 1.30 GB (fp64 basis), 1.09 against 1.15 GB (fp32). The step term is an envelope fit: up to about 2× high at 10k–100k DOF, and for an operator without workspace (diagonal) a single chunk can come out about 4% low, and many chunks up to 7% low (500k DOF, 400 modes in chunks of 10: allocator growth of about $0.15 \cdot 8\,n\,n_\mathrm{modes}$; real operators add slack through the workspace term).
 
 ### Convergence
 

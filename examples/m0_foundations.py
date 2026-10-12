@@ -25,6 +25,7 @@ from jaxmodal.materials import (  # noqa: E402
 from jaxmodal.mesh import box_mesh, read, voxel_mesh, write  # noqa: E402
 
 out = Path(sys.argv[1] if len(sys.argv) > 1 else tempfile.mkdtemp())
+out.mkdir(parents=True, exist_ok=True)
 data = Path(__file__).parents[1] / "tests" / "data"
 
 pair = read(data / "gmsh_pair.msh")  # Gmsh 4.1 ASCII, two hex20 volumes

@@ -21,6 +21,7 @@ beam = box_mesh((20, 2, 2), spacing=(L / 20, h / 2, h / 2), type="hex20")
 bcs = {"xmin": "xyz"}
 lam, V, info = solve_modes(beam, steel, bcs, 6, tol=1e-6, maxit=1000)
 f = info["frequencies"]
+# first cantilever root beta_1 L = 1.8751, I / A = h^2 / 12
 f_eb = 1.8751**2 / (2 * np.pi * L**2) * np.sqrt(E * h**4 / 12 / (rho * h * h))
 print(f"cantilever ({info['operator']}, {info['iterations']} iterations): f = {np.round(f, 2)} Hz")
 print(f"  first bending {f[0]:.2f} Hz vs Euler-Bernoulli {f_eb:.2f} Hz (ratio {f[0] / f_eb:.4f})")

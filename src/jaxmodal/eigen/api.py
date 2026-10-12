@@ -25,15 +25,16 @@ def solve_modes(
         name, build = "unstructured", unstructured
     op = build(mesh, materials, orientations, mass=mass, nodal_mass=nodal_mass)
     R = jnp.asarray(rigid_modes(mesh, free))
-    if R.shape[1]:
+    k = R.shape[1]
+    if k:
         R = m_orthonormalize(R, op.apply_M(R))  # consumes its first argument
     lam, V, info = lobpcg(
-        op, free, n_modes, tol, R if R.shape[1] else None, maxit=maxit, seed=seed, chunk=chunk,
+        op, free, n_modes, tol, R if k else None, maxit=maxit, seed=seed, chunk=chunk,
         guards=guards, basis_dtype=basis_dtype, low_memory=low_memory,
     )  # fmt: skip
     info.update(
         operator=name,
-        n_rigid=R.shape[1],
+        n_rigid=k,
         rigid=np.asarray(R),
         frequencies=np.sqrt(np.maximum(lam, 0)) / (2 * np.pi),
     )
