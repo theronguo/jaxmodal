@@ -1,6 +1,5 @@
 """PCG and MINRES against spsolve on the PR 4 A_P."""
 
-import functools
 import json
 import subprocess
 import sys
@@ -9,30 +8,12 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import scipy.sparse.linalg as spla
+from helpers import box, rhs
+from jax.tree_util import Partial
 
 from jaxmodal.linalg import minres, pcg
-from jaxmodal.materials import Material, isotropic
-from jaxmodal.mesh import box_mesh
-from jaxmodal.operators import a_p, ap_operator, assemble, dof_mask, restrict, unstructured
+from jaxmodal.operators import a_p, ap_operator, restrict
 from jaxmodal.precond import block_jacobi, chebyshev, jacobi, lmax_estimate
-
-MAT = {0: Material(isotropic(3.0, 0.3), 2.0)}
-
-
-@functools.cache
-def box(bcs="clamped"):
-    """hex20 6x5x4 box: (op, free, K, M, lam) with the lowest 8 eigenvalues."""
-    mesh = box_mesh((6, 5, 4), spacing=(1 / 6, 0.83 / 5, 0.67 / 4), type="hex20")
-    free = dof_mask(mesh, {"xmin": "xyz"} if bcs == "clamped" else {})
-    K, M = assemble(mesh, MAT)
-    Kf, Mf, _ = restrict(K, M, free)
-    v0 = np.ones(Kf.shape[0])  # a fixed ARPACK start: sigma = lam[0] identical in every run
-    lam = np.sort(spla.eigsh(Kf, 14, M=Mf, sigma=-1.0, v0=v0)[0])
-    return unstructured(mesh, MAT), free, K, M, lam[lam > 1e-6][:8]
-
-
-def rhs(free, k, seed=1):
-    return np.random.default_rng(seed).standard_normal((len(free), k)) * free[:, None]
 
 
 def rel(x, xr):
@@ -103,7 +84,6 @@ def test_pcg_exits():
     A, P = ap_operator(op, free, lam[0]), jacobi(op, free, lam[0])
     b = rhs(free, 3)
     _, info = run(pcg, A, b, P, 1e-16)
-    print("floor:", info)
     assert info["stagnated"].all() and not info["converged"].any()
     assert (info["replacements"] == 5).all() and (info["iterations"] < 3000).all()
     assert (info["residuals"] <= 1e-13).all()
@@ -133,7 +113,6 @@ def test_minres_accuracy():
     assert np.isclose(float(A.s), s, rtol=1e-14)
     xr = spla.spsolve(a_p(K - sb * M, free, s).tocsc(), b)
     x, info = run(minres, A, b, jacobi(op, free, sb), 1e-12)
-    print("indefinite:", info, rel(x[:, keep], xr[:, keep]))
     assert rel(x[:, keep], xr[:, keep]) <= 1e-10 and info["converged"].all()
     assert np.all(x[~free] == 0)
 
@@ -145,12 +124,29 @@ def test_minres_exits():
     A, P = ap_operator(op, free, -sb), jacobi(op, free, sb)
     b = rhs(free, 3)
     _, info = run(minres, A, b, P, 1e-15, maxit=10000)
-    print("floor:", info)
     assert info["stagnated"].all() and not info["converged"].any()
     assert (info["iterations"] < 2000).all() and (info["iterations"] % 10 == 0).all()
     _, info = run(minres, A, b, P, 1e-12, maxit=30)
     assert not info["converged"].any() and not info["stagnated"].any()
     assert (info["iterations"] == 30).all()
+
+
+@pytest.mark.parametrize("solver", [pcg, minres], ids=["pcg", "minres"])
+def test_nan_exit(solver):
+    """A residual that turns NaN mid-run stops its column at once (first check for MINRES);
+    the other column is bit for bit unchanged."""
+    op, free, K, M, lam = box()
+    A, P = ap_operator(op, free, lam[0]), jacobi(op, free, lam[0])
+    b = rhs(free, 2)
+    W = np.ones_like(b)
+    W[np.flatnonzero(free)[0], 1] = np.nan  # column 1's preconditioner returns NaN
+    Pn = Partial(lambda w, r: w * P(r), jnp.asarray(W))
+    x, info = run(solver, A, b, Pn, 1e-8)
+    xr, ir = run(solver, A, b, Partial(Pn.func, jnp.ones_like(b)), 1e-8)  # without the NaN
+    assert info["iterations"][1] <= 10 and np.isnan(info["residuals"][1])
+    assert not info["converged"][1] and not info["stagnated"][1]
+    assert info["converged"][0] and info["iterations"][0] == ir["iterations"][0]
+    assert np.array_equal(x[:, 0], xr[:, 0])
 
 
 def test_errors():

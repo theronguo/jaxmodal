@@ -1,10 +1,14 @@
 """Shared test references."""
 
+import functools
+
 import numpy as np
+import scipy.sparse.linalg as spla
 
 from jaxmodal.elements import check_elements, kernels
 from jaxmodal.materials import Material, from_euler, isotropic, orthotropic, rotate
 from jaxmodal.mesh import Mesh, box_mesh
+from jaxmodal.operators import assemble, dof_mask, restrict, unstructured
 
 ORTHO = orthotropic(10.0, 4.0, 2.0, 0.3, 0.2, 0.25, 1.5, 1.2, 0.8)
 R = np.asarray(from_euler(np.array([0.3, 1.1, -0.7])))
@@ -88,3 +92,21 @@ def distort(m, curved, rng):
     if curved:
         pts[interior] += rng.uniform(-0.05, 0.05, (interior.sum(), 3))
     return Mesh(pts, m.blocks, m.node_sets, m.element_sets, m.material, m.orientation)
+
+
+@functools.cache
+def box(bcs="clamped"):
+    """PR 10 solver box, hex20 6x5x4, material 0, xmin clamped or free: (op, free, K, M, lam),
+    lam the lowest 8 nonzero eigenvalues."""
+    mesh = box_mesh((6, 5, 4), spacing=(1 / 6, 0.83 / 5, 0.67 / 4), type="hex20")
+    free = dof_mask(mesh, {"xmin": "xyz"} if bcs == "clamped" else {})
+    K, M = assemble(mesh, MATERIALS)
+    Kf, Mf, _ = restrict(K, M, free)
+    v0 = np.ones(Kf.shape[0])  # a fixed ARPACK start: sigma = lam[0] identical in every run
+    lam = np.sort(spla.eigsh(Kf, 14, M=Mf, sigma=-1.0, v0=v0)[0])
+    return unstructured(mesh, MATERIALS), free, K, M, lam[lam > 1e-6][:8]
+
+
+def rhs(free, k, seed=1):
+    """(n_dof, k) random right-hand sides, zero on constrained DOFs."""
+    return np.random.default_rng(seed).standard_normal((len(free), k)) * free[:, None]

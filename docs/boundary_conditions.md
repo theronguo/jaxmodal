@@ -38,7 +38,7 @@ which puts the scalar $s$ on the constrained diagonal:
 - **Indefinite shift-invert** $K - \sigma M$ (PRs 10, 15): the roadmap (Key design decisions, interior bands) fixes $s = \overline{\mathrm{diag}\,K} + \sigma\,\overline{\mathrm{diag}\,M}$ over free DOFs, which the caller passes as `a_p(K - sigma * M, m, s=...)`.
 - A mask with no free DOF raises.
 
-**Matrix-free `ap_operator(op, free, sigma=0.0, s=None)`** (PR 10) is the counterpart of `a_p(K + sigma * M, free, s)` for any operator with `apply_K`, `apply_M`, `diag_K` and `diag_M`: a pytree `APOperator` with $x \mapsto m \odot (K + \sigma M)(m \odot x) + s\,(1 - m) \odot x$ on `(n, k)` blocks, `n_dof`, and the leaves `op`, `free` (float mask), `sigma` and `s`, so new data never recompiles.
+**Matrix-free `ap_operator(op, free, sigma=0.0, s=None)`** (PR 10) is the counterpart of `a_p(K + sigma * M, free, s)` for any operator with `apply_K`, `apply_M`, `diag_K`, `diag_M` and `n_dof`: a pytree `APOperator` with $x \mapsto m \odot (K + \sigma M)(m \odot x) + s\,(1 - m) \odot x$ on `(n, k)` blocks, `n_dof`, and the leaves `op`, `free` (float mask), `sigma` and `s`, so new data never recompiles.
 
 - **Default** $s$ = mean over free DOFs of $\mathrm{diag}K + |\sigma|\,\mathrm{diag}M$. For $\sigma \ge 0$ that is the rule above; for $\sigma < 0$ it is the roadmap's shift-invert $s$, so the indefinite operator needs no explicit `s`. An explicit `s` overrides it.
 - **Sign convention:** `sigma` is the shift in $K + \sigma M$. The shift-invert operator $K - \sigma_b M$ is `ap_operator(op, free, -sigma_b)`, and its SPD preconditioner is built at $+\sigma_b$, e.g. `jacobi(op, free, sigma_b)` ([`preconditioners.md`](preconditioners.md)).

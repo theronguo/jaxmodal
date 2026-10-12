@@ -73,12 +73,12 @@ $$1 - \mu\,p(\mu) = \frac{T_k\big((\theta - \mu)/\delta\big)}{T_k(\theta/\delta)
   2. If it is also within tol, the column has converged.
   3. Otherwise the column restarts from its $x$: $r = b - Ax$, $z = Pr$, $p = z$.
   4. After `STALL_R` = 5 restarts without convergence it stops as `stagnated`: the attainable floor.
-  5. `maxit` stops the remaining columns; a column whose residual is not finite stops too (not converged, not stagnated, NaN residual: e.g. a non-SPD preconditioner).
+  5. `maxit` stops the remaining columns; a column whose residual is not finite stops too (not converged, not stagnated, NaN residual: e.g. `block_jacobi` with a non-SPD block, whose Cholesky gives NaN). MINRES sees a non-finite residual at its next check.
 - Iteration counts are exact (no check granularity).
 - **`info`** (device arrays, so `pcg` is traceable): `iterations`, `residuals` (explicit relative residuals at exit), `converged`, `stagnated`, `replacements`, all `(k,)`.
 - Zero columns return $x = 0$, converged, with 0 iterations.
 - **Masking:** `b` must vanish on constrained DOFs (not checked). With a masked-output preconditioner, $x$ is then exactly 0 there, which is exact for $A_P$.
-- **Memory:** $x, r, z, p, Ap$: 5 blocks, plus `b` and the operator and preconditioner workspace.
+- **Memory:** 4 blocks plus `b` and the operator and preconditioner workspace (measured with a diagonal operator).
 
 ## MINRES (`minres`)
 
@@ -86,8 +86,8 @@ $$1 - \mu\,p(\mu) = \frac{T_k\big((\theta - \mu)/\delta\big)}{T_k(\theta/\delta)
 
 - **Stopping:** the explicit residual $\|b - Ax\|_2 \le \mathrm{tol}\,\|b\|_2$ is checked every `CHECK` = 10 iterations. A column is `converged` when it meets tol and `stagnated` after `STALL_C` = 5 checks without a new minimum; `maxit` gives neither. The last iterate is returned. Iteration counts are multiples of 10 when `maxit` is.
 - **`info`:** as `pcg` without `replacements`.
-- **Floor:** on the hex20 box below with Jacobi of $K + \sigma_b M$, the explicit residual stalls at about $5\cdot10^{-14}$ with $\sigma_b$ between $\lambda_6$ and $\lambda_7$ and at about $1.2\cdot10^{-12}$ between $\lambda_{30}$ and $\lambda_{31}$ (plan prototype): it grows with the shift's index (PR 15's $\tau_\mathrm{eff}$).
-- **Memory:** 7 blocks ($x$, $r_1$, $r_2$, $y$, $w$, $w_2$, the apply output).
+- **Floor:** on the hex20 box below with Jacobi of $K + \sigma_b M$, the explicit residual stalls at $3.5$–$8.8\cdot10^{-14}$ (by right-hand side and run) with $\sigma_b$ between $\lambda_6$ and $\lambda_7$ and at about $1.2\cdot10^{-12}$ between $\lambda_{30}$ and $\lambda_{31}$ (plan prototype): it grows with the shift's index (PR 15's $\tau_\mathrm{eff}$).
+- **Memory:** 9 blocks plus `b` and the workspace (measured: the carried $x$, $r_1$, $r_2$, $y$, $w$, $w_2$, the body's $v$ and $Av$, the returned $x$).
 
 ## Block-ELL (`block_ell`, `BlockELL`)
 
@@ -130,10 +130,10 @@ hex20 box $6\times5\times4$ (2,199 DOF), $E = 3$, $\nu = 0.3$, $\rho = 2$, `xmin
 | voxel $16^3$ | 14,739 | 202 | 198 | 105 |
 | voxel $32^3$ | 107,811 | 389 | 384 | 204 |
 
-The counts grow as $h^{-1}$ (×1.9–2.0 per refinement) for all three, as expected without a coarse level; multigrid (PRs 11–13) must remove this growth. Block Jacobi barely beats Jacobi on these isotropic boxes; Chebyshev degree 2 halves the iterations for 2 operator applies per iteration.
+The counts grow as $h^{-1}$ (×1.86–1.96 per refinement) for all three, as expected without a coarse level; multigrid (PRs 11–13) must remove this growth. Block Jacobi barely beats Jacobi on these isotropic boxes; Chebyshev degree 2 halves the iterations for 2 operator applies per iteration, so without a coarse level it gains nothing in operator applies or wall time (hex20 $16^3$: 3.75 s against 3.52 s for Jacobi).
 
 ## Tests
 
-- `tests/test_krylov.py`: PCG with the identity, Jacobi, block Jacobi and Chebyshev, σ = $\lambda_1$, $100\lambda_1$ and free-free, against `spsolve` to $10^{-10}$ with a zero column; columns independent and frozen; the PCG exits (floor after exactly 5 restarts, convergence after a restart, `maxit`); MINRES on SPD and indefinite systems to $10^{-10}$ and its exits; no recompiles for new data.
+- `tests/test_krylov.py`: PCG with the identity, Jacobi, block Jacobi and Chebyshev, σ = $\lambda_1$, $100\lambda_1$ and free-free, against `spsolve` to $10^{-10}$ with a zero column; columns independent and frozen; the PCG exits (floor after exactly 5 restarts, convergence after a restart, `maxit`, a residual turning NaN mid-run); MINRES on SPD and indefinite systems to $10^{-10}$ and its exits; no recompiles for new data.
 - `tests/test_ell.py`: plain and sliced ELL against CSR to $10^{-12}$ ($b$ = 3, 6; $m$ = 1, 7; several chunks with a remainder), padding against an independent count, the automatic choice, fp32 to $10^{-6}$, PCG through `BlockELL`.
-- `tests/test_precond.py`: `ap_operator` against `a_p` on unmasked vectors (σ = 0, positive, negative); node blocks and block-Jacobi inverses against SciPy for stored/on-the-fly, consistent/lumped, nodal masses, `s_K`, mixed hex8/hex20, hex27 and a masked two-phase voxel grid with partially constrained nodes; the σ < 0 raise; $1.1\,\tilde\lambda_\max/\lambda_\max \in [1, 1.5]$; Chebyshev against a dense spectral reference to $10^{-12}$ (degrees 1–4), symmetry, $A_P$-self-adjoint error propagation, positivity, and fewer PCG iterations than block Jacobi; the h-study smoke run.
+- `tests/test_precond.py`: `ap_operator` against `a_p` on unmasked vectors (σ = 0, positive, negative); node blocks and block-Jacobi inverses against SciPy for stored/on-the-fly, consistent/lumped, nodal masses, `s_K`, mixed hex8/hex20, hex27 and a masked two-phase voxel grid with `s_K`, all with partially constrained nodes; the σ < 0 raise; $1.1\,\tilde\lambda_\max/\lambda_\max \in [1, 1.5]$ and the invariant-start guard; Chebyshev against a dense spectral reference to $10^{-12}$ (degrees 1–4), symmetry, $A_P$-self-adjoint error propagation, positivity, and fewer PCG iterations than block Jacobi; the h-study smoke run.

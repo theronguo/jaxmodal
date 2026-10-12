@@ -24,6 +24,7 @@ def _jacobi(inv, r):
 def jacobi(op, free, sigma=0.0):
     """Jacobi on A_P = K + sigma M as a pytree callable: v -> m * v / (diag K + sigma diag M),
     0 on constrained DOFs (masked output)."""
+    check_x64("jacobi")
     _check_sigma(sigma)
     free = jnp.asarray(free)
     d = op.diag_K() + sigma * op.diag_M()
@@ -38,7 +39,7 @@ def _inverse_blocks(B, free):
     m = jnp.asarray(free).reshape(n, b).astype(B.dtype)
     B = B * m[:, :, None] * m[:, None, :] + (1 - m)[:, :, None] * jnp.eye(b, dtype=B.dtype)
     Linv = solve_triangular(
-        jnp.linalg.cholesky(B), jnp.broadcast_to(jnp.eye(b), B.shape), lower=True
+        jnp.linalg.cholesky(B), jnp.broadcast_to(jnp.eye(b, dtype=B.dtype), B.shape), lower=True
     )
     return jnp.swapaxes(Linv, 1, 2) @ Linv, m
 

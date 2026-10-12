@@ -163,7 +163,7 @@ A concrete $\sigma < 0$ raises `ValueError` (preconditioners are SPD and approxi
   
   The last iterate is returned. Iteration counts are multiples of 10 when `maxit` is (PR 15's cost model uses these). Frozen columns and zero columns ($\beta = 0$, MINRES's breakdown case) are guarded with `jnp.where` as in `pcg`.
 - **Returns:** the same as `pcg` without `replacements`; `residuals` are the explicit residuals at exit (PR 15 takes $\tau_\mathrm{eff}$ from them).
-- **Floor:** measured 8.8e-14 with σ between $\lambda_6$ and $\lambda_7$, 1.2e-12 between $\lambda_{30}$ and $\lambda_{31}$ (it grows with the shift's index); recorded in `docs/preconditioners.md` for PR 15.
+- **Floor:** measured 3.5–8.8e-14 (by right-hand side and run) with σ between $\lambda_6$ and $\lambda_7$, 1.2e-12 between $\lambda_{30}$ and $\lambda_{31}$ (it grows with the shift's index); recorded in `docs/preconditioners.md` for PR 15.
 - **Memory:** 7 blocks ($x$, $r_1$, $r_2$, $y$, $w$, $w_2$ and the apply output).
 
 ### Block-ELL (`block_ell`, `BlockELL`)

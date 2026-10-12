@@ -11,7 +11,7 @@ from jax import lax
 from ..elements import ELEMENTS, kernels
 from ..materials import check_materials, phase_table, phases
 from ..mesh.model import CORNERS
-from .common import check_nodal_mass, check_v, check_x64, register, scaled
+from .common import check_nodal_mass, check_v, check_x64, node_cols, register, scaled
 from .dofmap import check_int32
 
 SLAB_CELLS = 2**16  # default slab: about this many cells per scan step (benchmarks/stencil_slab.py)
@@ -226,8 +226,7 @@ def _k_diag(op, Ke, el):
 
 def _k_blocks(op, Ke, el):
     P = op.rho.shape[0]
-    a = np.arange(24)
-    blocks = Ke[:, a[:, None], 3 * (a // 3)[:, None] + np.arange(3)].reshape(P, 8, 3, 3)
+    blocks = Ke[:, np.arange(24)[:, None], node_cols(24)].reshape(P, 8, 3, 3)
     ph, s = _gather(op.phase, el), _gather(op.s_K, el)
     w = jnp.where(ph == jnp.arange(P, dtype=jnp.int32)[:, None, None, None], s, 0.0)
     return jnp.einsum("paij,psyx->aisyxj", blocks, w)

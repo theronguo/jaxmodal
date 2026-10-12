@@ -8,12 +8,13 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import scipy.linalg as sla
-from helpers import MATERIALS, R, mixed_mesh
-from test_krylov import box
+import scipy.sparse as sp
+from helpers import MATERIALS, R, box, mixed_mesh
+from jax.tree_util import Partial
 
 import jaxmodal.eigen
 import jaxmodal.precond
-from jaxmodal.linalg import pcg
+from jaxmodal.linalg import block_ell, pcg
 from jaxmodal.mesh import box_mesh, voxel_mesh
 from jaxmodal.operators import a_p, ap_operator, assemble, stencil, unstructured
 from jaxmodal.precond import block_jacobi, chebyshev, jacobi, lmax_estimate
@@ -48,17 +49,18 @@ def case(name):
         m = mixed_mesh(rng)
     elif name == "hex27":
         m = box_mesh((2, 2, 2), spacing=(0.5, 0.5, 0.5), type="hex27")
-    else:  # masked voxel grid, 2 phases
+    else:  # masked voxel grid, 2 phases, scaled s_K
         mask = np.ones((4, 3, 3), bool)
         mask[2:, 1:, 2] = mask[0, 2, :2] = False
         m = voxel_mesh((4, 3, 3), spacing=(0.5, 1.0, 0.75), mask=mask)
         m = dataclasses.replace(m, material=rng.integers(0, 2, m.n_el))
+        s_K = rng.uniform(0.1, 2, m.n_el)
     K, M = assemble(m, MATERIALS, ORIENT, s_K=s_K, **kw)
     if name == "voxel":
         op = stencil(m, MATERIALS, ORIENT)
     else:
         op = unstructured(m, MATERIALS, ORIENT, mode="otf" if name == "otf" else "stored", **kw)
-        op = op if s_K is None else op.scaled(s_K=s_K)
+    op = op if s_K is None else op.scaled(s_K=s_K)
     return op, K, M, bc_mask(m)
 
 
@@ -139,6 +141,13 @@ def test_lmax(name, kind, seed):
     assert 1.0 <= SAFETY * est / lmax <= 1.5, SAFETY * est / lmax
 
 
+def test_lmax_invariant_start():
+    """An invariant start (A = 2.5 I, identity precond) hits beta = 0 at once; the guard
+    returns 2.5 instead of NaN."""
+    E = block_ell(2.5 * sp.eye(12, format="csr"))
+    assert float(lmax_estimate(E, Partial(lambda r: r))) == pytest.approx(2.5, rel=1e-14)
+
+
 def cheb_ref(Aff, Dff, lmax, k, ratio=30.0):
     """Dense spectral reference S = L^-T Q diag((1 - r_k(mu)) / mu) Q^T L^-1."""
     L = np.linalg.cholesky(Dff)
@@ -191,7 +200,6 @@ def test_chebyshev_beats_block_jacobi():
     b = jnp.asarray(np.random.default_rng(1).standard_normal((op.n_dof, 3)) * free[:, None])
     _, ib = pcg(A, b, P, 1e-12, 3000)
     _, ic = pcg(A, b, chebyshev(A, P, lmax_estimate(A, P)), 1e-12, 3000)
-    print("block Jacobi:", ib["iterations"], "Chebyshev 2:", ic["iterations"])
     assert ib["converged"].all() and ic["converged"].all()
     assert (ic["iterations"] < ib["iterations"]).all()
 
@@ -210,7 +218,6 @@ def test_jacobi_moved():
     assert jaxmodal.eigen.jacobi is jaxmodal.precond.jacobi
 
 
-@pytest.mark.slow
 def test_study_smoke():
     """Test 18: the h-study on its smallest meshes."""
     from benchmarks import pcg_study

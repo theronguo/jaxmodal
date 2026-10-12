@@ -26,7 +26,7 @@ class BlockELL:
     n_dof: int
     rows: tuple  # block rows per bucket
     chunks: tuple  # block rows per scan step, per bucket
-    padding: float  # stored blocks / structural blocks
+    padding: float  # stored blocks / structural blocks (a leaf)
 
     @property
     def n_buckets(self):
@@ -36,7 +36,7 @@ class BlockELL:
         return _apply(self, X)
 
 
-register(BlockELL, ["n_dof", "rows", "chunks", "padding"])
+register(BlockELL, ["n_dof", "rows", "chunks"])  # padding is a leaf: no recompile
 
 
 @jax.jit

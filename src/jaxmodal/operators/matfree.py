@@ -13,7 +13,7 @@ from jax import lax
 
 from ..elements import ELEMENTS, check_elements, kernels
 from ..materials import check_materials, phase_table, phases
-from .common import check_nodal_mass, check_v, check_x64, register, scaled
+from .common import check_nodal_mass, check_v, check_x64, node_cols, register, scaled
 from .dofmap import check_int32, conn_dofs
 
 DEFAULT_PATH = {"cpu": "scatter", "gpu": "scatter"}  # CPU from benchmarks/scatter_gather.py
@@ -330,15 +330,10 @@ def _k_diag(op, b, d):
     return (d["s_K"][:, None] * diag)[..., None]
 
 
-def _node_cols(k):
-    """(k, 3): the columns 3a + j of row 3a + i's node block."""
-    return 3 * (np.arange(k) // 3)[:, None] + np.arange(3)
-
-
 def _k_blocks(op, b, d):
     """(c, k, 3): row 3a + i, column j holds Ke[3a + i, 3a + j]."""
     k = b.dofs.shape[1]
-    cols = _node_cols(k)
+    cols = node_cols(k)
     if op.mode == "stored":
         blocks = d["Ke"][:, _packed_index(k)[np.arange(k)[:, None], cols]]
     else:

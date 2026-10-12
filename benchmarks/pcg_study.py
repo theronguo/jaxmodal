@@ -15,7 +15,7 @@ import numpy as np
 
 from benchmarks import harness
 from jaxmodal import config
-from jaxmodal.eigen.lobpcg import sigma_estimate
+from jaxmodal.eigen import sigma_estimate
 from jaxmodal.linalg import pcg
 from jaxmodal.materials import Material, isotropic
 from jaxmodal.mesh import box_mesh, voxel_mesh

@@ -89,5 +89,6 @@ def chebyshev(A, precond, lmax, degree=2, ratio=30.0):
     check_x64("chebyshev")
     if not (isinstance(degree, int) and degree >= 1):
         raise ValueError(f"degree must be an int >= 1, got {degree!r}")
-    f = functools.partial(jnp.asarray, dtype=jnp.float64)
-    return Chebyshev(A, precond, f(lmax), f(ratio), degree)
+    return Chebyshev(
+        A, precond, jnp.asarray(lmax, jnp.float64), jnp.asarray(ratio, jnp.float64), degree
+    )
