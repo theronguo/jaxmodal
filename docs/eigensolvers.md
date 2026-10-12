@@ -120,7 +120,7 @@ sigma, its = sigma_estimate(op, free, R)  # lam_1 upper bound, for preconditione
 `lobpcg(op, free, n_modes, tol=1e-6, R=None, precond=None, X0=None, maxit=500, seed=0)` computes the lowest `n_modes` eigenpairs of the masked pencil $K_m v = m \odot K(m \odot v)$, $M_m$ likewise, for any operator with `apply_K`, `apply_M`, `diag_K`, `diag_M` and `n_dof` (PR 5 or PR 6).
 
 - **Returns:** `lam` `(n_modes,)` ascending (NumPy); `V` `(n_dof, n_modes)` on the device, M-orthonormal with constrained rows exactly 0; and `info` with `iterations`, `converged`, `stagnated`, `residuals` and `thresholds` (from explicitly recomputed products, on every exit), `p_drops`, `refills`, `norm_K`, `norm_M`, `history` (max wanted residual per iteration) and `time` (`setup`, `iterations`, in seconds).
-- **Deflation basis `R`:** `(n_dof, k)`, M-orthonormal (rigid modes after `m_orthonormalize` with the same operator). $MR = M_m R$ is computed once. The start block and every new direction are projected, $W \leftarrow W - R\,(MR^\top W)$, so no extra M apply is needed per iteration. Without `R`, a free body returns its rigid modes as λ ≈ 0; their λ-scaled residual is meaningless, so the solve ends stagnated.
+- **Deflation basis `R`:** `(n_dof, k)`, M-orthonormal (rigid modes after `m_orthonormalize` with the same operator). $MR = M_m R$ is computed once. The start block and every new direction are projected, $W \leftarrow W - R\,(MR^\top W)$, so no extra M apply is needed per iteration. Without `R`, a free body returns its rigid modes as λ ≈ 0; their λ-scaled residual is meaningless, so the solve ends at the no-progress exit (`converged` False, `stagnated` True).
 - **Preconditioner `precond`:** a pytree callable `(n, j) -> (n, j)` (e.g. `jax.tree_util.Partial`), fixed, linear and SPD on the free DOFs, with masked output. It is a step argument, so new preconditioner data does not recompile. The default is `jacobi(op, free)`.
 - **Block size** $m = n_\mathrm{modes} + \max(5, \lfloor 0.2\,n_\mathrm{modes}\rfloor)$.
 - **Errors:**
@@ -159,7 +159,7 @@ Hetmaniuk–Lehoucq / Duersch et al. (2018), with fixed shapes: every block is $
      - mask columns whose $G_M$-norm fell to $\le 10^{-8}$ of their norm before (the **noise rule**; without it a noise column would carry about $10^{-4}$ of non-orthogonality into $P$);
      - SVQB in coefficient space.
 
-     `p_drops` counts the iterations in which the pivot fallback, the noise rule or this SVQB lost a P column.
+     `p_drops` counts the iterations in which the pivot fallback, the noise rule or this SVQB lost a P column. It can also fire under heavy soft locking, when the active W and P columns span fewer than $m$ directions; it is a diagnostic, not a failure.
      
      $[X', P']$ is then M-orthonormal without any n-sized orthogonalization of $P$ (measured: $\max|G_M - I| \le 7\cdot10^{-8}$).
   6. **Update.** $X' = XC_x + WC_w + PC_p$, and $P'$ likewise, with the same GEMMs for the K and M products. It is sequenced with `optimization_barrier`: XLA does not fuse a sum of GEMMs, and this saves 2 blocks.
@@ -267,6 +267,7 @@ All runs: isotropic $E = 3$, $\nu = 0.3$, $\rho = 2$ on the box $(1, 0.83, 0.67)
   - Modes with relative gap $\ge 10^{-2}$: λ error $\le \max(10^{-8}, 10\varepsilon\lambda_\max/\lambda)$, with $\lambda_\max$ from `eigsh(which="LA")`. Gaps in $[10^{-4}, 10^{-2})$: $\le 10\,$tol, cluster-wise.
   - Principal sines $\le 10\,r_M\lambda/\mathrm{gap}$, with the dense $r_M$. The reference's $r_M$ is $\ge 10\times$ smaller. Sines are computed stably, as $\sigma_\max(L^\top(Q - Q_rQ_r^\top MQ))$; $\sqrt{1-\cos^2}$ bottoms out near $10^{-8}$. Clusters below a relative gap of $10^{-4}$ are compared by subspace.
   - $\|V^\top MV - I\| \le 10^{-10}$, constrained rows 0, and `info["residuals"]` equal to residuals recomputed with the operator.
+  - No P drops, and `norm_K`, `norm_M` within $[0.9, 1]\times$ the exact 2-norms (`eigsh`).
 - **Exact multiplicities** on a free square-section beam and a free cube. A beam of section $1\times1.002$ gives bending pairs in the $[10^{-4}, 10^{-2})$ band.
 - **Stagnation:**
   - tol $10^{-16}$ gives floor acceptance;
@@ -274,7 +275,8 @@ All runs: isotropic $E = 3$, $\nu = 0.3$, $\rho = 2$ on the box $(1, 0.83, 0.67)
   - a 1-mode run is not flagged.
 - **Robustness:**
   - a start block with duplicated columns (refill);
-  - a forced $P \approx XC$ (the pivot test drops it, output finite);
+  - a forced $P \approx XC$ at noise $10^{-12}$ (the Cholesky fails) and $10^{-6}$ (finite, pivot below `PIVOT`): P is dropped, the new $X$ stays M-orthonormal;
+  - the recompute schedule (iterations 20, 40) and explicit products after a recompute step;
   - the P invariant after 30 steps ($\le 10^{-6}$);
   - `_p_coeffs` masks exactly a noise column;
   - near-singular M within 500 iterations;
@@ -282,6 +284,6 @@ All runs: isotropic $E = 3$, $\nu = 0.3$, $\rho = 2$ on the box $(1, 0.83, 0.67)
 - **Compiles:** one step compile per solve, and 0 for a second solve with a new operator, preconditioner and tol (subprocess, cache off, `jax.monitoring`).
 - **Memory:** step memory $\le 16.5$ blocks.
 - **Floor** (slow): within $[0.1, 10]\times\varepsilon\lambda_\max/\lambda_1$.
-- **Jacobi, σ and errors:** Jacobi against the assembled diagonals; σ within $[\lambda_1, 2\lambda_1]$; `ValueError` for a too-large block.
+- **Jacobi, σ and errors:** Jacobi against the assembled diagonals; σ within $[\lambda_1, 2\lambda_1]$; `ValueError` for a too-large block, a bad `X0`, `n_modes` or `maxit` below 1, and a non-M-orthonormal R; `RuntimeError` after 3 refills; the `maxit` and no-progress exits run the explicit confirmation (counted).
 
 The discretization itself is verified in [`verification.md`](verification.md).

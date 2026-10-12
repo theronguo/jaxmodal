@@ -158,6 +158,10 @@ def test_modes(p_args):
     p = problem(*p_args)
     lam, V, info = lobpcg(p.op, p.free, 12, tol=1e-10, R=p.R)
     check_modes(p_args, lam, V, info, 1e-10)
+    assert info["p_drops"] == 0
+    for A, key in ((p.Kf, "norm_K"), (p.Mf, "norm_M")):  # power iteration: from below
+        exact = eigsh(A, 1, which="LA", return_eigenvectors=False)[0]
+        assert 0.9 <= info[key] / exact <= 1 + 1e-10  # measured 0.96-1.0; 3 iterations: 0.64
 
 
 @pytest.mark.parametrize(
@@ -190,13 +194,24 @@ def test_gap_band():
 
 def test_stagnation(monkeypatch):
     p = problem("hex20", (4, 4, 4), "clamped")
+    confirm, calls = lob._confirm, []
+
+    def counted(*args):  # every exit reports residuals of explicit products
+        calls.append(1)
+        return confirm(*args)
+
+    monkeypatch.setattr(lob, "_confirm", counted)
     lam, _, info = lobpcg(p.op, p.free, 10, tol=1e-16, maxit=2000)
     assert info["converged"] and info["stagnated"] and info["iterations"] < 2000
     assert np.all(info["residuals"] <= info["thresholds"])
     monkeypatch.setattr(lob, "C_FLOOR", 0.0)  # floor unreachable: the no-progress exit
+    calls.clear()
     _, _, info = lobpcg(p.op, p.free, 10, tol=1e-16, maxit=2000)
     assert not info["converged"] and info["stagnated"] and info["iterations"] < 2000
+    assert calls
+    calls.clear()
     lam, V, info = lobpcg(p.op, p.free, 10, tol=1e-10, maxit=30)  # the maxit exit
+    assert len(calls) == 1
     assert not info["converged"] and not info["stagnated"] and info["iterations"] == 30
     assert np.allclose(info["residuals"], residuals(p, lam, V), rtol=1e-5)
 
@@ -283,7 +298,7 @@ def test_recompute_schedule(monkeypatch):
     monkeypatch.setattr(lob, "lobpcg_step", record)
     lobpcg(p.op, p.free, 2, tol=1e-16, maxit=40)
     assert len(flags) >= 20
-    assert [i + 1 for i, f in enumerate(flags) if f] == [20, 40][: len(flags) // 20]
+    assert [i + 1 for i, f in enumerate(flags) if f] == [i for i in (20, 40) if i <= len(flags)]
 
 
 def test_p_coeffs():
@@ -392,6 +407,8 @@ def test_errors():
         lobpcg(op, free, 8)
     with pytest.raises(ValueError, match="n_modes and maxit"):
         lobpcg(op, free, 2, maxit=0)
+    with pytest.raises(ValueError, match="n_modes and maxit"):
+        lobpcg(op, free, 0)
     with pytest.raises(ValueError, match="free must be"):
         lobpcg(op, free.astype(int), 2)
     for X0 in (np.ones((op.n_dof, 8)), np.ones(op.n_dof)):  # block size 7
