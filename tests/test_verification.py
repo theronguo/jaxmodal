@@ -250,5 +250,5 @@ def test_plate_rates(name, t):
     for lam, _, lmax_ in runs.values():
         assert np.all(lam[:6] >= ex - 10 * EPS * lmax_)
     for a, b in PLATE_NESTED[t]:
-        if b in runs:
+        if b in runs:  # PAG levels stop at n = 12
             assert np.all(runs[b][0] <= runs[a][0] + 10 * EPS * runs[b][2])

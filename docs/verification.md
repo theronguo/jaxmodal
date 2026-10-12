@@ -60,7 +60,7 @@ Modes 7–10 are the worst. $n = 8$ meets the target with a 3× margin; $n = 6$ 
 
 **Simply supported BCs on solids** (`SIMPLY_SUPPORTED` in `tests/exact.py`, reused by PR 16). For a plate $[0, a]\times[0, b]\times[0, h]$, face-wise over each whole edge face, through the thickness: $u_y = u_z = 0$ on $x = 0, a$ and $u_x = u_z = 0$ on $y = 0, b$; top and bottom are free. In `dof_mask` form: `{"xmin": "yz", "xmax": "yz", "ymin": "xz", "ymax": "xz"}`. The normal stress on the edge faces is free. This is exactly the boundary condition of the exact solution, and no rigid modes remain.
 
-**Exact solution** (`plate_modes(plies, a, b, k, points=None, P=12, mmax=8)`; Srinivas, Joga Rao & Rao 1970, J. Sound Vib. 12, 187–199). `plies` are `(C, rho, t)` stacked from $z = 0$, each $C$ orthotropic in the plate axes (a 90° ply is `rotate(C, Rz90)`). With $p = m\pi/a$, $q = n\pi/b$, $m, n \ge 0$ not both 0, the ansatz
+**Exact solution** (`plate_modes(plies, a, b, k, points=None, P=12, mmax=8)`; Srinivas et al. 1970 (Srinivas, Joga Rao & Rao), J. Sound Vib. 12, 187–199). `plies` are `(C, rho, t)` stacked from $z = 0$, each $C$ orthotropic in the plate axes (a 90° ply is `rotate(C, Rz90)`). With $p = m\pi/a$, $q = n\pi/b$, $m, n \ge 0$ not both 0, the ansatz
 
 $$u = U(z)\cos px \sin qy,\quad v = V(z)\sin px\cos qy,\quad w = W(z)\sin px \sin qy$$
 
@@ -144,7 +144,7 @@ One element through the thickness stalls at 3.4% (ORTHO, $n = 12$): the thicknes
 - **Measured** (hex20 target meshes): isolated modes 0.999998–1.000000; a pair as returned by eigsh, e.g. 0.9997/0.0003, sums to 1.000000. Flipping the sign of the analytic $U$ gives 0.991–0.994 on PAG.
 - **Checks on the analytic shapes:** they vanish on the constrained DOFs ($4\cdot10^{-16}$ of the maximum), and their self-MAC with the FE $M$ is the identity to $10^{-31}$ (unweighted: $3.5\cdot10^{-6}$ off-diagonal), which catches an unweighted MAC. This M-orthogonality is a property of these meshes and layups: sampled sines and cosines are discretely orthogonal across $(m, n)$ on a uniform in-plane grid, and within one $(m, n)$ the two lowest families differ in $z$-parity on a mid-plane-symmetric layup. It does not hold for sampled shapes in general.
 
-**Published tables** of Srinivas & Rao (1970) and Visscher et al. (1991) are not reproduced. The oracles are validated by their own convergence ($P$, $N$), the closed form and the prototype transfer matrix, and the FE converges to both at the expected rates.
+**Published tables** of Srinivas et al. (1970) and Visscher et al. (1991) are not reproduced. The oracles are validated by their own convergence ($P$, $N$), the closed form and the prototype transfer matrix, and the FE converges to both at the expected rates.
 
 ## NAFEMS FV52 and FV12, Lamb sphere (PR 8c)
 

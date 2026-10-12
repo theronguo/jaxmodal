@@ -131,4 +131,5 @@ Expected runtime including setup: fast additions ≈ 25 s (Visscher 2.5 s cached
 - The Lagrange basis is the Legendre Vandermonde times its inverse at the GLL nodes (vectorized; degree ≤ 24 is well conditioned). `np.einsum(..., optimize=True)` for the ply stiffness: without it, `plate_modes` at $P = 24$ took 3.2 s instead of 0.24 s.
 - Labels and sets are one assert per plate (simplicity NIT): the expected order is a list of label sets, compared with `[set(map(tuple, labels[S])) for S in sets]`.
 - `plate_fe` always computes 10 modes, so the rate levels reuse the target runs (ORTHO hex20/hex27 $n = 16$).
-- Measured: fast additions 30 s, slow additions 48 s (PAG hex27 target 27 s, rates 22 s), on a loaded machine.
+- Measured (performance reviewer): fast additions 26.7 s, slow additions 53 s (PAG hex27 target 27 s, of which $\hat\lambda_\max$ about 10 s with a floor near 7.6 s at any tolerance; rates 26 s). The caches hold about 0.19 GB.
+- Code review round 1: correctness, simplicity, docs and performance satisfied (the tests reviewer hit the usage limit; the correctness reviewer's mutants: unweighted MAC, strain sign, Phi sign, diagonal-only MAC rule, disabled guard all killed; `side="left"` ply lookup equivalent, $C^0$ profiles). Simplicity NITs applied: shared `_legendre`, mass block once, `put_along_axis`, renamed `mass`.

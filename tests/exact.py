@@ -34,11 +34,16 @@ def sliding_block(C, rho, L, n, kmax=8):
     return lam
 
 
+def _legendre(x, N):
+    """Legendre P_0..P_N and their derivatives at x, (len(x), N + 1) each."""
+    return lg.legvander(x, N), np.array([lg.legval(x, lg.legder(c)) for c in np.eye(N + 1)]).T
+
+
 def _basis(xn, x):
     """Lagrange basis on nodes xn and its derivative at points x, (len(x), len(xn)) each."""
     Vi = np.linalg.inv(lg.legvander(xn, len(xn) - 1))
-    dP = np.array([lg.legval(x, lg.legder(c)) for c in np.eye(len(xn))]).T
-    return lg.legvander(x, len(xn) - 1) @ Vi, dP @ Vi
+    P, dP = _legendre(x, len(xn) - 1)
+    return P @ Vi, dP @ Vi
 
 
 @functools.cache
@@ -54,6 +59,7 @@ def _plate_block(plies, p, q, P):
     xn, wg, N, dN = _gll(P)
     nn = len(plies) * P + 1
     K, M = np.zeros((3, nn, 3, nn)), np.zeros((3, nn, 3, nn))
+    NN = np.einsum("g,ga,gb->ab", wg, N, N)
     for k, (C, rho, t) in enumerate(plies):
         J, s, D = t / 2, slice(k * P, k * P + P + 1), dN / (t / 2)
         B = np.zeros((len(wg), 6, 3, P + 1))  # strains (-pU, -qV, W', V'+qW, U'+pW, qU+pV)
@@ -63,7 +69,7 @@ def _plate_block(plies, p, q, P):
         BCB = np.einsum("g,geca,ef,gfdb->cadb", wg, B, np.asarray(C), B, optimize=True)
         K[:, s, :, s] += J * BCB
         for c in range(3):
-            M[c, s, c, s] += J * rho * np.einsum("g,ga,gb->ab", wg, N, N)
+            M[c, s, c, s] += J * rho * NN
     keep = np.repeat([q > 0, p > 0, p > 0 and q > 0], nn)  # component rule
     K, M = K.reshape(3 * nn, -1)[np.ix_(keep, keep)], M.reshape(3 * nn, -1)[np.ix_(keep, keep)]
     lam, X = sl.eigh(K, M)
@@ -73,7 +79,7 @@ def _plate_block(plies, p, q, P):
 
 
 def plate_modes(plies, a, b, k, points=None, P=12, mmax=8):
-    """Lowest k modes of a simply supported plate [0, a] x [0, b] (Srinivas & Rao 1970).
+    """Lowest k modes of a simply supported plate [0, a] x [0, b] (Srinivas et al. 1970).
 
     plies: list of (C, rho, t) stacked from z = 0, C orthotropic in the plate axes. Mode
     (m, n) has u = U(z) cos(px) sin(qy), v = V(z) sin(px) cos(qy), w = W(z) sin(px) sin(qy),
@@ -98,10 +104,9 @@ def plate_modes(plies, a, b, k, points=None, P=12, mmax=8):
     t = np.array([ply[2] for ply in plies])
     zi = np.r_[0, np.cumsum(t)]
     ply = np.clip(np.searchsorted(zi, zu, side="right") - 1, 0, len(plies) - 1)
-    Nz = np.zeros((len(zu), len(plies) * P + 1))
-    Nz[np.arange(len(zu))[:, None], ply[:, None] * P + np.arange(P + 1)] = _basis(
-        _gll(P)[0], 2 * (zu - zi[ply]) / t[ply] - 1
-    )[0]
+    Nz = np.zeros((len(zu), len(plies) * P + 1))  # z profiles at the distinct node z
+    cols = ply[:, None] * P + np.arange(P + 1)
+    np.put_along_axis(Nz, cols, _basis(_gll(P)[0], 2 * (zu - zi[ply]) / t[ply] - 1)[0], 1)
     Phi = []
     for m, n, f in labels:
         p, q = m * np.pi / a, n * np.pi / b
@@ -120,10 +125,8 @@ def visscher(C, rho, L, N, k=16):
     """
     T, L = tensor(np.asarray(C, float)), np.asarray(L, float)
     x, w = lg.leggauss(N + 2)
-    P = np.array([lg.legval(x, c) for c in np.eye(N + 1)])
-    dP = np.array([lg.legval(x, lg.legder(c)) for c in np.eye(N + 1)])
-    G = {(0, 0): (P * w) @ P.T, (1, 0): (dP * w) @ P.T, (0, 1): (P * w) @ dP.T}
-    G[1, 1] = (dP * w) @ dP.T
+    Pd = [A.T for A in _legendre(x, N)]  # P_a and P_a' at the Gauss points
+    G = {(i, j): (Pd[i] * w) @ Pd[j].T for i in (0, 1) for j in (0, 1)}
     abc = np.array([i for i in itertools.product(range(N + 1), repeat=3) if sum(i) <= N])
     vol, out = np.prod(L) / 8, []
     for par in (0, 1):
@@ -135,8 +138,8 @@ def visscher(C, rho, L, N, k=16):
              for j in range(3) for n in range(3)}  # fmt: skip
         K = np.block([[sum(T[i, j, m, n] * D[j, n] for j in range(3) for n in range(3))
                        for m in range(3)] for i in range(3)])  # fmt: skip
-        m = rho * vol * np.prod([G[0, 0].diagonal()[idx[:, d]] for d in range(3)], 0)
-        s = np.tile(m, 3) ** -0.5
+        mass = rho * vol * np.prod([G[0, 0].diagonal()[idx[:, d]] for d in range(3)], 0)
+        s = np.tile(mass, 3) ** -0.5
         K *= s[:, None] * s
         out.append(sl.eigh(K, eigvals_only=True, subset_by_index=[0, k - 1], overwrite_a=True))
     return np.sort(np.concatenate(out))[:k]
