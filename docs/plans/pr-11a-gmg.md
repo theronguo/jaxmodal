@@ -168,3 +168,13 @@ Iteration bounds were measured with the prototype (the tests review got 50 for t
 - 11b: `solve_modes` dispatch, σ hint, fp32 V-cycle, memory estimator (including the ~5-block GMG workspace in the LOBPCG step), Mac acceptance, deferred GPU checks. 11b re-checks the budget model's V-cycle term ($5.5\,t_A$; measured $4.95\,t_A$ warm) and the σ pre-estimate cost (73 s of the 134 s 2M run, the main lever for margin) against warm measurements.
 - Spacing-aware coarsening and line smoothers; robustness to unfiltered high-contrast densities (PR 23 re-runs the contrast test).
 - W-cycles and smoother degree tuning (degree 2 fixed default, an argument).
+
+## Implementation notes
+
+Deviations from the plan above and re-measured figures (shipped code, `benchmarks/results/gmg_study.json`):
+
+- The grid helper is `grid_ids(op)` in `operators/voxel.py` (cell and node id grids in (x, y, z) order, cropped, $-1$ for absent), not `active_cells`; `gmg` uses it for the hierarchy and for the renumbering check.
+- The level-0 smoother blocks come from the same setup sweep as the level-1 cells (group blocks of the masked fine matrices plus the owned diagonal), not from `block_jacobi`; for $k = 1$ they equal it.
+- `test_simp` runs at the solid box's σ. At the field's own σ estimate ($1.8\cdot10^3$, a soft-region mode) PCG needs 480 iterations; this is documented as a limitation (`docs/preconditioners.md`) for 11b and PRs 21–23 to revisit.
+- The plate, beam and odd tests use σ from their own case: measured 60 (plate $64^2\times1$), 59 (beam $128\times1\times1$) and 15 (odd $33\times8\times8$) instead of the prototype's 38 / 35 / 17 at other σ; the bounds stay 100.
+- Setup peak at $87^3$: +1.21 GB over the baseline (target ≤ 3 GB). V-cycle at $m = 15$: 1.71 s against 0.365 s per $A_P$ apply, $4.7\,t_A$.

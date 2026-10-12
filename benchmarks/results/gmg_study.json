@@ -1,0 +1,486 @@
+{
+  "runs": [
+    {
+      "case": "box8",
+      "shape": [
+        8,
+        8,
+        8
+      ],
+      "n_dof": 2187,
+      "sigma": 12247599.373400955,
+      "iterations": [
+        13,
+        13,
+        13,
+        13
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 1.2249753749929368
+    },
+    {
+      "case": "box16",
+      "shape": [
+        16,
+        16,
+        16
+      ],
+      "n_dof": 14739,
+      "sigma": 12247599.373400955,
+      "iterations": [
+        13,
+        13,
+        13,
+        13
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.9523260419955477
+    },
+    {
+      "case": "box32",
+      "shape": [
+        32,
+        32,
+        32
+      ],
+      "n_dof": 107811,
+      "sigma": 12247599.373400955,
+      "iterations": [
+        13,
+        13,
+        13,
+        13
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 1.0025484579382464
+    },
+    {
+      "case": "box64",
+      "shape": [
+        64,
+        64,
+        64
+      ],
+      "n_dof": 823875,
+      "sigma": 12247599.373400955,
+      "iterations": [
+        13,
+        13,
+        13,
+        13
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 1.6035435410449281
+    },
+    {
+      "case": "odd9",
+      "shape": [
+        9,
+        8,
+        8
+      ],
+      "n_dof": 2430,
+      "sigma": 10950971.61120709,
+      "iterations": [
+        13,
+        13,
+        13,
+        13
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 1.3427370419958606
+    },
+    {
+      "case": "odd17",
+      "shape": [
+        17,
+        8,
+        8
+      ],
+      "n_dof": 4374,
+      "sigma": 4819528.6420054035,
+      "iterations": [
+        13,
+        13,
+        13,
+        13
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 1.255907875020057
+    },
+    {
+      "case": "odd33",
+      "shape": [
+        33,
+        8,
+        8
+      ],
+      "n_dof": 8262,
+      "sigma": 1555964.8057527938,
+      "iterations": [
+        15,
+        15,
+        14,
+        15
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 1.3466940840007737
+    },
+    {
+      "case": "free32",
+      "shape": [
+        32,
+        32,
+        32
+      ],
+      "n_dof": 107811,
+      "sigma": 86589488.94428058,
+      "iterations": [
+        13,
+        13,
+        13,
+        13
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.11082591593731195
+    },
+    {
+      "case": "plate16",
+      "shape": [
+        16,
+        16,
+        1
+      ],
+      "n_dof": 1734,
+      "sigma": 181692.86591974105,
+      "iterations": [
+        26,
+        26,
+        27,
+        27
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 1.3998357499949634
+    },
+    {
+      "case": "plate32",
+      "shape": [
+        32,
+        32,
+        1
+      ],
+      "n_dof": 6534,
+      "sigma": 59947.59396420043,
+      "iterations": [
+        47,
+        46,
+        48,
+        47
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.6450389169622213
+    },
+    {
+      "case": "plate64",
+      "shape": [
+        64,
+        64,
+        1
+      ],
+      "n_dof": 25350,
+      "sigma": 1248972.4154979757,
+      "iterations": [
+        60,
+        60,
+        60,
+        60
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.6150688329944387
+    },
+    {
+      "case": "plate128",
+      "shape": [
+        128,
+        128,
+        1
+      ],
+      "n_dof": 99846,
+      "sigma": 10623600.533665122,
+      "iterations": [
+        55,
+        56,
+        55,
+        55
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.7997368749929592
+    },
+    {
+      "case": "plate64x2",
+      "shape": [
+        64,
+        64,
+        2
+      ],
+      "n_dof": 38025,
+      "sigma": 499716.168372179,
+      "iterations": [
+        46,
+        47,
+        47,
+        47
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 2.256289084092714
+    },
+    {
+      "case": "beam64x2",
+      "shape": [
+        64,
+        2,
+        2
+      ],
+      "n_dof": 1755,
+      "sigma": 49201.706671103544,
+      "iterations": [
+        28,
+        28,
+        28,
+        28
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 2.1815242919838056
+    },
+    {
+      "case": "beam128",
+      "shape": [
+        128,
+        1,
+        1
+      ],
+      "n_dof": 1548,
+      "sigma": 3456167.8425299837,
+      "iterations": [
+        59,
+        59,
+        56,
+        58
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 2.6802233749767765
+    },
+    {
+      "case": "simp32@solid",
+      "shape": [
+        32,
+        32,
+        32
+      ],
+      "n_dof": 107811,
+      "sigma": 12247599.373400955,
+      "iterations": [
+        55,
+        54,
+        55,
+        53
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.11948087508790195
+    },
+    {
+      "case": "simp32@own",
+      "shape": [
+        32,
+        32,
+        32
+      ],
+      "n_dof": 107811,
+      "sigma": 1839.0917014187398,
+      "iterations": [
+        466,
+        460,
+        436,
+        480
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.11077745899092406
+    },
+    {
+      "case": "aniso0.5",
+      "shape": [
+        32,
+        32,
+        32
+      ],
+      "n_dof": 107811,
+      "sigma": 12426218.769937314,
+      "iterations": [
+        15,
+        15,
+        15,
+        15
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.11249187507200986
+    },
+    {
+      "case": "aniso0.25",
+      "shape": [
+        32,
+        32,
+        32
+      ],
+      "n_dof": 107811,
+      "sigma": 12566564.590453936,
+      "iterations": [
+        35,
+        35,
+        35,
+        35
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.11014420900028199
+    },
+    {
+      "case": "aniso0.1",
+      "shape": [
+        32,
+        32,
+        32
+      ],
+      "n_dof": 107811,
+      "sigma": 13939164.520573312,
+      "iterations": [
+        148,
+        151,
+        149,
+        148
+      ],
+      "converged": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "build_s": 0.11472170799970627
+    }
+  ],
+  "tol": 1e-08,
+  "system": "benchmarks/results/system.json",
+  "large": {
+    "n": 87,
+    "n_dof": 2044416,
+    "m": 15,
+    "setup_peak_bytes": 1212433368,
+    "vcycle_s": 1.7110049170441926,
+    "apply_s": 0.3648192920954898,
+    "timing_peak_bytes": 4432219664
+  },
+  "versions": {
+    "jax": "0.11.2",
+    "jaxlib": "0.11.2",
+    "numpy": "2.5.3",
+    "platform": "macOS-27.2-arm64-arm-64bit",
+    "cpu_count": 16,
+    "p_cores": 12,
+    "e_cores": 4,
+    "xla_flags": null,
+    "jax_num_cpu_devices": true
+  }
+}
