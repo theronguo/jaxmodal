@@ -6,7 +6,7 @@ Exact solutions and published benchmarks that check the discretization, with the
 
 - **Targets** are relative errors in frequency, $|f^h/f - 1|$ with $f = \sqrt\lambda/2\pi$; the roadmap's 0.1% in $f$ is about 0.2% in $\lambda$.
 - **Rates** are fitted to relative errors in $\lambda$, $|\lambda^h/\lambda - 1|$: the least-squares slope of $\log$ error against $\log h$, per mode, over the stated levels. Richardson extrapolation is not used. The finest error must be $\ge 100 f_\lambda$, with the solver floor $f_\lambda = 10\,\varepsilon\,\hat\lambda_\max/\lambda$ ($\hat\lambda_\max$ from `eigsh(which="LA", tol=1e-3)`: an order-of-magnitude estimate suffices, and the default tolerance costs about 20 s on a 30k-DOF mesh), so that round-off cannot bend the fit.
-- **Matching.** For the sliding block, the computed modes are compared sorted against the exact sorted spectrum. This is valid because each list is the lowest part of a spectrum: the $k$-th smallest values correspond, whatever the mode shapes. Exactly degenerate exact values pair either way. The Visscher box is compared the same way from mode 7 (generic anisotropy, relative gaps $\ge 10^{-2}$). Srinivas–Rao (8b) and FV52 (8c) pair by M-weighted MAC with labels, degenerate sets by summed MAC (see "Mode matching" below).
+- **Matching.** For the sliding block, the computed modes are compared sorted against the exact sorted spectrum. This is valid because each list is the lowest part of a spectrum: the $k$-th smallest values correspond, whatever the mode shapes. Exactly degenerate exact values pair either way. The Visscher box is compared the same way from mode 7 (generic anisotropy, relative gaps $\ge 10^{-2}$). Srinivas–Rao (8b) pairs by M-weighted MAC with labels, degenerate sets by summed MAC (see "Mode matching" below). FV52 (from mode 4) and FV12 (from mode 7) are compared sorted; the Lamb sphere by cluster means (from mode 7).
 
 ## Sliding block
 
@@ -146,6 +146,69 @@ One element through the thickness stalls at 3.4% (ORTHO, $n = 12$): the thicknes
 
 **Published tables** of Srinivas et al. (1970) and Visscher et al. (1991) are not reproduced. The oracles are validated by their own convergence ($P$, $N$), the closed form and the prototype transfer matrix, and the FE converges to both at the expected rates.
 
-## NAFEMS FV52 and FV12, Lamb sphere (PR 8c)
+## NAFEMS FV52 and FV12
 
-Not yet implemented.
+**Sources.** NAFEMS R0015, Abbassian, Dawswell & Knowles, *Selected Benchmarks for Natural Frequency Analysis* (1987), and NAFEMS TNSB Rev. 3, *The Standard NAFEMS Benchmarks* (1990); the targets as listed by Altair OptiStruct verification problems OS-V 0455 (FV52) and OS-V 0420 (FV12). Abaqus Benchmarks 4.4.10 gives the same FV52 boundary conditions, but its "NAFEMS" reference row (44.092, 106.66, …) equals its own C3D8I results, not the published targets. Steel: $E = 200$ GPa, $\nu = 0.3$, $\rho = 8000$ kg/m³. Meshes are `box_mesh` with `coords`, cosine-graded in-plane for the fine runs, $x_i = \tfrac L2(1 - \cos(\pi i/n))$.
+
+**Gating (roadmap).** A mode is gated against its target (1%) only when the refinement-converged fine hex27 run is within 0.5% of it; otherwise against the fine run (1%), with the gap to the target recorded here.
+
+### FV52: simply supported thick plate
+
+- **Setup:** $10\times10\times1$ m; NAFEMS puts $u_z = 0$ along the four edges of the bottom face. Modes 1–3 are in-plane rigid modes (partial rigid modes of the solver). Targets, modes 4–10: 45.897, 109.44, 109.44, 167.89, 193.59, 206.19, 206.19 Hz.
+- **Placement of $u_z = 0$.** No placement reproduces mode 4 ($f/f_\text{target}$, modes 4–10):
+
+  | $u_z = 0$ on | mesh | ratios | converged? |
+  |---|---|---|---|
+  | bottom edges (NAFEMS) | hex27 8×8×2 → 20×20×3 graded; hex20 16×16×{2, 4, 8} | mode 4: 0.951 → 0.930; 0.936, 0.931, 0.926 | no, still falling |
+  | mid-plane edges | hex27 32×32×4 graded; hex20 16×16×{2, 4, 8} | 0.954, 0.967, 0.967, 0.950, 1.000, 0.966, 0.968; mode 4: 0.958, 0.956, 0.955 | no, falls with $n_z$ |
+  | whole edge faces | hex27 32×32×4 graded; hex20 16×16×{2, 4} | 0.963, 0.981, 0.981, 0.972, 1.000, 0.986, 0.988; mode 4: 0.9630, 0.9626 | yes |
+
+  A $u_z = 0$ line on a solid (bottom or mid-plane edges) is a singular line support: its frequencies keep falling under refinement. Only the face support is regular. The targets presumably come from a thick-plate model rather than 3D elasticity. **Used here:** $u_z = 0$ on the whole edge faces (node sets `xmin`, `xmax`, `ymin`, `ymax`, component `z`), which keeps the 3 in-plane rigid modes.
+- **Fine run:** hex27 32×32×4, cosine-graded in-plane (114k DOF, 35 s, 4.1 GB). Modes 4–10: 44.17932, 107.32841 (×2), 163.12638, 193.64577, 203.32401, 203.67752 Hz; modes 11/12: 206.758 (×2). In-plane refinement 24 → 32 changes $f$ by $\le 2\cdot10^{-5}$, $n_z$ 4 → 8 by $\le 6\cdot10^{-5}$ (downward), and hex20 at the same mesh agrees to $8\cdot10^{-6}$: the values are accurate to about $10^{-4}$, above the converged ones.
+- **Pairing of modes 9/10.** The fine run has a split pair at 203.32/203.68 (FE 9/10) and a degenerate pair at 206.76 (FE 11/12, 0.28% above the 206.19 target). On the square, a pair $(m, n)/(n, m)$ is exactly degenerate when $m + n$ is odd (the two shapes have different parities in $x$ and $y$: the 2D irrep E); for $m + n$ even, the symmetric and antisymmetric combinations are 1D irreps, degenerate only by accident in a separable plate model and split in 3D. The target's degenerate pair is most likely (1,3)/(3,1), so sorted pairing (target 9/10 with FE 9/10) is used; it is also the conservative choice (larger recorded gaps).
+- **Gating and gaps.** Only mode 8 (193.646 Hz, +0.03%) is within 0.5% of its target; it is gated against the target. Modes 4–7, 9, 10 are gated against the fine run; their gaps to the targets are −3.7%, −1.9%, −1.9%, −2.8%, −1.4%, −1.2%.
+- **Test mesh** 12×12×2 uniform (hex20 0.5 s, hex27 1.1 s): $f/f_\text{fine} - 1$ = +0.15, +0.17, +0.17, +0.24, +0.02, +0.26, +0.26% (hex20; hex27 within 0.01 points). A conforming consistent-mass mesh lies above the exact value, so the test also asserts $f \ge f_\text{fine}(1 - 10^{-4})$; this pins the placement, since the mid-plane-edge support gives $-0.03$ to $-0.43\%$ on the same mesh, inside the two-sided 1%. The rigid eigenvalues are $\le 10\,\varepsilon\,\hat\lambda_\max$ (tested; about $10^{-12}\lambda_4$). The slow test reruns the fine mesh and reproduces the recorded values to $10^{-6}$.
+- **Upper bound:** hex20 6×6×1 → 12×12×2 (nested, uniform), modes 4–10 decrease within $10\,\varepsilon\,\hat\lambda_\max$.
+
+### FV12: free thin plate
+
+- **Setup:** $10\times10\times0.05$ m ($L/t = 200$), free; hex20/hex27 only (hex8 locks). The NAFEMS shell model fixes $x$, $y$ and $\theta_z$ at all nodes, removing the in-plane rigid modes, so its modes 4–10 are the solid's modes 7–13. Targets: 1.622, 2.360, 2.922, 4.233, 4.233, 7.416, 7.416 Hz. Altair also lists "7.392 (HOE)" beside 7.416; the R0015 value 7.416 is used for both modes of the pair (degenerate by symmetry). Modes 12/13 are gated against the fine run, so this affects only the recorded gap.
+- **Fine runs** (hex27, one element through the thickness, cosine-graded in-plane; the edge element is $1.5\cdot10^{-2}$ m at $n = 80$, below $t$):
+
+  | mesh | DOF | time | modes 7–13 (Hz) |
+  |---|---|---|---|
+  | 40×40 | 59k | 8 s | 1.6188, 2.3601, 2.9236, 4.1843 (×2), 7.3688 (×2) |
+  | 60×60 | 132k | 23 s, 3.5 GB | 1.618722, 2.359530, 2.922390, 4.183217 (×2), 7.358644 (×2) |
+  | 80×80 | 233k | 51 s, 9.5 GB | 1.618696, 2.359358, 2.922055, 4.182914 (×2), 7.355642 (×2) |
+
+  60 → 80 changes $f$ by $\le 0.041\%$ (modes 12/13), and $n_z$ 1 → 2 (at 40×40) by $\le 0.017\%$, so the 80×80 values are converged to $< 0.1\%$. Uniform 40×40 and 60×60 meshes differ from the graded ones by up to 0.15% (modes 10/11): the free-edge layer needs the grading. The 80×80 run is too large for the suite; the slow test reruns 60×60 and checks $|f_{60}/f_{80} - 1| \le 0.1\%$ (two-sided: graded meshes of different $n$ are not nested).
+- **Gating and gaps.** Modes 7–9 are within 0.5% of their targets (−0.20%, −0.03%, 0.00%) and are gated against them; modes 10–13 sit 1.2% (10/11) and 0.8% (12/13) below the targets and are gated against the fine run.
+- **Test mesh** 20×20×1 uniform, hex20 and hex27 (0.8–1.6 s): $f/f_\text{fine} - 1$ = 0.18, 0.11, 0.17, 0.24 (×2), 0.50% (×2). Six rigid eigenvalues $\le 10\,\varepsilon\,\hat\lambda_\max$.
+- **Upper bound:** hex20 10×10×1 → 20×20×1 (nested, uniform), from mode 7.
+
+## Lamb sphere
+
+**Exact solution** (free isotropic sphere of radius $a$; Lamb, *Proc. London Math. Soc.* s1-13, 189–212, 1882). With $\eta = \omega a/c_s$, $\xi = \omega a/c_p$ and the spherical Bessel functions $j_n$, the modes of order $n \ge 1$ have multiplicity $2n + 1$ and satisfy
+
+- torsional: $(n - 1)\,j_n(\eta) - \eta\, j_{n+1}(\eta) = 0$ ($n = 1$: $j_2(\eta) = 0$; its root $\eta = 0$ is the rigid rotation);
+- spheroidal: the standard form (Saviot, Champagnon, Duval, Kudriavtsev & Ekimov, *J. Non-Cryst. Solids* 197, 238–246, 1996; Eringen & Şuhubi, *Elastodynamics* II, 1975) uses $F(x) = x j_{n+1}(x)/j_n(x)$, which has poles. Multiplied by $j_n(\eta)j_n(\xi)$ it becomes entire:
+  $$2\big[\eta^2 j_n(\eta) + (n-1)(n+2)\big(\eta j_{n+1}(\eta) - (n+1)j_n(\eta)\big)\big]\,\xi j_{n+1}(\xi) + \Big(-\tfrac{\eta^4}{2} + (n-1)(2n+1)\eta^2\Big)j_n(\eta)j_n(\xi) + \big[\eta^2 - 2n(n-1)(n+2)\big]\,\eta j_{n+1}(\eta)\,j_n(\xi) = 0.$$
+  At a zero of $j_n$ the old form has a simple pole, so the product is generically nonzero there: no new roots.
+
+`lamb_sphere(nu, k)` scans both functions for $n = 1 \ldots 8$ on $(0.3, 12]$, refines each sign change with `brentq`, and returns the lowest $k$ roots as `(eta, kind, n)`. It raises unless the $k$-th root lies below the lowest root of order 8 (lowest roots rise with $n$). The breathing mode ($n = 0$) is not included; the form above gives a spurious root at 2.459 for $n = 0$, while the true breathing mode at $\nu = 0.3$ is at 4.9955.
+
+**Values at $\nu = 0.3$:** T2 2.501133 (×5), S2 2.646217 (×5), S1 3.529987 (×3), T3 3.864700 (×7), S3 3.937401 (×7); T1 = 5.763459 is the first zero of $j_2$ (Abramowitz & Stegun, table 10.6), and T2 does not depend on $\nu$. Checks: a monomial Rayleigh–Ritz on the unit ball ($x^ay^bz^c$, total degree $\le 10$, closed-form ball integrals) reproduces modes 7–30 to $10^{-7}$; an independent derivation of the spheroidal $2\times2$ traction determinant ($\sigma_{rr} = \sigma_{r\theta} = 0$ for $u = \nabla\varphi + \nabla\times\nabla\times(r\psi)$) gives the same roots for $n = 1 \ldots 5$ to 7 digits.
+
+**Voxel FE.** hex8 `voxel_mesh` of the cells whose centre lies in the unit ball, $n$ cells per diameter; $E = 1$, $\nu = 0.3$, $\rho = 1$, consistent mass. The voxelized volume differs from the ball's, so the exact value is taken for the sphere of equal volume, $a = (3V/4\pi)^{1/3}$. The cubic grid splits each 5-fold cluster into 3 + 2; torsional modes have a radial kinetic-energy fraction $\le 0.001$, spheroidal ones 0.55–0.60, so the fraction $< 0.1$ classifies them (every level gives exactly 5 + 5 among the lowest 10 elastic modes). Each cluster is compared by its mean $\eta$:
+
+| $n$ | DOF | $a$ | time | T2 mean | S2 mean | max |
+|---|---|---|---|---|---|---|
+| 8 | 1.4k | 1.0146 | 0.3 s | −3.34% | +1.49% | 3.34% |
+| 12 | 3.9k | 1.0027 | 0.5 s | −2.57% | +0.59% | 2.57% |
+| 16 | 8.5k | 1.0048 | 1.4 s | −1.82% | +0.27% | 1.82% |
+| 20 | 15.7k | 1.0028 | 3 s | −1.26% | +0.16% | 1.26% |
+| 24 | 25.9k | 0.9986 | 8 s | −1.02% | +0.09% | 1.02% |
+| 32 | 59.4k | 1.0019 | 34 s | −0.74% | +0.02% | 0.74% |
+| 40 | 112k | 1.0004 | 107 s | −0.60% | −0.01% | 0.60% |
+
+The test (`slow`) runs levels 8, 12, 16, 24, 32 with `n_modes = 18` and asserts the 5 + 5 classification, the recorded means to 0.02 percentage points (this pins the equal-volume radius: the nominal $a = 1$ moves them by 1.4 points at level 8 and still drops 5×), and the roadmap's criterion: the max error drops $\ge 2\times$ (measured 4.5×). The least-squares rate of the max is about 1.1 (reported, not tested): the staircase boundary limits convergence. No upper bound is checked, since the voxel geometry is not nested. With `n_modes = 18`, level 32 also guards the σ rule: under PR 8a's $-0.01\tilde\lambda_k$ it raises (172ε; [eigensolvers](eigensolvers.md)).

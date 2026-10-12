@@ -7,6 +7,8 @@ import numpy as np
 import scipy.linalg as sl
 from helpers import tensor
 from numpy.polynomial import legendre as lg
+from scipy.optimize import brentq
+from scipy.special import spherical_jn
 
 SLIDING = {"xmin": "x", "xmax": "x", "ymin": "y", "ymax": "y", "zmin": "z", "zmax": "z"}
 SIMPLY_SUPPORTED = {"xmin": "yz", "xmax": "yz", "ymin": "xz", "ymax": "xz"}
@@ -149,3 +151,35 @@ def mac(A, B, M):
     """M-weighted MAC matrix (a_i^T M b_j)^2 / ((a_i^T M a_i)(b_j^T M b_j))."""
     MA, MB = M @ A, M @ B
     return (A.T @ MB) ** 2 / (np.einsum("ij,ij->j", A, MA)[:, None] * np.einsum("ij,ij->j", B, MB))
+
+
+def lamb_sphere(nu, k, nmax=8, top=12.0):
+    """Lowest k distinct elastic roots eta = omega a / c_s of a free isotropic sphere (Lamb 1882),
+    sorted, as (eta, kind, n): torsional "T" and spheroidal "S" of order n = 1..nmax, with
+    multiplicity 2n + 1. Both frequency functions are entire (the spheroidal one is the usual
+    form times j_n(eta) j_n(xi)), so every sign change on (0.3, top] is a root. Raises unless
+    the k-th root lies below the lowest root of order nmax.
+    """
+    r = np.sqrt((1 - 2 * nu) / (2 * (1 - nu)))  # c_s / c_p
+
+    def tors(e, n):
+        return (n - 1) * spherical_jn(n, e) - e * spherical_jn(n + 1, e)
+
+    def spher(e, n):
+        x = r * e
+        je, ge = spherical_jn(n, e), e * spherical_jn(n + 1, e)
+        jx, gx = spherical_jn(n, x), x * spherical_jn(n + 1, x)
+        a = (n - 1) * (n + 2)
+        return (2 * (e**2 * je + a * (ge - (n + 1) * je)) * gx
+                + (-(e**4) / 2 + (n - 1) * (2 * n + 1) * e**2) * je * jx
+                + (e**2 - 2 * n * a) * ge * jx)  # fmt: skip
+
+    grid, out = np.linspace(0.3, top, 4000), []
+    for n, (kind, f) in itertools.product(range(1, nmax + 1), (("T", tors), ("S", spher))):
+        y = f(grid, n)
+        for i in np.flatnonzero(y[:-1] * y[1:] < 0):
+            out.append((brentq(f, grid[i], grid[i + 1], (n,), xtol=1e-14), kind, n))
+    out, edge = sorted(out), min((e for e, _, n in out if n == nmax), default=top)
+    if len(out) < k or out[k - 1][0] >= edge:  # lowest roots rise with n: a check, not a bound
+        raise ValueError(f"nmax = {nmax}, top = {top} too small for {k} roots")
+    return out[:k]

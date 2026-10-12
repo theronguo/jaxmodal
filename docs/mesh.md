@@ -138,11 +138,12 @@ mesh = voxel_mesh(shape=(nx, ny, nz), spacing=(hx, hy, hz), origin=(ox, oy, oz),
 
 ```python
 mesh = box_mesh(shape=(nx, ny, nz), spacing=(hx, hy, hz), origin=(ox, oy, oz), type="hex20")
+mesh = box_mesh(shape, type="hex27", coords=(cx, cy, cz))  # graded
 ```
 
 - A structured block of $n_x \times n_y \times n_z$ elements of type `hex8`, `hex20` or `hex27`, with shared nodes in VTK order. It is the test mesh for PRs 4, 5, 7 and 8 (`voxel_mesh` is hex8 only).
 - **Nodes** are the used points of the half-spacing grid $(2n_x+1)\times(2n_y+1)\times(2n_z+1)$: hex8 uses even indices, hex20 indices with at most one odd component, hex27 all. Position $o + h \odot (i, j, k)/2$; nodes and elements in grid order ($x$ fastest), like `voxel_mesh`. Connectivity is the grid index of $2\,\text{cell} + \texttt{REFERENCE\_NODES}[:n] + 1$, one code path for all types.
 - **Sets:** the six face node sets as for voxel meshes; no element sets; labels 0; no `voxel` metadata. The hex8 box equals the unmasked `voxel_mesh` on points, connectivity and node sets.
 - **Validation:** `shape`, `spacing` and `origin` as for `voxel_mesh` (`check_grid`); an unknown `type` raises.
-- **Spacing** is uniform per axis. Graded meshes (PR 8's NAFEMS runs) will take per-axis node-coordinate arrays rather than remapping points, which would move midside nodes off the edge midpoints.
+- **Graded meshes:** `coords=(cx, cy, cz)` gives the element boundaries per axis (lengths $n_d + 1$, finite, strictly increasing, else `ValueError`) and overrides `spacing` and `origin`. A node at half-grid index $i$ on axis $d$ sits at `np.interp(i / 2, arange(n_d + 1), coords[d])`: corner nodes on the boundaries, midside and centre nodes at element midpoints. Each element is thus an affine axis-aligned box, so geometry stays exact and refined meshes stay nested when their boundaries are. Remapping points instead would move midside nodes off the edge midpoints. The NAFEMS runs use cosine grading $x_i = \tfrac L2\big(1 - \cos(\pi i/n)\big)$ ([verification](verification.md)).
 - **Cost** (M3 Max): hex8 $100^3$ (3.1M DOF) 0.44 s and 0.8 GB, hex20 $60^3$ (2.7M DOF) 0.22 s, hex27 $40^3$ (1.6M DOF) 0.11 s. It sorts all (element, node) grid indices (`np.unique`), so it is O(N log N) and about 6× slower than `voxel_mesh` for hex8; fine for test meshes, while a used-node bitmask as in `voxel_mesh` would be the route above ~10M DOF.
