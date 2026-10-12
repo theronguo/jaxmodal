@@ -257,6 +257,31 @@ def test_sigma_estimate(built, name, shape, bcs, factors, density):
     assert 0 < its <= 20 * len(built)
 
 
+def test_sigma_rounds(monkeypatch):
+    """The pre-estimate's round logic on scripted probes: rebuild while sigma drops by more
+    than 3x, keep the smaller of the last two, at most 4 rounds."""
+
+    def run(probes):
+        builds, probes = [], iter(probes)
+
+        def fake_gmg(op, free, sigma):
+            if sigma == 0:
+                raise SingularShiftError("free")
+            builds.append(sigma)
+            return object()
+
+        monkeypatch.setattr(api, "gmg", fake_gmg)
+        monkeypatch.setattr(api, "sigma_estimate", lambda *a, **kw: (100.0, None))
+        monkeypatch.setattr(
+            api, "lobpcg", lambda *a, **kw: ([next(probes)], None, {"iterations": 2})
+        )
+        return api._gmg_sigma(None, None, None), builds
+
+    assert run([10.0, 20.0]) == ((10.0, 4), [100.0, 10.0])  # a rising probe keeps the minimum
+    assert run([50.0]) == ((50.0, 2), [100.0])
+    assert run([30.0, 9.0, 2.0, 0.5]) == ((0.5, 8), [100.0, 30.0, 9.0, 2.0])
+
+
 def test_sigma_hint(built, monkeypatch):
     """Test 2: a sigma hint skips the pre-estimate (one build, at the hint) and gives the same
     modes; sigma = 0 on a free body raises instead of being replaced."""
