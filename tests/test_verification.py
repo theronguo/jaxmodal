@@ -296,6 +296,9 @@ def test_fv52(t):
     f = hz(lam[3:])
     assert abs(f[4] / FV52_TARGET[4] - 1) <= 1e-2  # mode 8
     assert np.abs(f / FV52_FINE - 1).max() <= 1e-2
+    # conforming, consistent mass: above the exact value, which the fine run (accurate to about
+    # 1e-4, from above) bounds; pins the placement (mid-plane edges give up to -0.4%)
+    assert np.all(f >= FV52_FINE * (1 - 1e-4))
 
 
 @pytest.mark.parametrize("t", ["hex20", "hex27"])

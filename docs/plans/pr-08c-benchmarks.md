@@ -288,3 +288,4 @@ docs/ROADMAP.md, README.md      status; FV52 and FV12 wording
   - fast additions about 6 s;
   - slow: `test_nafems_fine` 57 s, `test_lamb_rates` 43 s.
 - **$L/t = 1600$ plate** re-measured under $-0.3$: $0.09 f_\lambda$ at 12 modes, unchanged.
+- **FV52 one-sided check** (code review round 1): the test also asserts $f \ge f_\text{fine}(1 - 10^{-4})$, valid because a conforming consistent-mass mesh lies above the exact value and the fine run is accurate to about $10^{-4}$ from above. Without it, the mid-plane-edge mutant survives at 12×12×2 ($-0.03$ to $-0.43\%$ against the fine run, inside the two-sided 1%). FV12 gets no such check: its 80×80 fine run is converged only to $4\cdot10^{-4}$.
