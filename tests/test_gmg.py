@@ -535,13 +535,14 @@ def test_no_recompile():
 
 
 def test_errors():
-    """Test 13: unstructured operator, sigma < 0, renumbered voxel mesh, x64 off."""
+    """Test 13: unstructured operator, sigma < 0 or NaN, renumbered voxel mesh, x64 off."""
     b = box_mesh((2, 2, 2))
     with pytest.raises(TypeError):
         gmg(unstructured(b, UNIT), dof_mask(b, {"xmin": "xyz"}), 1.0)
     op, free, m = unit((4, 3, 3), bcs={"xmin": "xyz"})
-    with pytest.raises(ValueError, match="sigma"):
-        gmg(op, free, -1.0)
+    for bad in (-1.0, float("nan")):
+        with pytest.raises(ValueError, match="sigma must be >= 0"):
+            gmg(op, free, bad)
     r = rcm(m)[0]
     with pytest.raises(ValueError, match="renumber"):
         gmg(stencil(r, UNIT), dof_mask(r, {"xmin": "xyz"}), 1.0)
@@ -669,46 +670,41 @@ def test_gmg_workspace(n):
         assert got <= est and (n < 32 or est <= 1.25 * got)
 
 
+def step_bytes(op, P, low, k=15):
+    """Temporaries + aliased bytes of the compiled LOBPCG step (block k) with precond P."""
+    from test_lobpcg import step_args
+
+    c, _ = lob._capacity(100, 1, k, low)
+    f = lob.lobpcg_step_low if low else lob.lobpcg_step
+    args = list(step_args(op, op.n_dof, k, low, 0))
+    args[1], args[3] = op, P
+    mem = f.lower(*args, c=c).compile().memory_analysis()
+    return mem.temp_size_in_bytes + mem.alias_size_in_bytes
+
+
 @pytest.mark.parametrize("low", [False, True], ids=["9-block", "low"])
 def test_gmg_step(low):
     """Test 8: the LOBPCG step with the GMG cycle (fp64, fp32) <= lobpcg_memory's step term."""
-    from test_lobpcg import step_args
-
     op, free, m = steel((16,) * 3, {"xmin": "xyz"})
-    n, k = op.n_dof, 15
-    c, _ = lob._capacity(100, 1, k, low)
-    f = lob.lobpcg_step_low if low else lob.lobpcg_step
+    b = 8 * op.n_dof * 15
     for dtype in ("float64", "float32"):
-        args = list(step_args(op, n, k, low, 0))
-        args[1], args[3] = op, gmg(op, free, 1e5, dtype=dtype)
-        mem = f.lower(*args, c=c).compile().memory_analysis()
-        got = mem.temp_size_in_bytes + mem.alias_size_in_bytes
+        got = step_bytes(op, gmg(op, free, 1e5, dtype=dtype), low)
         pc = functools.partial(gmg_memory, m, dtype=dtype)
         est = lobpcg_memory(
-            lambda w: stencil_memory(m, w), n, 10, low_memory=low, precond_memory=pc
+            lambda w: stencil_memory(m, w), op.n_dof, 10, low_memory=low, precond_memory=pc
         )["step"]
-        assert got <= est, (dtype, got / (8 * n * k), est / (8 * n * k))
+        assert got <= est, (dtype, got / b, est / b)
 
 
 @pytest.mark.slow
 def test_gmg_step_tight():
     """Test 8: at 48^3 (m = 15) the GMG step's extra temporaries over the Jacobi step are
     within 0.6 blocks below GMG_STEP for every step and V-cycle dtype (pins the constants)."""
-    from test_lobpcg import step_args
-
     op, free, _ = steel((48,) * 3, {"xmin": "xyz"})
-    n, k = op.n_dof, 15
+    b = 8 * op.n_dof * 15
     for low, key in ((False, "9-block"), (True, "low")):
-        c, _ = lob._capacity(100, 1, k, low)
-        f = lob.lobpcg_step_low if low else lob.lobpcg_step
-
-        def temp(P, f=f, c=c, low=low):
-            args = list(step_args(op, n, k, low, 0))
-            args[1], args[3] = op, P
-            mem = f.lower(*args, c=c).compile().memory_analysis()
-            return (mem.temp_size_in_bytes + mem.alias_size_in_bytes) / (8 * n * k)
-
-        jac = temp(jacobi(op, free, 0.0))
+        jac = step_bytes(op, jacobi(op, free, 0.0), low)
         for dtype in ("float64", "float32"):
-            extra, model = temp(gmg(op, free, 1e5, dtype=dtype)) - jac, GMG_STEP[(key, dtype)]
-            assert model - 0.6 <= extra <= model, (key, dtype, extra)
+            extra = (step_bytes(op, gmg(op, free, 1e5, dtype=dtype), low) - jac) / b
+            model = GMG_STEP[(key, dtype)]
+            assert model - 0.6 <= extra <= model, f"{key} {dtype}: {extra:.2f}; re-fit GMG_STEP"
