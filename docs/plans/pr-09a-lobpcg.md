@@ -148,8 +148,7 @@ The prototype is the design below: one module-level jitted step with every array
 ## API
 
 ```python
-lam, V, info = lobpcg(op, free, n_modes, tol=1e-6, R=None, precond=None, X0=None,
-                      maxit=500, seed=0)
+lam, V, info = lobpcg(op, free, n_modes, tol=1e-6, R=None, precond=None, X0=None, maxit=500, seed=0)
 ```
 
 - `op`: any pytree operator with `apply_K`, `apply_M`, `diag_K`, `diag_M`, `n_dof` (PR 5 or 6). `free`: `(n_dof,)` bool from `dof_mask`. The solver uses the masked operators $K_m v = m \odot K(m \odot v)$ and $M_m$ likewise.
