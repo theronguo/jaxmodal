@@ -122,7 +122,7 @@ Every public entry checks that x64 is enabled (`check_x64`, the flag, not the dt
 - $B_n = K_{nn} + \sigma\,\mathrm{diag}(M)_n I_3$;
 - rows and columns of constrained components zeroed, with 1 on their diagonal. The output is masked, so the constrained diagonal never reaches it and no `s` is needed (as in `jacobi`). On the free entries $B_n$ equals the 3×3 diagonal block of $A_P$.
 
-$\sigma < 0$ raises `ValueError` (preconditioners are SPD and approximate $K + \sigma M$ with $\sigma \ge 0$; MINRES's preconditioner is built at $+\sigma_b$), and `jacobi` gets the same check. The blocks are inverted through a batched Cholesky (`cho_solve` against $I_3$), so a non-SPD block gives NaN instead of silent garbage. A private `_inverse_blocks(B, free)` does the masking and inversion from any `(n_nodes, 3, 3)` blocks, so PR 11 can feed it coarse-level blocks. `block_jacobi` returns `Partial(_block_jacobi, inv, mask)`: $v \mapsto m \odot (B_n^{-1} v_n)$. Its storage is 9 values per node (3 vectors). Like `jacobi`, it fits any `precond` slot.
+A concrete $\sigma < 0$ raises `ValueError` (preconditioners are SPD and approximate $K + \sigma M$ with $\sigma \ge 0$; MINRES's preconditioner is built at $+\sigma_b$), and `jacobi` gets the same check; a traced σ is not checked, so both stay traceable. The blocks are inverted through a batched Cholesky (`cho_solve` against $I_3$), so a non-SPD block gives NaN instead of silent garbage. A package-internal `_inverse_blocks(B, free)` does the masking and inversion from any `(n, b, b)` blocks with an `(n, b)` mask, so PRs 11 and 13 can feed it coarse-level blocks (3×3 and 6×6); the docs name it as the internal entry for level blocks. `block_jacobi` returns `Partial(_block_jacobi, inv, mask)`: $v \mapsto m \odot (B_n^{-1} v_n)$. Its storage is 9 values per node (3 vectors). Like `jacobi`, it fits any `precond` slot.
 
 ### PCG (`pcg`)
 
@@ -135,6 +135,9 @@ $\sigma < 0$ raises `ValueError` (preconditioners are SPD and approximate $K + \
   3. Otherwise the column restarts from its current $x$: $r = b - Ax$ (the explicit residual), $z = P r$, $\rho = r^\top z$, $p = z$. Keeping the old $p$ was measured not to work (correctness review): the recursive residual then creeps down from the floor without reaching tol, no further replacement happens, and the column runs to `maxit`. With the restart, tol $10^{-14}$ converges after a replacement, and $10^{-15}$, $10^{-16}$ stagnate after 5 replacements in 469–848 iterations; iteration counts above the floor are unchanged.
   4. After `STALL_R` = 5 replacements in a column without convergence, the column stops as `stagnated` (the attainable floor; PR 14's "unverifiable" input).
   5. `maxit` stops every remaining column.
+  6. A column whose residual norm is not finite stops (not converged, not stagnated; its `residuals` entry is NaN), e.g. under a non-SPD preconditioner whose Cholesky gave NaN. The same applies to `minres`.
+  
+  A restart costs one operator apply and one preconditioner apply for the block, both inside the `lax.cond` branch, which runs only at the floor.
   
   Iteration counts are exact (no check granularity), which the ≤ 20%-growth tests of PRs 11–13 need.
 - **Returns:** `x` and `info`, a dict of device arrays so that `pcg` stays traceable:
@@ -253,13 +256,13 @@ All against `spsolve` on the PR 4 `a_p`, on the hex20 box above unless stated ot
    - the easy column's exit residual within 1% of its single-column value (an unfrozen column would keep stepping and push it far below tol: the tests review measured $x$ off by $1.6\cdot10^{-9}$ and survival of "$x$ to $10^{-12}$" at tol $10^{-12}$);
    - scaling one column by $10^{6}$ changes nothing for the others.
 3. **PCG exits** (explicit `maxit=3000`):
-   - tol $10^{-16}$: every column `stagnated` with exactly `STALL_R` = 5 replacements, not converged, fewer iterations than `maxit`; explicit residuals $\le 10^{-13}$ (measured $\le 4.6\cdot10^{-14}$);
+   - tol $10^{-16}$: every column `stagnated` with exactly `STALL_R` = 5 replacements, not converged, fewer iterations than `maxit`; explicit residuals $\le 10^{-13}$ (measured $\le 4.6\cdot10^{-14}$ with the kept-$p$ prototype; re-measured with the restart at implementation before fixing the bound);
    - a tol in the $10^{-14}$ band (fixed at implementation from a measurement): a column converges after $\ge 1$ replacement;
    - tol $10^{-12}$: no replacements;
    - `maxit=5`: not converged, not stagnated, `iterations == 5`.
 4. **MINRES accuracy:**
    - the SPD case as in test 1, including the zero column ($\beta = 0$);
-   - the indefinite `ap_operator(op, free, -sigma_b)` ($K - \sigma_b M$) with $\sigma_b$ the midpoint of $\lambda_6$ and $\lambda_7$, default `s` (equal to the explicit roadmap $s$), preconditioner `jacobi(op, free, sigma_b)`, tol $10^{-12}$: rel. error $\le 10^{-10}$ (measured $2.2\cdot10^{-12}$; the floor is 8.8e-14 here, a 3× margin on the residual).
+   - the indefinite `ap_operator(op, free, -sigma_b)` ($K - \sigma_b M$) with $\sigma_b$ the midpoint of $\lambda_6$ and $\lambda_7$, default `s` (equal to the explicit roadmap $s$), preconditioner `jacobi(op, free, sigma_b)`, tol $10^{-12}$: rel. error $\le 10^{-10}$ (measured $2.2\cdot10^{-12}$; the explicit residual reached $3.3\cdot10^{-13}$, a 3× margin to tol, with the floor at $8.8\cdot10^{-14}$).
 5. **MINRES exits:**
    - tol $10^{-15}$: `stagnated` well before `maxit`;
    - `maxit=30`: not converged, not stagnated;
@@ -301,7 +304,7 @@ All against `spsolve` on the PR 4 `a_p`, on the hex20 box above unless stated ot
     - unstructured hex20 and voxel;
     - seeds 0–2.
 16. **Chebyshev:**
-    - for degrees 1–4, with Jacobi and block Jacobi: `chebyshev(...)` applied to random masked vectors equals the dense spectral reference to $10^{-12}$: on the free block, with $D^{-1/2}A_{P,ff}D^{-1/2} = Q\,\mathrm{diag}(\mu)\,Q^\top$ and $r_k(\mu) = T_k((\theta - \mu)/\delta)/T_k(\theta/\delta)$ (same `lmax`), $S_\mathrm{ref} = D^{-1/2}Q\,\mathrm{diag}((1 - r_k(\mu))/\mu)\,Q^\top D^{-1/2}$. The tests review measured the prototype within $6\cdot10^{-15}$ and four coefficient mutants (recurrence sign, missing factor 2, no 1.1, ratio 10) off by $7\cdot10^{-2}$–$5\cdot10^{-1}$, while all four passed symmetry, positivity and "fewer iterations than block Jacobi". This also pins that the 1.1 is applied exactly once;
+    - for degrees 1–4, with Jacobi and block Jacobi: `chebyshev(...)` applied to random masked vectors equals the dense spectral reference to $10^{-12}$: on the free block, with the Cholesky factor $D_{ff} = LL^\top$ (block diagonal for block Jacobi), $L^{-1}A_{P,ff}L^{-\top} = Q\,\mathrm{diag}(\mu)\,Q^\top$ and $r_k(\mu) = T_k((\theta - \mu)/\delta)/T_k(\theta/\delta)$ (same `lmax`), $S_\mathrm{ref} = L^{-\top}Q\,\mathrm{diag}((1 - r_k(\mu))/\mu)\,Q^\top L^{-1}$. The tests review measured the prototype within $6\cdot10^{-15}$ and four coefficient mutants (recurrence sign, missing factor 2, no 1.1, ratio 10) off by $7\cdot10^{-2}$–$5\cdot10^{-1}$, while all four passed symmetry, positivity and "fewer iterations than block Jacobi". This also pins that the 1.1 is applied exactly once;
     - for degrees 1–4:
       - $|u^\top Sv - v^\top Su| \le 10^{-12}\,|u^\top Sv|$;
       - error propagation $E = I - SA_P$ is $A_P$-self-adjoint to $10^{-12}$;
@@ -322,7 +325,7 @@ All against `spsolve` on the PR 4 `a_p`, on the hex20 box above unless stated ot
   - the measured tables above and the h-study.
 - `docs/operators.md`: `block_diag_K` as the sixth interface method (the "same five" wording at the interface paragraph changes).
 - `docs/boundary_conditions.md`: the module intro and the $A_P$ section gain `ap_operator` (matrix-free counterpart of `a_p`), its default $s$ for both signs of σ and the sign convention.
-- `docs/eigensolvers.md`: `jacobi` now lives in `precond/`.
+- `docs/eigensolvers.md`: `jacobi` now lives in `precond/` and raises for a concrete σ < 0 (its entry in the LOBPCG section).
 - `README.md`: a short PCG with Chebyshev snippet; the status line.
 - `docs/ROADMAP.md`: the status line; Principle 2's interface list gains `block_diag_K` (from PR 10).
 
@@ -334,4 +337,4 @@ All against `spsolve` on the PR 4 `a_p`, on the hex20 box above unless stated ot
 - Block-Krylov variants: columns are independent solves.
 - Node blocks of block-ELL coarse levels (PR 11 reads the diagonal slot and calls `_inverse_blocks`), and `BlockELL` storage bytes for the PR 11 and 13 estimators.
 - fp32 smoother data (PR 11 casts the leaves of `block_jacobi`, `chebyshev` and the levels).
-- PR 14's masked $M_P$: `ap_operator(op.scaled(s_K=zeros), free, 1.0)` is exactly $mMm + \overline{\mathrm{diag}M}\,(I - m)$, so no constructor is added; the docs note it.
+- PR 14's masked $M_P$: `ap_operator(op.scaled(s_K=zeros), free, 1.0)` is exactly $mMm + \overline{\mathrm{diag}M}\,(I - m)$, so no constructor is added; the docs note it as a correctness shortcut that still pays a (zero-scaled) K apply, about 2× the cost of M alone, which PR 14's cost model counts or replaces by a small $M_P$ pytree.
