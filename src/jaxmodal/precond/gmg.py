@@ -269,9 +269,8 @@ def _vcycle(P, b, lvl):
 
 def _wt(rows, isl, W, r):
     """W^T r: (6 MAX_ISLANDS, m) from the per-row island blocks W (rows, 6)."""
-    rr = r[rows]
-    t = [jax.ops.segment_sum(W[:, j, None] * rr, isl, MAX_ISLANDS) for j in range(6)]
-    return jnp.stack(t, 1).reshape(-1, r.shape[1])
+    t = jax.ops.segment_sum(W[:, :, None] * r[rows][:, None], isl, MAX_ISLANDS)
+    return t.reshape(-1, r.shape[1])
 
 
 def _wy(rows, isl, W, y, r):

@@ -263,8 +263,10 @@ def test_islands():
     t = s.copy()
     t[1, 1, 6] = 1.0  # touches the block island along an edge only
     t[0, 5, 6] = 5e-6  # 5 min(s_K): soft (stiff means > 10 min)
+    t[0, 5, 9] = 2e-5  # 20 min(s_K): stiff, its own island
     got = G._islands(cells, t.ravel())
-    assert sorted(got[0]) == sorted([*want[0], ids[1, 1, 6]]) and len(got) == 3
+    assert sorted(got[0]) == sorted([*want[0], ids[1, 1, 6]]) and len(got) == 4
+    assert sorted(map(list, got[2:])) == [[ids[0, 5, 9]], [ids[3, 5, 0]]]
 
 
 def test_deflation_dense():
@@ -302,7 +304,7 @@ def test_deflation_shapes():
     """Per-row deflation storage padded to a power of 2 rows, 6 MAX_ISLANDS columns in E^+
     (one compiled cycle per row bucket); rows on two islands' rings appear once per island;
     no island gives defl None (the plain V-cycle)."""
-    m, op, free, _, _ = island_case()
+    m, op, free, _, s = island_case()
     rows, isl, Z, AZ, Einv = gmg(op, free, 0.37).defl
     n = len(rows)
     assert Z.shape == AZ.shape == (n, 6) and n >= 256 and n & (n - 1) == 0
@@ -312,6 +314,10 @@ def test_deflation_shapes():
     assert set(isl[live]) == {0, 1, 2}
     for c in (0, 1, 2):  # each island's rows are distinct
         assert len(np.unique(rows[live & (isl == c)])) == (live & (isl == c)).sum()
+    t = s.copy()
+    t[1:3, 2:4, 7:9] = t[3, 0, 10] = t[2, 1, 11] = 1e-6  # only the single-cell island left
+    rows = gmg(op.scaled(s_K=t.ravel(), s_M=t.ravel()), free, 0.37).defl[0]
+    assert len(rows) == 256  # 81 live rows: the 256-row floor
     _, op, free, _, _ = island_case(soft=1.0)
     assert gmg(op, free, 0.37).defl is None
 
