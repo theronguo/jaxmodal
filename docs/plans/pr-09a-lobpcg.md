@@ -70,7 +70,11 @@ The prototype is the design below: one module-level jitted step with every array
   | P re-orthogonalized in n-space against X and W | 12 + 6 |
   | without it | 7 + 6 |
   
-  The roadmap budget assumes about 11 blocks. Keeping P orthogonal in coefficient space (below) removes the n-space P pass. 9a records the `memory_analysis` temp of the final step in blocks; 9b's estimator and the budget table build on that number.
+  - With P kept orthogonal in coefficient space (`lob2`), the step measures 12 + 6 blocks at $m = 15$ and $48$, $n = 10^5$ and $10^6$. The temp is the same with R of 6 or 60 columns, so the temp does not grow with the basis.
+  - XLA:CPU does not fuse a sum of GEMMs: `X C_x + W C_w + P C_p` holds all three products at once. Sequencing the update with `optimization_barrier` (below) gives 10 + 6 = 16 blocks at the same speed (73 / 215 ms against 72 / 216 ms).
+  - The roadmap's "9 blocks + ≈ 2 Rayleigh–Ritz temporaries ≈ 11 blocks" cannot be reached in XLA. A donated buffer takes its output only after every read of it, so the 6 new X/P blocks coexist with the 6 old ones and W (3). One $(n, 3m)$ array or a stacked $(3, n, m)$ layout is worse (21 + 9).
+  
+  9a records the measured temp + alias of the final step in blocks in `docs/eigensolvers.md` (expected 16). 9b's estimator models that count and updates the Memory budget rows, for example 1M at $m = 25$: 3.2 GB instead of 1.8 + 0.4 GB. That is noted there as a deviation.
 - **Per-iteration cost** (182k DOF, first prototype):
 
   | m | step | K + M applies | dense part |
@@ -81,6 +85,7 @@ The prototype is the design below: one module-level jitted step with every array
   - The dense part is GEMMs at about 450 GFLOP/s.
   - Deflating W through `M(W)` cost a full extra M apply, +26% per iteration. With $M R$ precomputed it costs nothing extra.
   - Pairwise Grams (no concatenation of $[X, W, P]$) save 9% at $m = 48$.
+  - `lob2` measures 72 ms at $m = 15$ and 216 ms at $m = 48$. Recompute iterations cost 150 / 390 ms. HLO is 77 KB at $n = 10^6$.
 - **P drop rule.**
   - A relative-θ test (drop when SVQB of P has $\theta_\min < 10^{-6}\theta_\max$) dropped P on most iterations, and the free case stopped converging.
   - The noise test used instead: a P column is dropped when its M-norm after orthogonalization against X is $\le 10^{-8}$ of its norm before. It gives 0 drops in all runs above.
@@ -159,7 +164,7 @@ lam, V, info = lobpcg(op, free, n_modes, tol=1e-6, R=None, precond=None, X0=None
   | `iterations` | step calls |
   | `converged`, `stagnated` | Convergence |
   | `residuals`, `thresholds` | `(n_modes,)`, from explicitly recomputed products |
-  | `p_drops` | iterations in which any P column was dropped |
+  | `p_drops` | iterations in which any P column was dropped (noise rule or pivot-test fallback) |
   | `refills` | start-block refill rounds |
   | `norm_K`, `norm_M` | power-iteration estimates |
   | `history` | max wanted residual per iteration |
@@ -189,7 +194,7 @@ Hetmaniuk–Lehoucq / Duersch et al. 2018, with fixed shapes: every block is $(n
    
    Inactive columns are the exact $\theta = 0$ eigenspace, so kept directions carry nothing from them. It returns the transformed $V, KV, MV$ and the new mask; dropped columns are exact zeros.
 3. **Step** `lobpcg_step(state, op, mask, precond, R, MR, consts, recompute)`.
-   - A module-level `jax.jit`. The state `(X, KX, MX, P, KP, MP, actP, lam)` is donated. `consts = (‖K‖, ‖M‖, tol)` are traced scalars and `recompute` is a traced bool. Everything is an argument, nothing is closed over, so there is one compiled variant per shape.
+   - A module-level `jax.jit`. The state `(X, KX, MX, P, KP, MP, actP, lam)` is donated. `consts = (‖K‖, ‖M‖, tol, c)` are traced scalars, with $c$ read from `C_FLOOR` on the host at each call, so a monkeypatch takes effect without a recompile and `recompute` is a traced bool. Everything is an argument, nothing is closed over, so there is one compiled variant per shape.
    1. **Residuals.** $R = KX - MX\Lambda$, residuals $r_i$ and thresholds $t_i$ (Convergence). Active columns are $a = r > t$ (soft locking: converged columns get no new direction but stay in $X$).
    2. **New directions.** $W = T(R) \odot a$, deflated with $MR$; then $KW$ and $MW$, the only two applies of width $m$ per iteration.
    3. **Orthogonalize W.** M-orthogonalize against $[X, P]$ ($C = [MX, MP]^\top W$), SVQB, orthogonalize again, SVQB again.
@@ -197,24 +202,30 @@ Hetmaniuk–Lehoucq / Duersch et al. 2018, with fixed shapes: every block is $(n
       - Build $G_K$ and $G_M$ pairwise from $m\times m$ products, without concatenating the blocks.
       - Zero the masked rows and columns off the diagonal, with $G_M = 1$ and $G_K = \beta = 10\max_i|\lambda_i| + \|K\|/\|M\|$ on their diagonal. X is fully active and M-orthonormal, so by Courant–Fischer the lowest $m$ active Ritz values are $\le \max_i\lambda_i < \beta$. Masked slots never enter, and no λ̂_max is needed.
       - Cholesky of $G_M$, then `eigh`; take the lowest $m$.
-      - If the Cholesky is not finite or $\min\mathrm{diag}(L)^2 \le 10^{-10}$ ($G_M$ ill-conditioned), redo the small problem with the P block masked. That is a `jnp.where` between the two small solutions; the n-sized work is unchanged.
+      - **Pivot test:** if the Cholesky is not finite or $\min\mathrm{diag}(L)^2 \le 10^{-10}$, redo the small problem with the P block masked. That is a `jnp.where` between the two small solutions; the n-sized work is unchanged.
+        - This bounds $\lambda_\min(G_M)$ only from above, not the condition number. In practice $G_M \approx I$: the measured minimum pivot is 1.00 and $\max|G_M - I| \le 7\cdot10^{-8}$.
+        - The whole P block is masked, and this counts as a drop.
    5. **New P coefficients** (Duersch).
       - Take $C_P$ = the Ritz coefficients with the X rows zeroed.
       - M-orthogonalize $C_P$ against $C_X$ in the $G_M$ inner product, twice, entirely in the small space.
-      - A column whose $G_M$-norm falls to $\le 10^{-8}$ of its norm before is masked; this is the noise rule.
+      - A column whose $G_M$-norm falls to $\le 10^{-8}$ of its norm before is masked. This is the column-level noise rule; it counts as a drop.
+      - If removing the noise rule is caught by no test (the pivot test may cover it), it is dropped in the implementation rather than kept unpinned.
       - SVQB of the rest in coefficient space.
       - The new $[X', P']$ is then M-orthonormal without any n-space orthogonalization of P.
-   6. **Update.** $X' = X C_{X,x} + W C_{X,w} + P C_{X,p}$, and $P'$ likewise from $C_P$; $KX'$, $MX'$, $KP'$, $MP'$ by the same GEMMs. `lax.cond(recompute, ...)` replaces the products by explicit applies.
+   6. **Update.** $X' = X C_{X,x} + W C_{X,w} + P C_{X,p}$, and $P'$ likewise from $C_P$; $KX'$, $MX'$, $KP'$, $MP'$ by the same GEMMs.
+      - For each of $V$, $KV$, $MV$ the update is sequenced: the X products for $X'$ and $P'$, then `optimization_barrier`, then the added W products, another barrier, then the P products. This saves 2 blocks (Measured facts).
+      - `lax.cond(recompute, ...)` replaces the products by explicit applies.
    7. **Return.** The new state, and one packed array (residuals, thresholds and λ of $X'$, the drop flag), giving a single device-to-host transfer per iteration.
 4. **Outer loop (Python).**
    - One step per iteration, with `recompute = (it + 1) % RECOMPUTE == 0`.
+   - A non-finite packed output raises `FloatingPointError`. That is a free check on an array already fetched, and it covers a failed fallback.
    - When the lowest $n_\mathrm{modes}$ meet their thresholds, recompute $KX$ and $MX$ explicitly, write them back into the state, and check again. Exit only if that check passes.
    - An internal `stop(lam_history)` predicate serves `sigma_estimate`.
    - Module constants: `RECOMPUTE = 20`, `C_FLOOR = 10`, `TAU = 1e-14`, `TAU_P = 1e-8`, `STALL = 50`.
 
 9b keeps `lobpcg_step` and changes only around it:
 - the deflation $W \leftarrow W - R(MR^\top W)$ becomes the chunked projector over $[R, \text{locked}]$, already a step argument;
-- the 6-block mode is a second step variant;
+- the 6-block mode is a second step variant (the roadmap's "at most two compiled step variants" becomes 9-block and 6-block);
 - the outer loop gains chunks and locking.
 
 ## Convergence
@@ -257,7 +268,9 @@ All tests compare against `reference_modes`, requesting at least 6 modes past th
    - Principal angles: $\sin\theta \le 10\,r_M\lambda/\mathrm{gap}$, with the absolute gap and a dense $r_M$ through the Cholesky of $M_f$. The reference's $r_M$ is asserted $\ge 10\times$ smaller; measured margin 20–25×.
    - Clusters with relative gap $< 10^{-4}$ are compared by subspace, with the gap to the nearest outside eigenvalue.
    - $\|V^\top MV - I\|_\max \le 10^{-10}$, constrained rows exactly 0, $\lambda$ ascending.
-   - `info["residuals"]` equals the residuals recomputed in the test from the returned $V$, $\lambda$ (relative $10^{-12}$).
+   - `info["residuals"]` equals the residuals recomputed in the test from the returned $V$, $\lambda$ with the solver's own operator, $\|K_m v - \lambda M_m v\|/(|\lambda|\,\|M_m v\|)$ through `op.apply_K`/`op.apply_M` and the mask (relative $10^{-12}$).
+     - Assembled SciPy matrices differ from it by about $2\cdot10^{-4}$ even for a correct solver, because of round-off at $\varepsilon\lambda_\max/\lambda$.
+     - The confirmation-removed mutant differs by $10^{-3}$.
    - `converged` is True and `stagnated` is False.
 2. **Multiplicities.** A free square-section beam ($2\times1\times1$, hex20 $6\times3\times3$) and a free cube (hex20 $4^3$).
    - `n_modes` is chosen so that the reference has a relative gap $> 10^{-6}$ after the last wanted mode (asserted).
@@ -266,14 +279,16 @@ All tests compare against `reference_modes`, requesting at least 6 modes past th
 4. **Gap $[10^{-4}, 10^{-2})$.** A clamped beam with section $1\times1.002$; its bending pairs sit at a λ relative gap of about $4\cdot10^{-3}$, which the test asserts lies in the band. The test checks λ error $\le \max(10\,\mathrm{tol}, f_\lambda)$, cluster-wise and sorted.
 5. **Stagnation.**
    - (a) tol $= 10^{-16}$ on hex20 $4^3$: `converged` and `stagnated` are both True, `iterations < maxit`, and every wanted residual is ≤ its threshold.
-   - (b) With `C_FLOOR` monkeypatched to 0 (so the floor is unreachable): the no-progress exit fires before `maxit`, with `converged = False` and `stagnated = True`.
+   - (b) With `C_FLOOR` monkeypatched to 0, so the floor is unreachable (tol $10^{-16}$, same mesh; $c$ is a traced argument, so no stale executable): the no-progress exit fires before `maxit`, with `converged = False` and `stagnated = True`.
    - (c) A 1-mode solve on clamped hex20 $6^3$ at tol $10^{-10}$ converges without a flag. This run has an 85-iteration gap without a new residual minimum, so it kills the residual-only rule.
 6. **Rank-deficient start.** `X0` with duplicated columns: `refills ≥ 1`, converges, λ match as in test 1.
-7. **Forced P drop.** Call `lobpcg_step` on a state whose $P = XC + 10^{-12}\xi$ (random $C$, $\xi$, P mask all True): the drop flag is set and the output is finite. With a random $P$ (orthonormalized against $X$), it is not set.
+7. **Forced P drop and the P invariant.**
+   - (a) Call `lobpcg_step` on a state whose $P = XC + 10^{-12}\xi$ (random $C$, $\xi$, P mask all True): the drop flag is set and the output is finite. With a random $P$ (M-orthonormalized against $X$), the flag is not set.
+   - (b) After 30 steps from a real start on hex20 $4^3$, explicit M applies give $\|P'^\top M X'\|_\max \le 10^{-6}$ and $\|P'^\top M P' - I\|_\max \le 10^{-6}$ on the live columns. Correct code measures $\le 7\cdot10^{-8}$; without the coefficient-space orthogonalization it is about 0.6.
 8. **Near-singular M.** hex20 $6^3$ with 30% void elements ($E\cdot10^{-9}$, $\rho\cdot10^{-12}$, seed 0) at tol $10^{-8}$, seed 0: converged within 500 iterations (measured 358), λ error $\le f_\lambda$ against `reference_modes` on the same materials.
-9. **Floor** (slow). At tol $10^{-16}$ on the clamped and the free hex20 $6^3$, the lowest attained max residual (`min(history)`) is within $[0.1, 10]\times\varepsilon\lambda_\max/\lambda_1$. The values are recorded in `docs/eigensolvers.md`.
+9. **Floor** (slow). At tol $10^{-16}$ on the clamped and the free hex20 $4^3$ (clamped measured: ratio 0.9), the lowest attained max residual (`min(history)`) is within $[0.1, 10]\times\varepsilon\lambda_\max/\lambda_1$. The values are recorded in `docs/eigensolvers.md`.
 10. **Compiles.** In a fresh subprocess with the cache disabled, count `jax.monitoring` backend-compile events whose `fun_name` contains `lobpcg_step`.
-    - One solve: ≤ 2 (the roadmap bound; 1 expected).
+    - One solve: exactly 1. The roadmap's ≤ 2 leaves room for 9b's 6-block variant, and exactly 1 also kills a static `recompute`.
     - A second solve with the same shapes but new data (`op.scaled(...)` with a new `s_K`, a new `jacobi` σ, a new tol) adds 0.
     - `sigma_estimate` runs separately, at $m = 6$, and is counted separately: ≤ 1.
 11. **σ pre-estimate.** On clamped hex20 $8^3$ and free hex20 $6^3$ (with `R`): $\lambda_1 \le \sigma \le 2\lambda_1$.
@@ -288,13 +303,14 @@ All tests compare against `reference_modes`, requesting at least 6 modes past th
 | start block not deflated | 3 |
 | mask diagonal $G_K = 0$ instead of β | 6 (spurious zero Ritz values) |
 | no refill of dropped start columns | 6 |
-| Cholesky fallback removed (P never dropped) | 7 |
-| coefficient-space orthogonalization of $C_P$ removed | 1 or 7 (expected: loss of M-orthonormality or drops); confirm when implementing |
+| pivot-test fallback removed | 7a (non-finite output; the flag alone is not set) |
+| coefficient-space orthogonalization of $C_P$ removed | 7b (measured 0.6 vs $\le 7\cdot10^{-8}$; tests 1 and 7a do not see it) |
+| noise rule removed | 7a or dropped from the code (Algorithm) |
 | floor term removed ($c = 0$) | 5a |
 | no-progress exit removed | 5b (runs to `maxit`) |
 | λ-sum progress clause removed | 5c |
-| explicit confirmation at exit removed | 1 (residuals vs recomputed) |
-| `recompute` made static | 10 (extra compile) |
+| explicit confirmation at exit removed | 1 (residuals vs recomputed with `op`) |
+| `recompute` made static | 10 (2 compiles instead of 1) |
 | operator closed over instead of passed | 10 (second solve recompiles) |
 | Jacobi ignores σ | 12 |
 | σ stop window of 1 iteration | 11 |
@@ -305,7 +321,7 @@ All tests compare against `reference_modes`, requesting at least 6 modes past th
 
 - **`docs/eigensolvers.md`:** module list in the intro, plus a LOBPCG section with:
   - the `lobpcg` / `jacobi` / `sigma_estimate` signatures, the `info` fields, the block-size rule and the `ValueError`, and the `R` contract;
-  - the algorithm: the steps above, why SVQB zeroes inactive columns, the mask value and the Courant–Fischer argument, the P rules, implicit updates;
+  - the algorithm: the steps above, why SVQB zeroes inactive columns, the mask value and the Courant–Fischer argument, the two P levels (the column noise rule and the whole-block pivot-test fallback), implicit updates, the sequenced update;
   - convergence: residual, threshold, the outcome table, both progress clauses, the theory;
   - the σ pre-estimate and its cost, and why the default Jacobi uses σ = 0;
   - the measured floor, the iteration tables, the SIMP case, the per-iteration cost and step memory in blocks, and the thin-plate limit of Jacobi;
@@ -314,7 +330,11 @@ All tests compare against `reference_modes`, requesting at least 6 modes past th
 - **`docs/ROADMAP.md`:**
   - the PR 9 split note, with the dependency text above;
   - the 9a status line;
-  - the two deviations (σ = 0 default, the hint test moving to PR 11; the mask value without λ̂_max and the test λ_max from SciPy), including the matching Key-decisions wording ("A = 10·λ̂_max", "estimated before the solve by a few Jacobi-preconditioned LOBPCG iterations").
+  - the two deviations:
+    - **σ = 0 default:** add only the exception "PR 9's default Jacobi uses σ = 0 (iterations change < 3%)" to the general σ > 0 preconditioning rule (line 65). Add "the σ pre-estimate is within 2× of λ₁ and a user hint skips it" to PR 11's Tests, and point PR 9's test clause (line 395) to it.
+    - **No λ̂_max in the solver:** the Rayleigh–Ritz decision "A = 10·λ̂_max" becomes "A = 10·max|λ| + ‖K‖/‖M‖". λ̂_max is defined once (at the PR 9 λ-error test) as "λ_max from SciPy `eigsh(which="LA")` on the free blocks (tests only)", so the uses at lines 390, 411, 414, 418, 526 and 536 inherit it;
+  - line 74: "at most two compiled step variants (with and without P)" becomes "(9-block and 6-block)";
+  - a note that the step's measured memory (about 16 blocks in the 9-block mode) exceeds the budget's 9 + 2. 9b updates the Memory budget rows with its estimator.
 - **`README.md`:** the status line and `lobpcg` in the API overview.
 
 ## Not covered
