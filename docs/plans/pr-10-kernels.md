@@ -20,7 +20,9 @@ The kernels serve these later PRs:
 | 14 (counting) | blocks of PCG probe solves |
 | 15 (interior bands) | MINRES with the explicit-residual stopping rule |
 
-**Deviations from the roadmap:** none. Decisions the roadmap leaves open are made below.
+**Deviations from the roadmap:** none. Principle 2's operator interface gains a sixth method, `block_diag_K()`, which the roadmap's "node blocks computed from the element kernels" requires; the principle's wording is updated (Docs). Decisions the roadmap leaves open are made below.
+
+**Sign convention.** `ap_operator(op, free, sigma)` builds $K + \sigma M$. The shift-invert operator of the roadmap, $K - \sigma_b M$ with $\sigma_b$ inside the spectrum, is `ap_operator(op, free, -sigma_b)`, and its SPD preconditioner is built at $+\sigma_b$ (e.g. `block_jacobi(op, free, sigma_b)`).
 
 ## Measured facts (prototypes `scratchpad/p10/`; jax 0.11.2, fp64, M3 Max CPU)
 
@@ -90,7 +92,7 @@ The estimate approaches $\lambda_\max$ from below and stays within 0.8% of it.
 | `operators/constraints.py` | `ap_operator`, the matrix-free $A_P$ |
 | `operators/matfree.py`, `operators/voxel.py` | a sixth operator method, `block_diag_K()` |
 
-Everything is fp64-checked (`check_x64`) at its public entry and traceable. The callables (operator, preconditioner, ELL matrix) are pytrees passed as jit arguments, so new data never recompiles, as in `lobpcg`.
+Every public entry checks that x64 is enabled (`check_x64`, the flag, not the dtype of the data), and everything is traceable. The callables run in the dtype of their input where they can (PR 11's fp32 V-cycles cast the leaves with `tree_map`; Not covered). The callables (operator, preconditioner, ELL matrix) are pytrees passed as jit arguments, so new data never recompiles, as in `lobpcg`.
 
 ### $A_P$ (`ap_operator`)
 
@@ -116,22 +118,21 @@ Everything is fp64-checked (`check_x64`) at its public entry and traceable. The 
 
 ### Node-block Jacobi (`block_jacobi`)
 
-`block_jacobi(op, free, sigma=0.0, s=None)` builds the node blocks of $A_P$:
+`block_jacobi(op, free, sigma=0.0)` builds the node blocks of $K + \sigma M$:
 - $B_n = K_{nn} + \sigma\,\mathrm{diag}(M)_n I_3$;
-- rows and columns of constrained components zeroed;
-- diagonal $s$ on them (the same `s` as `ap_operator`).
+- rows and columns of constrained components zeroed, with 1 on their diagonal. The output is masked, so the constrained diagonal never reaches it and no `s` is needed (as in `jacobi`). On the free entries $B_n$ equals the 3×3 diagonal block of $A_P$.
 
-It inverts them by batched `jnp.linalg.inv` (SPD 3×3; for $\sigma < 0$ they may be indefinite, so inv is used rather than Cholesky), and returns `Partial(_block_jacobi, inv, mask)`: $v \mapsto m \odot (B_n^{-1} v_n)$ with masked output. Its storage is 9 values per node (3 vectors). Like `jacobi`, it fits any `precond` slot.
+$\sigma < 0$ raises `ValueError` (preconditioners are SPD and approximate $K + \sigma M$ with $\sigma \ge 0$; MINRES's preconditioner is built at $+\sigma_b$), and `jacobi` gets the same check. The blocks are inverted through a batched Cholesky (`cho_solve` against $I_3$), so a non-SPD block gives NaN instead of silent garbage. A private `_inverse_blocks(B, free)` does the masking and inversion from any `(n_nodes, 3, 3)` blocks, so PR 11 can feed it coarse-level blocks. `block_jacobi` returns `Partial(_block_jacobi, inv, mask)`: $v \mapsto m \odot (B_n^{-1} v_n)$. Its storage is 9 values per node (3 vectors). Like `jacobi`, it fits any `precond` slot.
 
 ### PCG (`pcg`)
 
 `pcg(A, b, precond=None, tol=1e-8, maxit=1000)`, for $(n, k)$ right-hand sides.
 
-- **Iteration:** a standard preconditioned CG, run independently per column (column-wise scalars, as for PR 14's probe blocks). A column that is done is frozen: its step size is 0, so its $x$ stops changing. The loop is one jitted `lax.while_loop`; `tol` and `maxit` are dynamic.
+- **Iteration:** a standard preconditioned CG, run independently per column (column-wise scalars, as for PR 14's probe blocks). A column that is done is frozen: its $\alpha$ and $\beta$ are set to 0 through `jnp.where` (which also guards the $0/0$ of zero and converged columns), so its $x$ stops changing. The loop is one jitted `lax.while_loop`; `tol` and `maxit` are dynamic.
 - **Stopping, per column:**
   1. When the recursive residual meets $\|r\|_2 \le \mathrm{tol}\,\|b\|_2$, the explicit residual $b - Ax$ is computed (one extra apply for the block, under `lax.cond` only in iterations where some column newly meets tol).
   2. If the explicit residual is also within tol, the column is converged.
-  3. Otherwise the column's residual is replaced by the explicit one (residual replacement, $p$ kept), and the iteration continues.
+  3. Otherwise the column restarts from its current $x$: $r = b - Ax$ (the explicit residual), $z = P r$, $\rho = r^\top z$, $p = z$. Keeping the old $p$ was measured not to work (correctness review): the recursive residual then creeps down from the floor without reaching tol, no further replacement happens, and the column runs to `maxit`. With the restart, tol $10^{-14}$ converges after a replacement, and $10^{-15}$, $10^{-16}$ stagnate after 5 replacements in 469–848 iterations; iteration counts above the floor are unchanged.
   4. After `STALL_R` = 5 replacements in a column without convergence, the column stops as `stagnated` (the attainable floor; PR 14's "unverifiable" input).
   5. `maxit` stops every remaining column.
   
@@ -140,7 +141,8 @@ It inverts them by batched `jnp.linalg.inv` (SPD 3×3; for $\sigma < 0$ they may
   - `iterations` `(k,)`;
   - `residuals` `(k,)`, explicit relative residuals at exit;
   - `converged` `(k,)`;
-  - `stagnated` `(k,)`.
+  - `stagnated` `(k,)`;
+  - `replacements` `(k,)` (PCG only), so the restart path is observable.
 - **Zero columns** of `b` return $x = 0$ and converged, with 0 iterations.
 - **Masking:** `b` must vanish on constrained DOFs (it is not checked, because `pcg` knows no mask). With a masked-output preconditioner, $x$ then stays 0 there. That is exact for $A_P$, whose constrained part is decoupled.
 - **Default `precond`:** the identity.
@@ -156,8 +158,9 @@ It inverts them by batched `jnp.linalg.inv` (SPD 3×3; for $\sigma < 0$ they may
   - `stagnated` after 5 consecutive checks without a new minimum of its explicit residual;
   - `maxit` (an `info` flag through `converged` False, `stagnated` False).
   
-  The last iterate is returned. Iteration counts are multiples of 10 (PR 15's cost model uses these).
-- **Returns:** the same as `pcg`.
+  The last iterate is returned. Iteration counts are multiples of 10 when `maxit` is (PR 15's cost model uses these). Frozen columns and zero columns ($\beta = 0$, MINRES's breakdown case) are guarded with `jnp.where` as in `pcg`.
+- **Returns:** the same as `pcg` without `replacements`; `residuals` are the explicit residuals at exit (PR 15 takes $\tau_\mathrm{eff}$ from them).
+- **Floor:** measured 8.8e-14 with σ between $\lambda_6$ and $\lambda_7$, 1.2e-12 between $\lambda_{30}$ and $\lambda_{31}$ (it grows with the shift's index); recorded in `docs/preconditioners.md` for PR 15.
 - **Memory:** 7 blocks ($x$, $r_1$, $r_2$, $y$, $w$, $w_2$ and the apply output).
 
 ### Block-ELL (`block_ell`, `BlockELL`)
@@ -176,28 +179,30 @@ It inverts them by batched `jnp.linalg.inv` (SPD 3×3; for $\sigma < 0$ they may
   - several buckets are concatenated and put back in row order by one gather with the inverse permutation.
   
   The workspace is about one vector block at `chunk` = 2048 (measured). `chunk` is a static field.
-- **Padding ratio:** `padding` = stored blocks / nonzero blocks, excluding the `chunk` round-up.
+- **Chunk:** per bucket, `min(chunk, rows rounded up to 8)` block rows, so tiny coarse levels are not padded to 2048 rows. The gather temp is chunk·w·b·m·itemsize: about one vector block for 3×3 blocks, width 27 and 2048 rows; 79 MB for PR 13's level 1 (6×6, width 32, $m = 25$, measured shapes). The formula goes into the docs.
+- **Padding ratio:** `padding` = stored blocks / structurally nonzero blocks (blocks present in the BSR structure), excluding the `chunk` round-up.
 - **Sliced fallback:**
   - `sliced=None` chooses one bucket (plain ELL) when its padding is ≤ 1.5, else sliced ELL;
   - `sliced=True` / `False` force it.
   
   Sliced ELL groups the rows by width rounded up to a power of 2, one bucket per distinct width, so its padding is < 2.
 - **Block size:** `b` is a parameter, because PR 13's smoothed-aggregation coarse levels have 6×6 blocks (6 near-null modes per aggregate), and PR 11's levels 3×3.
-- **dtype:** `dtype="float32"` stores `vals` in fp32 for PR 11's fp32 V-cycles. The apply then runs in the input's dtype.
+- **dtype:** `dtype="float32"` stores `vals` in fp32 for PR 11's fp32 V-cycles. The apply casts `vals` to the input's dtype per chunk (an fp64 input against fp32 values computes in fp64).
 - **Built on the host** (vectorized NumPy, no Python row loop) from the matrices PRs 11–13 produce.
 
 ### Chebyshev (`lmax_estimate`, `chebyshev`)
 
-- **`lmax_estimate(A, precond, n, free, steps=20, seed=0)`:**
-  - What it estimates: $\lambda_\max(D^{-1}A)$, where $D^{-1}$ = `precond`.
-  - Method: `steps` Lanczos steps in the $D^{-1}$-weighted form ($v_{j+1} \propto A z_j - \alpha_j v_j - \beta_j v_{j-1}$, $z = D^{-1} v$), from one seeded random start masked by `free`, without reorthogonalization. It returns the largest Ritz value of the tridiagonal matrix (a lower bound).
+- **`lmax_estimate(A, precond, steps=20, seed=0)`:**
+  - What it estimates: $\lambda_\max(D^{-1}A)$, where $D^{-1}$ = `precond` (masked output, so the start vector needs no mask: $z = D^{-1}v$ vanishes on constrained DOFs). `A` must have `n_dof` (`APOperator` and `BlockELL` do).
+  - Method: `steps` Lanczos steps in the $D^{-1}$-weighted form ($v_{j+1} \propto A z_j - \alpha_j v_j - \beta_j v_{j-1}$, $z = D^{-1} v$), from one seeded random start, without reorthogonalization, with a `jnp.where` guard on $\beta = 0$ (an invariant start on a tiny coarse level). It returns the largest Ritz value of the tridiagonal matrix (a lower bound).
+  - Robustness (correctness review, seeds 0–4): $1.1\tilde\lambda_\max/\lambda_\max \in [1.0926, 1.1000]$ over voxel boxes up to 202k DOF, random two-phase contrast $10^4$, stiff and soft inclusions, hex20 and hex8 plates with $L/t$ 100 and 500, hex27, $\nu = 0.49$ and a free masked sphere, for Jacobi and block Jacobi.
   - Traceable: a jitted `fori_loop` with fixed `steps`; the eigenvalues of the small tridiagonal come from `jnp.linalg.eigvalsh`.
 - **`chebyshev(A, precond, lmax, degree=2, ratio=30.0)`:**
   - Returns a pytree callable $S$, a fixed linear SPD preconditioner: $r \mapsto p(D^{-1}A)\,D^{-1}r$, the `degree`-step Chebyshev iteration from $x_0 = 0$.
-  - Interval: $[\hat\lambda/\mathrm{ratio}, \hat\lambda]$, $\hat\lambda = 1.1\,$`lmax`.
+  - Interval: $[\hat\lambda/\mathrm{ratio}, \hat\lambda]$, $\hat\lambda = 1.1\,$`lmax`. The safety factor is applied inside: callers pass the raw estimate.
   - Cost: `degree` preconditioner applies and `degree − 1` operator applies.
-  - The smoothing step of PRs 11–13 is $x \leftarrow x + S(b - Ax)$, i.e. `degree` operator applies per smoothing. That matches the budget model's "degree 2 pre- and post-smoothing plus the residual: 5".
-  - $S$ is symmetric because $p(D^{-1}A)D^{-1} = D^{-1/2}p(D^{-1/2}AD^{-1/2})D^{-1/2}$. It is SPD because the residual polynomial is below 1 in magnitude on $(0, \hat\lambda]$, which contains the spectrum because $\hat\lambda \ge \lambda_\max$.
+  - The smoothing step of PRs 11–13 is $x \leftarrow x + S(b - Ax)$, i.e. `degree` operator applies per smoothing ($\mathrm{degree} - 1$ for pre-smoothing from $x = 0$). A degree-2 V-cycle then takes 4 fine applies, below the budget model's 5.
+  - $S$ is symmetric because $p(D^{-1}A)D^{-1} = D^{-1/2}p(D^{-1/2}AD^{-1/2})D^{-1/2}$. It is SPD because the residual polynomial is below 1 in magnitude on $(0, \hat\lambda]$, which contains the spectrum because $\hat\lambda \ge \lambda_\max$. For even degree $S$ stays SPD up to $\lambda_\max \le \hat\lambda(1 + 1/\mathrm{ratio})$; for odd degree it stays positive beyond $\hat\lambda$, but smoothing diverges there.
   - `degree` is static (a dataclass meta field). `lmax` is a leaf, so a new estimate does not recompile.
   - Ratio 30 is the common ML/Ifpack2 default; PR 11 may tune it.
 
@@ -242,15 +247,19 @@ All against `spsolve` on the PR 4 `a_p`, on the hex20 box above unless stated ot
      - constrained rows of $x$ are exactly 0.
    - Repeated with the identity preconditioner, `block_jacobi` and `chebyshev` (degree 2).
    - Also run free-free, with σ > 0 and `bcs={}`.
-2. **PCG columns are independent:**
-   - a block with right-hand sides of different difficulty (one a low-mode combination) gives per-column iterations and $x$ equal to the single-column solves (iterations exactly, $x$ to $10^{-12}$);
+2. **Columns are independent (PCG and MINRES):** at tol $10^{-8}$, a block of an easy column (a low-mode combination) and a random one, against the single-column solves:
+   - iterations exactly equal;
+   - $x$ within $10^{-9}$ relative (the batched rounding differs by up to $4\cdot10^{-11}$, measured);
+   - the easy column's exit residual within 1% of its single-column value (an unfrozen column would keep stepping and push it far below tol: the tests review measured $x$ off by $1.6\cdot10^{-9}$ and survival of "$x$ to $10^{-12}$" at tol $10^{-12}$);
    - scaling one column by $10^{6}$ changes nothing for the others.
-3. **PCG exits:**
-   - tol $10^{-16}$: every column `stagnated`, not converged, with fewer iterations than `maxit`; explicit residuals $\le 10^{-12}$ (the floor, recorded);
+3. **PCG exits** (explicit `maxit=3000`):
+   - tol $10^{-16}$: every column `stagnated` with exactly `STALL_R` = 5 replacements, not converged, fewer iterations than `maxit`; explicit residuals $\le 10^{-13}$ (measured $\le 4.6\cdot10^{-14}$);
+   - a tol in the $10^{-14}$ band (fixed at implementation from a measurement): a column converges after $\ge 1$ replacement;
+   - tol $10^{-12}$: no replacements;
    - `maxit=5`: not converged, not stagnated, `iterations == 5`.
 4. **MINRES accuracy:**
-   - the SPD case as in test 1;
-   - the indefinite $A_P(K - \sigma M)$ with σ the midpoint of $\lambda_6$ and $\lambda_7$, default `s` (equal to the explicit roadmap $s$), Jacobi of $K + \sigma M$, tol $10^{-12}$: rel. error $\le 10^{-10}$ (measured $2.2\cdot10^{-12}$).
+   - the SPD case as in test 1, including the zero column ($\beta = 0$);
+   - the indefinite `ap_operator(op, free, -sigma_b)` ($K - \sigma_b M$) with $\sigma_b$ the midpoint of $\lambda_6$ and $\lambda_7$, default `s` (equal to the explicit roadmap $s$), preconditioner `jacobi(op, free, sigma_b)`, tol $10^{-12}$: rel. error $\le 10^{-10}$ (measured $2.2\cdot10^{-12}$; the floor is 8.8e-14 here, a 3× margin on the residual).
 5. **MINRES exits:**
    - tol $10^{-15}$: `stagnated` well before `maxit`;
    - `maxit=30`: not converged, not stagnated;
@@ -262,34 +271,37 @@ All against `spsolve` on the PR 4 `a_p`, on the hex20 box above unless stated ot
 7. **Plain ELL against SciPy CSR to $10^{-12}$:**
    - matrices: the assembled hex8 and hex20 $A_P$ ($b = 3$) and a random symmetric block-sparse matrix with $b = 6$;
    - widths $m$ = 1 and 7;
-   - `chunk` 2048 and a small `chunk` = 4, so that several chunks and the round-up are exercised.
+   - `chunk` 2048 and a small `chunk` = 4, with a block-row count that is not a multiple of 4, so that several chunks and the round-up are exercised.
 8. **Sliced ELL:**
-   - Matrix: a matrix with a few dense rows (padding > 1.5, so `sliced=None` chooses sliced ELL); `n_buckets > 1`.
+   - Matrix: a matrix with a few dense rows in the middle, not at the ends (padding > 1.5, so `sliced=None` chooses sliced ELL); `n_buckets > 1`.
    - It matches CSR to $10^{-12}$ for $b$ = 3 and 6.
    - `sliced=False` on the same matrix also matches and reports the larger padding.
-9. **Padding:** `padding` equals stored blocks / nonzero blocks counted independently.
-10. **fp32:** `dtype="float32"` matches CSR to $10^{-6}$ relative on fp32 input.
+9. **Padding:** `padding` equals stored blocks / structural BSR blocks counted independently.
+10. **fp32:** `dtype="float32"` stores fp32 `vals`, returns fp32 for fp32 input, and matches CSR to $10^{-6}$ relative.
 11. **PCG through `BlockELL`:** PCG on `block_ell(A_P)` equals PCG on `ap_operator` to $10^{-10}$.
 
 ### `tests/test_precond.py`
 
 12. **`ap_operator` against SciPy `a_p(K + sigma M, free, s)` @ x to $10^{-12}$:**
     - σ = 0, $\lambda_1$ and a negative σ (with its default $s$ equal to the roadmap's $s$);
-    - unstructured and stencil.
+    - unstructured and stencil;
+    - on random vectors that are not masked (a missing inner $m \odot x$ fails).
 13. **Node blocks against SciPy to $10^{-12}$:**
     - `block_diag_K` equals the 3×3 diagonal blocks of the assembled $K$;
-    - `block_jacobi`'s blocks (before inversion) equal those of the PR 4 SciPy $A_P$;
+    - `block_jacobi`'s blocks (before inversion) equal those of the PR 4 SciPy $A_P$ on the free entries, with identity on the constrained ones;
+    - `block_jacobi` and `jacobi` raise for σ < 0;
     - cases:
       - unstructured stored and on-the-fly, consistent and lumped, with nodal masses, scaled `s_K`;
       - mixed hex8 + hex20 + a hex27 box;
       - the voxel stencil with a mask and 2 phases;
       - BCs `xmin: xyz` plus `ymin: y` (partially constrained nodes).
-14. **Block-Jacobi apply:** it equals `scipy.linalg.inv` of each block times $v$, with masked output.
+14. **Block-Jacobi apply:** on a vector with nonzero constrained entries, it equals `scipy.linalg.inv` of each block times $v$, with output exactly 0 on constrained DOFs.
 15. **λ_max:** $1.1\,$`lmax_estimate` lies in $[1, 1.5]\times$ the `eigsh(which="LA")` $\lambda_\max$ of $(A_{P,ff}, D_{ff})$:
     - $D$ = Jacobi and block Jacobi;
     - unstructured hex20 and voxel;
     - seeds 0–2.
 16. **Chebyshev:**
+    - for degrees 1–4, with Jacobi and block Jacobi: `chebyshev(...)` applied to random masked vectors equals the dense spectral reference to $10^{-12}$: on the free block, with $D^{-1/2}A_{P,ff}D^{-1/2} = Q\,\mathrm{diag}(\mu)\,Q^\top$ and $r_k(\mu) = T_k((\theta - \mu)/\delta)/T_k(\theta/\delta)$ (same `lmax`), $S_\mathrm{ref} = D^{-1/2}Q\,\mathrm{diag}((1 - r_k(\mu))/\mu)\,Q^\top D^{-1/2}$. The tests review measured the prototype within $6\cdot10^{-15}$ and four coefficient mutants (recurrence sign, missing factor 2, no 1.1, ratio 10) off by $7\cdot10^{-2}$–$5\cdot10^{-1}$, while all four passed symmetry, positivity and "fewer iterations than block Jacobi". This also pins that the 1.1 is applied exactly once;
     - for degrees 1–4:
       - $|u^\top Sv - v^\top Su| \le 10^{-12}\,|u^\top Sv|$;
       - error propagation $E = I - SA_P$ is $A_P$-self-adjoint to $10^{-12}$;
@@ -308,10 +320,11 @@ All against `spsolve` on the PR 4 `a_p`, on the hex20 box above unless stated ot
   - PCG and MINRES: algorithms, stopping rules, `info`, block counts, masking;
   - block-ELL: layout, chunks, padding, the sliced fallback, fp32;
   - the measured tables above and the h-study.
-- `docs/operators.md`: `block_diag_K` as the sixth interface method; `ap_operator`.
+- `docs/operators.md`: `block_diag_K` as the sixth interface method (the "same five" wording at the interface paragraph changes).
+- `docs/boundary_conditions.md`: the module intro and the $A_P$ section gain `ap_operator` (matrix-free counterpart of `a_p`), its default $s$ for both signs of σ and the sign convention.
 - `docs/eigensolvers.md`: `jacobi` now lives in `precond/`.
 - `README.md`: a short PCG with Chebyshev snippet; the status line.
-- `docs/ROADMAP.md`: the status line.
+- `docs/ROADMAP.md`: the status line; Principle 2's interface list gains `block_diag_K` (from PR 10).
 
 ## Not covered
 
@@ -319,3 +332,6 @@ All against `spsolve` on the PR 4 `a_p`, on the hex20 box above unless stated ot
 - A fused $K + \sigma M$ apply. This is the budget model's first lever, deferred until a PR measures the need.
 - Assembling $A_P$ into block-ELL from elements (PR 11 builds its coarse levels element-wise).
 - Block-Krylov variants: columns are independent solves.
+- Node blocks of block-ELL coarse levels (PR 11 reads the diagonal slot and calls `_inverse_blocks`), and `BlockELL` storage bytes for the PR 11 and 13 estimators.
+- fp32 smoother data (PR 11 casts the leaves of `block_jacobi`, `chebyshev` and the levels).
+- PR 14's masked $M_P$: `ap_operator(op.scaled(s_K=zeros), free, 1.0)` is exactly $mMm + \overline{\mathrm{diag}M}\,(I - m)$, so no constructor is added; the docs note it.
