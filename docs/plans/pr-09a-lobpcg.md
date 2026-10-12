@@ -77,7 +77,7 @@ The prototype is the design below: one module-level jitted step with every array
   | hex20 $24^3$ | 182k | 15 | 18 |
   | hex20 $32^3$ | 421k | 15 | 16.9 |
 
-  The barrier saving shows only from about 400k DOF. 9b's estimator models the step as max(16 blocks, apply phase + the operator estimator's workspace) and updates the Memory budget rows, for example 1M at $m = 25$: 3.2 GB instead of 1.8 + 0.4 GB. That is noted there as a deviation. Both figures go into `docs/eigensolvers.md`.
+  The barrier saving shows only from about 400k DOF. 9b's estimator models the step as max(16 blocks, apply phase + the operator estimator's workspace) and updates the Memory budget rows, for example 1M at $m = 25$: at least 3.2 GB (16 blocks) instead of 1.8 + 0.4 GB. That is noted there as a deviation. Both figures go into `docs/eigensolvers.md`.
 - **Per-iteration cost** (182k DOF, first prototype):
 
   | m | step | K + M applies | dense part |
@@ -290,7 +290,7 @@ All tests compare against `reference_modes`, requesting at least 6 modes past th
    - (a) Call `lobpcg_step` on a state whose $P = XC + 10^{-12}\xi$ (random $C$, $\xi$, P mask all True): the drop flag is set and the output is finite. With a random $P$ (M-orthonormalized against $X$), the flag is not set.
    - (b) After 30 steps from a real start on hex20 $4^3$, explicit M applies give $\|P'^\top M X'\|_\max \le 10^{-6}$ and $\|P'^\top M P' - I\|_\max \le 10^{-6}$ on the live columns. Correct code measures $\le 7\cdot10^{-8}$; without the coefficient-space orthogonalization it is about 0.6.
    - (c) `_p_coeffs` returns the coefficients and both masks: the noise-rule live mask, over the original columns, and the SVQB keep mask.
-     - Input: $C_P = C_X B + 10^{-12}\xi$ in one column, random elsewhere, with $G = I + 0.1\,\mathrm{sym}(\text{random})$.
+     - Input: $C_P = C_X B + 10^{-12}\xi$ in one column, random elsewhere, with $G = I + 0.01\,\mathrm{sym}(\text{randn})$ (min eigenvalue ≈ 0.9 for $k \le 17$; $0.1$ is indefinite for 20% of seeds at $k = 17$), $\mathrm{cond}(G) \le 10$ asserted.
      - The live mask is all True except that column, and $k - 1$ columns are kept.
      - The kept columns are $G$-orthonormal and $G$-orthogonal to $C_X$ to $10^{-12}$.
 8. **Near-singular M.** hex20 $6^3$ with 30% void elements ($E\cdot10^{-9}$, $\rho\cdot10^{-12}$, seed 0) at tol $10^{-8}$, seed 0: converged within 500 iterations (measured 358), λ error $\le f_\lambda$ against `reference_modes` on the same materials.
