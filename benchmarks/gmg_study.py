@@ -16,6 +16,7 @@ from pathlib import Path
 
 import jax.numpy as jnp
 import numpy as np
+from scipy import ndimage
 
 from benchmarks import harness
 from jaxmodal import config
@@ -48,8 +49,22 @@ CASES = [
     ("beam128", (128, 1, 1), "clamped", None, None, "own"),
     ("simp32@solid", (32,) * 3, "clamped", None, "simp", "box8"),
     ("simp32@own", (32,) * 3, "clamped", None, "simp", "own"),
+    ("simp32s4@own", (32,) * 3, "clamped", None, ("gen", 4, True), "own"),
+    ("simp32s5@own", (32,) * 3, "clamped", None, ("gen", 5, True), "own"),
+    ("binary32@own", (32,) * 3, "clamped", None, ("gen", 3, False), "own"),
     *[(f"aniso{f}", (32,) * 3, "clamped", (1, 1, f), None, "own") for f in (0.5, 0.25, 0.1)],
 ]
+
+
+def field(seed, filtered, shape=(32,) * 3):
+    """The simp32.npy recipe (filtered=True) or its unfiltered binary variant, (x, y, z)."""
+    f = np.random.default_rng(seed).standard_normal(shape)
+    if filtered:
+        f = ndimage.gaussian_filter(f, 2)
+    rho = (f > np.quantile(f, 0.6)).astype(float)
+    if filtered:
+        rho = ndimage.uniform_filter(rho, 3)
+    return 1e-3 + (1 - 1e-3) * rho
 
 
 def case(shape, bcs, factors, density):
@@ -57,8 +72,9 @@ def case(shape, bcs, factors, density):
     spacing = tuple(h * f for f in (factors or (1, 1, 1)))
     mesh = voxel_mesh(shape, spacing)
     op = stencil(mesh, STEEL)
-    if density == "simp":
-        rho = np.load(SIMP).transpose(2, 1, 0).ravel().astype(float)
+    if density is not None:
+        rho = np.load(SIMP) if density == "simp" else field(*density[1:], shape)
+        rho = rho.transpose(2, 1, 0).ravel().astype(float)
         op = op.scaled(s_K=rho**3, s_M=rho)
     free = dof_mask(mesh, {} if bcs == "free" else {"xmin": "xyz"})
     return op, free, mesh

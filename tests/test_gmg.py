@@ -228,6 +228,103 @@ def test_symmetric(bcs):
     assert (Pu[~free] == 0).all()
 
 
+# ---------------------------------------------------------------- 5b: island deflation
+
+
+def island_case(soft=1e-6):
+    """12x6x4 unit grid, clamped xmin: a stiff body (x < 4), a stiff island (x 7-8, y 2-3,
+    z 1-2) and a single stiff cell (10, 0, 3), in soft cells s_K = s_M = soft."""
+    m = voxel_mesh((12, 6, 4), (0.5, 1.0, 0.7))
+    s = np.full((4, 6, 12), soft)  # (z, y, x) = element order
+    s[:, :, :4] = 1.0
+    s[1:3, 2:4, 7:9] = 1.0
+    s[3, 0, 10] = 1.0
+    op = stencil(m, UNIT).scaled(s_K=s.ravel(), s_M=s.ravel())
+    free = dof_mask(m, {"xmin": "xyz"})
+    K, M = assemble(m, UNIT, s_K=s.ravel(), s_M=s.ravel())
+    return m, op, free, a_p(K + 0.37 * M, free).toarray(), s
+
+
+def test_islands():
+    """Islands: node-connected stiff components but the largest, largest first; none below
+    the contrast threshold or on a uniform field."""
+    m, op, _, _, s = island_case()
+    ids = np.arange(m.n_el).reshape(4, 6, 12)
+    cells = G.grid_ids(op)[0]
+    got = G._islands(cells, np.asarray(op.s_K))
+    assert [sorted(i) for i in got] == [sorted(ids[1:3, 2:4, 7:9].ravel()), [ids[3, 0, 10]]]
+    assert G._islands(cells, np.where(s.ravel() < 1, 2e-3, 1.0)) == []
+    assert G._islands(cells, np.ones(m.n_el)) == []
+
+
+def test_deflation_dense():
+    """The deflated cycle equals Q + (I - Q A) V (I - A Q) with dense A_P, the undeflated V and
+    Z built here from the island nodes' positions (translations, rotations about the
+    centroid, constrained rows 0)."""
+    m, op, free, A0, s = island_case()
+    P = gmg(op, free, 0.37)
+    rows, Z, AZ, Einv = P.defl
+    V = dense(dataclasses.replace(P, defl=(rows, 0 * Z, 0 * AZ, 0 * Einv)), A0.shape[0])
+    conn = m.blocks["hex8"]
+    cols = []
+    for e in G._islands(G.grid_ids(op)[0], np.asarray(op.s_K)):
+        nodes = np.unique(conn[e])
+        x = m.points[nodes] - m.points[nodes].mean(0)
+        for j in range(6):
+            u = np.zeros((len(m.points), 3))
+            if j < 3:
+                u[nodes, j] = 1
+            else:
+                u[nodes] = np.cross(np.eye(3)[j - 3], x)
+            cols.append(u.ravel() * free)
+    Zr = np.array(cols).T
+    Q = Zr @ np.linalg.inv(Zr.T @ A0 @ Zr) @ Zr.T
+    eye = np.eye(A0.shape[0])
+    ref = Q + (eye - Q @ A0) @ V @ (eye - A0 @ Q)
+    got = dense(P, A0.shape[0])
+    assert rel(got, ref) <= 1e-10
+    assert rel(got, got.T) <= 1e-12
+    assert np.linalg.eigvalsh(got[np.ix_(free, free)]).min() > 0
+
+
+def test_deflation_shapes():
+    """Deflation arrays are padded to power-of-2 sizes (one compiled cycle per bucket); no
+    island gives zero columns and the plain V-cycle."""
+    _, op, free, _, _ = island_case()
+    rows, Z, AZ, Einv = gmg(op, free, 0.37).defl
+    assert Z.shape[1] == 12 and Z.shape[0] == len(rows) and (len(rows) & (len(rows) - 1)) == 0
+    _, op, free, _, _ = island_case(soft=1.0)
+    rows, Z, AZ, Einv = gmg(op, free, 0.37).defl
+    assert Z.shape == (256, 6) and not np.asarray(Z).any() and not np.asarray(Einv).any()
+
+
+def test_defaults():
+    """Chebyshev degree 2 on the fine level, 4 on coarse levels, ratio 30."""
+    op, free, _ = steel((8,) * 3, {"xmin": "xyz"})
+    P = gmg(op, free, 1e7)
+    degs = [S.degree for _, S in P.levels]
+    assert degs[0] == 2 and set(degs[1:]) == {4} and len(degs) > 1
+    assert all(float(S.ratio) == 30.0 for _, S in P.levels)
+
+
+def test_grid_ids_padded():
+    """grid_ids crops slab padding and empty trailing scan layers; gmg does not depend on the
+    slab."""
+    mask = np.ones((7, 5, 3), bool)
+    mask[6] = False
+    m = voxel_mesh((7, 5, 3), mask=mask)
+    ops = [stencil(m, UNIT, slab=s) for s in (None, 2, 4)]
+    assert ops[1].cell.shape[0] > 6
+    ref = G.grid_ids(ops[0])
+    free = dof_mask(m, {"xmin": "xyz"})
+    U = jnp.asarray(np.random.default_rng(7).standard_normal((ops[0].n_dof, 2)))
+    for o in ops[1:]:
+        c, n = G.grid_ids(o)
+        assert c.shape == (6, 5, 3) and n.shape == (7, 6, 4)
+        assert (c == ref[0]).all() and (n == ref[1]).all()
+        assert rel(gmg(o, free, 0.37)(U), gmg(ops[0], free, 0.37)(U)) <= 1e-13
+
+
 # ---------------------------------------------------------------- 6-10: PCG iterations (steel)
 
 
@@ -265,18 +362,25 @@ def test_h_independence(n):
     assert iterations(op, free, sigma)[0] <= 1.2 * base  # measured 13 at 8^3 ... 64^3
 
 
+@pytest.mark.slow
 def test_simp():
-    """Test 7: the checked-in filtered binary SIMP field (rho in [1e-3, 1], p = 3) at the solid
-    geometry's sigma: <= 100 iterations (measured 55)."""
+    """Test 7: the checked-in filtered binary SIMP field (rho in [1e-3, 1], s_K = rho^3, s_M =
+    rho) at its own lam_1 (reference_modes, an island mode) and at the solid box's: <= 100
+    iterations (measured 87 and 33)."""
+    from benchmarks.gmg_study import lam1
+
     rho = np.load(SIMP)
     assert rho.shape == (32, 32, 32) and rho.dtype == np.float32
     assert rho.min() == np.float32(1e-3) and rho.max() == 1.0
     assert abs(float(rho.mean()) - 0.40059) < 1e-4
     op, free, m = steel((32,) * 3, {"xmin": "xyz"})
-    sigma = sigma_of(op, free, m)
-    op = op.scaled(s_K=rho.transpose(2, 1, 0).ravel().astype(float) ** 3)
-    op = op.scaled(s_M=rho.transpose(2, 1, 0).ravel().astype(float))
-    assert iterations(op, free, sigma)[0] <= 100
+    solid = sigma_of(op, free, m)
+    r = rho.transpose(2, 1, 0).ravel().astype(float)
+    op = op.scaled(s_K=r**3, s_M=r)
+    own = lam1(op, free, m)
+    assert own < 1e-5 * solid
+    for sigma in (own, solid):
+        assert iterations(op, free, sigma)[0] <= 100
 
 
 def test_single_layer():
@@ -379,7 +483,7 @@ def test_lobpcg():
     lam, _, info = lobpcg(op, free, 6, tol=1e-8, precond=gmg(op, free, sigma))
     lam_j, _, info_j = lobpcg(op, free, 6, tol=1e-8, precond=jacobi(op, free))
     assert info["converged"] and info_j["converged"]
-    assert np.abs(np.asarray(lam) / lr[:6] - 1).max() <= 1e-7
+    assert np.abs(np.asarray(lam) / lr[:6] - 1).max() <= 1e-8  # isolated modes (9a floor)
     assert info["iterations"] < info_j["iterations"]
 
 

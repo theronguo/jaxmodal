@@ -1,6 +1,6 @@
 """Geometric multigrid V-cycle for voxel stencils: semi-coarsened nested grids, Galerkin cell
 matrices in block-ELL, stopped-axis group block smoothers under Chebyshev, dense coarsest
-Cholesky. See docs/preconditioners.md."""
+Cholesky, and deflation of the rigid modes of stiff islands. See docs/preconditioners.md."""
 
 import dataclasses
 import functools
@@ -11,6 +11,7 @@ import numpy as np
 from jax import lax
 from jax.scipy.linalg import cho_solve
 from jax.tree_util import Partial
+from scipy import ndimage
 
 from ..linalg.ell import BlockELL
 from ..mesh import voxel_mesh
@@ -23,6 +24,8 @@ from .jacobi import _block_jacobi, _check_sigma, _inverse_blocks
 
 SETUP_CHUNK = 2**14  # child cells per setup loop step (bounds the setup temporaries)
 ELL_CHUNK = 2048  # block rows per ELL scan step (block_ell's default chunk)
+ISLAND_CONTRAST = 1e3  # max / min s_K from which stiff islands are deflated
+MAX_ISLANDS = 16  # largest islands deflated (6 rigid modes each)
 SLOT = (OFFSETS[None, :] - OFFSETS[:, None] + 1) @ np.array([1, 3, 9])  # (8, 8) ELL slot of (a, b)
 
 
@@ -235,13 +238,15 @@ def _group_apply(inv, idx, pos, r):
 
 @dataclasses.dataclass(frozen=True)
 class GMG:
-    """V-cycle approximating A_P^{-1}: v -> m V(m v). Levels are (A, S) for all but the
-    coarsest, transfers[l] maps level l+1 to l, L is the coarsest Cholesky factor."""
+    """V-cycle approximating A_P^{-1}, deflated: r -> Q r + (I - Q A) m V(m (I - A Q) r),
+    Q = Z E^+ Z^T. Levels are (A, S) for all but the coarsest, transfers[l] maps level l+1 to
+    l, L is the coarsest Cholesky factor."""
 
     levels: tuple
     transfers: tuple
     L: jax.Array
     free: jax.Array
+    defl: tuple  # (rows, Z, AZ, Einv): island rigid modes and A_P Z on their support rows
 
     @property
     def n_dof(self):
@@ -267,7 +272,12 @@ def _vcycle(P, b, lvl):
 @jax.jit
 def _vcycle_apply(P, r):
     m = P.free[:, None]
-    return m * _vcycle(P, m * r, 0)
+    rows, Z, AZ, Einv = P.defl
+    r = m * r
+    y = Einv @ (Z.T @ r[rows])
+    v = m * _vcycle(P, r - jnp.zeros_like(r).at[rows].add(AZ @ y), 0)
+    w = Einv @ (AZ.T @ v[rows])
+    return v + jnp.zeros_like(r).at[rows].add(Z @ (y - w))
 
 
 # ---------------------------------------------------------------- builder
@@ -286,6 +296,55 @@ def _check_sigma0(op, free, shape, cells, s_K):
         raise ValueError(f"{msg} ({err}); use sigma > 0") from err
     if k:
         raise ValueError(f"A_P is singular at sigma = 0 ({k} rigid modes left); use sigma > 0")
+
+
+def _islands(cell_ids, s_K):
+    """Cell ids of the stiff islands: node-connected components of the cells with s_K above
+    10 min(s_K), all but the largest, if max / min s_K >= ISLAND_CONTRAST (largest first)."""
+    lo = s_K.min()
+    if not s_K.max() >= ISLAND_CONTRAST * lo:
+        return []
+    act = cell_ids >= 0
+    stiff = np.zeros(cell_ids.shape, bool)
+    stiff[act] = s_K[cell_ids[act]] > 10 * lo
+    lab, k = ndimage.label(stiff, np.ones((3, 3, 3)))
+    parts = sorted((cell_ids[lab == c] for c in range(1, k + 1)), key=len, reverse=True)
+    return parts[1 : 1 + MAX_ISLANDS]
+
+
+def _deflation(A0, F, spacing, free, islands):
+    """(rows, Z, AZ, Einv): masked rigid modes Z of each island (translations, rotations about
+    its centroid) and A_P Z on their support rows, padded to power-of-2 sizes (padding rows
+    point at DOF 0 with zero values); Einv = (Z^T A_P Z)^+."""
+    xyz = F.node_ijk() * spacing
+    n = 1 << max(len(islands) - 1, 0).bit_length()
+    cols, sup = [], [np.zeros(0, np.int64)]
+    for e in islands:
+        nodes = np.unique(F.conn[e])
+        x = xyz[nodes] - xyz[nodes].mean(0)
+        z = np.zeros((len(nodes), 3, 6))
+        z[:, :, :3] = np.eye(3)
+        z[:, :, 3:] = np.cross(np.eye(3)[:, None], x).transpose(1, 2, 0)  # e_j x x
+        dof = (3 * nodes[:, None] + np.arange(3)).ravel()
+        cols.append((dof, z.reshape(-1, 6) * free[dof, None]))
+        ring = np.unique(F.conn[np.isin(F.conn, nodes).any(1)])
+        sup.append((3 * ring[:, None] + np.arange(3)).ravel())
+    rows = np.unique(np.concatenate(sup))
+    nr = max(256, 1 << (len(rows) - 1).bit_length())
+    Z = np.zeros((nr, 6 * n))
+    AZ = jnp.zeros((nr, 6 * n))
+    for c, (dof, z) in enumerate(cols):
+        Z[np.searchsorted(rows, dof), 6 * c : 6 * c + 6] = z
+        full = jnp.zeros((len(free), 6)).at[dof].set(z)
+        AZ = AZ.at[: len(rows), 6 * c : 6 * c + 6].set(A0(full)[rows])
+    E = Z.T @ np.asarray(AZ)
+    dg = np.diag(E)
+    sc = np.where(dg > 0, 1 / np.sqrt(np.where(dg > 0, dg, 1)), 0.0)
+    lam, U = np.linalg.eigh(sc[:, None] * E * sc[None])
+    keep = lam > 1e-12 * max(lam.max(), 0)
+    Einv = sc[:, None] * (U[:, keep] / lam[keep]) @ U[:, keep].T * sc[None]
+    rows = np.concatenate([rows, np.zeros(nr - len(rows), np.int64)])
+    return jnp.asarray(rows, jnp.int32), jnp.asarray(Z), AZ, jnp.asarray(Einv)
 
 
 def _smoother(A, B, idx, pos, degree, ratio):
@@ -316,11 +375,12 @@ def _ell(vals, cols):
     return BlockELL((jnp.asarray(colsp),), (vals,), None, 3 * n, (n,), (c,), 27 * n / nnz)
 
 
-def gmg(op, free, sigma, *, degree=2, ratio=30.0):
+def gmg(op, free, sigma, *, degree=2, coarse_degree=4, ratio=30.0):
     """Geometric multigrid V-cycle for A_P = m (K + sigma M) m + s (I - m) of a voxel Stencil,
     as a pytree callable on (n_dof, k) blocks (masked output). sigma >= 0 is concrete and
     required: choose it physically (the sigma pre-estimate); sigma = 0 is refused unless A_P
-    is provably nonsingular. Needs the voxel_mesh node order (no rcm/renumber)."""
+    is provably nonsingular. Chebyshev degree `degree` on the fine level, `coarse_degree` on
+    the others. Needs the voxel_mesh node order (no rcm/renumber)."""
     check_x64("gmg")
     if not isinstance(op, Stencil):
         raise TypeError(f"gmg needs a voxel Stencil operator, got {type(op).__name__}")
@@ -372,7 +432,7 @@ def gmg(op, free, sigma, *, degree=2, ratio=30.0):
         )
         if levels:
             A = _ell(vals, _ell_cols(G))
-        levels.append((A, _smoother(A, B, idx, pos, degree, ratio)))
+        levels.append((A, _smoother(A, B, idx, pos, coarse_degree if levels else degree, ratio)))
         gc = np.flatnonzero(C.node_map >= 0)
         transfers.append(
             Transfer(
@@ -390,7 +450,8 @@ def gmg(op, free, sigma, *, degree=2, ratio=30.0):
     L = jnp.linalg.cholesky(_dense(cells, G.conn, G.n_nodes))
     if not bool(jnp.isfinite(L).all()):
         raise ValueError("coarsest factor is not finite")
-    return GMG(tuple(levels), tuple(transfers), L, fl)
+    defl = _deflation(A0, F, np.asarray(op.spacing), free, _islands(cell_ids, s_K))
+    return GMG(tuple(levels), tuple(transfers), L, fl, defl)
 
 
 def _dense(cells, conn, n):
