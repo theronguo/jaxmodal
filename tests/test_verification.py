@@ -231,7 +231,13 @@ PLATE_LEVELS = {
     ("pag", "hex20"): (4, 8, 12),
     ("pag", "hex27"): (4, 8, 12),
 }
-PLATE_NESTED = {"hex8": ((8, 16), (12, 24)), "hex20": ((4, 8), (8, 16)), "hex27": ((4, 8), (8, 16))}
+PLATE_NESTED = {
+    ("ortho", "hex8"): ((8, 16), (12, 24)),
+    ("ortho", "hex20"): ((4, 8), (8, 16)),
+    ("ortho", "hex27"): ((4, 8), (8, 16)),
+    ("pag", "hex20"): ((4, 8),),
+    ("pag", "hex27"): ((4, 8),),
+}
 
 
 @pytest.mark.slow
@@ -249,6 +255,5 @@ def test_plate_rates(name, t):
     assert np.all(err[-1] >= 100 * 10 * EPS * lmax_f / lam_f[:6])
     for lam, _, lmax_ in runs.values():
         assert np.all(lam[:6] >= ex - 10 * EPS * lmax_)
-    for a, b in PLATE_NESTED[t]:
-        if b in runs:  # PAG levels stop at n = 12
-            assert np.all(runs[b][0] <= runs[a][0] + 10 * EPS * runs[b][2])
+    for a, b in PLATE_NESTED[name, t]:
+        assert np.all(runs[b][0] <= runs[a][0] + 10 * EPS * runs[b][2])
