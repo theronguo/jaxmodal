@@ -124,9 +124,10 @@ def check_modes(p_args, lam, V, info, tol):
     assert np.all(V[~p.free] == 0)
     Vf = V[p.idx]
     assert np.abs(Vf.T @ (p.Mf @ Vf) - np.eye(n)).max() <= 1e-10
-    # rounding differs between the jitted and eager products (about 1e-7 relative at r ~ 1e-11);
+    # rounding differs between the jitted and eager products (about 1e-7 relative at r ~ 1e-11),
+    # and the re-orthonormalization at lock moves locked columns by rounding (about 2e-5);
     # residuals from implicitly updated products would differ by about 1e-3
-    assert np.allclose(info["residuals"], residuals(p, lam, jnp.asarray(V)), rtol=1e-5, atol=0)
+    assert np.allclose(info["residuals"], residuals(p, lam, jnp.asarray(V)), rtol=1e-4, atol=0)
     if p.R is not None:
         assert np.abs(np.asarray(p.R).T @ (p.M @ V)).max() <= 1e-10
     rm, rm_ref = r_M(p_args, lam, Vf), r_M(p_args, lr[:n], Vr[:, :n])
@@ -771,6 +772,21 @@ def test_estimate_chunks(dtype):
     peak = harness.measure(code, setup)["peak_bytes"]
     print(f"chunks {dtype}: estimate {est / 1e9:.2f} GB, peak {peak / 1e9:.2f} GB")
     assert peak <= est, (est, peak)
+
+
+@pytest.mark.slow
+def test_many_chunks():
+    """30 locks on a diagonal pencil whose Jacobi residuals are dominated by the locked
+    coordinates (up to 1e6 x): without re-orthonormalizing at lock the basis loses M-
+    orthonormality (1e-9) and chunk 9 drifts into span(B) and fails."""
+    n = 20_000
+    d = np.full(n, 1e6)
+    d[:1200] = 1 + 0.37 * np.arange(1200)
+    op = Diagonal(jnp.asarray(np.random.default_rng(0).permutation(d)), jnp.ones(n))
+    lam, V, info = lobpcg(op, np.ones(n, bool), 300, tol=1e-8, chunk=10)
+    assert info["converged"] and len(info["chunks"]) == 30
+    assert np.abs(V.T @ V - np.eye(300)).max() <= 1e-13
+    np.testing.assert_allclose(lam, np.sort(d)[:300], rtol=0, atol=1e-9)
 
 
 def test_failed_chunk():

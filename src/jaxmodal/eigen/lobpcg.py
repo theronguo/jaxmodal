@@ -248,6 +248,21 @@ def _lock(B, count, X, j):
     return _insert(B, X * (jnp.arange(X.shape[1]) < j), jnp.asarray(count, jnp.int32))
 
 
+@functools.partial(jax.jit, static_argnames="c")
+def _reortho(X, j, op, m, B, count, c):
+    """X[:, :j] M-orthogonalized twice against B[:, :count], then M-orthonormalized by
+    Cholesky (keeps the column order); the other columns zero. The locked basis then stays
+    M-orthonormal to rounding: a single deflation pass leaves the Jacobi-amplified locked
+    directions in W otherwise, and the block drifts into span(B) after many chunks."""
+    act = jnp.arange(X.shape[1]) < j
+    X = X * act
+    for _ in range(2):
+        X = _project(B, count, X, _M(op, m, X), c)
+    G = jnp.where(act[:, None] & act[None, :], X.T @ _M(op, m, X), jnp.eye(X.shape[1]))
+    L = jnp.linalg.cholesky((G + G.T) / 2)
+    return jax.scipy.linalg.solve_triangular(L, X.T, lower=True).T
+
+
 @jax.jit
 def _norms(op, m, v):
     """||K_m||_2 and ||M_m||_2 by power iteration from v."""
@@ -490,8 +505,9 @@ def _solve(
         thr.append(t[:jj])
         if not ok or count + j >= n_modes:
             break
-        V[:, count : count + j] = np.asarray(state[0][:, :j])
-        B = _lock(B, count, state[0], j)
+        X = _reortho(state[0], j, op, m, B, cnt, c=c)
+        V[:, count : count + j] = np.asarray(X[:, :j])
+        B = _lock(B, count, X, j)
         count += j
         X0, state = state[0][:, j:], None  # free the old state before the next start
     end = min(count + jj, n_modes)
