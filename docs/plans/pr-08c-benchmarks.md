@@ -239,7 +239,7 @@ docs/ROADMAP.md, README.md      status; FV52 and FV12 wording
 **Mutants expected to be killed:**
 - σ factor back to 0.01: Lamb level 32 at `n_modes = 18`.
 - `coords` midside nodes misplaced, e.g. `interp(i)` instead of `interp(i / 2)`: coords test.
-- FV52 constraint only on the bottom or mid-plane edges (1–7% off), or in all directions: fine values at 1%.
+- FV52 constraint only on the bottom edges (1.6–4.2% off on the test mesh), or in all directions: fine values at 1%. Mid-plane edges (−0.03 to −0.43% on the test mesh, inside 1%): the one-sided $f \ge f_\text{fine}(1 - 10^{-4})$ (see Implementation notes).
 - FV12 with a hidden constraint: rigid count.
 - Lamb classification threshold inverted: the 5 + 5 count and the recorded means.
 - Equal-volume radius replaced by the nominal one: the recorded means (1.4 points off at level 8, 0.19 points at level 32, against a 0.02-point tolerance).
