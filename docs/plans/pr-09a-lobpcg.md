@@ -356,3 +356,10 @@ All tests compare against `reference_modes`, requesting at least 6 modes past th
 - Locking, chunks, the fp32 basis, the 6-block mode, the estimator, memory tests and the memory model: 9b.
 - `solve_modes`, examples and budgets: 9c. The σ hint test: PR 11.
 - Thin plates: they need the PR 10–13 preconditioners.
+
+## Implementation notes
+
+- `check_modes` compares `info["residuals"]` with residuals recomputed through the operator at rtol $10^{-5}$, not $10^{-12}$. Jitted and eager reductions differ by about $10^{-7}$ relative. A mutant without the explicit exit confirmation is off by about $10^{-3}$, so it is still killed.
+- `lobpcg` also raises `ValueError` when $\|R^\top M_mR - I\|_\max > 10^{-8}$. The README snippet first passed an R that was M-orthonormalized with a lumped-mass operator; one rigid mode leaked into the result, and the solve stagnated silently.
+- The sequenced update passes the remaining blocks through `optimization_barrier` along with the partial sums; without them the step holds 18 blocks (measured 16.00 with them).
+- Mutants: all 18 in the table are killed, including the soft-lock mutant.
