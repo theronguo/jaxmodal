@@ -22,7 +22,7 @@ Two library changes come with it:
   - 8a's docs called 0.01 "a margin"; the margin points the wrong way.
 - **Voxel sphere** ($n = 32$ cells per diameter, 59.4k DOF), full `reference_modes`:
   - With 18 modes the residual is **172ε** against the 100ε bound, so `reference_modes` raises.
-  - With 22 modes it passes at 50ε (performance reviewer). **The failure depends on $k$.**
+  - With 22 modes it passes at 50ε. **The failure depends on $k$.** (With the fix, 18 modes take 33 s, 22 modes 37 s.)
   - Residuals at pass-2 factors 0.01, 0.1, 0.3 and 1 (18 modes): 172, 8.0, 3.6 and 3.7 ε, in 12.0, 12.4, 12.2 and 13.1 s.
   - One pass-2 solve with $k = 23$: 50, 4.8 and 3.2 ε at factors 0.01, 0.3 and 1; 0.3 costs +4% time.
 - **hex20 $12^3$ cube:** 5.5, 1.5, 1.1 and 1.5 ε, in 3.3–3.7 s.
@@ -71,10 +71,10 @@ Two library changes come with it:
   | 8 | 1.4k | 1.0146 | 0.1 s | −3.34% | +1.49% | 3.34% |
   | 12 | 3.9k | 1.0027 | 0.3 s | −2.57% | +0.59% | 2.57% |
   | 16 | 8.5k | 1.0048 | 1.3 s | −1.82% | +0.27% | 1.82% |
-  | 20 | 15.7k | | 3.2 s | −1.26% | +0.16% | 1.26% |
+  | 20 | 15.7k | 1.0028 | 3.2 s | −1.26% | +0.16% | 1.26% |
   | 24 | 25.9k | 0.9986 | 7.3 s | −1.02% | +0.09% | 1.02% |
-  | 32 | 59.4k | 1.0019 | 26 s (18 modes) | −0.74% | +0.02% | 0.74% |
-  | 40 | 112k | | 107 s | −0.60% | −0.01% | 0.60% |
+  | 32 | 59.4k | 1.0019 | 33 s (18 modes) | −0.74% | +0.02% | 0.74% |
+  | 40 | 112k | 1.0004 | 107 s | −0.60% | −0.01% | 0.60% |
 
   - Over levels 8, 12, 16, 24 and 32, the max error drops 4.5× (at least 2× is required).
   - The least-squares rate of the max is about 1.1. It goes in the docs only.
@@ -110,8 +110,8 @@ Two library changes come with it:
 - **Pairing modes 9/10.**
   - The fine run has a split pair at FE 9/10 (203.32/203.68) and a degenerate pair at FE 11/12 (206.76, +0.28% from the 206.19 target).
   - The square's symmetry group makes a pair exactly degenerate (E) when $m + n$ is odd, as for FE 11/12. Pairs like (1,3)/(3,1) form symmetric and antisymmetric combinations, which are degenerate only accidentally in separable plate theory, and 3D splits them (FE 9/10).
-  - Which FE pair the theory's degenerate 206.19 pair corresponds to is therefore not decidable from the targets alone.
-  - **Decision:** pair by index (target 9/10 with FE 9/10). This is the conservative choice: the gaps −1.4% and −1.2% are recorded, both modes are gated against the fine run, and the docs state that FE 11/12 lie 0.28% from the target.
+  - The theory's degenerate 206.19 pair is most likely (1,3)/(3,1) ($m + n$ even), which 3D splits into FE 9/10; the targets alone cannot prove it.
+  - **Decision:** pair by index (target 9/10 with FE 9/10), consistent with the symmetry argument and conservative: the gaps −1.4% and −1.2% are recorded, both modes are gated against the fine run, and the docs state that FE 11/12 lie 0.28% from the target.
 - **Gating (roadmap rule).**
   - Only mode 8 (193.646, +0.03%) is within 0.5% of its target, so it is gated against the target (1%).
   - Modes 4–7, 9 and 10 are gated against the fine run (1%).
@@ -221,20 +221,20 @@ docs/ROADMAP.md, README.md      status; FV52 and FV12 wording
 5. **`test_fv12`** (fast): hex20 and hex27 20×20×1 uniform, free. For modes 7–13:
    - modes 7–9 are within 1% of their targets;
    - all modes are within 1% of the recorded fine values;
-   - there are 6 rigid modes.
+   - the first 6 modes are rigid, $|\lambda| \le 10^{-8}\lambda_7$.
 6. **Upper bound** (fast, hex20; nested, uniform meshes, consistent mass):
    - FV52 from mode 4, coarse $6\times6\times1$ to fine $12\times12\times2$;
    - FV12 from mode 7, coarse $10\times10\times1$ to fine $20\times20\times1$;
    - assert $\lambda_k(\text{fine}) \le \lambda_k(\text{coarse}) + 10\varepsilon\hat\lambda_\max$.
 7. **Fine runs** (`slow`):
    - FV52: hex27 32×32×4 graded (35 s) reproduces the recorded fine values to $10^{-6}$.
-   - FV12: the 80×80 run (51 s, 9.5 GB) is too large for the suite. The slow test reruns 60×60 graded (23 s, 3.5 GB) and asserts it lies within 0.1% above the recorded 80×80 values (the roadmap's "last refinement < 0.1%"; measured 0.041%). The 80×80 values come from the prototype run, and the docs say so.
+   - FV12: the 80×80 run (51 s, 9.5 GB) is too large for the suite. The slow test reruns 60×60 graded (23 s, 3.5 GB) and asserts $|f_{60}/f_{80} - 1| \le 10^{-3}$ against the recorded 80×80 values (two-sided: the graded meshes are not nested) (the roadmap's "last refinement < 0.1%"; measured 0.041%). The 80×80 values come from the prototype run, and the docs say so.
 
 **Mode matching (roadmap):** FV52 is compared from mode 4, FV12 and Lamb from mode 7. FV modes are taken in sorted order and Lamb modes by cluster. No modes are labelled, so no MAC is needed.
 
 **Runtime:**
 - Fast additions: about 8 s (FV52 2 × 0.9 s, FV12 2 × 1.3 s, bounds about 1 s, coords < 1 s).
-- Slow additions: about 95 s (Lamb about 35 s, FV52 fine 35 s, FV12 60×60 23 s).
+- Slow additions: about 100–105 s (Lamb about 43 s, FV52 fine 35 s, FV12 60×60 23 s).
 
 **Mutants expected to be killed:**
 - σ factor back to 0.01: Lamb level 32 at `n_modes = 18`.
@@ -266,10 +266,11 @@ docs/ROADMAP.md, README.md      status; FV52 and FV12 wording
     - cluster selection by radial fraction;
     - the error table, the 2× criterion, and the rate (reported only).
 - **`docs/ROADMAP.md`:**
-  - 8c status.
+  - 8c status, naming both library changes: graded `box_mesh(..., coords=...)` and the pass-2 shift $-0.3\tilde\lambda_k$ (replacing 8a's $-0.01$).
   - The FV52 sentence becomes: "no $u_z = 0$ placement reproduces mode 4 (the converged 3D value with $u_z = 0$ on the edge faces is 3.7% below the target; the NAFEMS bottom-edge line support does not converge); edge faces are used, other modes gated as the rule says".
   - FV12: "≈ 0.6%" becomes "≈ 0.5%".
 - **`README.md`:** status.
+- In `docs/`, checks are described by what was done, not by who did it (no reviewer attributions).
 
 ## Not covered
 
