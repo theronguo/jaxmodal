@@ -16,12 +16,13 @@ from ..linalg.ell import BlockELL
 from ..mesh import voxel_mesh
 from ..operators.common import check_x64, register
 from ..operators.constraints import ap_operator, rigid_modes
+from ..operators.dofmap import check_int32
 from ..operators.voxel import OFFSETS, Stencil, grid_ids, reference_element
 from .chebyshev import chebyshev, lmax_estimate
 from .jacobi import _block_jacobi, _check_sigma, _inverse_blocks
 
 SETUP_CHUNK = 2**14  # child cells per setup loop step (bounds the setup temporaries)
-ELL_CHUNK = 2048  # block rows per ELL scan step (PR 10)
+ELL_CHUNK = 2048  # block rows per ELL scan step (block_ell's default chunk)
 SLOT = (OFFSETS[None, :] - OFFSETS[:, None] + 1) @ np.array([1, 3, 9])  # (8, 8) ELL slot of (a, b)
 
 
@@ -62,7 +63,11 @@ class _Grid:
     def __post_init__(self):
         mesh = voxel_mesh(self.shape, mask=self.mask)
         vx = mesh.voxel
-        self.node_map, self.conn = vx.node_map, mesh.blocks["hex8"]
+        self.node_map, self.element_map, self.conn = (
+            vx.node_map,
+            vx.element_map,
+            mesh.blocks["hex8"],
+        )
         nx, ny, nz = self.shape
         c = np.flatnonzero(vx.element_map >= 0)
         self.ijk = np.stack([c % nx, c // nx % ny, c // (nx * ny)], 1)
@@ -82,8 +87,7 @@ def _coarse(F):
     mask = np.zeros(shape, bool)
     mask[tuple(parent.T)] = True
     C = _Grid(shape, mask, tuple(p[r[1]] for p, r in zip(F.pos, rules, strict=True)))
-    emap = voxel_mesh(shape, mask=mask).voxel.element_map
-    cell = emap[parent[:, 0] + shape[0] * (parent[:, 1] + shape[1] * parent[:, 2])]
+    cell = C.element_map[parent[:, 0] + shape[0] * (parent[:, 1] + shape[1] * parent[:, 2])]
     interp = [_interp(r[1], p) for p, r in zip(F.pos, rules, strict=True)]
     return C, cell, [r[3] for r in rules], interp
 
@@ -93,9 +97,11 @@ def _groups(G):
     (n_nodes,) each node's flat slot; grp, loc per node)."""
     stopped = [n <= 2 for n in G.shape]
     ijk = G.node_ijk()
-    key = np.where(stopped, 0, ijk)
-    _, grp = np.unique(key[:, ::-1], axis=0, return_inverse=True)  # k = 1: grp = node id
-    grp = grp.ravel()
+    if any(stopped):
+        _, grp = np.unique(np.where(stopped, 0, ijk)[:, ::-1], axis=0, return_inverse=True)
+        grp = grp.ravel()
+    else:
+        grp = np.arange(G.n_nodes)  # k = 1: groups are the nodes
     loc, k = np.zeros(len(ijk), np.int64), 1
     for d in range(3):
         if stopped[d]:
@@ -208,9 +214,8 @@ def _prolong(T, x):
     for ax, (j0, j1, w0, w1) in zip((2, 1, 0), T.tabs, strict=True):  # x, y, z
         sh = [1] * 5
         sh[ax] = -1
-        G = jnp.take(G, j0, ax) * w0.reshape(sh).astype(x.dtype) + jnp.take(G, j1, ax) * w1.reshape(
-            sh
-        ).astype(x.dtype)
+        w0, w1 = (w.reshape(sh).astype(x.dtype) for w in (w0, w1))
+        G = jnp.take(G, j0, ax) * w0 + jnp.take(G, j1, ax) * w1
     return G.reshape(-1, 3, m)[T.gf].reshape(-1, m)
 
 
@@ -283,23 +288,30 @@ def _check_sigma0(op, free, shape, cells, s_K):
         raise ValueError(f"A_P is singular at sigma = 0 ({k} rigid modes left); use sigma > 0")
 
 
-def _smoother(A, B, idx, pos, k, degree, ratio):
+def _smoother(A, B, idx, pos, degree, ratio):
     pres = np.repeat(idx < len(pos), 3, axis=1)
     inv, m = _inverse_blocks(B, pres)
-    if k == 1:
+    if not bool(jnp.isfinite(inv).all()):
+        raise ValueError("smoother blocks are not finite (A_P is singular)")
+    if idx.shape[1] == 1:
         D = Partial(_block_jacobi, inv, m)
     else:
         D = Partial(_group_apply, inv, jnp.asarray(idx, jnp.int32), jnp.asarray(pos, jnp.int32))
     return chebyshev(A, D, lmax_estimate(A, D), degree, ratio)
 
 
-def _ell(vals, cols):
-    n = len(cols)
+def _ell_rows(n):
+    """ELL chunk and padded row count for n block rows."""
     c = min(ELL_CHUNK, -(-n // 8) * 8)
-    rp = -(-n // c) * c
+    return c, -(-n // c) * c
+
+
+def _ell(vals, cols):
+    """BlockELL from (rp, 27, 3, 3) values already padded to _ell_rows and (n, 27) columns."""
+    n = len(cols)
+    c, rp = _ell_rows(n)
     colsp = np.zeros((rp, 27), np.int32)
     colsp[:n] = cols
-    vals = jnp.pad(vals, ((0, rp - n), (0, 0), (0, 0), (0, 0)))
     nnz = (cols != np.arange(n)[:, None]).sum() + n
     return BlockELL((jnp.asarray(colsp),), (vals,), None, 3 * n, (n,), (c,), 27 * n / nnz)
 
@@ -322,6 +334,7 @@ def gmg(op, free, sigma, *, degree=2, ratio=30.0):
         flat_n[flat_n >= 0] != np.arange(op.n_nodes)
     ).any():
         raise ValueError("gmg needs the voxel_mesh node order; do not renumber voxel meshes")
+    check_int32(grid_nodes=int(np.prod(np.array(shape) + 1)))
     s_K = np.asarray(op.s_K)
     if sigma == 0:
         _check_sigma0(op, free, shape, cell_ids, s_K)
@@ -332,26 +345,16 @@ def gmg(op, free, sigma, *, degree=2, ratio=30.0):
     Ke, me = reference_element(op)
     Me = jnp.kron(me if op.mass == "consistent" else jnp.diag(me.sum(1)), jnp.eye(3))
     F = _Grid(shape, cell_ids >= 0, tuple(np.arange(n + 1.0) for n in shape))
-    flat = F.conn.ravel()  # each node's first (lowest element, corner) occurrence owns it
-    order = np.argsort(flat, kind="stable")
-    first = order[np.searchsorted(flat[order], np.arange(op.n_nodes))]
-    own = np.zeros((op.n_el, 8), bool)
-    own.flat[first] = True
-    src = (
-        Ke,
-        Me,
-        op.phase,
-        op.s_K,
-        sigma * op.rho[op.phase] * op.s_M,
-        jnp.asarray(F.conn, jnp.int32),
-    )
-    src = src + (fl, jnp.asarray(own), d)
+    own = np.zeros((op.n_el, 8), bool)  # each node's first (lowest element, corner) owns it
+    own.flat[np.unique(F.conn.ravel(), return_index=True)[1]] = True
+    w_M = sigma * op.rho[op.phase] * op.s_M
+    src = (Ke, Me, op.phase, op.s_K, w_M, jnp.asarray(F.conn, jnp.int32), fl, jnp.asarray(own), d)
 
     levels, transfers, G, A = [], [], F, A0
     while True:
         C, parent, P1, interp = _coarse(G)
         idx, pos, grp, loc, pairs = _groups(G)
-        n_rows = G.n_nodes if levels else 0
+        n_rows = _ell_rows(G.n_nodes)[1] if levels else 0
         cells, B, vals = _sweep(
             src,
             tuple(jnp.asarray(t) for t in P1),
@@ -369,7 +372,7 @@ def gmg(op, free, sigma, *, degree=2, ratio=30.0):
         )
         if levels:
             A = _ell(vals, _ell_cols(G))
-        levels.append((A, _smoother(A, B, idx, pos, idx.shape[1], degree, ratio)))
+        levels.append((A, _smoother(A, B, idx, pos, degree, ratio)))
         gc = np.flatnonzero(C.node_map >= 0)
         transfers.append(
             Transfer(

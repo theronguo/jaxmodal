@@ -142,36 +142,37 @@ On the fine level the child matrices are formed per chunk from the phase-indexed
 
 **V-cycle.**
 $$x = S_l b,\qquad x \mathrel{+}= P_l\,V_{l+1}\big(P_l^\top(b - A_l x)\big),\qquad x \mathrel{+}= S_l(b - A_l x),$$
-with the exact Cholesky solve on the coarsest level. Pre- and post-smoothing use the same symmetric $S_l$, so the V-cycle is symmetric; it is positive definite because Chebyshev on $[\hat\lambda/30, \hat\lambda]$ with $\hat\lambda \ge \lambda_\max(D_l^{-1}A_l)$ gives $\|I - S_lA_l\|_{A_l} < 1$. The recursion is unrolled at trace time.
+with the exact Cholesky solve on the coarsest level. Pre- and post-smoothing use the same symmetric $S_l$, so the V-cycle is symmetric. Chebyshev runs on $[1.1\tilde\lambda/\text{ratio}, 1.1\tilde\lambda]$ with $\tilde\lambda$ the 20-step Lanczos estimate; the V-cycle is positive definite provided $1.1\tilde\lambda \ge \lambda_\max(D_l^{-1}A_l)$ (then $\|I - S_lA_l\|_{A_l} < 1$), PR 10's safety assumption (measured $1.09$–$1.10\,\lambda_\max$ on every level of a binary SIMP box, a plate and a beam). When the fine grid already has every axis $\le 2$, it is smoothed once and then solved exactly. The recursion is unrolled at trace time.
 
 **Singular guard.** With σ = 0 and a singular $A_P$, the rounded coarsest Cholesky gives NaN or a finite factor that amplifies rigid components by ~$10^{13}$. At σ == 0, `gmg`:
 1. refuses any cell with `s_K` = 0 (`ValueError`: "zero-stiffness cells at sigma = 0: ... use sigma > 0"): such cells add no stiffness and can cut the body apart;
 2. calls `rigid_modes(voxel_mesh(shape, spacing, mask), free)` before any device setup and raises if it returns a column; rigid modes are linear, so they lie in the range of every $P$, and the coarsest level is singular exactly when $A_P$ is;
 3. re-raises, chained, the `ValueError` of meshes `rigid_modes` rejects (edge or vertex contacts, more than `MAX_PARTS` parts): "cannot verify that A_P is nonsingular at sigma = 0 (...); use sigma > 0". This refuses a few SPD cases (a hinge clamped on both sides, many clamped islands); σ > 0 makes all of them SPD.
 
-A non-finite coarsest factor raises "coarsest factor is not finite" at any σ (a backstop). A pivot-ratio threshold was rejected: legitimate SPD cases fall with size (clamped plate at σ = 0: $6\cdot10^{-7}$ at $128^2\times1$) and reach $1.6\cdot10^{-11}$ on SIMP designs with large void regions at σ > 0. The guard is exact only at σ == 0: a σ far below $\lambda_1$ passes it and gives a poorly conditioned V-cycle, so choose σ physically (the σ pre-estimate).
+Two backstops act at any σ: non-finite smoother blocks raise "smoother blocks are not finite" (e.g. cells with `s_K` = `s_M` = 0 leaving free nodes with no stiffness and no mass), and a non-finite coarsest factor raises "coarsest factor is not finite". A pivot-ratio threshold was rejected: legitimate SPD cases fall with size (clamped plate at σ = 0: $6\cdot10^{-7}$ at $128^2\times1$) and reach $1.6\cdot10^{-11}$ on SIMP designs with large void regions at σ > 0. The guard is exact only at σ == 0: a σ far below $\lambda_1$ passes it and gives a poorly conditioned V-cycle, so choose σ physically (the σ pre-estimate).
 
 **Inputs.** `op` must be a `Stencil` (`TypeError` otherwise) in the `voxel_mesh` node order: a voxel mesh renumbered by `rcm`/`renumber` raises `ValueError` (its grid order is already narrow). A concrete σ < 0 raises; x64 must be on.
 
-**Measured** (`benchmarks/gmg_study.py` → `benchmarks/results/gmg_study.json`; unit-length steel grids, spacing $1/\max(n)$, `xmin` clamped unless free, σ from `sigma_estimate` on the case unless noted, 4 right-hand sides, PCG to $10^{-8}$, max over the right-hand sides):
+**Measured** (`benchmarks/gmg_study.py` → `benchmarks/results/gmg_study.json`; unit-length steel grids, spacing $1/\max(n)$, `xmin` clamped unless free, σ = $\lambda_1$ of the case from `reference_modes` unless noted, 4 right-hand sides, PCG to $10^{-8}$, max over the right-hand sides; the JSON also records `sigma_estimate`, which is within 10% of $\lambda_1$ on the bulky cases but 30–3800× too large on the thin plates, beams, anisotropic grids and the SIMP field, an input for 11b's σ pre-estimate):
 
 | case | DOF | iterations |
 |---|---|---|
-| boxes $8^3$ / $16^3$ / $32^3$ / $64^3$ (σ of $8^3$) | 2k – 824k | 13 / 13 / 13 / 13 |
+| boxes $8^3$ / $16^3$ / $32^3$ / $64^3$ ($\lambda_1$ of $8^3$) | 2k – 824k | 13 / 13 / 13 / 13 |
 | odd $9\times8\times8$ / $17\times8\times8$ / $33\times8\times8$ | 2.4k – 8.3k | 13 / 13 / 15 |
-| free $32^3$ (rigid modes deflated in the σ estimate) | 108k | 13 |
-| plates $16^2$ / $32^2$ / $64^2$ / $128^2$ $\times1$ | 1.7k – 100k | 27 / 48 / 60 / 56 |
-| plate $64^2\times2$ | 38k | 47 |
-| beams $64\times2\times2$ / $128\times1\times1$ | 1.8k / 1.5k | 28 / 59 |
-| filtered binary SIMP field $32^3$ (`tests/data/simp32.npy`), σ of the solid box | 108k | 55 |
-| the same field at its own σ estimate ($1.8\cdot10^3$, a soft-region mode) | 108k | 480 |
-| anisotropic spacing $h_z = h/2$ / $h/4$ / $h/10$, $32^3$ | 108k | 15 / 35 / 151 |
+| free $32^3$ (first elastic $\lambda_1$) | 108k | 13 |
+| plates $16^2$ / $32^2$ / $64^2$ / $128^2$ $\times1$ | 1.7k – 100k | 27 / 48 / 94 / 186 |
+| plate $64^2\times2$ | 38k | 53 |
+| beams $64\times2\times2$ / $128\times1\times1$ | 1.8k / 1.5k | 28 / 137 (69 for 3 of 4 right-hand sides; the fourth restarts from the explicit residual near the tolerance) |
+| filtered binary SIMP field $32^3$ (`tests/data/simp32.npy`), $\lambda_1$ of the solid $8^3$ box | 108k | 55 |
+| the same field at its own $\lambda_1 = 15.1$ (a void-region mode) | 108k | 723 |
+| anisotropic spacing $h_z = h/2$ / $h/4$ / $h/10$, $32^3$ | 108k | 15 / 37 / 170 |
 
-At $87^3$ (2.04M DOF, σ of $8^3$): the build adds 1.21 GB of process peak over the operator + block Jacobi + $\lambda_\max$ baseline (the unchunked prototype added 22.7 GB), and one V-cycle at $m = 15$ takes 1.71 s against 0.365 s for one $A_P$ apply ($4.7\,t_A$, warm; the Mac budget model assumes $5.5\,t_A$). The prototype's LOBPCG (10 modes, tol $10^{-6}$) took 17 iterations at $32^3$ and 18 at $87^3$.
+At $87^3$ (2.04M DOF, $\lambda_1$ of $8^3$): the build adds 1.12 GB of process peak over the operator + block Jacobi + $\lambda_\max$ baseline (the unchunked prototype added 22.7 GB), and one V-cycle at $m = 15$ takes 1.84 s against 0.383 s for one $A_P$ apply ($4.8\,t_A$, warm; the Mac budget model assumes $5.5\,t_A$). The setup transient is about 0.9 KB per fine node (level-1 cells, ELL values, level-2 cells) and the resident hierarchy about 150 B per fine node (0.31 GB at $87^3$); at 100M DOF that is roughly 30 GB of transient, which fits a GPU only because `gmg` runs before LOBPCG allocates its blocks (as the rigid-mode setup does). The transfers work on the full box grid, so their temporaries scale with the box, not the active nodes (≈ 1/occupancy). Restriction is the transpose of the gathers, i.e. scatter-adds: 0.156 s against 0.026 s for prolongation on the fine level at $87^3$, $m = 15$ (a deferred GPU check). The prototype's LOBPCG (10 modes, tol $10^{-6}$) took 17 iterations at $32^3$ and 18 at $87^3$.
 
 **Limitations.**
-- **Anisotropic spacing:** coarsening is by element count, not spacing; $h_z = h/10$ needs 151 iterations. Spacing-aware semi-coarsening needs line smoothers along long stopped axes.
-- **High contrast at low σ:** binary densities with sharp interfaces get harder as $n$ grows (16 / 32 / 64³: 24 / 55 / 76, prototype), and at the design's own σ the SIMP field above needs ~480 iterations: its lowest modes live in soft regions, where geometric transfers and point-wise group smoothers resolve the $10^9$ stiffness contrast poorly. PR 23 re-runs the contrast test on a real design.
+- **Anisotropic spacing:** coarsening is by element count, not spacing; $h_z = h/10$ needs 170 iterations. Spacing-aware semi-coarsening needs line smoothers along long stopped axes.
+- **Thin plates and slender beams:** at σ = $\lambda_1$ the iterations grow like $h^{-1}$ (single-layer plates 27 / 48 / 94 / 186 from $16^2$ to $128^2$). Coarse trilinear hex8 cells on a one- or two-element-thick layer get ever flatter and lock in bending, so the coarse correction misses the smooth bending error. Larger σ hides it (the same plates at the overestimated `sigma_estimate` take ≤ 60). Remedies belong to later PRs: algebraic coarsening (PR 13) and the solid-shell element (M4).
+- **High contrast at low σ:** binary densities with sharp interfaces get harder as $n$ grows (16 / 32 / 64³: 24 / 55 / 76 at the solid σ, prototype). At its own $\lambda_1 = 15.1$ the SIMP field needs 723 iterations: with $s_K = \rho^3$ and $s_M = \rho$ the lowest modes are spurious void-region modes ($\lambda_1$ is $10^{-6}$ of the solid's), where geometric transfers and group smoothers resolve the $10^9$ stiffness contrast poorly. Topology optimization removes such modes with a modified mass interpolation (PRs 21–23), and PR 23 re-runs the contrast test on a real design.
 
 ## Measured (jax 0.11.2, fp64, M3 Max CPU)
 

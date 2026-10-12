@@ -1,8 +1,10 @@
 """Voxel GMG study: PCG iterations per case, the setup peak and the V-cycle cost at 87^3.
 
-Unit-length steel voxel grids (spacing 1 / max(shape)), xmin clamped unless "free"; sigma from
-sigma_estimate on the case (rigid modes deflated for free bodies), or as noted; 4 random masked
-right-hand sides; relative residual 1e-8; Chebyshev degree 2 over the group block smoother.
+Unit-length steel voxel grids (spacing 1 / max(shape)), xmin clamped unless "free"; sigma = lam_1
+of the case from reference_modes (SciPy), or of the named case; the sigma_estimate value is
+recorded too (it overestimates lam_1 on slender bodies). 4 random masked right-hand sides;
+relative residual 1e-8; Chebyshev degree 2 over the group block smoother. build_s includes
+compilation on the first build of each grid.
 The setup peak is the build's process peak RSS above the operator + block Jacobi + lambda_max
 baseline, in a fresh subprocess (harness.measure). Writes results/gmg_study.json.
 """
@@ -17,11 +19,18 @@ import numpy as np
 
 from benchmarks import harness
 from jaxmodal import config
-from jaxmodal.eigen import sigma_estimate
+from jaxmodal.eigen import reference_modes, sigma_estimate
 from jaxmodal.linalg import pcg
 from jaxmodal.materials import Material, isotropic
 from jaxmodal.mesh import voxel_mesh
-from jaxmodal.operators import ap_operator, dof_mask, m_orthonormalize, rigid_modes, stencil
+from jaxmodal.operators import (
+    ap_operator,
+    assemble,
+    dof_mask,
+    m_orthonormalize,
+    rigid_modes,
+    stencil,
+)
 from jaxmodal.precond import gmg
 
 STEEL = {0: Material(isotropic(210e9, 0.3), 7850.0)}
@@ -37,7 +46,7 @@ CASES = [
     ("plate64x2", (64, 64, 2), "clamped", None, None, "own"),
     ("beam64x2", (64, 2, 2), "clamped", None, None, "own"),
     ("beam128", (128, 1, 1), "clamped", None, None, "own"),
-    ("simp32@solid", (32,) * 3, "clamped", None, "simp", "box32"),
+    ("simp32@solid", (32,) * 3, "clamped", None, "simp", "box8"),
     ("simp32@own", (32,) * 3, "clamped", None, "simp", "own"),
     *[(f"aniso{f}", (32,) * 3, "clamped", (1, 1, f), None, "own") for f in (0.5, 0.25, 0.1)],
 ]
@@ -55,7 +64,15 @@ def case(shape, bcs, factors, density):
     return op, free, mesh
 
 
-def sigma_of(op, free, mesh):
+def lam1(op, free, mesh):
+    """Lowest non-rigid eigenvalue from the SciPy reference (reference_modes)."""
+    K, M = assemble(mesh, STEEL, s_K=np.asarray(op.s_K), s_M=np.asarray(op.s_M))
+    nr = rigid_modes(mesh, free).shape[1]
+    return float(reference_modes(K, M, nr + 6, free, points=mesh.points)[0][nr])
+
+
+def estimate(op, free, mesh):
+    """sigma_estimate with the M-orthonormal rigid modes for free bodies."""
     R = jnp.asarray(rigid_modes(mesh, free))
     R = m_orthonormalize(R, op.apply_M(R)) if R.shape[1] else None
     return sigma_estimate(op, free, R=R)[0]
@@ -122,13 +139,14 @@ def main(cases=CASES, n_large=87, out=harness.RESULTS, write=True):
     runs, sigmas = [], {}
     for name, shape, bcs, factors, density, src in cases:
         op, free, mesh = case(shape, bcs, factors, density)
-        sigma = sigmas[name] = sigma_of(op, free, mesh) if src == "own" else sigmas[src]
-        r = dict(case=name, shape=shape, n_dof=op.n_dof, sigma=sigma) | iterations(op, free, sigma)
+        sigma = sigmas[name] = lam1(op, free, mesh) if src == "own" else sigmas[src]
+        r = dict(case=name, shape=shape, n_dof=op.n_dof, sigma=sigma)
+        r |= dict(sigma_estimate=estimate(op, free, mesh)) | iterations(op, free, sigma)
         print(json.dumps(r), flush=True)
         runs.append(r)
     result = dict(runs=runs, tol=TOL, system="benchmarks/results/system.json")
     if n_large:
-        result["large"] = large(n_large, sigma_of(*case((8,) * 3, "clamped", None, None)))
+        result["large"] = large(n_large, lam1(*case((8,) * 3, "clamped", None, None)))
         print(json.dumps(result["large"]), flush=True)
     if write:
         harness.write_result("gmg_study", result, out)
