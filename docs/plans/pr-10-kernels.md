@@ -338,3 +338,10 @@ All against `spsolve` on the PR 4 `a_p`, on the hex20 box above unless stated ot
 - Node blocks of block-ELL coarse levels (PR 11 reads the diagonal slot and calls `_inverse_blocks`), and `BlockELL` storage bytes for the PR 11 and 13 estimators.
 - fp32 smoother data (PR 11 casts the leaves of `block_jacobi`, `chebyshev` and the levels).
 - PR 14's masked $M_P$: `ap_operator(op.scaled(s_K=zeros), free, 1.0)` is exactly $mMm + \overline{\mathrm{diag}M}\,(I - m)$, so no constructor is added; the docs note it as a correctness shortcut that still pays a (zero-scaled) K apply, about 2× the cost of M alone, which PR 14's cost model counts or replaces by a small $M_P$ pytree.
+
+## Implementation notes
+
+- Test 2: the batched and single-column applies round differently, so iteration counts may differ by 1 (measured 287 vs 286 for the random column), and the easy column's exit residual differed by 1.0% at equal iterations. The test allows ±1 iteration and replaces the 1% residual check by an exact one: the block's easy-column $x$ after `maxit` = its iteration count equals the full run's bit for bit (frozen).
+- Test 12 uses σ = 1.3 (a positive value; the box of test 13 has no λ₁ computed).
+- Tests 1–5 fix ARPACK's start vector, so σ = λ₁ (and the floor-band exits of test 3) are identical in every run.
+- Test 7/auto: on small boxes the clamped nodes are width-1 rows of $A_P$, so plain padding exceeds 1.5 (hex8 6³: 1.59 clamped, 1.35 free); the automatic-choice test uses the free hex8 6³ box.

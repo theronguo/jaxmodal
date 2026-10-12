@@ -1,6 +1,6 @@
 # Eigensolvers
 
-`jaxmodal.eigen.reference_modes` (module `eigen/reference.py`) is the SciPy reference eigensolver on assembled matrices; `jaxmodal.linalg.count_below` (module `linalg/inertia.py`) is the exact dense inertia count (PR 8a). They are oracles for the matrix-free LOBPCG and for later PRs; both run on the host on the SciPy matrices from `assemble`. `jaxmodal.eigen.lobpcg` (module `eigen/lobpcg.py`, PRs 9a and 9b) is the matrix-free solver, with `jacobi`, `sigma_estimate`, chunked solves and the estimator `jaxmodal.memory.lobpcg_memory`; see [LOBPCG](#lobpcg). `jaxmodal.eigen.solve_modes` (PR 9c) is the public entry point on top of it; see [Public API](#public-api-solve_modes).
+`jaxmodal.eigen.reference_modes` (module `eigen/reference.py`) is the SciPy reference eigensolver on assembled matrices; `jaxmodal.linalg.count_below` (module `linalg/inertia.py`) is the exact dense inertia count (PR 8a). They are oracles for the matrix-free LOBPCG and for later PRs; both run on the host on the SciPy matrices from `assemble`. `jaxmodal.eigen.lobpcg` (module `eigen/lobpcg.py`, PRs 9a and 9b) is the matrix-free solver, with `jacobi` (defined in `precond/jacobi.py` since PR 10, re-exported here), `sigma_estimate`, chunked solves and the estimator `jaxmodal.memory.lobpcg_memory`; see [LOBPCG](#lobpcg). `jaxmodal.eigen.solve_modes` (PR 9c) is the public entry point on top of it; see [Public API](#public-api-solve_modes).
 
 ```python
 from jaxmodal.eigen import reference_modes
@@ -187,7 +187,7 @@ lam, V, info = lobpcg(op, free, 200, R=R, chunk=40, basis_dtype="float32", low_m
   - `FloatingPointError` for a non-finite step.
 
   Non-convergence never raises: check `info`.
-- **`jacobi(op, free, sigma=0.0)`:** Jacobi on $A_P = K + \sigma M$, i.e. $v \mapsto m \odot v / (\mathrm{diag}K + \sigma\,\mathrm{diag}M)$, with output 0 on constrained DOFs. The constrained diagonal $s$ of $A_P$ ([`boundary_conditions.md`](boundary_conditions.md)) never reaches the output.
+- **`jacobi(op, free, sigma=0.0)`:** Jacobi on $A_P = K + \sigma M$, i.e. $v \mapsto m \odot v / (\mathrm{diag}K + \sigma\,\mathrm{diag}M)$, with output 0 on constrained DOFs. The constrained diagonal $s$ of $A_P$ ([`boundary_conditions.md`](boundary_conditions.md)) never reaches the output. It lives in `jaxmodal.precond` (PR 10, with `block_jacobi` and Chebyshev, [`preconditioners.md`](preconditioners.md)); `jaxmodal.eigen.jacobi` is the same function. A concrete $\sigma < 0$ raises `ValueError`.
 
 ### Algorithm
 

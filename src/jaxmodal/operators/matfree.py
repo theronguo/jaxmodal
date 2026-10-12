@@ -181,6 +181,9 @@ class Unstructured:
     def diag_M(self):
         return _diag_M(self)
 
+    def block_diag_K(self):
+        return _block_diag_K(self)
+
     def scaled(self, s_K=None, s_M=None):
         """Copy with new per-element scalings (n_el,); None keeps the current one. Traceable."""
         return scaled(self, s_K, s_M)
@@ -327,6 +330,26 @@ def _k_diag(op, b, d):
     return (d["s_K"][:, None] * diag)[..., None]
 
 
+def _node_cols(k):
+    """(k, 3): the columns 3a + j of row 3a + i's node block."""
+    return 3 * (np.arange(k) // 3)[:, None] + np.arange(3)
+
+
+def _k_blocks(op, b, d):
+    """(c, k, 3): row 3a + i, column j holds Ke[3a + i, 3a + j]."""
+    k = b.dofs.shape[1]
+    cols = _node_cols(k)
+    if op.mode == "stored":
+        blocks = d["Ke"][:, _packed_index(k)[np.arange(k)[:, None], cols]]
+    else:
+        c = d["geo"].shape[0]
+        B = kernels.bmatrix(kernels.gradients(b.type, d["geo"][..., :9].reshape(c, -1, 3, 3)))
+        blocks = jnp.einsum(
+            "eq,eqvk,evw,eqwkj->ekj", d["geo"][..., 9], B, op.C[d["phase"]], B[..., cols]
+        )
+    return d["s_K"][:, None, None] * blocks
+
+
 def _m_scale(op, d):
     return op.rho[d["phase"]] * d["s_M"]
 
@@ -425,6 +448,12 @@ def _apply_M(op, v):
 def _diag_K(op):
     _check(op)
     return _assemble(op, lambda b, d: _k_diag(op, b, d), 1)[:, 0]
+
+
+@jax.jit
+def _block_diag_K(op):
+    _check(op)
+    return _assemble(op, lambda b, d: _k_blocks(op, b, d), 3).reshape(op.n_nodes, 3, 3)
 
 
 @jax.jit

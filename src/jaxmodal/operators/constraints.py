@@ -1,6 +1,7 @@
-"""Dirichlet BC masks, the masked eigen-operator and A_P (SciPy); rigid body modes and the
-deflation projector. See docs/boundary_conditions.md."""
+"""Dirichlet BC masks, the masked eigen-operator and A_P (SciPy and matrix-free); rigid body
+modes and the deflation projector. See docs/boundary_conditions.md."""
 
+import dataclasses
 import functools
 
 import jax
@@ -11,6 +12,7 @@ import scipy.sparse as sp
 from jax.scipy.linalg import solve_triangular
 
 from ..mesh import parts
+from .common import check_x64, register
 
 MAX_PARTS = 10  # default cap on parts: R is dense, 8 n_dof 6 n_parts bytes
 RANK_TOL = 1e-8  # sigma_i <= RANK_TOL sigma_max counts as zero (unit-normalized columns)
@@ -65,6 +67,48 @@ def a_p(A, mask, s=None):
         if s <= 0:
             raise ValueError(f"mean free diagonal s = {s:.3g} <= 0; pass s for indefinite A")
     return (masked(A, mask) + sp.diags_array(s * ~mask)).tocsr()
+
+
+@dataclasses.dataclass(frozen=True)
+class APOperator:
+    """Matrix-free A_P = m (K + sigma M) m + s (I - diag m) as a pytree callable on (n, k)."""
+
+    op: object
+    free: jax.Array  # (n_dof,) float mask
+    sigma: jax.Array
+    s: jax.Array
+
+    @property
+    def n_dof(self):
+        return self.op.n_dof
+
+    def __call__(self, x):
+        return _ap_apply(self, x)
+
+
+register(APOperator, [])
+
+
+@jax.jit
+def _ap_apply(A, x):
+    m = A.free[:, None]
+    mx = m * x
+    return m * (A.op.apply_K(mx) + A.sigma * A.op.apply_M(mx)) + A.s * (1 - m) * x
+
+
+def ap_operator(op, free, sigma=0.0, s=None):
+    """Matrix-free A_P of K + sigma M (any operator with apply_K, apply_M, diag_K, diag_M);
+    the counterpart of a_p(K + sigma * M, free, s). Default s: the mean over free DOFs of
+    diag K + |sigma| diag M (PR 4's rule for sigma >= 0, the shift-invert rule for sigma < 0)."""
+    check_x64("ap_operator")
+    _check_mask(op.n_dof, np.asarray(free))
+    if not np.asarray(free).any():
+        raise ValueError("mask has no free DOF")
+    f = jnp.asarray(free, jnp.float64)
+    sigma = jnp.asarray(sigma, jnp.float64)
+    if s is None:
+        s = jnp.sum(f * (op.diag_K() + jnp.abs(sigma) * op.diag_M())) / jnp.sum(f)
+    return APOperator(op, f, sigma, jnp.asarray(s, jnp.float64))
 
 
 def rigid_modes(mesh, free=None, max_parts=MAX_PARTS):

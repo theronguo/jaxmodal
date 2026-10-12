@@ -3,7 +3,9 @@ modes and deflation. See docs/operators.md and docs/boundary_conditions.md."""
 
 from .assembled import assemble
 from .constraints import (
+    APOperator,
     a_p,
+    ap_operator,
     dof_mask,
     m_orthonormalize,
     masked,
@@ -16,9 +18,11 @@ from .matfree import Unstructured, unstructured
 from .voxel import Stencil, reference_element, stencil
 
 __all__ = [
+    "APOperator",
     "Stencil",
     "Unstructured",
     "a_p",
+    "ap_operator",
     "assemble",
     "check_int32",
     "dof_mask",

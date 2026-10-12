@@ -2,7 +2,7 @@
 
 Large-scale 3D linear modal analysis, $K v = \lambda M v$, in JAX. It uses matrix-free operators, preconditioned LOBPCG, hex8/hex20/hex27 and solid-shell elements, and linear anisotropic elasticity. The targets are the lowest modes and modes in frequency bands, with FFD shape optimization and topology optimization later.
 
-**Status:** early development. PR 0 (scaffold, benchmark harness, conventions), PR 1 (mesh data model, readers, voxel generator), PR 2 (anisotropic materials, rotations, phases), PR 3 (hex8/hex20/hex27 element kernels), PR 4 (DOF map, assembled SciPy reference operators, Dirichlet masking, box meshes), PR 5 (matrix-free unstructured operator, RCM reordering, memory estimator), PR 6 (voxel stencil operator), PR 7 (rigid body modes, M-orthonormalization, deflation projector), PR 8a (certified SciPy reference eigensolver, dense inertia count, sliding-block verification), PR 8b (Srinivas–Rao plates, anisotropic Visscher box, MAC mode matching), PR 8c (NAFEMS FV52/FV12, Lamb sphere, graded box meshes), PR 9a (matrix-free LOBPCG with Jacobi), PR 9b (chunked LOBPCG with locking, fp32 deflation basis, low-memory mode, LOBPCG memory estimator) and PR 9c (the public `solve_modes` API, milestone examples, Mac acceptance budgets) are done: milestone M2, first modes end to end. Preconditioning (PRs 10–13) comes next. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+**Status:** early development. PR 0 (scaffold, benchmark harness, conventions), PR 1 (mesh data model, readers, voxel generator), PR 2 (anisotropic materials, rotations, phases), PR 3 (hex8/hex20/hex27 element kernels), PR 4 (DOF map, assembled SciPy reference operators, Dirichlet masking, box meshes), PR 5 (matrix-free unstructured operator, RCM reordering, memory estimator), PR 6 (voxel stencil operator), PR 7 (rigid body modes, M-orthonormalization, deflation projector), PR 8a (certified SciPy reference eigensolver, dense inertia count, sliding-block verification), PR 8b (Srinivas–Rao plates, anisotropic Visscher box, MAC mode matching), PR 8c (NAFEMS FV52/FV12, Lamb sphere, graded box meshes), PR 9a (matrix-free LOBPCG with Jacobi), PR 9b (chunked LOBPCG with locking, fp32 deflation basis, low-memory mode, LOBPCG memory estimator) PR 9c (the public `solve_modes` API, milestone examples, Mac acceptance budgets) and PR 10 (PCG, MINRES, block-ELL, node-block Jacobi, Chebyshev, the matrix-free $A_P$) are done: milestone M2, first modes end to end. Multigrid preconditioning (PRs 11–13) comes next. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Install
 
@@ -152,6 +152,23 @@ mu, V, info = solve_modes(box, materials, {"xmin": "x"}, 5, tol=1e-10)  # the lo
 assert info["n_rigid"] == 3 and np.allclose(mu, lam[3:8], rtol=1e-8)
 f = info["frequencies"]  # sqrt(lam) / (2 pi), Hz for SI inputs; info["rigid"]: the rigid modes
 ```
+
+Linear solves on $A_P$ (PR 10): PCG and MINRES on blocks of right-hand sides, Jacobi, node-block Jacobi and Chebyshev preconditioners, and a block-ELL SpMV for assembled matrices:
+
+```python
+from jaxmodal.linalg import pcg
+from jaxmodal.operators import ap_operator
+from jaxmodal.precond import block_jacobi, chebyshev, lmax_estimate
+
+A = ap_operator(op, free, lam[3])  # matrix-free A_P of K + sigma M
+D = block_jacobi(op, free, lam[3])  # inverted 3x3 node blocks of K + sigma M
+S = chebyshev(A, D, lmax_estimate(A, D))  # degree-2 Chebyshev over block Jacobi
+b = jnp.asarray(np.random.default_rng(0).standard_normal((op.n_dof, 2)) * free[:, None])
+x, info = pcg(A, b, S, tol=1e-10)  # info: iterations, residuals, converged, stagnated, ...
+assert info["converged"].all() and np.allclose(a_p(K + lam[3] * M, free) @ np.asarray(x), b)
+```
+
+See [`docs/preconditioners.md`](docs/preconditioners.md) for the solvers' stopping rules, the preconditioners, block-ELL and the measured h-study.
 
 The scripts in [`examples/`](examples) walk through each milestone (`m0_foundations.py`: meshes, VTU, materials; `m1_operators.py`: element matrices and operators against the assembled matrices; `m2_modes.py`: a cantilever against Euler–Bernoulli and a free voxel cube); each ends with a check and runs as a smoke test.
 
