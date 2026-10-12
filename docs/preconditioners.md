@@ -87,7 +87,7 @@ $$1 - \mu\,p(\mu) = \frac{T_k\big((\theta - \mu)/\delta\big)}{T_k(\theta/\delta)
 - **Stopping:** the explicit residual $\|b - Ax\|_2 \le \mathrm{tol}\,\|b\|_2$ is checked every `CHECK` = 10 iterations. A column is `converged` when it meets tol and `stagnated` after `STALL_C` = 5 checks without a new minimum; `maxit` gives neither. The last iterate is returned. Iteration counts are multiples of 10 when `maxit` is.
 - **`info`:** as `pcg` without `replacements`.
 - **Floor:** on the hex20 box below with Jacobi of $K + \sigma_b M$, the explicit residual stalls at $3.5$–$8.8\cdot10^{-14}$ (by right-hand side and run) with $\sigma_b$ between $\lambda_6$ and $\lambda_7$ and at about $1.2\cdot10^{-12}$ between $\lambda_{30}$ and $\lambda_{31}$ (plan prototype): it grows with the shift's index (PR 15's $\tau_\mathrm{eff}$).
-- **Memory** (measured, plus `b`): 9 blocks with a diagonal operator (the carried $x$, $r_1$, $r_2$, $y$, $w$, $w_2$, the body's $v$ and $Av$, the returned $x$); with the hex20 operator 6 blocks more than PCG.
+- **Memory** (measured, plus `b`): 9 blocks with a diagonal operator (the carried $x$, $r_1$, $r_2$, $y$, $w$, $w_2$, the body's $v$ and $Av$, the returned $x$); with the hex20 operator about 12 blocks above a bare apply (6 more than PCG).
 
 ## Block-ELL (`block_ell`, `BlockELL`)
 
