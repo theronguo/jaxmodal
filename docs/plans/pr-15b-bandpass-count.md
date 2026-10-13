@@ -18,6 +18,9 @@ lines by a host callback inside the existing loop (no segmentation, no carry or 
 `verbose` in `solve_modes`'s `count_options`; the result of an unconverged restart; `gap` = the
 governing gap; `n_top` in `info`; `lam_W` required with W.
 
+Revision 4 (round 3): the progress callback every step (throttled on the host to one line per
+10 s), `si_checked(verbose)` reaching the count, docs for `count`'s tuple W and `verbose`.
+
 ## Scope
 
 - **In:** the band-pass count `band_count` (two counting edges, deflation of the known
@@ -120,7 +123,7 @@ est, info = band_count(op, free, V, lam, lo, hi, V_out, lam_out, *, R=None, prec
   added by `band_count`, not passed in V); lo < hi: the band edges (eigenvalues, lo > 0; a band
   from 0 uses `count`). V_out, lam_out: the known converged out-of-band pairs nearest the band (`si_slice`'s
   neighbours, the nearest pair of the caller's W beyond each edge), a host array (n, j) and
-  its eigenvalues (j,); in practice 2–4 columns. None may lie in
+  its eigenvalues (j,); 2 columns from `si_checked`, any j accepted. None may lie in
   $[\lambda_{in,lo}, \lambda_{in,hi}]$, and at least one must lie on each side (otherwise the
   edge cannot be placed: raises). All of them are deflated.
 - `band_edges` (roadmap "Band edges"): $\lambda_{in,lo}$ = min(lam) (lo when lam is empty),
@@ -144,14 +147,15 @@ est, info = band_count(op, free, V, lam, lo, hi, V_out, lam_out, *, R=None, prec
   and the shared info; `count` and `band_count` validate, place the edges, pick d and call it.
   No behaviour change for `count`.
 - **Progress.** With `verbose` (new on `count` too; a static flag of `_recurrence`), the loop
-  body calls `jax.debug.callback` every `PRINT_EVERY = 16` steps (under `lax.cond`) with
-  (k, iteration sum, iteration max); the host side prints steps done of d, PCG iterations and
+  body calls `jax.debug.callback` every step with scalars only (k, iteration sum, iteration
+  max; d and t0 bound on the host by `functools.partial`); the host side prints steps done of d, PCG iterations and
   elapsed time when at least `PRINT_S = 10` s passed since its last line, and each block prints
   one line. The carry and the loop are unchanged, so the step-phase memory (`count_memory`) and
   the results are unchanged. At 1M DOF a step takes about 65–85 s (50 probes), so this prints
-  about every 20 minutes; on test meshes it stays quiet. `verbose` joins `solve_modes`'s
+  one line per step there; on test meshes the throttle keeps it quiet. A verbose count compiles
+  its own loop variant once (seconds; noted in the docs). `verbose` joins `solve_modes`'s
   `COUNT_OPTIONS` (rule: every option reachable; 14b band counts get progress too).
-- Memory: `count_memory` / `probe_block` apply unchanged (V_out adds 2–4 host columns).
+- Memory: `count_memory` / `probe_block` apply unchanged (V_out adds 2 host columns from `si_checked`).
 
 ### 3. `si_checked` (`eigen/shift_invert.py`, internal like `si_slice`)
 
@@ -199,7 +203,7 @@ lam, V, info = si_checked(op, free, lo, hi, precond, *, capacity, W=None, lam_W=
   count's degree-cap reason), `estimate` (the last), `estimates` (all), `flagged` (some
   verifiable count ≥ 0.5: the roadmap's flag) and `restarts`. A failed check is `flagged and not
   passed`. 15c adds the predicted-cost keys.
-- `verbose`: `si_slice`'s lines, the count's segment lines, and one line per count (estimate,
+- `verbose`: also sets the count's `verbose` unless `count_options` gives it. `si_slice`'s lines, the count's progress lines, and one line per count (estimate,
   degree, steps, time, action: pass, restart j, flagged).
 - Memory: `si_slice` releases its basis before returning, the count reuses the slice's
   preconditioner, so the peak is max(slice, count) with one preconditioner; restarts stay
@@ -280,6 +284,7 @@ including tight lower edges, goes into the docs for 15c's cost model (seconds, n
   formula, the lower tail and the band normalization, the out-of-band deflation and its
   justification, progress lines, the degree table; "Shift-invert slices": `si_checked`, the
   restart rule, its `info["count"]` layout; "Validation": the new tests in both files.
+- `docs/eigensolvers.md`, `count`'s description: W may be a tuple of arrays; `verbose`.
 - `README.md`: status line; a `band_count` line next to `count`.
 - `docs/eigensolvers.md` options table: `count_options` gains `verbose`.
 - `docs/ROADMAP.md`: PR 15b status.
