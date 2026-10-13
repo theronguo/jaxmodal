@@ -9,6 +9,7 @@ from .eigen.lobpcg import _block_size, _capacity  # shared with the solver on pu
 from .elements import ELEMENTS
 from .materials import phases
 from .operators import dof_mask, rigid_modes
+from .operators.common import is_count
 from .operators.matfree import layout
 from .operators.voxel import grid_layout
 from .precond.gmg import _ell_rows, _islands
@@ -163,7 +164,7 @@ GMG_STEP = {
 GMG_LOOP = {"float64": 1.2, "float32": 0.7}
 # V-cycle temporaries beyond the stencil's slab workspace, fp64 blocks: upper envelope of
 # memory_analysis at 16^3-87^3 before PR 13c's Chebyshev loop (m = 15; 10.6-14.9 fp64, 5.0-7.5
-# fp32); kept, 7-47% above the temporaries with the loop.
+# fp32); kept: the workspace estimate is 7-39% above the temporaries with the loop (32^3-64^3).
 GMG_WORK = {"float64": 15.0, "float32": 7.5}
 GMG_BUILD = 1650  # setup process peak per fine node (1.12 GB at 87^3)
 
@@ -319,6 +320,9 @@ def solve_modes_memory(
         "operator", operator_options, OPERATOR_OPTIONS["stencil" if voxel else "unstructured"]
     )
     pc_opts = _check_options(f"{name} precond", precond_options, PRECOND_OPTIONS[name])
+    for key in ("degree", "max_coarse"):
+        if key in pc_opts and not is_count(pc_opts[key]):
+            raise ValueError(f"{key} must be an int >= 1, got {pc_opts[key]!r}")
     if name == "gmg":
         pc = functools.partial(
             gmg_memory, mesh, dtype=precond_dtype, degree=pc_opts.get("degree", 2)

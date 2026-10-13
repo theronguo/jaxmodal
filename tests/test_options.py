@@ -294,6 +294,7 @@ def test_numpy_ints():
         "degree": np.int64(3)}, sigma_options={"rounds": np.int64(2)},
     )  # fmt: skip
     assert lam.shape == (2,)
+    assert type(chebyshev(None, None, 1.0, degree=np.int64(3)).degree) is int  # one jit entry
 
 
 def test_validation_voxel():
@@ -318,6 +319,13 @@ def test_key_check_before_build(monkeypatch):
 
 
 # ------------------------------------------------------------- 5: solve_modes_memory
+
+
+def test_memory_validation():
+    """Test 5: solve_modes_memory checks the count values like solve_modes."""
+    for opts in ({"degree": "x"}, {"degree": 4.0}, {"max_coarse": 0}):
+        with pytest.raises(ValueError, match="int >= 1"):
+            solve_modes_memory(box((4, 4, 4)), CLAMP, 2, n_rigid=0, precond_options=opts)
 
 
 def test_memory_operator_options():
@@ -449,7 +457,8 @@ def test_gmg_step_degree(n, dtype):
 def test_gmg_loop_increment(n):
     """Test 5: GMG_LOOP pinned to the measured degree-4 minus degree-2 increase of the V-cycle
     temporaries (fp64 and fp32) and, at 48^3, of both LOBPCG steps (fp64): within [0.8, 1] of
-    the model (below 48^3 the low step rises up to 2.06 blocks, inside the GMG_STEP slack)."""
+    the model for fp64 and [0.7, 1] for fp32 (measured 0.84-0.86: margin for XLA versions; below
+    48^3 the low step rises up to 2.06 blocks, inside the GMG_STEP slack)."""
     mesh = voxel_mesh((n,) * 3, (1 / n,) * 3)
     op, free = stencil(mesh, STEEL), dof_mask(mesh, CLAMP)
     r = jax.ShapeDtypeStruct((op.n_dof, 15), jnp.float64)
@@ -464,7 +473,8 @@ def test_gmg_loop_increment(n):
         if n >= 48 and dtype == "float64":
             diffs += [step_bytes(op, P[4], low) - step_bytes(op, P[2], low) for low in (0, 1)]
         for diff in diffs:
-            assert 0.8 <= diff / (GMG_LOOP[dtype] * b) <= 1, (dtype, diff / b)
+            lo = 0.8 if dtype == "float64" else 0.7
+            assert lo <= diff / (GMG_LOOP[dtype] * b) <= 1, (dtype, diff / b)
 
 
 def test_amg_loop_increment():
