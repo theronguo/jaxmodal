@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from ..operators import dof_mask, m_orthonormalize, rigid_modes, stencil, unstructured
+from ..operators.common import is_count
 from ..precond import SingularShiftError, amg, gmg, jacobi
 from .lobpcg import lobpcg, sigma_estimate
 
@@ -40,10 +41,14 @@ PRECOND_OPTIONS = {
     "jacobi": (),
 }
 SIGMA_OPTIONS = ("tol", "maxit", "rounds", "drop", "estimate_maxit")
-RESERVED = (
-    "mesh, materials, orientations, mass, nodal_mass, sigma, dtype (precond_dtype), nonsingular, "
-    "aggregates"
-)
+# Builder parameters solve_modes sets itself or through its own keywords (dtype: precond_dtype).
+RESERVED = {
+    "unstructured": {"mesh", "materials", "orientations", "mass", "nodal_mass"},
+    "stencil": {"mesh", "materials", "orientations", "mass", "nodal_mass"},
+    "gmg": {"op", "free", "sigma", "dtype"},
+    "amg": {"op", "free", "sigma", "points", "nonsingular", "aggregates", "return_aggregates"},
+    "jacobi": {"op", "free", "sigma"},
+}
 
 
 def _check_options(name, opts, allowed):
@@ -53,14 +58,15 @@ def _check_options(name, opts, allowed):
     if bad:
         raise ValueError(
             f"unknown {name} option(s) {bad}; allowed: {sorted(allowed)}. solve_modes sets "
-            f"{RESERVED} itself or through its own keywords"
+            f"{sorted(set().union(*RESERVED.values()))} itself or through its own keywords "
+            "(dtype: precond_dtype)"
         )
     return opts
 
 
 def _check_sigma_options(opts):
     for key in ("maxit", "rounds", "estimate_maxit"):
-        if key in opts and not (isinstance(opts[key], int) and opts[key] >= 1):
+        if key in opts and not is_count(opts[key]):
             raise ValueError(f"sigma_options {key} must be an int >= 1, got {opts[key]!r}")
     if "tol" in opts and not opts["tol"] > 0:
         raise ValueError(f"sigma_options tol must be > 0, got {opts['tol']!r}")

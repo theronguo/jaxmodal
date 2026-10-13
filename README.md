@@ -223,8 +223,13 @@ The defaults are the robust choice; every option of the operator, the preconditi
 
 ```python
 mu2, V2, info = solve_modes(
-    hbox, materials, {"xmin": "xyz"}, 4, X0=V,
-    operator_options={"mode": "otf"}, precond_options={"degree": 3, "max_coarse": 100},
+    hbox,
+    materials,
+    {"xmin": "xyz"},
+    4,
+    X0=V,
+    operator_options={"mode": "otf"},
+    precond_options={"degree": 3, "max_coarse": 100},
 )
 assert info["converged"]
 solve_modes_memory(hbox, {"xmin": "xyz"}, 4, operator_options={"mode": "otf"})["total"]

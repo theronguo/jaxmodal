@@ -1,6 +1,7 @@
 """Helpers shared by the matrix-free operators and the assembled oracle. See docs/operators.md."""
 
 import dataclasses
+import numbers
 
 import jax
 import jax.numpy as jnp
@@ -11,6 +12,11 @@ def register(cls, meta):
     """Register a frozen dataclass as a pytree; `meta` fields are static, the rest are leaves."""
     data = [f.name for f in dataclasses.fields(cls) if f.name not in meta]
     jax.tree_util.register_dataclass(cls, data_fields=data, meta_fields=meta)
+
+
+def is_count(x):
+    """x is an integer >= 1 (Python or NumPy, not bool)."""
+    return isinstance(x, numbers.Integral) and not isinstance(x, bool) and x >= 1
 
 
 def as_float(v):

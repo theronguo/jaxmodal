@@ -153,14 +153,17 @@ def lobpcg_memory(
 GMG_STEP = {
     ("9-block", "float64"): 4.3,
     ("9-block", "float32"): 0.0,
-    ("low", "float64"): 8.8,
+    ("low", "float64"): 9.0,
     ("low", "float32"): 4.5,
 }
-# Fine-level Chebyshev degree > 2: the smoother loop carries about one more fine vector, +1.07
-# fp64 blocks (+0.60 fp32) of V-cycle temporaries and step at 8^3-87^3; V-cycle-dtype blocks.
-GMG_LOOP = 1.2
+# Fine-level Chebyshev degree > 2, fp64 blocks: the smoother loop carries about one more fine
+# vector, +1.07 (fp64) / +0.60 (fp32 V-cycle) blocks of V-cycle temporaries at 8^3-87^3; the
+# steps rise 1.07 (fp64, from 48^3 up) and up to 2.06 (fp64 low step, 8^3-32^3, inside the
+# GMG_STEP slack), fp32 steps by at most 0.6.
+GMG_LOOP = {"float64": 1.2, "float32": 0.7}
 # V-cycle temporaries beyond the stencil's slab workspace, fp64 blocks: upper envelope of
-# memory_analysis at 16^3-87^3 (m = 15; 10.6-14.9 fp64, 5.0-7.5 fp32).
+# memory_analysis at 16^3-87^3 before PR 13c's Chebyshev loop (m = 15; 10.6-14.9 fp64, 5.0-7.5
+# fp32); kept, 7-47% above the temporaries with the loop.
 GMG_WORK = {"float64": 15.0, "float32": 7.5}
 GMG_BUILD = 1650  # setup process peak per fine node (1.12 GB at 87^3)
 
@@ -216,7 +219,7 @@ def gmg_memory(mesh, m, dtype="float64", s_K=None, degree=2):
         shape, n_fine = cs, nc
     storage += (3 * nc) ** 2 * 8  # coarsest Cholesky factor
     b = 8 * n_dof * m
-    loop = GMG_LOOP * dt / 8 * b if degree > 2 else 0
+    loop = GMG_LOOP[dtype] * b if degree > 2 else 0
     work = GMG_WORK[dtype] * b + dt / 8 * stencil_memory(mesh, m)["workspace"] + loop
     if s_K is not None:
         islands = _islands(cell, np.asarray(s_K))
@@ -321,8 +324,10 @@ def solve_modes_memory(
             gmg_memory, mesh, dtype=precond_dtype, degree=pc_opts.get("degree", 2)
         )
     elif name == "amg":
-        keep = {k: v for k, v in pc_opts.items() if k in ("max_coarse", "degree")}
-        pc = functools.partial(amg_memory, mesh, **keep)
+        pc = functools.partial(
+            amg_memory, mesh, max_coarse=pc_opts.get("max_coarse", 1000),
+            degree=pc_opts.get("degree", 2),
+        )  # fmt: skip
     est = stencil_memory if voxel else unstructured_memory
     op_memory = functools.partial(est, mesh, mass=mass, **op_opts)
     if n_rigid is None:

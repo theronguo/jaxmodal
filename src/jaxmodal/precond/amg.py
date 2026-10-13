@@ -14,7 +14,7 @@ from pyamg.aggregation.smooth import jacobi_prolongation_smoother
 from pyamg.strength import symmetric_strength_of_connection
 
 from ..linalg.ell import BlockELL, block_ell
-from ..operators.common import register
+from ..operators.common import is_count, register
 from .chebyshev import chebyshev, lmax_estimate
 from .gmg import GMG, Cholesky
 from .jacobi import _block_jacobi, _inverse_blocks
@@ -161,7 +161,7 @@ def amg(
     strength, aggregation and the tentative fit and recomputes everything that depends on the
     values. For new materials, s_K, s_M or sigma the result equals a fresh setup; for moved
     points it keeps the old near-null space (an approximation). max_coarse is then ignored."""
-    if not (isinstance(max_coarse, int) and max_coarse >= 1):
+    if not is_count(max_coarse):
         raise ValueError(f"max_coarse must be an int >= 1, got {max_coarse!r}")
     sigma = _check("amg", op, sigma, nonsingular)
     if nonsingular and not bool((op.s_K > 0).all()):

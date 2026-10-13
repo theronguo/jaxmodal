@@ -1,0 +1,153 @@
+{
+  "x0": {
+    "mesh": "hex20 8^3",
+    "cold": 16,
+    "warm": 1
+  },
+  "jacobi": {
+    "mesh": "hex20 8^3",
+    "amg": 16,
+    "jacobi": 283
+  },
+  "degree_amg": [
+    {
+      "degree": 2,
+      "iterations": 17,
+      "converged": true,
+      "lobpcg_s": 7.0039119579596445,
+      "precond_s": 2.2768235419644043,
+      "total_s": 9.995662625064142
+    },
+    {
+      "degree": 3,
+      "iterations": 16,
+      "converged": true,
+      "lobpcg_s": 8.820442874915898,
+      "precond_s": 2.537771583069116,
+      "total_s": 12.071833541966043
+    },
+    {
+      "degree": 4,
+      "iterations": 15,
+      "converged": true,
+      "lobpcg_s": 10.294395083910786,
+      "precond_s": 2.5601577090565115,
+      "total_s": 13.566859249956906
+    }
+  ],
+  "degree_gmg": [
+    {
+      "degree": 2,
+      "iterations": 16,
+      "converged": true,
+      "lobpcg_s": 2.8813882910180837,
+      "precond_s": 0.5486602910095826,
+      "total_s": 3.483986667008139
+    },
+    {
+      "degree": 3,
+      "iterations": 15,
+      "converged": true,
+      "lobpcg_s": 3.4754345420515165,
+      "precond_s": 0.5511605419451371,
+      "total_s": 4.081039415905252
+    },
+    {
+      "degree": 4,
+      "iterations": 14,
+      "converged": true,
+      "lobpcg_s": 3.9063055419828743,
+      "precond_s": 0.595943458029069,
+      "total_s": 4.556979125016369
+    }
+  ],
+  "vcycle_amg": [
+    {
+      "degree": 2,
+      "time_s": 0.0620518340729177,
+      "temp_blocks": 19.142061337355454
+    },
+    {
+      "degree": 4,
+      "time_s": 0.12211870797909796,
+      "temp_blocks": 18.2449531245379
+    }
+  ],
+  "vcycle_gmg_float64": [
+    {
+      "degree": 2,
+      "time_s": 0.7012844580458477,
+      "temp_blocks": 13.55030953320184
+    },
+    {
+      "degree": 4,
+      "time_s": 1.2523667080095038,
+      "temp_blocks": 14.616919314216355
+    }
+  ],
+  "vcycle_gmg_float32": [
+    {
+      "degree": 2,
+      "time_s": 0.43200074997730553,
+      "temp_blocks": 6.503303939715774
+    },
+    {
+      "degree": 4,
+      "time_s": 0.721372083062306,
+      "temp_blocks": 7.103279826025388
+    }
+  ],
+  "cost": {
+    "n": 44,
+    "m": 25,
+    "n_dof": 1075275,
+    "sizes": [
+      1075275,
+      273375,
+      20250,
+      750
+    ],
+    "t_A_s": 0.3141832500696182,
+    "amg_cycle_t_A": 1.249407522246457,
+    "P_t_A": 0.19527443957181115,
+    "PT_t_A": 0.1759086202281906,
+    "vcycle_t_A": 5.425230869819015,
+    "vcycle_temp_blocks": 11.742183571644462,
+    "setup_s": {
+      "galerkin": 0.6699315829901025,
+      "sa_loop": 1.7599949999712408,
+      "amg_total": 4.127046457957476
+    },
+    "storage_GB": {
+      "levels": 0.236224512,
+      "transfers": 0.240741636,
+      "coarse": 0.0045
+    },
+    "padding": {
+      "levels": [
+        1.0457945700930489,
+        1.2392284655368269
+      ],
+      "P": [
+        1.3411745683278449,
+        1.3727222262447807
+      ],
+      "PT": [
+        1.2067525635287557,
+        1.4119180363478387
+      ]
+    },
+    "operator_complexity": 1.1482990262829995
+  },
+  "versions": {
+    "jax": "0.11.2",
+    "jaxlib": "0.11.2",
+    "numpy": "2.5.3",
+    "platform": "macOS-27.2-arm64-arm-64bit",
+    "cpu_count": 16,
+    "p_cores": 12,
+    "e_cores": 4,
+    "xla_flags": null,
+    "jax_num_cpu_devices": true
+  }
+}

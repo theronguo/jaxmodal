@@ -9,8 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from exact import mac
-from helpers import step_bytes
-from test_amg import owned_bytes
+from helpers import STEEL, owned_bytes, step_bytes
 
 from jaxmodal.eigen import lobpcg, reference_modes, solve_modes
 from jaxmodal.materials import Material, isotropic
@@ -42,7 +41,6 @@ G = importlib.import_module("jaxmodal.precond.gmg")
 CHEB = importlib.import_module("jaxmodal.precond.chebyshev")
 
 MAT = {0: Material(isotropic(3.0, 0.3), 2.0)}
-STEEL = {0: Material(isotropic(210e9, 0.3), 7850.0)}
 CLAMP = {"xmin": "xyz"}
 SPIED = ("unstructured", "stencil", "gmg", "amg", "lobpcg", "sigma_estimate")
 
@@ -274,6 +272,8 @@ BAD_KEYS = [
     (dict(sigma_options={"rounds": 0}), "rounds"),
     (dict(sigma_options={"estimate_maxit": 0}), "estimate_maxit"),
     (dict(sigma_options={"drop": 1.0}), "drop"),
+    (dict(sigma_options={"rounds": True}), "rounds"),
+    (dict(precond_options={"max_coarse": True}), "max_coarse"),
 ]
 
 
@@ -285,6 +285,15 @@ def test_validation(kw, word):
         solve_modes(box((2, 2, 2)), MAT, CLAMP, 1, **kw)
     if "unknown" in str(e.value):
         assert "allowed" in str(e.value) and "solve_modes sets" in str(e.value)
+
+
+def test_numpy_ints():
+    """Test 4: NumPy integers pass the count checks (bool does not, above)."""
+    lam, _, _ = solve_modes(
+        box((4, 4, 4)), MAT, CLAMP, 2, precond_options={"max_coarse": np.int64(500),
+        "degree": np.int64(3)}, sigma_options={"rounds": np.int64(2)},
+    )  # fmt: skip
+    assert lam.shape == (2,)
 
 
 def test_validation_voxel():
@@ -359,9 +368,9 @@ def test_memory_precond_options():
     g = {d: gmg_memory(v, 15, degree=d) for d in (2, 3)}
     b = 8 * 3 * len(v.points) * 15
     for key in ("workspace", "step", "step_low"):
-        assert abs(g[3][key] - g[2][key] - GMG_LOOP * b) <= 1
+        assert abs(g[3][key] - g[2][key] - GMG_LOOP["float64"] * b) <= 1
     g32 = [gmg_memory(v, 15, "float32", degree=d)["step"] for d in (2, 3)]
-    assert abs(g32[1] - g32[0] - GMG_LOOP * b / 2) <= 1
+    assert abs(g32[1] - g32[0] - GMG_LOOP["float32"] * b) <= 1
 
 
 MAX_COARSE_MESHES = {
@@ -434,15 +443,43 @@ def test_gmg_step_degree(n, dtype):
         assert work <= gmg_memory(mesh, 15, dtype, degree=deg)["workspace"], kw
 
 
+@pytest.mark.parametrize(
+    "n", [16, pytest.param(48, marks=pytest.mark.slow)]
+)  # fmt: skip
+def test_gmg_loop_increment(n):
+    """Test 5: GMG_LOOP pinned to the measured degree-4 minus degree-2 increase of the V-cycle
+    temporaries (fp64 and fp32) and, at 48^3, of both LOBPCG steps (fp64): within [0.8, 1] of
+    the model (below 48^3 the low step rises up to 2.06 blocks, inside the GMG_STEP slack)."""
+    mesh = voxel_mesh((n,) * 3, (1 / n,) * 3)
+    op, free = stencil(mesh, STEEL), dof_mask(mesh, CLAMP)
+    r = jax.ShapeDtypeStruct((op.n_dof, 15), jnp.float64)
+    b = 8 * op.n_dof * 15
+    for dtype in ("float64", "float32"):
+        P = {d: gmg(op, free, 1e5, dtype=dtype, degree=d) for d in (2, 4)}
+        work = {
+            d: G._vcycle_apply.lower(p, r).compile().memory_analysis().temp_size_in_bytes
+            for d, p in P.items()
+        }  # fmt: skip
+        diffs = [work[4] - work[2]]
+        if n >= 48 and dtype == "float64":
+            diffs += [step_bytes(op, P[4], low) - step_bytes(op, P[2], low) for low in (0, 1)]
+        for diff in diffs:
+            assert 0.8 <= diff / (GMG_LOOP[dtype] * b) <= 1, (dtype, diff / b)
+
+
+def test_amg_loop_increment():
+    """Test 5: AMG_LOOP_K pinned to the measured degree-4 minus degree-2 step increase at hex20
+    8^3 (both steps): within [0.6, 1] of the model."""
+    mesh = box_mesh((8,) * 3, (1 / 8,) * 3, type="hex20")
+    op, free = unstructured(mesh, STEEL), dof_mask(mesh, CLAMP)
+    P = {d: amg(op, free, 1e6, mesh.points, degree=d) for d in (2, 4)}
+    for low in (False, True):
+        diff = step_bytes(op, P[4], low) - step_bytes(op, P[2], low)
+        assert 0.6 <= diff / (8 * 15 * AMG_LOOP_K) <= 1, (low, diff / 120)
+
+
 # ------------------------------------------------------------- 6: option sets pinned
 
-RESERVED = {
-    "unstructured": {"mesh", "materials", "orientations", "mass", "nodal_mass"},
-    "stencil": {"mesh", "materials", "orientations", "mass", "nodal_mass"},
-    "gmg": {"op", "free", "sigma", "dtype"},
-    "amg": {"op", "free", "sigma", "points", "nonsingular", "aggregates", "return_aggregates"},
-    "jacobi": {"op", "free", "sigma"},
-}
 LOBPCG_FORWARDED = {
     "op", "free", "n_modes", "tol", "R", "precond", "X0", "maxit", "seed", "chunk", "guards",
     "basis_dtype", "low_memory",
@@ -461,14 +498,12 @@ def test_option_sets_pinned():
     )  # fmt: skip
     allowed = {**api.OPERATOR_OPTIONS, **api.PRECOND_OPTIONS}
     for name, f in builders.items():
-        assert params(f) - RESERVED[name] == set(allowed[name]), name
+        assert params(f) - api.RESERVED[name] == set(allowed[name]), name
     assert params(lobpcg) == LOBPCG_FORWARDED
     assert params(LOB.lobpcg) <= params(solve_modes) | {"op", "free", "R", "precond"}
     assert params(api._precond_sigma) - {"op", "free", "R", "build", "seed"} == set(
         api.SIGMA_OPTIONS
     )
-    for word in set().union(*RESERVED.values()) - {"op", "free", "points", "return_aggregates"}:
-        assert word in api.RESERVED, word
 
 
 # ------------------------------------------------------------- 7: Chebyshev loop
@@ -536,3 +571,16 @@ def test_chebyshev_loop_fp32():
     assert S(u32).dtype == jnp.float32
     ref = unrolled(S, u32)
     assert jnp.linalg.norm(S(u32) - ref) <= 1e-5 * jnp.linalg.norm(ref)
+
+
+@pytest.mark.slow
+def test_options_study_smoke():
+    """benchmarks/options_study.run(small=True) records every entry with converged solves."""
+    from benchmarks import options_study
+
+    r = options_study.run(small=True)
+    assert r["x0"]["warm"] < r["x0"]["cold"] and r["jacobi"]["amg"] < r["jacobi"]["jacobi"]
+    for key in ("degree_amg", "degree_gmg"):
+        assert [d["degree"] for d in r[key]] == [2, 3, 4] and all(d["converged"] for d in r[key])
+    for key in ("vcycle_amg", "vcycle_gmg_float64", "vcycle_gmg_float32"):
+        assert [d["degree"] for d in r[key]] == [2, 4] and all(d["temp_blocks"] > 0 for d in r[key])
