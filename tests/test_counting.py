@@ -513,7 +513,7 @@ def test_count_peak():
     n x k device copy would add 60%) stays on the host."""
     from benchmarks import harness
 
-    s, b = 56, 24
+    s, b = 60, 24
     mesh = voxel_mesh((s, s, s), (1 / s,) * 3)
     n = 3 * len(mesh.points)
     e = count_memory(lambda m: stencil_memory(mesh, m, mass="lumped"), n, b, voxel=True)
