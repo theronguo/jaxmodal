@@ -208,7 +208,7 @@ def _check_ortho(op, m, W, seed):
 
 def count(
     op, free, W, lam, lam_last, lam_next, *, R=None, precond=None, n_probes=50, seed=0,
-    tau=None, degree=None, block=None, maxit=1000,
+    tau=None, degree=None, block=None, maxit=1000, _steps=None,
 ):  # fmt: skip
     """Stochastic count of the eigenvalues below lam_c = (lam_last + lam_next) / 2 that are
     missing from W. Returns (estimate, info); passed = verifiable and estimate < 0.5.
@@ -221,7 +221,11 @@ def count(
     the fp64 multigrid). degree overrides the degree rule, tau the inner tolerance
     0.01 / (d sqrt(n_free)); block: probes per block (default n_probes); maxit: per PCG solve.
     A stagnated or unconverged solve makes the count unverifiable: the remaining work is
-    skipped and the estimate is NaN.
+    skipped and the estimate is NaN. info["time"]: sampling (the y solves), recurrence (the
+    recurrences alone), projection (the projections and the reduction), step (recurrence per
+    step), block ((sampling + projection) per block run) and total. _steps (internal, the
+    calibration in solve_modes): run at most this many steps per block, with the degree-d
+    polynomial's compiled shape (the estimate is then not the count's).
     """
     check_x64("count")
     t0 = time.perf_counter()
@@ -284,7 +288,8 @@ def count(
     keys = fold(jax.random.key(seed), jnp.arange(n_blocks * block))
     s_all = np.full(n_blocks * block, np.nan)
     it_sum = it_max = steps = 0
-    t_sample = t_rec = 0.0
+    t_sample = t_rec = t_proj = 0.0
+    d_run = d if _steps is None else min(d, _steps)
     ok = True
     for i in range(n_blocks):
         ta = time.perf_counter()
@@ -297,15 +302,21 @@ def count(
             break
         w0 = _project(op, m, W, R, MR, y)
         del y  # only w0 and the recurrence are alive in the step phase
-        u, k, isum, imax, bad = _recurrence(A, precond, m, w0, gamma, d, float(lam_c), tau, maxit)
+        w0.block_until_ready()
+        tc = time.perf_counter()
+        u, k, isum, imax, bad = _recurrence(
+            A, precond, m, w0, gamma, d_run, float(lam_c), tau, maxit
+        )
         del w0
         k, bad = int(k), bool(bad)
+        td = time.perf_counter()
         steps, it_sum, it_max = steps + k, it_sum + int(isum), max(it_max, int(imax))
         if not bad:
             u = _project(op, m, W, R, MR, u)
             s_all[i * block : (i + 1) * block] = np.asarray(jnp.sum(u * _mm(op, m, u), 0))
         del u
-        t_rec += time.perf_counter() - tb
+        t_rec += td - tc
+        t_proj += time.perf_counter() - td + tc - tb
         if bad:
             ok = False
             break
@@ -321,7 +332,9 @@ def count(
         time=dict(
             sampling=t_sample,
             recurrence=t_rec,
+            projection=t_proj,
             step=t_rec / max(steps, 1),
+            block=(t_sample + t_proj) / (i + 1),
             total=time.perf_counter() - t0,
         ),  # fmt: skip
     )

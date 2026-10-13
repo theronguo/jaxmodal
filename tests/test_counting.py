@@ -531,6 +531,20 @@ def test_count_peak():
 # ---------------------------------------------------------------- 10, 11: blocks, fp32 W
 
 
+def test_steps_and_times():
+    """PR 14b test 7c: _steps caps the steps per block (same compile), _steps >= d gives the
+    count's estimate, and the time keys add up."""
+    est, info, _ = run(degree=20, n_probes=6, block=3)
+    n0 = counting._recurrence._cache_size()
+    _, capped, _ = run(degree=20, n_probes=6, block=3, _steps=3)
+    assert capped["steps"] == 2 * 3 and counting._recurrence._cache_size() == n0
+    assert run(degree=20, n_probes=6, block=3, _steps=20)[0] == est
+    t = info["time"]
+    assert t["step"] == t["recurrence"] / info["steps"]
+    assert t["block"] == pytest.approx((t["sampling"] + t["projection"]) / 2, rel=1e-12)
+    assert t["sampling"] + t["recurrence"] + t["projection"] <= t["total"]
+
+
 def test_blocks_and_compiles():
     """Test 10: b = 7 and b = 50 give the same s_j; degrees 100 and 120 share one compile."""
     a = run((2,), tau=1e-12, block=7)[1]["probes"]
