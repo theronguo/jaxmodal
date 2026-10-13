@@ -210,9 +210,10 @@ def test_tail_bias_quad():
 
     d, lam_top, n_top, n_free = 40, 1.25, 5000, 10**6
     gamma = jackson_step(d)
-    lam_max = lam_top * (n_free / n_top) ** (1 / 1.5)
+    a = counting.WEYL_A
+    lam_max = lam_top * (n_free / n_top) ** (1 / a)
     f = lambda lam: (  # noqa: E731
-        step_value(gamma, _theta(lam))[0] ** 2 * n_top * 1.5 * lam**0.5 / lam_top**1.5
+        step_value(gamma, _theta(lam))[0] ** 2 * n_top * a * lam ** (a - 1) / lam_top**a
     )
     want = quad(f, lam_top, lam_max, limit=2000, epsabs=0, epsrel=1e-10)[0]
     got = tail_bias(gamma, 0.5, lam_top, n_top, n_free)
