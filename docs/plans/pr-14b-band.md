@@ -61,7 +61,8 @@ New internal keyword `lam_stop=None` ($(2\pi f_{max})^2$, the pencil's units). W
   recorded as `info["t_iteration"]` (one `perf_counter` pair around the first iteration and the
   chunk); chunk 0 has no locked modes, so it times the applies without the projector. If
   chunk 0 ran a single iteration there is no warm time: `t_iteration` = 0, so the bound never
-  skips and `verify=None` goes to the calibration.
+  skips and `verify=None` goes to the calibration; the reported `predicted_s` is then None
+  (`predicted_kind: "unknown"`; `predicted_steps` still gives the cost).
 - Every chunk is lockable (the guard error applies to every chunk).
 - **Band rule** (host helper `_band_count(lam, t, lam_stop) -> i`, unit-tested on synthetic
   arrays): `i` = the number of Ritz values $\le$ `lam_stop`$\,(1 + 100\,t)$ (a neighbour within
