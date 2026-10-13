@@ -96,8 +96,8 @@ def _minres(A, P, b, tol, maxit):
     y = P(b)
     beta = jnp.sqrt(jnp.maximum(jnp.sum(b * y, 0), 0.0))
     zero = jnp.zeros_like(b)
-    st = dict(x=zero, r1=b, r2=b, y=y, w=zero, w2=zero, oldb=zk, beta=beta, dbar=zk, eps=zk,
-              phibar=beta, cs=-jnp.ones(k), sn=zk, it=0, act=nb > 0, conv=nb == 0,
+    st = dict(x=zero, xb=zero, r1=b, r2=b, y=y, w=zero, w2=zero, oldb=zk, beta=beta, dbar=zk,
+              eps=zk, phibar=beta, cs=-jnp.ones(k), sn=zk, it=0, act=nb > 0, conv=nb == 0,
               stag=jnp.zeros(k, bool), best=jnp.full(k, jnp.inf), since=jnp.zeros(k, int),
               its=jnp.zeros(k, int))  # fmt: skip
 
@@ -123,22 +123,26 @@ def _minres(A, P, b, tol, maxit):
         def explicit(_):
             e = _norm(b - A(x))
             new = e < s["best"]
-            return act & (e <= lim), jnp.minimum(e, s["best"]), jnp.where(new, 0, s["since"] + 1), e
+            xb = jnp.where(new, x, s["xb"])  # the 2-norm residual is not monotone in MINRES
+            since = jnp.where(new, 0, s["since"] + 1)
+            return act & (e <= lim), jnp.minimum(e, s["best"]), since, e, xb
 
         def skip(_):
-            return jnp.zeros(k, bool), s["best"], s["since"], jnp.zeros(k)
+            return jnp.zeros(k, bool), s["best"], s["since"], jnp.zeros(k), s["xb"]
 
-        good, best, since, e = lax.cond(it % CHECK == 0, explicit, skip, None)
+        good, best, since, e, xb = lax.cond(it % CHECK == 0, explicit, skip, None)
         stag = s["stag"] | (act & ~good & (since >= STALL_C))
         act = act & ~good & ~stag & jnp.isfinite(e)
-        return dict(x=x, r1=r1, r2=r2, y=y, w=w, w2=s["w"], oldb=oldb, beta=beta, dbar=dbar,
+        return dict(x=x, xb=xb, r1=r1, r2=r2, y=y, w=w, w2=s["w"], oldb=oldb, beta=beta, dbar=dbar,
                     eps=eps, phibar=phibar, cs=cs, sn=sn, it=it, act=act, conv=s["conv"] | good,
                     stag=stag, best=best, since=since, its=s["its"] + s["act"])  # fmt: skip
 
     s = lax.while_loop(lambda s: (s["it"] < maxit) & s["act"].any(), body, st)
-    x = s["x"]
-    info = dict(iterations=s["its"], residuals=_div(_norm(b - A(x)), nb), converged=s["conv"],
-                stagnated=s["stag"])  # fmt: skip
+    e = _norm(b - A(s["x"]))
+    last = e <= s["best"]  # the last iterate unless an earlier check was better
+    x = jnp.where(last, s["x"], s["xb"])
+    info = dict(iterations=s["its"], residuals=_div(jnp.minimum(e, s["best"]), nb),
+                converged=s["conv"], stagnated=s["stag"])  # fmt: skip
     return x, info
 
 
@@ -146,6 +150,8 @@ def minres(A, b, precond=None, tol=1e-8, maxit=10000):
     """Preconditioned MINRES for symmetric (possibly indefinite) A with an SPD precond, on
     independent columns of b (n, k): x and info (iterations, residuals, converged, stagnated).
     The explicit 2-norm residual is checked every CHECK iterations; a column converges when it
-    meets tol ||b|| and stagnates after STALL_C checks without a new minimum."""
+    meets tol ||b|| and stagnates after STALL_C checks without a new minimum. Returns the iterate
+    with the smallest explicit residual (the last one or the best check); a non-finite residual is
+    reported as NaN, as in pcg."""
     _check("minres", b, maxit)
     return _minres(A, Partial(_identity) if precond is None else precond, b, tol, maxit)
