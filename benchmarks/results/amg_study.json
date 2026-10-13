@@ -1,0 +1,959 @@
+{
+  "runs": [
+    {
+      "case": "hex20 6^3",
+      "n_dof": 3675,
+      "sigma": 12026017.941605447,
+      "amg": {
+        "iterations": [
+          14,
+          14,
+          14,
+          14
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "build_s": 1.6714865829562768,
+        "sizes": [
+          3675,
+          1029,
+          162,
+          6
+        ]
+      },
+      "pmg": {
+        "iterations": [
+          14,
+          14,
+          14,
+          14
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "case": "hex20 3^3",
+      "n_dof": 624,
+      "sigma": 12026017.941605447,
+      "amg": {
+        "iterations": [
+          14,
+          14,
+          15,
+          14
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "build_s": 1.2335188339930028,
+        "sizes": [
+          624,
+          192,
+          48
+        ]
+      },
+      "pmg": {
+        "iterations": [
+          14,
+          14,
+          14,
+          14
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "case": "hex20 12^3",
+      "n_dof": 24843,
+      "sigma": 12026017.941605447,
+      "amg": {
+        "iterations": [
+          14,
+          14,
+          14,
+          14
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "build_s": 2.0675594590138644,
+        "sizes": [
+          24843,
+          6591,
+          750,
+          48
+        ]
+      },
+      "pmg": {
+        "iterations": [
+          14,
+          14,
+          14,
+          14
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "case": "hex20 24^3",
+      "n_dof": 181875,
+      "sigma": 12026017.941605447,
+      "amg": {
+        "iterations": [
+          14,
+          14,
+          14,
+          14
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "build_s": 4.512946957955137,
+        "sizes": [
+          181875,
+          46875,
+          4374,
+          162,
+          6
+        ]
+      },
+      "pmg": {
+        "iterations": [
+          14,
+          14,
+          14,
+          14
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "case": "hex27 6^3",
+      "n_dof": 6591,
+      "sigma": 11979092.898337135,
+      "amg": {
+        "iterations": [
+          13,
+          13,
+          13,
+          13
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "build_s": 1.7520635839318857,
+        "sizes": [
+          6591,
+          1029,
+          162,
+          6
+        ]
+      },
+      "pmg": {
+        "iterations": [
+          13,
+          13,
+          13,
+          13
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "case": "hex27 3^3",
+      "n_dof": 1029,
+      "sigma": 11979092.898337135,
+      "amg": {
+        "iterations": [
+          13,
+          13,
+          13,
+          13
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "build_s": 1.2980944169685245,
+        "sizes": [
+          1029,
+          192,
+          48
+        ]
+      },
+      "pmg": {
+        "iterations": [
+          13,
+          13,
+          13,
+          13
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "case": "hex27 12^3",
+      "n_dof": 46875,
+      "sigma": 11979092.898337135,
+      "amg": {
+        "iterations": [
+          13,
+          13,
+          13,
+          13
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "build_s": 2.308328832965344,
+        "sizes": [
+          46875,
+          6591,
+          750,
+          48
+        ]
+      },
+      "pmg": {
+        "iterations": [
+          13,
+          13,
+          13,
+          13
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "case": "hex8 6^3",
+      "n_dof": 1029,
+      "sigma": 12428419.885493534,
+      "amg": {
+        "iterations": [
+          13,
+          13,
+          13,
+          13
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "build_s": 1.2065478750737384,
+        "sizes": [
+          1029,
+          108,
+          6
+        ]
+      }
+    },
+    {
+      "case": "hex8 12^3",
+      "n_dof": 6591,
+      "sigma": 12428419.885493534,
+      "amg": {
+        "iterations": [
+          13,
+          13,
+          13,
+          13
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "build_s": 1.453021083958447,
+        "sizes": [
+          6591,
+          600,
+          30
+        ]
+      }
+    },
+    {
+      "case": "hex8 24^3",
+      "n_dof": 46875,
+      "sigma": 12428419.885493534,
+      "amg": {
+        "iterations": [
+          13,
+          13,
+          13,
+          13
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "build_s": 2.8142036659410223,
+        "sizes": [
+          46875,
+          3888,
+          162,
+          6
+        ]
+      }
+    },
+    {
+      "case": "hex8 48^3",
+      "n_dof": 352947,
+      "sigma": 12428419.885493534,
+      "amg": {
+        "iterations": [
+          13,
+          13,
+          13,
+          13
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "build_s": 9.815006042015739,
+        "sizes": [
+          352947,
+          27744,
+          1176,
+          48
+        ]
+      }
+    },
+    {
+      "case": "beam 20x2x2",
+      "n_dof": 1863,
+      "sigma": 275116.6548036112,
+      "amg": {
+        "iterations": [
+          16,
+          16,
+          16,
+          16
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "build_s": 1.2364543329458684,
+        "sizes": [
+          1863,
+          567,
+          42
+        ]
+      },
+      "pmg": {
+        "iterations": [
+          16,
+          16,
+          15,
+          16
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "case": "free 6^3",
+      "n_dof": 3675,
+      "sigma": 83990979.28500436,
+      "amg": {
+        "iterations": [
+          14,
+          14,
+          14,
+          14
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "build_s": 1.6786357910605147,
+        "sizes": [
+          3675,
+          1029,
+          162,
+          6
+        ]
+      },
+      "pmg": {
+        "iterations": [
+          14,
+          14,
+          14,
+          14
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "case": "curved 6^3",
+      "n_dof": 3675,
+      "sigma": 12030431.380846037,
+      "amg": {
+        "iterations": [
+          14,
+          14,
+          14,
+          14
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "build_s": 1.7004578750347719,
+        "sizes": [
+          3675,
+          1029,
+          162,
+          6
+        ]
+      },
+      "pmg": {
+        "iterations": [
+          14,
+          14,
+          14,
+          14
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "case": "checkerboard 4^3 s_K 1e-3",
+      "n_dof": 1275,
+      "sigma": 1567319.918695683,
+      "amg": {
+        "iterations": [
+          20,
+          20,
+          20,
+          20
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "build_s": 1.2445277080405504,
+        "sizes": [
+          1275,
+          375,
+          48
+        ]
+      },
+      "pmg": {
+        "iterations": [
+          19,
+          19,
+          18,
+          19
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "case": "nodal 6^3",
+      "n_dof": 3675,
+      "sigma": 2817053.192453414,
+      "amg": {
+        "iterations": [
+          14,
+          14,
+          14,
+          14
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "build_s": 1.7021607079077512,
+        "sizes": [
+          3675,
+          1029,
+          162,
+          6
+        ]
+      },
+      "pmg": {
+        "iterations": [
+          14,
+          14,
+          14,
+          14
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "case": "plate 16^2x1 a=1",
+      "n_dof": 5865,
+      "sigma": 115811.48028086731,
+      "amg": {
+        "iterations": [
+          36,
+          35,
+          35,
+          35
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "build_s": 1.697213958017528,
+        "sizes": [
+          5865,
+          1734,
+          216,
+          24
+        ]
+      },
+      "pmg": {
+        "iterations": [
+          15,
+          15,
+          15,
+          15
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "case": "plate 16^2x1 a=2",
+      "n_dof": 5865,
+      "sigma": 29146.600870322785,
+      "amg": {
+        "iterations": [
+          85,
+          83,
+          83,
+          84
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "build_s": 1.8759437500266358,
+        "sizes": [
+          5865,
+          1734,
+          216,
+          24
+        ]
+      },
+      "pmg": {
+        "iterations": [
+          21,
+          21,
+          21,
+          21
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "case": "plate 16^2x1 a=4",
+      "n_dof": 5865,
+      "sigma": 7308.503666853503,
+      "amg": {
+        "iterations": [
+          229,
+          221,
+          224,
+          225
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "build_s": 2.3617594999959692,
+        "sizes": [
+          5865,
+          1734,
+          216,
+          24
+        ]
+      },
+      "pmg": {
+        "iterations": [
+          63,
+          61,
+          61,
+          61
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "case": "plate 16^2x1 a=10",
+      "n_dof": 5865,
+      "sigma": 1171.9878546197615,
+      "amg": {
+        "iterations": [
+          1000,
+          1000,
+          1000,
+          1000
+        ],
+        "converged": [
+          false,
+          false,
+          false,
+          false
+        ],
+        "build_s": 5.059311249991879,
+        "sizes": [
+          5865,
+          1734,
+          216,
+          24
+        ]
+      },
+      "pmg": {
+        "iterations": [
+          718,
+          618,
+          650,
+          629
+        ],
+        "converged": [
+          false,
+          false,
+          false,
+          false
+        ]
+      }
+    },
+    {
+      "case": "box 8^3 hz=h/1",
+      "n_dof": 8019,
+      "sigma": 11988567.727187516,
+      "amg": {
+        "iterations": [
+          14,
+          14,
+          14,
+          14
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "build_s": 1.8063622920308262,
+        "sizes": [
+          8019,
+          2187,
+          162,
+          6
+        ]
+      },
+      "pmg": {
+        "iterations": [
+          14,
+          14,
+          14,
+          14
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "case": "box 8^3 hz=h/2",
+      "n_dof": 8019,
+      "sigma": 5300740.539275825,
+      "amg": {
+        "iterations": [
+          20,
+          20,
+          19,
+          20
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "build_s": 1.860670791938901,
+        "sizes": [
+          8019,
+          2187,
+          162,
+          6
+        ]
+      },
+      "pmg": {
+        "iterations": [
+          17,
+          17,
+          17,
+          16
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "case": "box 8^3 hz=h/4",
+      "n_dof": 8019,
+      "sigma": 1676386.6642353723,
+      "amg": {
+        "iterations": [
+          50,
+          51,
+          51,
+          52
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "build_s": 2.131600124994293,
+        "sizes": [
+          8019,
+          2187,
+          162,
+          6
+        ]
+      },
+      "pmg": {
+        "iterations": [
+          28,
+          28,
+          28,
+          28
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "case": "box 8^3 hz=h/10",
+      "n_dof": 8019,
+      "sigma": 292473.57260561176,
+      "amg": {
+        "iterations": [
+          232,
+          242,
+          234,
+          244
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "build_s": 3.7722692081006244,
+        "sizes": [
+          8019,
+          2187,
+          162,
+          6
+        ]
+      },
+      "pmg": {
+        "iterations": [
+          76,
+          76,
+          73,
+          74
+        ],
+        "converged": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    }
+  ],
+  "tol": 1e-08,
+  "max_coarse": 100,
+  "system": "benchmarks/results/system.json",
+  "cost": {
+    "n": 44,
+    "m": 25,
+    "n_dof": 1075275,
+    "sizes": [
+      1075275,
+      273375,
+      20250,
+      750
+    ],
+    "t_A_s": 0.3149920830037445,
+    "amg_cycle_t_A": 1.248665773518189,
+    "P_t_A": 0.19592106383039193,
+    "PT_t_A": 0.17230539090514554,
+    "vcycle_t_A": 5.406786947684252,
+    "vcycle_temp_blocks": 11.742183571644462,
+    "setup_s": {
+      "galerkin": 1.2704543749568984,
+      "sa_loop": 1.966100791003555,
+      "amg_total": 5.073330542072654
+    },
+    "storage_GB": {
+      "levels": 0.236224512,
+      "transfers": 0.240741636,
+      "coarse": 0.0045
+    },
+    "padding": {
+      "levels": [
+        1.0457945700930489,
+        1.2392284655368269
+      ],
+      "P": [
+        1.3411745683278449,
+        1.3727222262447807
+      ],
+      "PT": [
+        1.2067525635287557,
+        1.4119180363478387
+      ]
+    },
+    "operator_complexity": 1.1482977224833812
+  },
+  "versions": {
+    "jax": "0.11.2",
+    "jaxlib": "0.11.2",
+    "numpy": "2.5.3",
+    "platform": "macOS-27.2-arm64-arm-64bit",
+    "cpu_count": 16,
+    "p_cores": 12,
+    "e_cores": 4,
+    "xla_flags": null,
+    "jax_num_cpu_devices": true
+  }
+}

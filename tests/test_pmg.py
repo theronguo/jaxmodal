@@ -126,7 +126,7 @@ def test_galerkin(name, mode, mass):
     """Test 2: _hex8_galerkin = P_ref^T a_p(K + sigma M, free, s) P_ref, exactly symmetric."""
     mesh, op, free, sigma, A = galerkin_case(name, mode, mass)
     Pr, _ = p_ref(mesh)
-    Ac, _ = PM._hex8_galerkin(ap_operator(op, free, sigma))
+    Ac = PM._hex8_galerkin(ap_operator(op, free, sigma))[0]
     assert rel(Ac.toarray(), Pr.T @ A.toarray() @ Pr) <= 1e-12
     assert (Ac != Ac.T).nnz == 0
 
@@ -153,7 +153,7 @@ def test_galerkin_padded():
     b = op.blocks[0]
     assert b.dofs.shape[0] > b.n_el
     Pr, _ = p_ref(mesh)
-    Ac, _ = PM._hex8_galerkin(ap_operator(op, free, sigma))
+    Ac = PM._hex8_galerkin(ap_operator(op, free, sigma))[0]
     assert rel(Ac.toarray(), Pr.T @ A.toarray() @ Pr) <= 1e-12
     d = {k: v[-b.chunk :] for k, v in mf._block_data(op, b).items()}
     K, M = mf.element_matrices(op, b, d)

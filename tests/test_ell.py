@@ -120,3 +120,60 @@ def test_errors():
         block_ell(sp.eye(10).tocsr(), 3)
     with pytest.raises(ValueError, match="dtype"):
         block_ell(sp.eye(9).tocsr(), dtype="float16")
+
+
+def random_rect(nr, nc, b, dense_rows=(), seed=0):
+    """Random rectangular block-sparse matrix (nr x nc blocks) with some dense block rows."""
+    rng = np.random.default_rng(seed)
+    P = sp.random(nr, nc, density=min(1.0, 3 / nc), random_state=rng).tolil()
+    for i in dense_rows:
+        P[i, :] = 1
+    P = P.tocsr()
+    P.data[:] = 1
+    A = sp.kron(P, np.ones((b, b))).tocsr()
+    A.data = rng.standard_normal(A.nnz)
+    return A
+
+
+def check_rect(A, E, m=3):
+    X = np.random.default_rng(m).standard_normal((A.shape[1], m))
+    Y = np.asarray(E(jnp.asarray(X)))
+    assert Y.shape == (A.shape[0], m) and E.n_dof == A.shape[0]
+    assert np.abs(Y - A @ X).max() <= 1e-12 * np.abs(A @ X).max()
+
+
+@pytest.mark.parametrize("sliced", [False, True])
+@pytest.mark.parametrize("b", [1, 3])
+@pytest.mark.parametrize("shape", [(50, 17), (17, 50)])
+def test_rectangular(shape, b, sliced):
+    """Rectangular (tall and wide, b = 1 and 3, plain and sliced) equals SciPy; padding
+    entries point to block column 0."""
+    A = random_rect(*shape, b, dense_rows=(3,))
+    E = block_ell(A, b, sliced=sliced, chunk=8)
+    assert (E.n_buckets > 1) == sliced
+    check_rect(A, E)
+    for cols, vals in zip(E.cols, E.vals, strict=True):
+        pad = (np.asarray(vals) == 0).all(axis=(2, 3))
+        assert (np.asarray(cols)[pad] == 0).all()
+
+
+def test_chunk_bound():
+    """A bucket wider than 27 blocks scans at most chunk * 27 // w rows, which bounds the gather
+    temporaries (vs the unbounded chunk); a b = 3, w = 27 square matrix keeps 2048."""
+    import dataclasses
+
+    from jaxmodal.linalg import ell
+
+    A = sp.csr_array(np.random.default_rng(1).standard_normal((1024, 512)))  # w = 512
+    E = block_ell(A, 1)
+    assert E.chunks == (2048 * 27 // 512,)
+    X = jnp.ones((512, 25))
+    temp = [
+        ell._apply.lower(F, X).compile().memory_analysis().temp_size_in_bytes
+        for F in (E, dataclasses.replace(E, chunks=(E.cols[0].shape[0],)))  # one step
+    ]
+    assert temp[0] <= 2 * E.chunks[0] * 512 * 25 * 8 < temp[1] / 4
+    check_rect(A, E)
+    S = sp.kron(sp.csr_array(np.ones((27, 27))), np.ones((3, 3))).tocsr()  # 27 blocks per row
+    S = sp.block_diag([S] * 100).tocsr()
+    assert block_ell(S, 3).chunks == (2048,)

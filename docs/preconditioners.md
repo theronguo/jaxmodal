@@ -1,6 +1,6 @@
 # Linear solvers, preconditioners and block-ELL
 
-PR 10 adds the single-level kernels that the multigrid PRs (11–13), the eigenvalue counting (PR 14) and the interior bands (PR 15) build on; PR 11a adds the voxel geometric multigrid ([below](#voxel-geometric-multigrid-gmg)) and PR 12 the unstructured p-multigrid ([below](#unstructured-p-multigrid-pmg)), both on one shared V-cycle. Everything works on the preconditioning operator $A_P$ ([`boundary_conditions.md`](boundary_conditions.md)).
+PR 10 adds the single-level kernels that the multigrid PRs (11–13), the eigenvalue counting (PR 14) and the interior bands (PR 15) build on; PR 11a adds the voxel geometric multigrid ([below](#voxel-geometric-multigrid-gmg)) PR 12 the unstructured p-multigrid ([below](#unstructured-p-multigrid-pmg)) and PR 13a the unstructured AMG ([below](#unstructured-amg-amg)), all on one shared V-cycle. Everything works on the preconditioning operator $A_P$ ([`boundary_conditions.md`](boundary_conditions.md)).
 
 | module | contents |
 |---|---|
@@ -10,6 +10,7 @@ PR 10 adds the single-level kernels that the multigrid PRs (11–13), the eigenv
 | `jaxmodal.precond` (`precond/chebyshev.py`) | `lmax_estimate`, `chebyshev`, `Chebyshev` |
 | `jaxmodal.precond` (`precond/gmg.py`) | `gmg`, `GMG` (voxel geometric multigrid; the shared V-cycle) |
 | `jaxmodal.precond` (`precond/pmg.py`) | `pmg` (unstructured p-multigrid, returns a `GMG`) |
+| `jaxmodal.precond` (`precond/amg.py`) | `amg` (p-level plus smoothed-aggregation AMG, returns a `GMG`), `ELLTransfer` |
 | `jaxmodal.operators` (`operators/constraints.py`) | `ap_operator`, the matrix-free $A_P$ |
 | operators (`matfree.py`, `voxel.py`) | the sixth interface method `block_diag_K()`; `matfree.element_matrices` (PR 12) |
 
@@ -93,16 +94,16 @@ $$1 - \mu\,p(\mu) = \frac{T_k\big((\theta - \mu)/\delta\big)}{T_k(\theta/\delta)
 
 ## Block-ELL (`block_ell`, `BlockELL`)
 
-`block_ell(A, b=3, dtype="float64", sliced=None, chunk=2048)` converts a SciPy sparse matrix ($n$ divisible by $b$) on the host, through BSR with $b \times b$ blocks, into a pytree `BlockELL`: `E(X)` for `(n, m)` blocks, `n_dof`, `padding`, `n_buckets`.
+`block_ell(A, b=3, dtype="float64", sliced=None, chunk=2048)` converts a SciPy sparse matrix (both dimensions divisible by $b$, square or rectangular) on the host, through BSR with $b \times b$ blocks, into a pytree `BlockELL`: `E(X)` maps `(n_cols, m)` blocks to `(n_dof, m)`, with `n_dof` the output row count (the operator size of a square matrix), `padding`, `n_buckets`. Rectangular matrices are AMG's transfers $P$ and $P^\top$; they never reach code that assumes a square operator.
 
-- **Layout:** per bucket, `cols` `(r_pad, w)` int32 and `vals` `(r_pad, w, b, b)`; $w$ is the bucket's width (most blocks per row). Padding entries point at the row's own block column with zero values.
+- **Layout:** per bucket, `cols` `(r_pad, w)` int32 and `vals` `(r_pad, w, b, b)`; $w$ is the bucket's width (most blocks per row). Padding entries point at block column 0 with zero values (a row's own block column may not exist in a rectangular matrix).
 - **Apply:** per bucket a `lax.scan` over row chunks gathers `X[cols]` as `(chunk, w, b, m)` and contracts with `vals`. Several buckets are concatenated and put back in row order by one gather.
-- **Chunk:** `min(chunk, rows rounded up to 8)` block rows per bucket, so tiny coarse levels are not padded to 2048 rows. The gather temp is
+- **Chunk:** `min(chunk, max(8, chunk * 27 // w), rows rounded up to 8)` block rows per bucket. Tiny coarse levels are not padded to 2048 rows, and a bucket wider than 27 blocks scans proportionally fewer rows, so square matrices up to width 27 keep 2048. The gather temp is
   $$\mathrm{chunk}\cdot w\cdot b\cdot m\cdot\mathrm{itemsize}$$
-  bytes: about one vector block for 3×3 blocks, width 27 and 2048 rows; 79 MB for PR 13's level 1 (6×6, width 32, $m = 25$).
+  bytes: about one vector block for 3×3 blocks, width 27 and 2048 rows. The width bound matters for AMG's restriction $P_0^\top$ (scalar, up to 429 entries per row at hex20 $44^3$): at chunk 512 its apply temp is 341 MB at $m = 25$, with the bound (108–128 rows) 135 MB and slightly faster.
 - **Padding:** `padding` = stored blocks / structurally nonzero blocks (without the chunk round-up). Constrained nodes are width-1 rows of $A_P$, so clamped faces add padding: plain-ELL padding of the hex8 $A_P$ is 1.35 free and 1.59 clamped on $6^3$, 1.21 / 1.33 on $10^3$, 1.07 clamped on $44^3$.
 - **Sliced fallback:** `sliced=None` uses one bucket (plain ELL) while its padding is $\le 1.5$, else one bucket per row width rounded up to a power of 2 (padding $< 2$); `True` / `False` force it. hex20 meshes exceed 1.5 and are sliced.
-- **Block size** `b` is a parameter: 3 for PR 11's levels, 6 for PR 13's smoothed-aggregation levels.
+- **Block size** `b` is a parameter: 3 for PR 11's levels and AMG's first level, 1 for AMG's coarser levels and transfers.
 - **dtype:** `"float32"` stores `vals` in fp32 for fp32 V-cycles; the apply casts them to the input's dtype (fp64 in computes in fp64).
 
 ## Voxel geometric multigrid (`gmg`)
@@ -200,8 +201,8 @@ Both are far inside the 10-min budget and the ±20% band; the cold runs peak hig
 
 **Limitations** (tracked in [`docs/open_items.md`](open_items.md)).
 - **Anisotropic spacing:** coarsening is by element count, not spacing; $h_z = h/10$ needs 106 iterations. Spacing-aware semi-coarsening needs line smoothers along long stopped axes.
-- **Thin plates and slender beams:** at σ = $\lambda_1$ the iterations grow like $h^{-1}$ (single-layer plates 23 / 37 / 71 / 136 from $16^2$ to $128^2$). Coarse trilinear hex8 cells on a one- or two-element-thick layer get ever flatter and lock in bending, so the coarse correction misses the smooth bending error. Larger σ hides it (the same plates at the overestimated `sigma_estimate` took ≤ 60). Remedies belong to later PRs: algebraic coarsening (PR 13) and the solid-shell element (M4).
-- **High contrast at low σ:** at its own $\lambda_1$ a SIMP field's lowest modes are spurious island and void-region modes of $s_K = \rho^3$, $s_M = \rho$ ($\lambda_1$ is $10^{-6}$–$10^{-3}$ of the solid's). Deflation removes the island modes, but soft-region error that trilinear coarse functions cannot separate from the stiff material remains: 87 on the checked-in field, 109–135 on other seeds, 452 on an unfiltered binary field (every case converges). A SciPy prototype with Jacobi-smoothed, phase-aware prolongation plus deflation reached 34 (checked-in field) and 55 (seed 4); such operator-dependent transfers widen the coarse stencils beyond 27 points and belong to PR 13 (algebraic multigrid). Topology optimization removes the spurious modes with a modified mass interpolation (PRs 21–23), and PR 23 re-runs the contrast test on a real design.
+- **Thin plates and slender beams:** at σ = $\lambda_1$ the iterations grow like $h^{-1}$ (single-layer plates 23 / 37 / 71 / 136 from $16^2$ to $128^2$). Coarse trilinear hex8 cells on a one- or two-element-thick layer get ever flatter and lock in bending, so the coarse correction misses the smooth bending error. Larger σ hides it (the same plates at the overestimated `sigma_estimate` took ≤ 60). AMG on the hex8 level (PR 13a) does not fix this (it makes the unstructured flat-element case worse, see `amg`); the remedy is the solid-shell element (M4 / PR 18).
+- **High contrast at low σ:** at its own $\lambda_1$ a SIMP field's lowest modes are spurious island and void-region modes of $s_K = \rho^3$, $s_M = \rho$ ($\lambda_1$ is $10^{-6}$–$10^{-3}$ of the solid's). Deflation removes the island modes, but soft-region error that trilinear coarse functions cannot separate from the stiff material remains: 87 on the checked-in field, 109–135 on other seeds, 452 on an unfiltered binary field (every case converges). A SciPy prototype with Jacobi-smoothed, phase-aware prolongation plus deflation reached 34 (checked-in field) and 55 (seed 4); such operator-dependent transfers widen the coarse stencils beyond 27 points; PR 13b's study runs `amg` on the checked-in field as an unstructured hex8 mesh. Topology optimization removes the spurious modes with a modified mass interpolation (PRs 21–23), and PR 23 re-runs the contrast test on a real design.
 
 ## Unstructured p-multigrid (`pmg`)
 
@@ -214,7 +215,7 @@ x, info = pcg(ap_operator(op, free, sigma), b, P, tol=1e-8)  # or minres / lobpc
 
 `pmg` builds a two-level V-cycle for hex20/hex27 (and mixed) meshes:
 - **Fine level:** the matrix-free $A_P$, smoothed by Chebyshev over node-block Jacobi.
-- **Coarse level:** the hex8 Galerkin matrix $P^\top A_P P$ on the corner nodes, solved exactly by SciPy `splu` on the host. This solve is for development and tests only; PR 13 replaces it with AMG on the same matrix.
+- **Coarse level:** the hex8 Galerkin matrix $P^\top A_P P$ on the corner nodes, solved exactly by SciPy `splu` on the host. This solve is for development and tests only; `amg` (below) is the production variant, with AMG on the same matrix.
 
 `pmg` has no type of its own. It returns a `GMG` (the shared cycle, below) with:
 - one level `((A_P, S),)`;
@@ -225,8 +226,8 @@ x, info = pcg(ap_operator(op, free, sigma), b, P, tol=1e-8)  # or minres / lobpc
 Masking ($m\odot V(m\odot r)$), symmetry and the `precond` interface are therefore those of `gmg`. On an all-hex8 mesh, $P = I$ and the coarse matrix is the assembled hex8 $A_P$, so the coarse solve is exact and PCG converges in one iteration (in exact arithmetic; the test allows 2).
 
 **Shared cycle.** `_vcycle` and `_vcycle_apply` are the same code for both preconditioners:
-- `GMG.coarse` takes any pytree callable: `Cholesky` for `gmg`, `HostLU` for `pmg`, and PR 13's device AMG next.
-- The transfers can be any object with a prolongation call and a `restrict` method: the voxel `Transfer` or `NodalTransfer`.
+- `GMG.coarse` takes any pytree callable: `Cholesky` for `gmg` and `amg`, `HostLU` for `pmg`.
+- The transfers can be any object with a prolongation call and a `restrict` method: the voxel `Transfer`, `NodalTransfer` or AMG's `ELLTransfer`.
 
 **Transfer.** The coarse nodes are the nodes that are a corner (local index 0–7) of some element. They are numbered in increasing fine id, which keeps the RCM locality. Each fine node takes its parents and weights from the first element containing it:
 $$w_{ac} = N^{(8)}_c(\xi_a) = \tfrac18\prod_{d=1}^3\big(1 + \xi_{a,d}\,\xi_{c,d}\big),$$
@@ -243,7 +244,7 @@ Tables and applies:
 
 Accuracy:
 - $P$ reproduces trilinear fields exactly on straight-sided elements whose midside nodes sit at the trilinear image of their reference position (`box_mesh`, graded `coords`).
-- On curved elements it still spans a nested coarse space (trilinear in the reference coordinates on the fine geometry), so $P^\top A_P P$ remains a true Galerkin operator. Rigid rotations are then only approximately in that space, which matters for PR 13's near-null space.
+- On curved elements it still spans a nested coarse space (trilinear in the reference coordinates on the fine geometry), so $P^\top A_P P$ remains a true Galerkin operator. Rigid rotations are then only approximately in that space, which matters for `amg`'s near-null space (evaluated at the corners, below).
 - On a conforming mesh, every element containing a node gives it the same parents. This is assumed, not checked.
 
 **Galerkin hex8 matrix.** The fine operator is never assembled. For element $e$:
@@ -258,10 +259,10 @@ where $Z_e$ maps the element's 8 corners to the coarse numbering. $D_e$ is the o
 Assembly:
 1. `element_matrices` ([`operators.md`](operators.md)) gives $s_K K_e$ and $\rho s_M M_e$ per chunk.
 2. One jitted `lax.map` per block runs over the operator's padded chunks. It contracts the $(c, n, 3, n, 3)$ view with $P_\text{loc}$ into $(n_\text{pad}, 24, 24)$ cells. Pads are zero and own nothing.
-3. The host drops the pads and sums the cells into a SciPy CSR over the coarse DOFs $3c + i$ (int32 indices). Summing duplicates keeps entries that cancel to 0.0, so the pattern is structural (every pair of corners sharing an element) and does not depend on rounding, storage mode or density: PR 13 may rely on it.
+3. The host drops the pads and sums the cells into a SciPy CSR over the coarse DOFs $3c + i$ (int32 indices). Summing duplicates keeps entries that cancel to 0.0, so the pattern is structural (every pair of corners sharing an element) and does not depend on rounding, storage mode or density (`amg`'s setup removes explicit zeros itself).
 4. The host symmetrizes once on that pattern, averaging each value with its transpose's ($A_c \leftarrow (A_c + A_c^\top)/2$ value by value, the two patterns being identical). Without this, CSR duplicate summation adds the $(i,j)$ and $(j,i)$ terms in different orders and leaves about $10^{-17}$ relative asymmetry; SciPy's `A + A.T` instead would prune exact cancellations and make the pattern numerical.
 
-The matrix is affine in σ: $G_K + \sigma G_M$, with the masked diagonal folded in. PR 13's σ rounds may use this. `_hex8_galerkin(A)` takes the `APOperator` and returns $A_c$ and the transfer. It is PR 13's input and stays private until then.
+The matrix is affine in σ: $G_K + \sigma G_M$, with the masked diagonal folded in. 13b's σ rounds may use this. `_hex8_galerkin(A)` takes the `APOperator` and returns $A_c$, the transfer and the corner node ids (coarse order). It is `amg`'s input and stays private; `_p_level` builds the fine level, transfer and $A_c$ for both `pmg` and `amg`.
 
 **Smoother and V-cycle.** $S$ = `chebyshev(A_P, block_jacobi(op, free, σ), lmax_estimate(...), degree, ratio)`, with degree 2 and ratio 30 by default (PR 10). The cycle is gmg's with one level:
 $$x = S b,\qquad x \mathrel{+}= P\,A_c^{-1}P^\top(b - A_P x),\qquad x \mathrel{+}= S(b - A_P x).$$
@@ -276,12 +277,12 @@ $$x = S b,\qquad x \mathrel{+}= P\,A_c^{-1}P^\top(b - A_P x),\qquad x \mathrel{+
 - Every new `pmg` build recompiles its jitted callers (`pcg`, `lobpcg_step`) once; reusing a build does not.
 - The jit caches hold the treedef, and with it the factor and the compiled executables, until `jax.clear_caches()`. `del` and `gc.collect()` do not free it. At hex20 $24^3$ the factor is about 1.5 GB. The p-MG tests and `benchmarks/pmg_study.py` clear the caches after each case.
 
-PR 13's device AMG has only array leaves and has neither issue.
+`amg`'s device hierarchy has only array leaves and has neither issue.
 
 Geometric nested dissection on the corner coordinates factors 4–8× faster: 3.5 s and 0.69 GB at $n = 24$, 17.8 s and 2.3 GB at $n = 32$. But `Unstructured` carries no coordinates, so COLAMD is kept for this test-only path ([`open_items.md`](open_items.md)).
 
 **σ.** σ must be concrete and > 0. `pmg` has no mesh with which to prove $A_P$ nonsingular at σ = 0 (the BCs may leave rigid modes), so:
-- σ == 0 raises `SingularShiftError`, the type `gmg` uses, so PR 13's σ pre-estimate can take the same fallback;
+- σ == 0 raises `SingularShiftError`, the type `gmg` uses, so the σ pre-estimate (13b) can take the same fallback;
 - σ < 0 or NaN raises `ValueError`.
 
 Refusing σ = 0 has a cost. A pre-estimate started at σ = 0 needs fewer rounds and iterations on clamped bodies:
@@ -291,7 +292,7 @@ Refusing σ = 0 has a cost. A pre-estimate started at σ = 0 needs fewer rounds 
 | cube | 1 round, 4 iterations | 2 rounds, 10 iterations |
 | plate, $a = 4$ | 1 round, 20 iterations | 3 rounds, 60 iterations |
 
-PR 13 can accept σ = 0 when `solve_modes` has found no rigid modes and every `s_K > 0` (open item).
+PR 13b can accept σ = 0 when `solve_modes` has found no rigid modes and every `s_K > 0` (open item).
 
 **Measured** (`benchmarks/pmg_study.py` → `benchmarks/results/pmg_study.json`; jax 0.11.2, fp64, M3 Max CPU).
 
@@ -335,7 +336,7 @@ The cost is a tie, and degree 2 needs the least smoother workspace. At hex20 $24
 | hex27 $16^3$ | 107,811 | 509 iterations, 21.6 s | 15, 3.4 s |
 
 **Limitations** ([`open_items.md`](open_items.md)).
-- **Flat elements:** the hex8 coarse space locks in bending when elements are flat ($a \gg 1$), so the coarse correction misses the smooth bending error. See the table above; the hex27 plate $32^2\times1$ at $a = 10$ needs > 1000 iterations and does not converge. Slenderness alone with $a = 1$ is fine (beam: 16). Revisit in PR 13 (AMG on the high-order level, a near-null space that keeps bending) and M4 (solid-shell elements).
+- **Flat elements:** the hex8 coarse space locks in bending when elements are flat ($a \gg 1$), so the coarse correction misses the smooth bending error. See the table above; the hex27 plate $32^2\times1$ at $a = 10$ needs > 1000 iterations and does not converge. Slenderness alone with $a = 1$ is fine (beam: 16). AMG on the hex8 level makes it worse (below); revisited in M4 (solid-shell elements).
 - **`splu` scaling** (coarse hex8 matrix of an $n^3$ box, COLAMD):
 
   | $n$ | coarse DOF | factor time | $L + U$ | process peak |
@@ -344,7 +345,85 @@ The cost is a tie, and degree 2 needs the least smoother workspace. At hex20 $24
   | 24 | 47k | 14 s | 1.5 GB | 3.9 GB |
   | 32 | 108k | 140 s | 6.2 GB | 18 GB |
 
-  The tests therefore stay at or below the 47k coarse DOF of hex20 $24^3$. PR 13's AMG replaces this solve.
+  The tests therefore stay at or below the 47k coarse DOF of hex20 $24^3$. `amg` replaces this solve.
+
+## Unstructured AMG (`amg`)
+
+```python
+from jaxmodal.precond import amg
+
+P = amg(op, free, sigma, mesh.points, degree=2, ratio=30.0, max_coarse=1000)  # sigma > 0
+x, info = pcg(ap_operator(op, free, sigma), b, P, tol=1e-8)  # or minres / lobpcg(precond=P)
+```
+
+`amg` is the production preconditioner for `Unstructured` operators (PR 13a). It returns a `GMG`, the shared V-cycle, with one flat hierarchy:
+- **hex20/hex27 or mixed meshes:** level 0 is `pmg`'s p-level (the matrix-free $A_P$ with Chebyshev over node-block Jacobi, and the `NodalTransfer`). Level 1 is the hex8 Galerkin matrix $A_c = P^\top A_P P$.
+- **All-hex8 meshes:** $P = I$, so there is no p-level. Level 0 is the matrix-free $A_P$ with Chebyshev over `block_jacobi`, and its transfer is the first AMG prolongator $P_0$, set up on the assembled $A_P$.
+- **Below that:** the smoothed-aggregation levels, down to `max_coarse` DOF, then a dense fp64 `Cholesky` of the coarsest matrix.
+
+When the hex8 level already has ≤ `max_coarse` DOF there is no AMG level: hex20/hex27 meshes get two-level p-MG with an exact Cholesky coarse solve (equal to `pmg`), and all-hex8 meshes get `levels = ()`, a direct solve (PCG converges in one iteration in exact arithmetic).
+
+Arguments and rules:
+- **`points`** are the mesh coordinates `(n_nodes, 3)` **in the operator's node order** (for a renumbered mesh, the renumbered mesh's `points`). A wrong shape raises `ValueError`; a wrong order cannot be detected.
+- **σ** follows `pmg`: concrete and > 0; σ == 0 raises `SingularShiftError`, σ < 0 or NaN `ValueError` (σ = 0 is 13b's).
+- **`degree`, `ratio`:** Chebyshev degree and ratio on every level.
+- **`max_coarse`:** coarsening stops at this size.
+
+**Near-null space.** $B$ is $(3n_c, 6)$: the translations and rotations $e_j\times(x - \bar x)$ at the corner coordinates $x$, with the rows of constrained corner DOFs zeroed (masked rigid modes). On straight elements it spans the corner restriction of `rigid_modes(mesh)`. On curved elements rotations lie in the hex8 coarse space only approximately; restricting the fine rigid modes was considered and not done, because the curved case converges in the same count as the straight one (14).
+
+**Setup loop** (`_sa_levels`, host, pyamg primitives). Per level, while the matrix has more than `max_coarse` rows:
+1. $A_z$: $A$ with explicit zeros removed (the hex8 Galerkin pattern is structural).
+2. Strength: `symmetric_strength_of_connection` with θ = 0, on 3×3 node blocks on the first level and scalar below.
+3. `standard_aggregation`, then `fit_candidates` (tentative prolongator $T$ and coarse $B$ by per-aggregate QR).
+4. **Zero-column drop:** columns of $T$ with zero norm are removed with their rows of the coarse $B$. They come from aggregates whose rows of $B$ are zero or rank-deficient (fully constrained nodes, rank-deficient random masks). pyamg keeps them, and its own solver hides the resulting zero rows with a pseudo-inverse coarse solve; dropping them keeps every coarse matrix SPD, so the dense Cholesky works.
+5. Stop if more than 0.9 of the rows would remain (no progress).
+6. $P = (I - \tfrac{\omega}{\rho} D^{-1}A_z)\,T$: `jacobi_prolongation_smoother` with $\omega = 4/3$, $\rho$ = pyamg's spectral radius estimate of $D^{-1}A_z$, and $D$ the 3×3 block diagonal on the first level (scalar below).
+7. Next matrix $P^\top A_z P$, symmetrized.
+
+This is pyamg's smoothed aggregation with the zero-column drop added; the first level's $P$ equals `smoothed_aggregation_solver`'s (node blocks, θ = 0, block weighting, no candidate improvement) exactly (test). Coarse levels are scalar because after the drop an aggregate may keep fewer than 6 columns. Other rules:
+- **Determinism:** the loop runs under a local `np.random.seed(0)` (pyamg's ρ estimate starts from `np.random`; without it two setups differ by about $10^{-4}$) and restores the caller's global state.
+- **Coarsest cap:** if coarsening stalls above 4·`max_coarse` rows, `amg` raises `ValueError` instead of factoring a huge dense matrix. A non-finite coarsest factor or level smoother raises `ValueError`.
+
+**The constrained corners are coarse unknowns.** On the hex20 → hex8 level, a free midside node interpolates from a constrained corner, so $P^\top A_P P$ couples constrained corner DOFs to free ones. The AMG cycle therefore solves all coarse DOFs; masking them inside the cycle made standalone PCG stagnate (> 1000 iterations). Their rows of $B$ are still masked: those DOFs carry energy of order $s$, not near-null energy.
+
+**Constrained rows of $P_0$ (all-hex8).** These rows are exactly 0, so the fine mask is the only mask needed:
+- a fully constrained node has no off-diagonal entries in $A_z$, so it stays unaggregated and its tentative row is empty;
+- a partially constrained node's constrained rows of $B$ are masked, and the block-Jacobi row of a constrained DOF is diagonal, so smoothing keeps them zero.
+
+With unmasked $B$ these rows would be nonzero (no measured change in the counts).
+
+**Device format.**
+- **First AMG level** (hex20/hex27): `block_ell(A_c, b=3)` with Chebyshev over its 3×3 diagonal-block Jacobi (all DOFs active).
+- **Coarser levels:** `block_ell(A, b=1)` with scalar Jacobi under Chebyshev.
+- **Transfers:** `ELLTransfer(P, PT)`, both stored as rectangular scalar block-ELL, so prolongation and restriction are gathers (no scatter-add). Restriction equals $P^\top$ by test.
+- The pytree holds device arrays only (and `BlockELL`'s `padding` float): the SciPy matrices and pyamg intermediates are host locals, freed when `amg` returns.
+
+The V-cycle is symmetric and positive definite on the free DOFs: the same Chebyshev smoother before and after on every level and an exact coarsest solve.
+
+**Measured** (`benchmarks/amg_study.py` → `benchmarks/results/amg_study.json`; jax 0.11.2, fp64, M3 Max CPU). Setup as in `pmg`'s table; `max_coarse` = 100, so that every size has an AMG level.
+
+| case | DOF | AMG level sizes (hex8 level first) | `pmg` (exact coarse) | `amg` |
+|---|---|---|---|---|
+| hex20 boxes $3^3$ / $6^3$ / $12^3$ / $24^3$ | 624 – 182k | 192→48 / 1029→162→6 / 6591→750→48 / 46875→4374→162→6 | 14 / 14 / 14 / 14 | 15 / 14 / 14 / 14 |
+| hex27 boxes $3^3$ / $6^3$ / $12^3$ | 1k – 47k | 192→48 / 1029→162→6 / 6591→750→48 | 13 / 13 / 13 | 13 / 13 / 13 |
+| hex8 boxes $6^3$ / $12^3$ / $24^3$ / $48^3$ | 1k – 353k | 1029→108→6 / 6591→600→30 / 46875→3888→162→6 / 352947→27744→1176→48 | — | 13 / 13 / 13 / 13 |
+| hex20 beam $20\times2\times2$ | 1.9k | 567→42 | 16 | 16 |
+| hex20 free / curved / nodal masses $6^3$ | 3.7k | 1029→162→6 | 14 / 14 / 14 | 14 / 14 / 14 |
+| hex20 $4^3$, `s_K` checkerboard $10^{-3}$ | 1.3k | 375→48 | 19 | 20 |
+| hex20 plate $16^2\times1$, $a$ = 1 / 2 / 4 / 10 | 5.9k | 1734→216→24 | 15 / 21 / 63 / 718 | 36 / 85 / 229 / > 1000 |
+| hex20 box $8^3$, $h_z = h/a$, $a$ = 1 / 2 / 4 / 10 | 8.0k | 2187→162→6 | 14 / 17 / 28 / 76 | 14 / 20 / 52 / 244 |
+
+**Cost at hex20 $44^3$** (1,075,275 DOF, default `max_coarse`, levels 273375 → 20250 → 750, $m = 25$):
+- $t_A$ = 315 ms.
+- The AMG cycle (everything below the p-level) costs 1.25 $t_A$; the first-level transfers cost 0.20 $t_A$ ($P$) and 0.17 $t_A$ ($P^\top$) per apply. Operator complexity 1.15.
+- The whole V-cycle costs 5.4 $t_A$ ($2d$ = 4 fine applies, the p-level transfers and the AMG cycle).
+- V-cycle temporaries: 11.7 fine blocks (`memory_analysis`).
+- Setup 5.1 s: the hex8 Galerkin matrix 1.3 s, the SA loop 2.0 s, the rest the device export and the fine level.
+- Device storage of the AMG levels and transfers: 0.48 GB (levels 0.24, transfers 0.24, coarsest factor 4.5 MB), int32 columns included. Padding: levels 1.05 / 1.24, $P$ 1.34 / 1.37, $P^\top$ 1.21 / 1.41.
+
+**Limitations** ([`open_items.md`](open_items.md)).
+- **Flat elements:** AMG on the hex8 coarse space makes `pmg`'s flat-element weakness worse (table). The loss comes from the deeper AMG levels, whose six rigid modes per aggregate represent plate bending poorly: on the plate with $a = 1$, `max_coarse` = 2000 (no AMG level) gives 15, 1000 (one AMG level) 19 and 100 (two) 36. Large meshes always have deep hierarchies, so the `max_coarse` = 100 numbers are the representative ones. Remedy: solid-shell elements (M4 / PR 18).
+- **10M scale (13b):** the all-hex8 path assembles $A_P$ with `_hex8_galerkin` (about 45 GB of host temporaries at 10M hex8 DOF), which 13b replaces with the production assembler; at 10M hex8 the scalar $P_0$ and $P_0^\top$ are about 4 GB each.
 
 ## Measured (jax 0.11.2, fp64, M3 Max CPU)
 
@@ -378,7 +457,8 @@ The counts grow as $h^{-1}$ (×1.86–1.96 per refinement) for all three, as exp
 ## Tests
 
 - `tests/test_krylov.py`: PCG with the identity, Jacobi, block Jacobi and Chebyshev, σ = $\lambda_1$, $100\lambda_1$ and free-free, against `spsolve` to $10^{-10}$ with a zero column; columns independent and frozen; the PCG exits (floor after exactly 5 restarts, convergence after a restart, `maxit`, a residual turning NaN mid-run); MINRES on SPD and indefinite systems to $10^{-10}$ and its exits; no recompiles for new data.
-- `tests/test_ell.py`: plain and sliced ELL against CSR to $10^{-12}$ ($b$ = 3, 6; $m$ = 1, 7; several chunks with a remainder), padding against an independent count, the automatic choice, fp32 to $10^{-6}$, PCG through `BlockELL`.
+- `tests/test_ell.py`: plain and sliced ELL against CSR to $10^{-12}$ ($b$ = 3, 6; $m$ = 1, 7; several chunks with a remainder), padding against an independent count, the automatic choice, fp32 to $10^{-6}$, PCG through `BlockELL`; rectangular matrices (tall and wide, $b$ = 1, 3, plain and sliced) with padding entries in column 0; the width-bounded chunk (a width-512 bucket scans 108 rows, its gather temporaries under a quarter of the whole-bucket scan's) and a width-27 $b = 3$ square matrix keeping 2048.
 - `tests/test_precond.py`: `ap_operator` against `a_p` on unmasked vectors (σ = 0, positive, negative); node blocks and block-Jacobi inverses against SciPy for stored/on-the-fly, consistent/lumped, nodal masses, `s_K`, mixed hex8/hex20, hex27 and a masked two-phase voxel grid with `s_K`, all with partially constrained nodes; the σ < 0 and NaN raises; $1.1\,\tilde\lambda_\max/\lambda_\max \in [1, 1.5]$ and the invariant-start guard; Chebyshev against a dense spectral reference to $10^{-12}$ (degrees 1–4), symmetry, $A_P$-self-adjoint error propagation, positivity, and fewer PCG iterations than block Jacobi; the h-study smoke run.
 - `tests/test_gmg.py`: every coarse level equals $P^\top A_P P$ from SciPy to $10^{-12}$ on masked meshes with nodal masses, two phases, odd axes (level-2 weights ⅓, ⅔), stopped axes, both stored axis orders, consistent and lumped mass, at the default and a 7-cell setup chunk; transfers reproduce linear fields on every level, restriction is $P^\top$, kept columns nonzero and dropped ones zero; the smoother blocks are the dense diagonal group blocks and the group apply their inverse; the V-cycle equals a dense NumPy composition to $10^{-10}$; symmetry and definiteness; the iteration bounds (h-independence ≤ 20%, SIMP, plate, free, beam, odd); the singular guard's raises and builds; island detection and the deflated cycle against a dense $Q + (I - QA)V(I - AQ)$ with an independently built $Z$; padded deflation sizes; the default degrees; `grid_ids` on slab-padded stencils; LOBPCG with GMG against `reference_modes`; no recompiles; the input errors; the study smoke run. PR 11b: the fp32 hierarchy's leaves (fp32 except the fine operator, `free`, `coarse.L`, `defl`; `levels[l][0] is levels[l][1].A`), the fp32 cycle within $10^{-5}$ of fp64 ($3\cdot10^{-4}$ on the thin plate), symmetric and positive with ≤ 0.75× the temporaries, and LOBPCG with ≤ 1.2× the iterations and λ within $10^{-9}$ (box $16^3$; slow: box $32^3$, plate $32^2\times1$, odd $33\times8\times8$); `gmg_memory`'s storage ≥ the unique buffers of the built hierarchy (fp64, fp32; boxes, a masked odd grid, a cropped grid with $k = 3$ fine groups, the island case with `s_K`) and within 5% on full boxes; the V-cycle temporaries ≤ `workspace` ($16^3$; slow $32^3$, within 1.25×) and the LOBPCG steps with GMG ≤ `lobpcg_memory`'s step term; slow: at $48^3$ the GMG steps' extra temporaries over the Jacobi steps lie within 0.6 blocks below `GMG_STEP`; every σ = 0 refusal is a `SingularShiftError`.
 - `tests/test_pmg.py`: the transfer reproduces trilinear fields on graded hex20 and hex27 boxes to $10^{-12}$, restriction and the dense prolongation equal an independent element-loop $P$ (also on the mixed hex8 + hex20 mesh, whose hex8 nodes get identity rows), with hand-checked ½ / ¼ / ⅛ rows; `_hex8_galerkin` equals $P^\top a_p(K + \sigma M, free, s) P$ from SciPy to $10^{-12}$ and is exactly symmetric (hex20, hex27, mixed; stored and otf; consistent and lumped; two phases, random `s_K`/`s_M`, nodal masses, a mixed clamped/sliding mask), also with padded chunks (whose `element_matrices` are zero) and on all-hex8 meshes (the assembled $a_p$); the V-cycle at degree 3, ratio 20 equals a NumPy composition with an independently built smoother and $(P^\top A P)^{-1}$ to $10^{-10}$ and is SPD on the free DOFs; symmetry on unmasked vectors, masked outputs, `type(pmg(...)) is GMG`; PCG in ≤ 2 iterations on a pure hex8 box; h-independence (≤ 20% growth from $3^3$ to $12^3$, hex20 and hex27; slow: hex20 $24^3$); ≤ 30 iterations on the beam, free, curved, nodal-mass and `s_K`-checkerboard cases; LOBPCG with p-MG against `reference_modes` in ≤ 40 iterations (hex20, hex27); the input errors; no recompile for a reused build; the factor freed after `jax.clear_caches()`; the study smoke run.
+- `tests/test_amg.py`: every SA level's coarse matrix equals $P^\top A_z P$ from SciPy to $10^{-12}$ and is symmetric, $P$ has no zero column, and the device levels, transfers ($P$, $P^\top$) and coarsest factor equal the SciPy matrices (hex20 $6^3$, clamped plus sliding); two setups are bitwise identical and leave `np.random` unchanged; $B$ spans the corner restriction of `rigid_modes` with exactly zero constrained rows; the first-level $P$ equals pyamg's `smoothed_aggregation_solver` to $10^{-12}$ (hex20, hex8 $12^3$); a random 30%-free mask drops zero columns and keeps every coarse matrix SPD (hex20, hex8); aggregates straddle the Dirichlet boundary and the setup succeeds; the V-cycle at degree 3, ratio 20 equals a NumPy composition with test-built smoothers and the dense coarsest inverse to $10^{-10}$, symmetric, SPD on the free DOFs, masked (hex20 with two AMG levels; hex8 with a sliding mask, whose constrained rows of $P_0$ are exactly 0); the no-AMG-level paths (hex20 equal to `pmg`, hex8 a direct solve); h-independence (≤ 20% growth and ≤ 1.5× the measured count: hex20 $3^3$–$12^3$, slow $24^3$; hex27 $3^3$–$12^3$; hex8 $6^3$–$24^3$); ≤ 1.5× the measured count on the beam, free, curved, nodal-mass and checkerboard cases; LOBPCG with AMG against `reference_modes` in ≤ 40 iterations (hex20, hex8); the input errors, the coarsest cap (monkeypatched singleton aggregation), a degenerate `max_coarse`, array leaves; the study smoke run.
