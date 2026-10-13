@@ -38,6 +38,10 @@ Stiff islands are detected from `s_K` only, so a multi-phase voxel model with $1
 
 With GMG the LOBPCG process peak is bimodal: in some runs, from about iteration 5, it is about one V-cycle temporary above the step's `memory_analysis` (+12 blocks at $48^3$), in other identical runs not; synchronous dispatch makes it rarer. So `lobpcg_memory` with `gmg_memory` is not a strict bound at mid sizes: 11% low at $64^3$ (fp64 cycle), 4% high at $48^3$ (worst of three runs), 10–12% high at $87^3$; all inside the roadmap's ±20% band. Default: keep the `memory_analysis` envelope `GMG_STEP` and document it. Revisit on the GPU (PR 24: the BFC allocator behaves differently) or if a size falls outside the band.
 
+### Run-to-run LOBPCG peak without GMG (found during PR 12, decision without user input)
+
+The chunked 300k-DOF diagonal-pencil peak (`test_estimate_chunks`) varies between identical runs too: 0.96–1.07× `lobpcg_memory` (fp64 basis, 1.24–1.39 against 1.30 GB; fp32 up to 1.04×), and peaks above the estimate, which earlier runs did not show, became the common case on 2026-10-13 with no package change (it fails on `main` as well). Unchunked (30 modes, $m = 36$) it is 1.07–1.16×. All inside the roadmap's ±20% band. Default, as for GMG: keep the estimator and test against 1.1× the estimate instead of a strict bound. Revisit with the GMG item (PR 24) or if a size falls outside the band.
+
 ### p-MG refuses σ = 0 (PR 12, decision without user input)
 
 `pmg` raises `SingularShiftError` at σ = 0 because it has no mesh to prove $A_P$ nonsingular. Cost: a σ pre-estimate started at σ = 0 needs fewer rounds and iterations on clamped bodies (cube: 1 round / 4 iterations against 2 / 10; plate $a = 4$: 1 / 20 against 3 / 60). Default: σ > 0 required. Revisit in PR 13, which owns the pre-estimate: accept σ = 0 when `solve_modes` has found no rigid modes and every `s_K > 0`.

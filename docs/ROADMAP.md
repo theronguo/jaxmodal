@@ -163,7 +163,7 @@ All sizes are fp64; GB = 10⁹ bytes.
 | Locked modes / deflation basis | small | small | n × 0.08 GB (fp32: half) | n × 0.8 GB (fp32: half) |
 | Max locked modes (fp32 basis; low-memory step, fp32 preconditioner and multigrid) | > 2000 | > 2000 | ≈ 700 (stored Ke) – 1000 (on the fly), with fp32 AMG from PR 18 | none on one GPU unless the GPU step holds ≤ 7.5 blocks (see below) |
 
-The LOBPCG rows use PR 9b's measured steps: 16 blocks for the 9-block step (new X and P coexist with the old blocks and W) and 11 for the low-memory step (XLA copies the donated X and P early), both including the Rayleigh–Ritz update and deflation-projector temporaries. `memory.lobpcg_memory` reproduces them (1–4% above the measured peak at 1.08M DOF, one chunk, $m = 48$; 4–7% below at $m = 25$ on hex20, 4% above on the 2M voxel at $m = 15$; 5% above for a chunked 300k-DOF solve).
+The LOBPCG rows use PR 9b's measured steps: 16 blocks for the 9-block step (new X and P coexist with the old blocks and W) and 11 for the low-memory step (XLA copies the donated X and P early), both including the Rayleigh–Ritz update and deflation-projector temporaries. `memory.lobpcg_memory` reproduces them (1–4% above the measured peak at 1.08M DOF, one chunk, $m = 48$; 4–7% below at $m = 25$ on hex20, 4% above on the 2M voxel at $m = 15$; for a chunked 300k-DOF solve between 4% above and 7% below, varying between runs).
 
 - **Mac (64 GB, unified memory):**
   - Both test columns fit easily.
