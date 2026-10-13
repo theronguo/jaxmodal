@@ -3,6 +3,7 @@ the hex8 Galerkin product P^T A_P P on the corner nodes, solved on the host by S
 (development and tests only; amg is the production variant). See docs/preconditioners.md."""
 
 import dataclasses
+import functools
 
 import jax
 import jax.numpy as jnp
@@ -167,7 +168,7 @@ def _pattern(op):
     )  # fmt: skip
 
 
-@jax.jit
+@functools.partial(jax.jit, donate_argnums=0)
 def _scatter_cells(data, op, b, sigma, m, d, own, pos):
     """data (nnzb, 3, 3) plus the block's coarse cells P_loc^T (diag(m_e) A_e diag(m_e) + D_e)
     P_loc scattered into the node-block pattern, one chunk per scan step."""
@@ -205,7 +206,9 @@ def _hex8_galerkin(A, pattern=None):
     v += v[pattern.tp].swapaxes(1, 2)
     v *= 0.5
     n_c = 3 * len(pattern.corner)
-    return sp.bsr_array((v, pattern.indices, pattern.indptr), shape=(n_c, n_c)), pattern
+    # own index arrays: callers may compact Ab in place (amg's eliminate_zeros)
+    Ab = sp.bsr_array((v, pattern.indices.copy(), pattern.indptr.copy()), shape=(n_c, n_c))
+    return Ab, pattern
 
 
 def _check(name, op, sigma, nonsingular=False):

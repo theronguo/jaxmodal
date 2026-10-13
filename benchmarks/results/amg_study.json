@@ -1,1474 +1,1474 @@
 {
-  "runs": [
-    {
-      "case": "hex20 6^3",
-      "n_dof": 3675,
-      "sigma": 12026017.941605447,
-      "amg": {
-        "iterations": [
-          14,
-          14,
-          14,
-          14
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 1.7221150000113994,
-        "sizes": [
-          3675,
-          1029,
-          162,
-          6
-        ]
-      },
-      "pmg": {
-        "iterations": [
-          14,
-          14,
-          14,
-          14
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ]
-      }
-    },
-    {
-      "case": "hex20 3^3",
-      "n_dof": 624,
-      "sigma": 12026017.941605447,
-      "amg": {
-        "iterations": [
-          14,
-          14,
-          15,
-          14
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 1.2651685420423746,
-        "sizes": [
-          624,
-          192,
-          48
-        ]
-      },
-      "pmg": {
-        "iterations": [
-          14,
-          14,
-          14,
-          14
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ]
-      }
-    },
-    {
-      "case": "hex20 12^3",
-      "n_dof": 24843,
-      "sigma": 12026017.941605447,
-      "amg": {
-        "iterations": [
-          14,
-          14,
-          14,
-          14
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 2.1622772499686107,
-        "sizes": [
-          24843,
-          6591,
-          750,
-          48
-        ]
-      },
-      "pmg": {
-        "iterations": [
-          14,
-          14,
-          14,
-          14
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ]
-      }
-    },
-    {
-      "case": "hex20 24^3",
-      "n_dof": 181875,
-      "sigma": 12026017.941605447,
-      "amg": {
-        "iterations": [
-          14,
-          14,
-          14,
-          14
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 4.361267916974612,
-        "sizes": [
-          181875,
-          46875,
-          4374,
-          162,
-          6
-        ]
-      },
-      "pmg": {
-        "iterations": [
-          14,
-          14,
-          14,
-          14
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ]
-      }
-    },
-    {
-      "case": "hex27 6^3",
-      "n_dof": 6591,
-      "sigma": 11979092.898337135,
-      "amg": {
-        "iterations": [
-          13,
-          13,
-          13,
-          13
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 1.788374541909434,
-        "sizes": [
-          6591,
-          1029,
-          162,
-          6
-        ]
-      },
-      "pmg": {
-        "iterations": [
-          13,
-          13,
-          13,
-          13
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ]
-      }
-    },
-    {
-      "case": "hex27 3^3",
-      "n_dof": 1029,
-      "sigma": 11979092.898337135,
-      "amg": {
-        "iterations": [
-          13,
-          13,
-          13,
-          13
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 1.3156696250662208,
-        "sizes": [
-          1029,
-          192,
-          48
-        ]
-      },
-      "pmg": {
-        "iterations": [
-          13,
-          13,
-          13,
-          13
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ]
-      }
-    },
-    {
-      "case": "hex27 12^3",
-      "n_dof": 46875,
-      "sigma": 11979092.898337135,
-      "amg": {
-        "iterations": [
-          13,
-          13,
-          13,
-          13
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 2.348426791955717,
-        "sizes": [
-          46875,
-          6591,
-          750,
-          48
-        ]
-      },
-      "pmg": {
-        "iterations": [
-          13,
-          13,
-          13,
-          13
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ]
-      }
-    },
-    {
-      "case": "hex8 6^3",
-      "n_dof": 1029,
-      "sigma": 12428419.885493534,
-      "amg": {
-        "iterations": [
-          13,
-          13,
-          13,
-          13
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 1.2146938340738416,
-        "sizes": [
-          1029,
-          108,
-          6
-        ]
-      }
-    },
-    {
-      "case": "hex8 12^3",
-      "n_dof": 6591,
-      "sigma": 12428419.885493534,
-      "amg": {
-        "iterations": [
-          13,
-          13,
-          13,
-          13
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 1.4613151249941438,
-        "sizes": [
-          6591,
-          600,
-          30
-        ]
-      }
-    },
-    {
-      "case": "hex8 24^3",
-      "n_dof": 46875,
-      "sigma": 12428419.885493534,
-      "amg": {
-        "iterations": [
-          13,
-          13,
-          13,
-          13
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 2.7276994589483365,
-        "sizes": [
-          46875,
-          3888,
-          162,
-          6
-        ]
-      }
-    },
-    {
-      "case": "hex8 48^3",
-      "n_dof": 352947,
-      "sigma": 12428419.885493534,
-      "amg": {
-        "iterations": [
-          13,
-          13,
-          13,
-          13
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 8.747594499960542,
-        "sizes": [
-          352947,
-          27744,
-          1176,
-          48
-        ]
-      }
-    },
-    {
-      "case": "beam 20x2x2",
-      "n_dof": 1863,
-      "sigma": 275116.6548036112,
-      "amg": {
-        "iterations": [
-          16,
-          16,
-          16,
-          16
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 1.2524120419984683,
-        "sizes": [
-          1863,
-          567,
-          42
-        ]
-      },
-      "pmg": {
-        "iterations": [
-          16,
-          16,
-          15,
-          16
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ]
-      }
-    },
-    {
-      "case": "free 6^3",
-      "n_dof": 3675,
-      "sigma": 83990979.28500436,
-      "amg": {
-        "iterations": [
-          14,
-          14,
-          14,
-          14
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 1.6977892499417067,
-        "sizes": [
-          3675,
-          1029,
-          162,
-          6
-        ]
-      },
-      "pmg": {
-        "iterations": [
-          14,
-          14,
-          14,
-          14
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ]
-      }
-    },
-    {
-      "case": "curved 6^3",
-      "n_dof": 3675,
-      "sigma": 12030431.380846037,
-      "amg": {
-        "iterations": [
-          14,
-          14,
-          14,
-          14
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 1.6987313330173492,
-        "sizes": [
-          3675,
-          1029,
-          162,
-          6
-        ]
-      },
-      "pmg": {
-        "iterations": [
-          14,
-          14,
-          14,
-          14
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ]
-      }
-    },
-    {
-      "case": "checkerboard 4^3 s_K 1e-3",
-      "n_dof": 1275,
-      "sigma": 1567319.918695683,
-      "amg": {
-        "iterations": [
-          20,
-          20,
-          20,
-          20
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 1.2692103330045938,
-        "sizes": [
-          1275,
-          375,
-          48
-        ]
-      },
-      "pmg": {
-        "iterations": [
-          19,
-          19,
-          18,
-          19
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ]
-      }
-    },
-    {
-      "case": "nodal 6^3",
-      "n_dof": 3675,
-      "sigma": 2817053.192453414,
-      "amg": {
-        "iterations": [
-          14,
-          14,
-          14,
-          14
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 1.7182296669343486,
-        "sizes": [
-          3675,
-          1029,
-          162,
-          6
-        ]
-      },
-      "pmg": {
-        "iterations": [
-          14,
-          14,
-          14,
-          14
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ]
-      }
-    },
-    {
-      "case": "plate 16^2x1 a=1",
-      "n_dof": 5865,
-      "sigma": 115811.48028086731,
-      "amg": {
-        "iterations": [
-          36,
-          35,
-          35,
-          35
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 1.7087449580430984,
-        "sizes": [
-          5865,
-          1734,
-          216,
-          24
-        ]
-      },
-      "amg max_coarse=1000": {
-        "iterations": [
-          19,
-          18,
-          19,
-          18
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "sizes": [
-          5865,
-          1734,
-          216
-        ]
-      },
-      "amg max_coarse=2000": {
-        "iterations": [
-          15,
-          15,
-          15,
-          15
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "sizes": [
-          5865,
-          1734
-        ]
-      },
-      "pmg": {
-        "iterations": [
-          15,
-          15,
-          15,
-          15
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ]
-      }
-    },
-    {
-      "case": "plate 16^2x1 a=2",
-      "n_dof": 5865,
-      "sigma": 29146.600870322785,
-      "amg": {
-        "iterations": [
-          85,
-          83,
-          83,
-          84
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 1.86648404202424,
-        "sizes": [
-          5865,
-          1734,
-          216,
-          24
-        ]
-      },
-      "pmg": {
-        "iterations": [
-          21,
-          21,
-          21,
-          21
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ]
-      }
-    },
-    {
-      "case": "plate 16^2x1 a=4",
-      "n_dof": 5865,
-      "sigma": 7308.503666853503,
-      "amg": {
-        "iterations": [
-          229,
-          221,
-          224,
-          225
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 2.355932457954623,
-        "sizes": [
-          5865,
-          1734,
-          216,
-          24
-        ]
-      },
-      "pmg": {
-        "iterations": [
-          63,
-          61,
-          61,
-          61
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ]
-      }
-    },
-    {
-      "case": "plate 16^2x1 a=10",
-      "n_dof": 5865,
-      "sigma": 1171.9878546197615,
-      "amg": {
-        "iterations": [
-          1000,
-          1000,
-          1000,
-          1000
-        ],
-        "converged": [
-          false,
-          false,
-          false,
-          false
-        ],
-        "build_s": 5.060182375018485,
-        "sizes": [
-          5865,
-          1734,
-          216,
-          24
-        ]
-      },
-      "pmg": {
-        "iterations": [
-          731,
-          613,
-          658,
-          659
-        ],
-        "converged": [
-          false,
-          false,
-          false,
-          false
-        ]
-      }
-    },
-    {
-      "case": "box 8^3 hz=h/1",
-      "n_dof": 8019,
-      "sigma": 11988567.727187516,
-      "amg": {
-        "iterations": [
-          14,
-          14,
-          14,
-          14
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 1.8324226250406355,
-        "sizes": [
-          8019,
-          2187,
-          162,
-          6
-        ]
-      },
-      "pmg": {
-        "iterations": [
-          14,
-          14,
-          14,
-          14
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ]
-      }
-    },
-    {
-      "case": "box 8^3 hz=h/2",
-      "n_dof": 8019,
-      "sigma": 5300740.539275825,
-      "amg": {
-        "iterations": [
-          20,
-          20,
-          19,
-          20
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 1.866764000034891,
-        "sizes": [
-          8019,
-          2187,
-          162,
-          6
-        ]
-      },
-      "pmg": {
-        "iterations": [
-          17,
-          17,
-          17,
-          16
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ]
-      }
-    },
-    {
-      "case": "box 8^3 hz=h/4",
-      "n_dof": 8019,
-      "sigma": 1676386.6642353723,
-      "amg": {
-        "iterations": [
-          50,
-          51,
-          51,
-          52
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 2.1072967919753864,
-        "sizes": [
-          8019,
-          2187,
-          162,
-          6
-        ]
-      },
-      "pmg": {
-        "iterations": [
-          28,
-          28,
-          28,
-          28
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ]
-      }
-    },
-    {
-      "case": "box 8^3 hz=h/10",
-      "n_dof": 8019,
-      "sigma": 292473.57260561176,
-      "amg": {
-        "iterations": [
-          232,
-          242,
-          234,
-          244
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 3.7247155000222847,
-        "sizes": [
-          8019,
-          2187,
-          162,
-          6
-        ]
-      },
-      "pmg": {
-        "iterations": [
-          76,
-          76,
-          73,
-          74
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ]
-      }
-    }
-  ],
-  "tol": 1e-08,
-  "max_coarse": 100,
-  "system": "benchmarks/results/system.json",
-  "cost": {
-    "n": 44,
-    "m": 25,
-    "n_dof": 1075275,
+ "runs": [
+  {
+   "case": "hex20 6^3",
+   "n_dof": 3675,
+   "sigma": 12026017.941605447,
+   "amg": {
+    "iterations": [
+     14,
+     14,
+     14,
+     14
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 1.7221150000113994,
     "sizes": [
-      1075275,
-      273375,
-      20250,
-      750
+     3675,
+     1029,
+     162,
+     6
+    ]
+   },
+   "pmg": {
+    "iterations": [
+     14,
+     14,
+     14,
+     14
     ],
-    "t_A_s": 0.304198959027417,
-    "amg_cycle_t_A": 1.295068123289702,
-    "P_t_A": 0.20203731865418204,
-    "PT_t_A": 0.18170810717479646,
-    "vcycle_t_A": 5.5979685580817895,
-    "vcycle_temp_blocks": 11.742183571644462,
-    "setup_s": {
-      "galerkin": 0.6581194169120863,
-      "sa_loop": 1.7578650410287082,
-      "amg_total": 4.1286615409189835
-    },
-    "storage_GB": {
-      "levels": 0.236224512,
-      "transfers": 0.240741636,
-      "coarse": 0.0045
-    },
-    "padding": {
-      "levels": [
-        1.0457945700930489,
-        1.2392284655368269
-      ],
-      "P": [
-        1.3411745683278449,
-        1.3727222262447807
-      ],
-      "PT": [
-        1.2067525635287557,
-        1.4119180363478387
-      ]
-    },
-    "operator_complexity": 1.1482990262829995
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ]
+   }
   },
-  "setup": [
-    {
-      "type": "hex20",
-      "n": 12,
-      "assemble": {
-        "time_s": 0.10538470791652799,
-        "nnz": 455877,
-        "peak_bytes": 58425392
-      },
-      "amg": {
-        "time_s": 1.0246460830094293,
-        "peak_bytes": 73367696
-      },
-      "reuse": {
-        "fresh_s": 0.07811154203955084,
-        "reuse_s": 0.07493112492375076,
-        "peak_bytes": 89211048
-      }
-    },
-    {
-      "type": "hex20",
-      "n": 24,
-      "assemble": {
-        "time_s": 0.19283904205076396,
-        "nnz": 3501153,
-        "peak_bytes": 119013496
-      },
-      "amg": {
-        "time_s": 1.9435993330553174,
-        "peak_bytes": 266010912
-      },
-      "reuse": {
-        "fresh_s": 0.5955963339656591,
-        "reuse_s": 0.5483817500062287,
-        "peak_bytes": 292684112
-      }
-    },
-    {
-      "type": "hex20",
-      "n": 44,
-      "assemble": {
-        "time_s": 0.7344099169131368,
-        "nnz": 21173733,
-        "peak_bytes": 463765960
-      },
-      "amg": {
-        "time_s": 4.938523874967359,
-        "peak_bytes": 1363592296
-      },
-      "reuse": {
-        "fresh_s": 3.580089916009456,
-        "reuse_s": 3.292666499968618,
-        "peak_bytes": 1466025208
-      }
-    },
-    {
-      "type": "hex27",
-      "n": 24,
-      "assemble": {
-        "time_s": 0.2535932909231633,
-        "nnz": 3501153,
-        "peak_bytes": 128630928
-      },
-      "amg": {
-        "time_s": 2.0393065420212224,
-        "peak_bytes": 299827536
-      },
-      "reuse": {
-        "fresh_s": 0.7874928331002593,
-        "reuse_s": 0.720358083024621,
-        "peak_bytes": 339149208
-      }
-    },
-    {
-      "type": "hex8",
-      "n": 24,
-      "assemble": {
-        "time_s": 0.1452854590024799,
-        "nnz": 3501153,
-        "peak_bytes": 111919224
-      },
-      "amg": {
-        "time_s": 1.4639656249200925,
-        "peak_bytes": 206012656
-      },
-      "reuse": {
-        "fresh_s": 0.4773527500219643,
-        "reuse_s": 0.4379021249478683,
-        "peak_bytes": 226804000
-      }
-    },
-    {
-      "type": "hex8",
-      "n": 48,
-      "assemble": {
-        "time_s": 0.5668818750418723,
-        "nnz": 27437625,
-        "peak_bytes": 569541088
-      },
-      "amg": {
-        "time_s": 5.253984457929619,
-        "peak_bytes": 1565803768
-      },
-      "reuse": {
-        "fresh_s": 3.9256760829593986,
-        "reuse_s": 3.5973513750359416,
-        "peak_bytes": 1670219144
-      }
-    },
-    {
-      "type": "hex8",
-      "n": 68,
-      "assemble": {
-        "time_s": 1.5321786670247093,
-        "nnz": 77536125,
-        "peak_bytes": 1577501848
-      },
-      "amg": {
-        "time_s": 12.50509583298117,
-        "peak_bytes": 4378119384
-      },
-      "reuse": {
-        "fresh_s": 11.299498084001243,
-        "reuse_s": 10.305054750060663,
-        "peak_bytes": 4624354784
-      }
-    }
-  ],
-  "simp": [
-    {
-      "case": "simp32@own",
-      "n": 32,
-      "sigma": 15.124775535299483,
-      "gmg": {
-        "iterations": [
-          87,
-          87,
-          87,
-          87
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 2.819846999947913
-      },
-      "amg max_coarse=1000": {
-        "iterations": [
-          789,
-          799,
-          803,
-          796
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 60.18270137498621,
-        "sizes": [
-          107811,
-          7986,
-          384
-        ]
-      },
-      "amg max_coarse=100": {
-        "iterations": [
-          910,
-          908,
-          900,
-          911
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 68.3594521250343,
-        "sizes": [
-          107811,
-          7986,
-          384,
-          24
-        ]
-      }
-    },
-    {
-      "case": "simp32@solid",
-      "n": 32,
-      "sigma": 12243236.8811708,
-      "gmg": {
-        "iterations": [
-          33,
-          33,
-          33,
-          33
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 2.875372917042114
-      },
-      "amg max_coarse=1000": {
-        "iterations": [
-          72,
-          70,
-          70,
-          72
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 7.293888375046663,
-        "sizes": [
-          107811,
-          7986,
-          384
-        ]
-      },
-      "amg max_coarse=100": {
-        "iterations": [
-          74,
-          72,
-          75,
-          73
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 7.195968875079416,
-        "sizes": [
-          107811,
-          7986,
-          384,
-          24
-        ]
-      }
-    },
-    {
-      "case": "s4@own",
-      "n": 32,
-      "sigma": 4.063056848914869,
-      "gmg": {
-        "iterations": [
-          133,
-          135,
-          134,
-          135
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 2.699580582906492
-      },
-      "amg max_coarse=1000": {
-        "iterations": [
-          646,
-          721,
-          732,
-          761
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 57.22927750006784,
-        "sizes": [
-          107811,
-          7986,
-          384
-        ]
-      },
-      "amg max_coarse=100": {
-        "iterations": [
-          721,
-          737,
-          720,
-          729
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 55.695084167062305,
-        "sizes": [
-          107811,
-          7986,
-          384,
-          24
-        ]
-      }
-    },
-    {
-      "case": "s5@own",
-      "n": 32,
-      "sigma": 2001.8535370396855,
-      "gmg": {
-        "iterations": [
-          109,
-          109,
-          107,
-          109
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 2.4374992919620126
-      },
-      "amg max_coarse=1000": {
-        "iterations": [
-          136,
-          136,
-          137,
-          137
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 11.999038249952719,
-        "sizes": [
-          107811,
-          7986,
-          384
-        ]
-      },
-      "amg max_coarse=100": {
-        "iterations": [
-          151,
-          151,
-          152,
-          151
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 12.896304166992195,
-        "sizes": [
-          107811,
-          7986,
-          384,
-          24
-        ]
-      }
-    },
-    {
-      "case": "binary@own",
-      "n": 32,
-      "sigma": 41.248915863764545,
-      "gmg": {
-        "iterations": [
-          447,
-          413,
-          449,
-          450
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 2.4265592499868944
-      },
-      "amg max_coarse=1000": {
-        "iterations": [
-          447,
-          447,
-          446,
-          447
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 34.448438916006126,
-        "sizes": [
-          107811,
-          7986,
-          384
-        ]
-      },
-      "amg max_coarse=100": {
-        "iterations": [
-          451,
-          447,
-          448,
-          449
-        ],
-        "converged": [
-          true,
-          true,
-          true,
-          true
-        ],
-        "build_s": 34.54969437501859,
-        "sizes": [
-          107811,
-          7986,
-          384,
-          24
-        ]
-      }
-    }
-  ],
-  "acceptance": {
-    "iterations": 19,
-    "converged": true,
-    "sigma": 11923132.249932302,
-    "sigma_iterations": 6,
-    "time": {
-      "setup": 2.6736124589806423,
-      "iterations": 49.479929749970324,
-      "precond": 18.104388167033903
-    },
-    "time_s": 72.21759516594466,
-    "lam": [
-      11923130.315886475,
-      11923130.31596669,
-      22046744.51484938,
-      68116643.9663329,
-      83487309.57772776,
-      83487309.57775748,
-      126949405.67317426,
-      178101150.16294912,
-      192874110.45989892,
-      201714880.48031938,
-      202613350.068823,
-      202613350.06897625,
-      226726067.7001311,
-      248957171.05197054,
-      249877705.71725437,
-      249877705.71727464,
-      287108698.9949506,
-      290023039.7567158,
-      290023039.7568042,
-      344792290.3639397
+  {
+   "case": "hex20 3^3",
+   "n_dof": 624,
+   "sigma": 12026017.941605447,
+   "amg": {
+    "iterations": [
+     14,
+     14,
+     15,
+     14
     ],
-    "cold_peak_bytes": 7674167296,
-    "peaks_bytes": [
-      7462590152,
-      7427987144
+    "converged": [
+     true,
+     true,
+     true,
+     true
     ],
-    "n": 44,
-    "n_modes": 20,
-    "n_dof": 1075275,
-    "estimate_bytes": 7445324394
+    "build_s": 1.2651685420423746,
+    "sizes": [
+     624,
+     192,
+     48
+    ]
+   },
+   "pmg": {
+    "iterations": [
+     14,
+     14,
+     14,
+     14
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ]
+   }
   },
-  "versions": {
-    "jax": "0.11.2",
-    "jaxlib": "0.11.2",
-    "numpy": "2.5.3",
-    "platform": "macOS-27.2-arm64-arm-64bit",
-    "cpu_count": 16,
-    "p_cores": 12,
-    "e_cores": 4,
-    "xla_flags": null,
-    "jax_num_cpu_devices": true
+  {
+   "case": "hex20 12^3",
+   "n_dof": 24843,
+   "sigma": 12026017.941605447,
+   "amg": {
+    "iterations": [
+     14,
+     14,
+     14,
+     14
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 2.1622772499686107,
+    "sizes": [
+     24843,
+     6591,
+     750,
+     48
+    ]
+   },
+   "pmg": {
+    "iterations": [
+     14,
+     14,
+     14,
+     14
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ]
+   }
+  },
+  {
+   "case": "hex20 24^3",
+   "n_dof": 181875,
+   "sigma": 12026017.941605447,
+   "amg": {
+    "iterations": [
+     14,
+     14,
+     14,
+     14
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 4.361267916974612,
+    "sizes": [
+     181875,
+     46875,
+     4374,
+     162,
+     6
+    ]
+   },
+   "pmg": {
+    "iterations": [
+     14,
+     14,
+     14,
+     14
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ]
+   }
+  },
+  {
+   "case": "hex27 6^3",
+   "n_dof": 6591,
+   "sigma": 11979092.898337135,
+   "amg": {
+    "iterations": [
+     13,
+     13,
+     13,
+     13
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 1.788374541909434,
+    "sizes": [
+     6591,
+     1029,
+     162,
+     6
+    ]
+   },
+   "pmg": {
+    "iterations": [
+     13,
+     13,
+     13,
+     13
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ]
+   }
+  },
+  {
+   "case": "hex27 3^3",
+   "n_dof": 1029,
+   "sigma": 11979092.898337135,
+   "amg": {
+    "iterations": [
+     13,
+     13,
+     13,
+     13
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 1.3156696250662208,
+    "sizes": [
+     1029,
+     192,
+     48
+    ]
+   },
+   "pmg": {
+    "iterations": [
+     13,
+     13,
+     13,
+     13
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ]
+   }
+  },
+  {
+   "case": "hex27 12^3",
+   "n_dof": 46875,
+   "sigma": 11979092.898337135,
+   "amg": {
+    "iterations": [
+     13,
+     13,
+     13,
+     13
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 2.348426791955717,
+    "sizes": [
+     46875,
+     6591,
+     750,
+     48
+    ]
+   },
+   "pmg": {
+    "iterations": [
+     13,
+     13,
+     13,
+     13
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ]
+   }
+  },
+  {
+   "case": "hex8 6^3",
+   "n_dof": 1029,
+   "sigma": 12428419.885493534,
+   "amg": {
+    "iterations": [
+     13,
+     13,
+     13,
+     13
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 1.2146938340738416,
+    "sizes": [
+     1029,
+     108,
+     6
+    ]
+   }
+  },
+  {
+   "case": "hex8 12^3",
+   "n_dof": 6591,
+   "sigma": 12428419.885493534,
+   "amg": {
+    "iterations": [
+     13,
+     13,
+     13,
+     13
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 1.4613151249941438,
+    "sizes": [
+     6591,
+     600,
+     30
+    ]
+   }
+  },
+  {
+   "case": "hex8 24^3",
+   "n_dof": 46875,
+   "sigma": 12428419.885493534,
+   "amg": {
+    "iterations": [
+     13,
+     13,
+     13,
+     13
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 2.7276994589483365,
+    "sizes": [
+     46875,
+     3888,
+     162,
+     6
+    ]
+   }
+  },
+  {
+   "case": "hex8 48^3",
+   "n_dof": 352947,
+   "sigma": 12428419.885493534,
+   "amg": {
+    "iterations": [
+     13,
+     13,
+     13,
+     13
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 8.747594499960542,
+    "sizes": [
+     352947,
+     27744,
+     1176,
+     48
+    ]
+   }
+  },
+  {
+   "case": "beam 20x2x2",
+   "n_dof": 1863,
+   "sigma": 275116.6548036112,
+   "amg": {
+    "iterations": [
+     16,
+     16,
+     16,
+     16
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 1.2524120419984683,
+    "sizes": [
+     1863,
+     567,
+     42
+    ]
+   },
+   "pmg": {
+    "iterations": [
+     16,
+     16,
+     15,
+     16
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ]
+   }
+  },
+  {
+   "case": "free 6^3",
+   "n_dof": 3675,
+   "sigma": 83990979.28500436,
+   "amg": {
+    "iterations": [
+     14,
+     14,
+     14,
+     14
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 1.6977892499417067,
+    "sizes": [
+     3675,
+     1029,
+     162,
+     6
+    ]
+   },
+   "pmg": {
+    "iterations": [
+     14,
+     14,
+     14,
+     14
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ]
+   }
+  },
+  {
+   "case": "curved 6^3",
+   "n_dof": 3675,
+   "sigma": 12030431.380846037,
+   "amg": {
+    "iterations": [
+     14,
+     14,
+     14,
+     14
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 1.6987313330173492,
+    "sizes": [
+     3675,
+     1029,
+     162,
+     6
+    ]
+   },
+   "pmg": {
+    "iterations": [
+     14,
+     14,
+     14,
+     14
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ]
+   }
+  },
+  {
+   "case": "checkerboard 4^3 s_K 1e-3",
+   "n_dof": 1275,
+   "sigma": 1567319.918695683,
+   "amg": {
+    "iterations": [
+     20,
+     20,
+     20,
+     20
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 1.2692103330045938,
+    "sizes": [
+     1275,
+     375,
+     48
+    ]
+   },
+   "pmg": {
+    "iterations": [
+     19,
+     19,
+     18,
+     19
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ]
+   }
+  },
+  {
+   "case": "nodal 6^3",
+   "n_dof": 3675,
+   "sigma": 2817053.192453414,
+   "amg": {
+    "iterations": [
+     14,
+     14,
+     14,
+     14
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 1.7182296669343486,
+    "sizes": [
+     3675,
+     1029,
+     162,
+     6
+    ]
+   },
+   "pmg": {
+    "iterations": [
+     14,
+     14,
+     14,
+     14
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ]
+   }
+  },
+  {
+   "case": "plate 16^2x1 a=1",
+   "n_dof": 5865,
+   "sigma": 115811.48028086731,
+   "amg": {
+    "iterations": [
+     36,
+     35,
+     35,
+     35
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 1.7087449580430984,
+    "sizes": [
+     5865,
+     1734,
+     216,
+     24
+    ]
+   },
+   "amg max_coarse=1000": {
+    "iterations": [
+     19,
+     18,
+     19,
+     18
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "sizes": [
+     5865,
+     1734,
+     216
+    ]
+   },
+   "amg max_coarse=2000": {
+    "iterations": [
+     15,
+     15,
+     15,
+     15
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "sizes": [
+     5865,
+     1734
+    ]
+   },
+   "pmg": {
+    "iterations": [
+     15,
+     15,
+     15,
+     15
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ]
+   }
+  },
+  {
+   "case": "plate 16^2x1 a=2",
+   "n_dof": 5865,
+   "sigma": 29146.600870322785,
+   "amg": {
+    "iterations": [
+     85,
+     83,
+     83,
+     84
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 1.86648404202424,
+    "sizes": [
+     5865,
+     1734,
+     216,
+     24
+    ]
+   },
+   "pmg": {
+    "iterations": [
+     21,
+     21,
+     21,
+     21
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ]
+   }
+  },
+  {
+   "case": "plate 16^2x1 a=4",
+   "n_dof": 5865,
+   "sigma": 7308.503666853503,
+   "amg": {
+    "iterations": [
+     229,
+     221,
+     224,
+     225
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 2.355932457954623,
+    "sizes": [
+     5865,
+     1734,
+     216,
+     24
+    ]
+   },
+   "pmg": {
+    "iterations": [
+     63,
+     61,
+     61,
+     61
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ]
+   }
+  },
+  {
+   "case": "plate 16^2x1 a=10",
+   "n_dof": 5865,
+   "sigma": 1171.9878546197615,
+   "amg": {
+    "iterations": [
+     1000,
+     1000,
+     1000,
+     1000
+    ],
+    "converged": [
+     false,
+     false,
+     false,
+     false
+    ],
+    "build_s": 5.060182375018485,
+    "sizes": [
+     5865,
+     1734,
+     216,
+     24
+    ]
+   },
+   "pmg": {
+    "iterations": [
+     731,
+     613,
+     658,
+     659
+    ],
+    "converged": [
+     false,
+     false,
+     false,
+     false
+    ]
+   }
+  },
+  {
+   "case": "box 8^3 hz=h/1",
+   "n_dof": 8019,
+   "sigma": 11988567.727187516,
+   "amg": {
+    "iterations": [
+     14,
+     14,
+     14,
+     14
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 1.8324226250406355,
+    "sizes": [
+     8019,
+     2187,
+     162,
+     6
+    ]
+   },
+   "pmg": {
+    "iterations": [
+     14,
+     14,
+     14,
+     14
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ]
+   }
+  },
+  {
+   "case": "box 8^3 hz=h/2",
+   "n_dof": 8019,
+   "sigma": 5300740.539275825,
+   "amg": {
+    "iterations": [
+     20,
+     20,
+     19,
+     20
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 1.866764000034891,
+    "sizes": [
+     8019,
+     2187,
+     162,
+     6
+    ]
+   },
+   "pmg": {
+    "iterations": [
+     17,
+     17,
+     17,
+     16
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ]
+   }
+  },
+  {
+   "case": "box 8^3 hz=h/4",
+   "n_dof": 8019,
+   "sigma": 1676386.6642353723,
+   "amg": {
+    "iterations": [
+     50,
+     51,
+     51,
+     52
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 2.1072967919753864,
+    "sizes": [
+     8019,
+     2187,
+     162,
+     6
+    ]
+   },
+   "pmg": {
+    "iterations": [
+     28,
+     28,
+     28,
+     28
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ]
+   }
+  },
+  {
+   "case": "box 8^3 hz=h/10",
+   "n_dof": 8019,
+   "sigma": 292473.57260561176,
+   "amg": {
+    "iterations": [
+     232,
+     242,
+     234,
+     244
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 3.7247155000222847,
+    "sizes": [
+     8019,
+     2187,
+     162,
+     6
+    ]
+   },
+   "pmg": {
+    "iterations": [
+     76,
+     76,
+     73,
+     74
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ]
+   }
   }
+ ],
+ "tol": 1e-08,
+ "max_coarse": 100,
+ "system": "benchmarks/results/system.json",
+ "cost": {
+  "n": 44,
+  "m": 25,
+  "n_dof": 1075275,
+  "sizes": [
+   1075275,
+   273375,
+   20250,
+   750
+  ],
+  "t_A_s": 0.304198959027417,
+  "amg_cycle_t_A": 1.295068123289702,
+  "P_t_A": 0.20203731865418204,
+  "PT_t_A": 0.18170810717479646,
+  "vcycle_t_A": 5.5979685580817895,
+  "vcycle_temp_blocks": 11.742183571644462,
+  "setup_s": {
+   "galerkin": 0.6581194169120863,
+   "sa_loop": 1.7578650410287082,
+   "amg_total": 4.1286615409189835
+  },
+  "storage_GB": {
+   "levels": 0.236224512,
+   "transfers": 0.240741636,
+   "coarse": 0.0045
+  },
+  "padding": {
+   "levels": [
+    1.0457945700930489,
+    1.2392284655368269
+   ],
+   "P": [
+    1.3411745683278449,
+    1.3727222262447807
+   ],
+   "PT": [
+    1.2067525635287557,
+    1.4119180363478387
+   ]
+  },
+  "operator_complexity": 1.1482990262829995
+ },
+ "setup": [
+  {
+   "type": "hex20",
+   "n": 12,
+   "assemble": {
+    "time_s": 0.10494349990040064,
+    "nnz": 455877,
+    "peak_bytes": 54738992
+   },
+   "amg": {
+    "time_s": 1.002033874974586,
+    "peak_bytes": 69501072
+   },
+   "reuse": {
+    "fresh_s": 0.07856579206418246,
+    "reuse_s": 0.07347270904574543,
+    "peak_bytes": 83968168
+   }
+  },
+  {
+   "type": "hex20",
+   "n": 24,
+   "assemble": {
+    "time_s": 0.19191604107618332,
+    "nnz": 3501153,
+    "peak_bytes": 87523424
+   },
+   "amg": {
+    "time_s": 1.8995213329326361,
+    "peak_bytes": 245039392
+   },
+   "reuse": {
+    "fresh_s": 0.5919430409558117,
+    "reuse_s": 0.5397177499253303,
+    "peak_bytes": 267813200
+   }
+  },
+  {
+   "type": "hex20",
+   "n": 44,
+   "assemble": {
+    "time_s": 0.7171018329681829,
+    "nnz": 21173733,
+    "peak_bytes": 417497520
+   },
+   "amg": {
+    "time_s": 4.912488457979634,
+    "peak_bytes": 1353090176
+   },
+   "reuse": {
+    "fresh_s": 3.574264083057642,
+    "reuse_s": 3.187177291023545,
+    "peak_bytes": 1465763112
+   }
+  },
+  {
+   "type": "hex27",
+   "n": 24,
+   "assemble": {
+    "time_s": 0.24857900000642985,
+    "nnz": 3501153,
+    "peak_bytes": 96665720
+   },
+   "amg": {
+    "time_s": 2.040621083113365,
+    "peak_bytes": 270811472
+   },
+   "reuse": {
+    "fresh_s": 0.7860662080347538,
+    "reuse_s": 0.7205539579736069,
+    "peak_bytes": 313311592
+   }
+  },
+  {
+   "type": "hex8",
+   "n": 24,
+   "assemble": {
+    "time_s": 0.14543262508232147,
+    "nnz": 3501153,
+    "peak_bytes": 78872696
+   },
+   "amg": {
+    "time_s": 1.47327520896215,
+    "peak_bytes": 191873264
+   },
+   "reuse": {
+    "fresh_s": 0.4726403329987079,
+    "reuse_s": 0.44018066697753966,
+    "peak_bytes": 217563448
+   }
+  },
+  {
+   "type": "hex8",
+   "n": 48,
+   "assemble": {
+    "time_s": 0.5521526670781896,
+    "nnz": 27437625,
+    "peak_bytes": 502972824
+   },
+   "amg": {
+    "time_s": 5.13263095903676,
+    "peak_bytes": 1423148184
+   },
+   "reuse": {
+    "fresh_s": 3.767624625004828,
+    "reuse_s": 3.462670750101097,
+    "peak_bytes": 1564378432
+   }
+  },
+  {
+   "type": "hex8",
+   "n": 68,
+   "assemble": {
+    "time_s": 1.4803982499288395,
+    "nnz": 77536125,
+    "peak_bytes": 1420149840
+   },
+   "amg": {
+    "time_s": 12.296697333920747,
+    "peak_bytes": 3961310232
+   },
+   "reuse": {
+    "fresh_s": 11.175915875006467,
+    "reuse_s": 10.186793291941285,
+    "peak_bytes": 4305882328
+   }
+  }
+ ],
+ "simp": [
+  {
+   "case": "simp32@own",
+   "n": 32,
+   "sigma": 15.124775535299483,
+   "gmg": {
+    "iterations": [
+     87,
+     87,
+     87,
+     87
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 2.819846999947913
+   },
+   "amg max_coarse=1000": {
+    "iterations": [
+     789,
+     799,
+     803,
+     796
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 60.18270137498621,
+    "sizes": [
+     107811,
+     7986,
+     384
+    ]
+   },
+   "amg max_coarse=100": {
+    "iterations": [
+     910,
+     908,
+     900,
+     911
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 68.3594521250343,
+    "sizes": [
+     107811,
+     7986,
+     384,
+     24
+    ]
+   }
+  },
+  {
+   "case": "simp32@solid",
+   "n": 32,
+   "sigma": 12243236.8811708,
+   "gmg": {
+    "iterations": [
+     33,
+     33,
+     33,
+     33
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 2.875372917042114
+   },
+   "amg max_coarse=1000": {
+    "iterations": [
+     72,
+     70,
+     70,
+     72
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 7.293888375046663,
+    "sizes": [
+     107811,
+     7986,
+     384
+    ]
+   },
+   "amg max_coarse=100": {
+    "iterations": [
+     74,
+     72,
+     75,
+     73
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 7.195968875079416,
+    "sizes": [
+     107811,
+     7986,
+     384,
+     24
+    ]
+   }
+  },
+  {
+   "case": "s4@own",
+   "n": 32,
+   "sigma": 4.063056848914869,
+   "gmg": {
+    "iterations": [
+     133,
+     135,
+     134,
+     135
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 2.699580582906492
+   },
+   "amg max_coarse=1000": {
+    "iterations": [
+     646,
+     721,
+     732,
+     761
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 57.22927750006784,
+    "sizes": [
+     107811,
+     7986,
+     384
+    ]
+   },
+   "amg max_coarse=100": {
+    "iterations": [
+     721,
+     737,
+     720,
+     729
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 55.695084167062305,
+    "sizes": [
+     107811,
+     7986,
+     384,
+     24
+    ]
+   }
+  },
+  {
+   "case": "s5@own",
+   "n": 32,
+   "sigma": 2001.8535370396855,
+   "gmg": {
+    "iterations": [
+     109,
+     109,
+     107,
+     109
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 2.4374992919620126
+   },
+   "amg max_coarse=1000": {
+    "iterations": [
+     136,
+     136,
+     137,
+     137
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 11.999038249952719,
+    "sizes": [
+     107811,
+     7986,
+     384
+    ]
+   },
+   "amg max_coarse=100": {
+    "iterations": [
+     151,
+     151,
+     152,
+     151
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 12.896304166992195,
+    "sizes": [
+     107811,
+     7986,
+     384,
+     24
+    ]
+   }
+  },
+  {
+   "case": "binary@own",
+   "n": 32,
+   "sigma": 41.248915863764545,
+   "gmg": {
+    "iterations": [
+     447,
+     413,
+     449,
+     450
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 2.4265592499868944
+   },
+   "amg max_coarse=1000": {
+    "iterations": [
+     447,
+     447,
+     446,
+     447
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 34.448438916006126,
+    "sizes": [
+     107811,
+     7986,
+     384
+    ]
+   },
+   "amg max_coarse=100": {
+    "iterations": [
+     451,
+     447,
+     448,
+     449
+    ],
+    "converged": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "build_s": 34.54969437501859,
+    "sizes": [
+     107811,
+     7986,
+     384,
+     24
+    ]
+   }
+  }
+ ],
+ "acceptance": {
+  "iterations": 19,
+  "converged": true,
+  "sigma": 11923132.249932302,
+  "sigma_iterations": 6,
+  "time": {
+   "setup": 2.6736124589806423,
+   "iterations": 49.479929749970324,
+   "precond": 18.104388167033903
+  },
+  "time_s": 72.21759516594466,
+  "lam": [
+   11923130.315886475,
+   11923130.31596669,
+   22046744.51484938,
+   68116643.9663329,
+   83487309.57772776,
+   83487309.57775748,
+   126949405.67317426,
+   178101150.16294912,
+   192874110.45989892,
+   201714880.48031938,
+   202613350.068823,
+   202613350.06897625,
+   226726067.7001311,
+   248957171.05197054,
+   249877705.71725437,
+   249877705.71727464,
+   287108698.9949506,
+   290023039.7567158,
+   290023039.7568042,
+   344792290.3639397
+  ],
+  "cold_peak_bytes": 7674167296,
+  "peaks_bytes": [
+   7462590152,
+   7427987144
+  ],
+  "n": 44,
+  "n_modes": 20,
+  "n_dof": 1075275,
+  "estimate_bytes": 7445324394
+ },
+ "versions": {
+  "jax": "0.11.2",
+  "jaxlib": "0.11.2",
+  "numpy": "2.5.3",
+  "platform": "macOS-27.2-arm64-arm-64bit",
+  "cpu_count": 16,
+  "p_cores": 12,
+  "e_cores": 4,
+  "xla_flags": null,
+  "jax_num_cpu_devices": true
+ }
 }

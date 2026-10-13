@@ -22,6 +22,7 @@ from helpers import (
     dense,
     distort,
     lam1,
+    mixed_mesh,
     rel,
     rhs,
     sigma6,
@@ -34,6 +35,7 @@ from pyamg.strength import symmetric_strength_of_connection
 from jaxmodal.eigen import lobpcg, reference_modes
 from jaxmodal.linalg import pcg
 from jaxmodal.memory import (
+    AMG_BUILD,
     AMG_STEP,
     amg_memory,
     lobpcg_memory,
@@ -537,10 +539,19 @@ def test_amg_memory_storage(name):
     n_c = 3 * len(np.unique(np.concatenate([c[:, :8].ravel() for c in mesh.blocks.values()])))
     coarse = 8 * min(n_c, 1000) ** 2
     assert got <= est and P.coarse.L.nbytes <= coarse, (got, est)
-    if tight:
+    if tight:  # the n-scaling part alone covers the non-coarse bytes, and within 1.3x
+        assert est - coarse >= got - P.coarse.L.nbytes
         assert est - coarse <= 1.3 * (got - P.coarse.L.nbytes), (est - coarse) / (
             got - P.coarse.L.nbytes
         )
+
+
+def test_amg_memory_build_mixed():
+    """13b test 7: a mixed mesh's build term uses the largest per-type constant."""
+    mesh = mixed_mesh(np.random.default_rng(0))
+    n_c = 3 * len(np.unique(np.concatenate([c[:, :8].ravel() for c in mesh.blocks.values()])))
+    beta, alpha = AMG_BUILD
+    assert amg_memory(mesh, 15)["build"] == int(beta + alpha["hex20"] * n_c)
 
 
 def step_case(t, n):

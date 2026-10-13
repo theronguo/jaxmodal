@@ -60,14 +60,13 @@ def _sa_levels(A, B, max_coarse, tents=None):
     given, they are reused (no strength, aggregation or fit; B and max_coarse unused). Runs
     under a fixed local NumPy seed (pyamg's spectral radius estimate draws from np.random; the
     estimate is the only consumer, so reuse draws the same stream) and leaves the global state
-    unchanged."""
+    unchanged. Removes explicit zero blocks from A in place."""
     state = np.random.get_state()
     np.random.seed(0)
     reuse, out = tents is not None, []
     try:
         levels, b = [], 3
-        while len(levels) < len(tents) if reuse else A.shape[0] > max_coarse:
-            A = A.copy()
+        while (len(levels) < len(tents)) if reuse else (A.shape[0] > max_coarse):
             A.eliminate_zeros()  # BSR: drops all-zero blocks
             Ab = sp.bsr_array(A, blocksize=(b, b)) if b > 1 else A
             if reuse:
@@ -169,10 +168,11 @@ def amg(
     if points.shape != (op.n_nodes, 3):
         raise ValueError(f"points must have shape ({op.n_nodes}, 3), got {points.shape}")
     key = _fingerprint(op) if return_aggregates or aggregates is not None else None
+    mask = np.asarray(free, bool).ravel()
     if aggregates is not None:
         if key != aggregates.key:
-            raise ValueError("aggregates come from a mesh with another connectivity")
-        if not np.array_equal(np.asarray(free, bool).ravel(), aggregates.free):
+            raise ValueError("aggregates come from a mesh with another connectivity or chunking")
+        if not np.array_equal(mask, aggregates.free):
             raise ValueError("aggregates come from another free mask")
     pattern = aggregates.pattern if aggregates is not None else None
     fine, Ab, pattern = _p_level(op, free, sigma, degree, ratio, pattern)
@@ -183,7 +183,6 @@ def amg(
     else:
         B, tents = None, aggregates.tents
     levels, coarsest, tents = _sa_levels(Ab, B, max_coarse, tents)
-    del Ab
     hex8 = all(b.dofs.shape[1] == 24 for b in op.blocks)
     out, transfers = ([], []) if hex8 else ([fine], [pattern.T])
     for i, (Al, P) in enumerate(levels):
@@ -192,5 +191,5 @@ def amg(
         transfers.append(ELLTransfer(block_ell(P, 1), block_ell(P.T.tocsr(), 1)))
     P = GMG(tuple(out), tuple(transfers), _cholesky(coarsest), A.free, None)
     if return_aggregates:
-        return P, AMGAggregates(pattern, tents, np.asarray(free, bool).ravel().copy(), key)
+        return P, AMGAggregates(pattern, tents, mask.copy(), key)
     return P

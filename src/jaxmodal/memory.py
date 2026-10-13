@@ -252,7 +252,7 @@ AMG_STEP = {
 }
 # Setup host peak: a fixed part plus bytes per corner DOF by element type (the largest present),
 # an envelope (+5%) of hex20 12^3-44^3, hex27 12^3-24^3, hex8 24^3-68^3 (4.4-5.5 kB measured).
-AMG_BUILD = (45e6, {"hex8": 4.6e3, "hex20": 5.1e3, "hex27": 5.8e3})
+AMG_BUILD = (45e6, {"hex8": 4.1e3, "hex20": 4.9e3, "hex27": 5.8e3})
 
 
 def amg_memory(mesh, m):
@@ -267,6 +267,7 @@ def amg_memory(mesh, m):
     fam = "hex8" if mesh.blocks.keys() == {"hex8"} else "p"
     storage = 120 * n_nodes  # free mask, node-block Jacobi inverses and mask (fp64)
     if fam == "p":  # NodalTransfer: (int32, fp64) parent / child tables
+        # w: parents per fine node; child.max(): fine nodes interpolating from one corner
         w = max(int((_w8(c.shape[1]) > 0).sum(1).max()) for c in blocks)
         pairs = []
         for c in blocks:

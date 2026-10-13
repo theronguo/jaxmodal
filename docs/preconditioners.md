@@ -325,7 +325,7 @@ Degree 2 is the default. Per PCG solve (V-cycle $2d$ applies plus PCG's one):
 | 3 | 70–77 | 80–88 |
 | 4 | 81 | ~90 |
 
-The cost is a tie, and degree 2 needs the least smoother workspace. At hex20 $24^3$ ($m = 25$): $t_A$ = 53 ms; the V-cycle takes 987 ms, of which the test-only `splu` solve is 765 ms (14.4 $t_A$) and the rest 4.2 $t_A$ ($2d$ = 4 applies plus transfers). The build takes 13.3 s, mostly `splu`. PR 13b's `_hex8_galerkin` at hex20 $44^3$ takes 0.73 s with a 0.46 GB process peak (PR 12's COO path: 1.4 s, 2.5 GB); `amg_study.setup` measures it.
+The cost is a tie, and degree 2 needs the least smoother workspace. At hex20 $24^3$ ($m = 25$): $t_A$ = 53 ms; the V-cycle takes 987 ms, of which the test-only `splu` solve is 765 ms (14.4 $t_A$) and the rest 4.2 $t_A$ ($2d$ = 4 applies plus transfers). The build takes 13.3 s, mostly `splu`. PR 13b's `_hex8_galerkin` at hex20 $44^3$ takes 0.72 s with a 0.42 GB process peak (PR 12's COO path: 1.4 s, 2.5 GB); `amg_study.setup` measures it.
 
 **LOBPCG** (10 modes, tol $10^{-6}$, σ = $\lambda_1$; times include compilation; eigenvalues agree with the Jacobi run to $\le 7\cdot10^{-11}$):
 
@@ -334,39 +334,6 @@ The cost is a tie, and degree 2 needs the least smoother workspace. At hex20 $24
 | hex20 $12^3$ | 24,843 | 435 iterations, 6.0 s | 15, 1.2 s |
 | hex20 beam $20\times2\times2$ | 1,863 | 309 iterations, 1.6 s | 14, 0.3 s |
 | hex27 $16^3$ | 107,811 | 509 iterations, 21.6 s | 15, 3.4 s |
-
-**Setup** (`amg_study.setup`, one process per size, `xmin` clamped, σ = 1e6; times include compilation for the first two columns, peaks are the process peak over the built operator):
-
-| mesh | DOF | assembler (time, peak) | `amg` (time, peak) | warm fresh / reused build |
-|---|---|---|---|---|
-| hex20 $12^3$ | 24k | 0.11 s, 0.06 GB | 1.0 s, 0.07 GB | 0.08 / 0.07 s |
-| hex20 $24^3$ | 182k | 0.19 s, 0.12 GB | 1.9 s, 0.27 GB | 0.60 / 0.55 s |
-| hex20 $44^3$ | 1.08M | 0.73 s, 0.46 GB | 4.9 s, 1.36 GB | 3.58 / 3.29 s |
-| hex27 $24^3$ | 375k | 0.25 s, 0.13 GB | 2.0 s, 0.30 GB | 0.79 / 0.72 s |
-| hex8 $24^3$ | 47k | 0.15 s, 0.11 GB | 1.5 s, 0.21 GB | 0.48 / 0.44 s |
-| hex8 $48^3$ | 353k | 0.57 s, 0.57 GB | 5.3 s, 1.57 GB | 3.93 / 3.60 s |
-| hex8 $68^3$ | 986k | 1.53 s, 1.58 GB | 12.5 s, 4.38 GB | 11.30 / 10.31 s |
-
-**SIMP fields** (`amg_study.simp`: `gmg_study`'s $32^3$ density fields as unstructured hex8 meshes, $s_K = \rho^3$, $s_M = \rho$, `xmin` clamped; PCG iterations to $10^{-8}$, range over the right-hand sides; GMG on the voxel operator for comparison):
-
-| field | σ | GMG | AMG, `max_coarse` 1000 | AMG, `max_coarse` 100 |
-|---|---|---|---|---|
-| filtered SIMP $32^3$ (`simp32.npy`) | own $\lambda_1$ | 87 | 789–803 | 900–911 |
-| filtered SIMP $32^3$ | $\lambda_1$ of the solid $8^3$ box | 33 | 70–72 | 72–75 |
-| the same recipe, seed 4 | own $\lambda_1$ | 133–135 | 646–761 | 720–737 |
-| the same recipe, seed 5 | own $\lambda_1$ | 107–109 | 136–137 | 151–152 |
-| unfiltered binary, seed 3 | own $\lambda_1$ (41.25) | 413–450 | 446–447 | 447–451 |
-
-On the filtered fields at their own $\lambda_1$ AMG is far behind: GMG deflates the stiff islands, while AMG's near-null space is the global rigid modes and θ = 0 aggregates across void and solid. On the binary field the two are level. A strength threshold θ = 0.02 (plan prototype) brings the checked-in field at its own $\lambda_1$ to 49–51, but at the solid's $\lambda_1$ its coarse levels turn dense and coarsening stalls, and it raises AMG storage 34–56% on the 13a cases; 13b keeps θ = 0, which also keeps the reuse equality ([`open_items.md`](open_items.md)).
-
-### Memory: `amg_memory`
-
-`amg_memory(mesh, m)` (PR 13b) returns, in bytes, for a hex8/hex20/hex27 mesh with $n_c$ corner DOF ($3\times$ corner nodes) and $n$ DOF:
-- **`storage`** (device, resident): the p-level (non-hex8 only: $120\,n_\text{nodes}$ for the smoother blocks and owner data plus $12\,(w\,n_\text{nodes} + c_\max n_\text{corner})$ for the transfer, exact) plus `AMG_STORAGE[fam]` $\cdot\, n_c$ for the AMG levels and transfers ($1200$ B for all-hex8, $2450$ B otherwise) plus $8\min(n_c, 1000)^2$ for the dense coarsest factor.
-- **`build`** (host, transient): $\beta + \alpha_t n_c$ with $\beta$ = 45 MB and $\alpha$ = 4.6 / 5.1 / 5.8 kB (hex8 / hex20 / hex27), the envelope of the measured peaks (setup table) over $\beta$ = 40 MB.
-- **`step`**, **`step_low`**: the V-cycle's extra temporaries in a LOBPCG step, $8n(a\,m + c) + 8mK$ (`AMG_STEP`, [`eigensolvers.md`](eigensolvers.md#memory)).
-
-The constants come from box meshes only (hex20 $8^3$–$44^3$, hex27 $6^3$–$24^3$, hex8 $12^3$–$68^3$); the AMG part per corner DOF varies with the hierarchy (hex20: 1463–2317 B, hex8: 874–1150 B), so `AMG_STORAGE` is its maximum. Graded and curved meshes, and $n_c$ below $10^4$, are not calibrated ([`open_items.md`](open_items.md)). `solve_modes_memory(..., precond="amg")` composes `amg_memory` with `lobpcg_memory`; the build peak is not added, because `amg` runs before LOBPCG allocates.
 
 **Limitations** ([`open_items.md`](open_items.md)).
 - **Flat elements:** the hex8 coarse space locks in bending when elements are flat ($a \gg 1$), so the coarse correction misses the smooth bending error. See the table above; the hex27 plate $32^2\times1$ at $a = 10$ needs > 1000 iterations and does not converge. Slenderness alone with $a = 1$ is fine (beam: 16). AMG on the hex8 level makes it worse (below); revisited in M4 (solid-shell elements).
@@ -443,11 +410,11 @@ The V-cycle is symmetric and positive definite on the free DOFs: the same Chebys
 `amg(..., return_aggregates=True)` returns `(P, agg)`; `agg` is an `AMGAggregates` (host data): the `Hex8Pattern`, the tentative prolongators $T_l$ (after the zero-column drop) and coarse candidates per SA level, a copy of `free` and a connectivity fingerprint (per block: element count and a hash of the DOF table). `amg(..., aggregates=agg)` skips the pattern, the corner tables, strength, aggregation and the tentative fit; it recomputes the cells, the smoothed prolongators (`jacobi_prolongation_smoother` reads its strength argument only when filtering, so it gets `None`), the Galerkin products and the device export, under the same local seed (the spectral radius estimate is the only consumer of the random stream, so skipping aggregation does not shift it). Another `free` or another connectivity raises `ValueError`; `points` are not checked.
 - **New values, same geometry** (σ, `s_K`, `s_M`, materials): with θ = 0 the first-level aggregates depend only on the pattern, the mask and $B$, and the coarser ones on the pattern of $P^\top A P$, which values change only through exact cancellations. A reused setup therefore equals a fresh one (test: the V-cycle to $10^{-12}$ after a 20% density perturbation that moves the smoothed $P$ by 12–13%, and σ = 0 aggregates reused at σ > 0).
 - **Moved points** (shape optimization): reuse keeps the old near-null space $B$. The result is still an SPD V-cycle and only approximates a fresh setup (test: within 1.2× its iterations after a 2% node perturbation).
-- It saves the topology part of a build (about 8–10% of a warm build: 3.3 s against 3.6 s at 1M hex20, 10.3 s against 11.3 s at 1M hex8; table below) and pins the hierarchy sizes. `solve_modes` does not use it; it is for PRs 21–23.
+- It saves the topology part of a build (about 8–11% of a warm build at $24^3$ and up: 3.2 s against 3.6 s at 1M hex20, 10.2 s against 11.2 s at 1M hex8; table below) and pins the hierarchy sizes. `solve_modes` does not use it; it is for PRs 21–23.
 
 ### Measured
 
-**Measured** (`benchmarks/amg_study.py` → `benchmarks/results/amg_study.json`; jax 0.11.2, fp64, M3 Max CPU). Setup as in `pmg`'s table; `max_coarse` = 100, so that every size has an AMG level.
+(`benchmarks/amg_study.py` → `benchmarks/results/amg_study.json`; jax 0.11.2, fp64, M3 Max CPU). Setup as in `pmg`'s table; `max_coarse` = 100, so that every size has an AMG level.
 
 | case | DOF | AMG level sizes (hex8 level first) | `pmg` (exact coarse) | `amg` |
 |---|---|---|---|---|
@@ -472,13 +439,13 @@ The V-cycle is symmetric and positive definite on the free DOFs: the same Chebys
 
 | mesh | DOF | assembler (time, peak) | `amg` (time, peak) | warm fresh / reused build |
 |---|---|---|---|---|
-| hex20 $12^3$ | 24k | 0.11 s, 0.06 GB | 1.0 s, 0.07 GB | 0.08 / 0.07 s |
-| hex20 $24^3$ | 182k | 0.19 s, 0.12 GB | 1.9 s, 0.27 GB | 0.60 / 0.55 s |
-| hex20 $44^3$ | 1.08M | 0.73 s, 0.46 GB | 4.9 s, 1.36 GB | 3.58 / 3.29 s |
-| hex27 $24^3$ | 375k | 0.25 s, 0.13 GB | 2.0 s, 0.30 GB | 0.79 / 0.72 s |
-| hex8 $24^3$ | 47k | 0.15 s, 0.11 GB | 1.5 s, 0.21 GB | 0.48 / 0.44 s |
-| hex8 $48^3$ | 353k | 0.57 s, 0.57 GB | 5.3 s, 1.57 GB | 3.93 / 3.60 s |
-| hex8 $68^3$ | 986k | 1.53 s, 1.58 GB | 12.5 s, 4.38 GB | 11.30 / 10.31 s |
+| hex20 $12^3$ | 25k | 0.10 s, 0.06 GB | 1.0 s, 0.07 GB | 0.08 / 0.07 s |
+| hex20 $24^3$ | 182k | 0.19 s, 0.09 GB | 1.9 s, 0.25 GB | 0.59 / 0.54 s |
+| hex20 $44^3$ | 1.08M | 0.72 s, 0.42 GB | 4.9 s, 1.35 GB | 3.57 / 3.19 s |
+| hex27 $24^3$ | 353k | 0.25 s, 0.10 GB | 2.0 s, 0.27 GB | 0.79 / 0.72 s |
+| hex8 $24^3$ | 47k | 0.15 s, 0.08 GB | 1.5 s, 0.19 GB | 0.47 / 0.44 s |
+| hex8 $48^3$ | 353k | 0.55 s, 0.50 GB | 5.1 s, 1.42 GB | 3.77 / 3.46 s |
+| hex8 $68^3$ | 986k | 1.48 s, 1.42 GB | 12.3 s, 3.96 GB | 11.18 / 10.19 s |
 
 **SIMP fields** (`amg_study.simp`: `gmg_study`'s $32^3$ density fields as unstructured hex8 meshes, $s_K = \rho^3$, $s_M = \rho$, `xmin` clamped; PCG iterations to $10^{-8}$, range over the right-hand sides; GMG on the voxel operator for comparison):
 
@@ -496,15 +463,15 @@ On the filtered fields at their own $\lambda_1$ AMG is far behind: GMG deflates 
 
 `amg_memory(mesh, m)` (PR 13b) returns, in bytes, for a hex8/hex20/hex27 mesh with $n_c$ corner DOF ($3\times$ corner nodes) and $n$ DOF:
 - **`storage`** (device, resident): the p-level (non-hex8 only: $120\,n_\text{nodes}$ for the smoother blocks and owner data plus $12\,(w\,n_\text{nodes} + c_\max n_\text{corner})$ for the transfer, exact) plus `AMG_STORAGE[fam]` $\cdot\, n_c$ for the AMG levels and transfers ($1200$ B for all-hex8, $2450$ B otherwise) plus $8\min(n_c, 1000)^2$ for the dense coarsest factor.
-- **`build`** (host, transient): $\beta + \alpha_t n_c$ with $\beta$ = 45 MB and $\alpha$ = 4.6 / 5.1 / 5.8 kB (hex8 / hex20 / hex27), the envelope of the measured peaks (setup table) over $\beta$ = 40 MB.
+- **`build`** (host, transient): $\beta + \alpha_t n_c$ with $\beta$ = 45 MB and $\alpha$ = 4.1 / 4.9 / 5.8 kB (hex8 / hex20 / hex27), 2–3% above the measured peaks at 1M (setup table; hex27 set by its $12^3$ peak). `_sa_levels` compacts the first-level matrix in place, so the assembled matrix exists once on the host.
 - **`step`**, **`step_low`**: the V-cycle's extra temporaries in a LOBPCG step, $8n(a\,m + c) + 8mK$ (`AMG_STEP`, [`eigensolvers.md`](eigensolvers.md#memory)).
 
 The constants come from box meshes only (hex20 $8^3$–$44^3$, hex27 $6^3$–$24^3$, hex8 $12^3$–$68^3$); the AMG part per corner DOF varies with the hierarchy (hex20: 1463–2317 B, hex8: 874–1150 B), so `AMG_STORAGE` is its maximum. Graded and curved meshes, and $n_c$ below $10^4$, are not calibrated ([`open_items.md`](open_items.md)). `solve_modes_memory(..., precond="amg")` composes `amg_memory` with `lobpcg_memory`; the build peak is not added, because `amg` runs before LOBPCG allocates.
 
 **Limitations** ([`open_items.md`](open_items.md)).
 - **Flat elements:** AMG on the hex8 coarse space makes `pmg`'s flat-element weakness worse (table). The loss comes from the deeper AMG levels, whose six rigid modes per aggregate represent plate bending poorly: on the plate with $a = 1$ (study runs `amg max_coarse=…`), `max_coarse` = 2000 (no AMG level) gives 15, 1000 (one AMG level) 19 and 100 (two) 36. Large meshes always have deep hierarchies, so the `max_coarse` = 100 numbers are the representative ones. Remedy: solid-shell elements (M4 / PR 18).
-- **10M scale:** `amg_memory` puts the host build peak at 13.6 GB for 10M hex20 DOF and 46.6 GB for 10M hex8 DOF (all-hex8: the fine level is the assembled $A_P$ itself, about 4.4 kB per corner DOF at its peak); the device storage at 7.1 / 12.6 GB. The 10M configurations are deferred GPU checks.
-- **SIMP fields at their own $\lambda_1$:** 790–910 iterations against GMG's 87 (table below); θ = 0 and the reuse equality are kept, the remedy is logged in [`open_items.md`](open_items.md).
+- **10M scale:** `amg_memory` puts the host build peak at 13.1 GB for 10M hex20 DOF and 41.6 GB for 10M hex8 DOF (all-hex8: the fine level is the assembled $A_P$ itself, about 4.0 kB per corner DOF at its peak); the device storage at 7.1 / 12.6 GB. The 10M configurations are deferred GPU checks.
+- **SIMP fields at their own $\lambda_1$:** 790–910 iterations against GMG's 87 (table above); θ = 0 and the reuse equality are kept, the remedy is logged in [`open_items.md`](open_items.md).
 
 ## Measured (jax 0.11.2, fp64, M3 Max CPU)
 

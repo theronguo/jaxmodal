@@ -15,7 +15,6 @@ Writes results/amg_study.json.
 import argparse
 import importlib
 import json
-import sys
 import time
 
 import jax
@@ -296,6 +295,8 @@ if __name__ == "__main__":
     a = p.parse_args()
     if a.large:
         config.enable_x64()
-        print(json.dumps(large()), file=sys.stderr)
+        r = large()
+        print(json.dumps(r))
+        harness.write_result("amg_study_large", r, a.out)
     else:
         main(out=a.out)
