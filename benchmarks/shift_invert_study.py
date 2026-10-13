@@ -19,7 +19,7 @@ from benchmarks import harness
 from jaxmodal import config
 from jaxmodal.eigen import solve_modes
 from jaxmodal.eigen.reference import reference_modes
-from jaxmodal.eigen.shift_invert import si_slice
+from jaxmodal.eigen.shift_invert import _slice_sets, si_slice
 from jaxmodal.linalg import minres
 from jaxmodal.materials import Material, isotropic
 from jaxmodal.mesh import box_mesh, voxel_mesh
@@ -152,18 +152,18 @@ def full_slice(n, first=51, last=70):
     """Modes first..last (1-based) of hex20 n^3 at tol 1e-8 by one slice and by
     solve_modes(band=(0, f(hi))) (LOBPCG from 0)."""
     mesh = hex20(n)
-    lam = reference(mesh, last + 1)
+    lam = reference(mesh, last + 6)
     lo, hi = (lam[first - 2] + lam[first - 1]) / 2, (lam[last - 1] + lam[last]) / 2
     op, free, build = setup(mesh)
     t = time.perf_counter()
     P = build(op, (lo + hi) / 2)
     lam_s, _, info = si_slice(op, free, lo, hi, P, capacity=60 * 6, tol=1e-8, verbose=True)
     wall = time.perf_counter() - t
-    n_ref = int(((lam >= lo) & (lam <= hi)).sum())
+    ref = lam[_slice_sets(lam, lo, hi, info["r_acc"])[0]]  # the slice's rule: edge clusters whole
     out = dict(n_dof=op.n_dof, slice=slice_info(info) | dict(
-        wall=wall, n_modes=len(lam_s), n_ref=n_ref, columns_per_mode=info["basis"] / len(lam_s),
-        error=float(np.abs(lam_s - lam[(lam >= lo) & (lam <= hi)]).max() / hi)
-        if len(lam_s) == n_ref else None))  # fmt: skip
+        wall=wall, n_modes=len(lam_s), n_ref=len(ref), columns_per_mode=info["basis"] / len(lam_s),
+        error=float(np.abs(lam_s - ref).max() / hi) if len(lam_s) == len(ref) else None,
+    ))  # fmt: skip
     t = time.perf_counter()
     lb, _, ib = solve_modes(mesh, MAT, BCS, tol=1e-8, band=(0, np.sqrt(hi) / (2 * np.pi)))
     out["band"] = dict(wall=time.perf_counter() - t, n_modes=len(lb), iterations=ib["iterations"])

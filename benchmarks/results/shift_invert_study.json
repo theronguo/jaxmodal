@@ -567,8 +567,108 @@
     },
     "note": "slice from the first run (log); floor dropped"
   },
+  "full": {
+    "n_dof": 24843,
+    "slice": {
+      "converged": true,
+      "reason": null,
+      "capacity_full": false,
+      "edge_unreached": null,
+      "r_acc": 1.695763129993134e-08,
+      "tau_eff": 1e-08,
+      "delta_max": 0.16470736882292472,
+      "steps": 22,
+      "basis": 138,
+      "sigma": 51.004672601215226,
+      "sigma_moved": false,
+      "minres_iterations": [
+        280,
+        280,
+        280,
+        280,
+        280,
+        280,
+        280,
+        280,
+        280,
+        280,
+        280,
+        280,
+        280,
+        280,
+        280,
+        270,
+        270,
+        270,
+        270,
+        270,
+        270,
+        270
+      ],
+      "time": {
+        "setup": 0.6661978750489652,
+        "minres": 129.33773520763498,
+        "ortho": 0.47898149816319346,
+        "ritz": 0.4720444999402389
+      },
+      "wall": 132.30171412497293,
+      "n_modes": 21,
+      "n_ref": 21,
+      "columns_per_mode": 6.571428571428571,
+      "error": 6.214801981639813e-15
+    },
+    "band": {
+      "wall": 8.516768916975707,
+      "n_modes": 71,
+      "iterations": 53
+    }
+  },
+  "voxel_2M": {
+    "n_dof": 1975509,
+    "lo": 2.531664416645313,
+    "hi": 5.91249487406235,
+    "precond_s": 4.8472071250434965,
+    "slice_60": {
+      "converged": true,
+      "reason": null,
+      "capacity_full": false,
+      "edge_unreached": null,
+      "r_acc": 1e-06,
+      "tau_eff": 1e-08,
+      "delta_max": 0.10530271264899141,
+      "steps": 9,
+      "basis": 60,
+      "sigma": 4.222079645353832,
+      "sigma_moved": false,
+      "minres_iterations": [
+        30,
+        40,
+        40,
+        40,
+        30,
+        30,
+        30,
+        30,
+        30
+      ],
+      "time": {
+        "setup": 1.7406615410000086,
+        "minres": 270.11877108190674,
+        "ortho": 4.511610959889367,
+        "ritz": 1.8400919999694452
+      },
+      "lam": [
+        3.819840118943622,
+        4.682729979645259,
+        4.682729979651463
+      ],
+      "wall": 278.6708616251126
+    }
+  },
   "walls": {
-    "hex20_1M": 6170.849287083023
+    "hex20_1M": 6170.849287083023,
+    "full": 148.55784804094583,
+    "voxel_2M": 347.1955800000578
   },
   "versions": {
     "jax": "0.11.2",
