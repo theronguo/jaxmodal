@@ -3,6 +3,7 @@ pyamg's primitives (node aggregation, zero-column drop) exported to the device a
 V-cycle with PR 12's p-level on top (none for all-hex8 meshes). See docs/preconditioners.md."""
 
 import dataclasses
+import hashlib
 
 import jax.numpy as jnp
 import numpy as np
@@ -17,7 +18,7 @@ from ..operators.common import register
 from .chebyshev import chebyshev, lmax_estimate
 from .gmg import GMG, Cholesky
 from .jacobi import _block_jacobi, _inverse_blocks
-from .pmg import _check, _p_level
+from .pmg import Hex8Pattern, _check, _p_level
 
 OMEGA = 4 / 3  # Jacobi prolongation smoothing weight (over the spectral radius estimate)
 STALL = 0.9  # stop coarsening when a level would keep more than this fraction of its DOFs
@@ -51,42 +52,51 @@ def _nullspace(x, free):
     return B.reshape(-1, 6) * free[:, None]
 
 
-def _sa_levels(A, B, max_coarse):
-    """([(A_l, P_l)], A_coarsest) by smoothed aggregation of the SciPy matrix A with near-null
-    space B: node-block (3 x 3) strength and block Jacobi weighting on the first level, scalar
-    below; zero tentative columns dropped. Runs under a fixed local NumPy seed (pyamg's spectral
-    radius estimate draws from np.random) and leaves the global state unchanged."""
+def _sa_levels(A, B, max_coarse, tents=None):
+    """([(A_l, P_l)], A_coarsest, tents) by smoothed aggregation of the SciPy matrix A (BSR with
+    3 x 3 blocks, or anything SciPy converts to it) with near-null space B: node-block strength
+    and block Jacobi weighting on the first level, scalar below; zero tentative columns
+    dropped. tents [(T_l, R_l)] are the tentative prolongators and coarse candidates per level;
+    given, they are reused (no strength, aggregation or fit; B and max_coarse unused). Runs
+    under a fixed local NumPy seed (pyamg's spectral radius estimate draws from np.random; the
+    estimate is the only consumer, so reuse draws the same stream) and leaves the global state
+    unchanged."""
     state = np.random.get_state()
     np.random.seed(0)
+    reuse, out = tents is not None, []
     try:
         levels, b = [], 3
-        while A.shape[0] > max_coarse:
-            A = sp.csr_array(A, copy=True)
-            A.eliminate_zeros()
+        while len(levels) < len(tents) if reuse else A.shape[0] > max_coarse:
+            A = A.copy()
+            A.eliminate_zeros()  # BSR: drops all-zero blocks
             Ab = sp.bsr_array(A, blocksize=(b, b)) if b > 1 else A
-            C = symmetric_strength_of_connection(Ab, 0.0)
-            T, R = fit_candidates(sp.csr_array(standard_aggregation(C)[0]), B)
-            T = sp.csc_array(T)
-            keep = np.flatnonzero(np.asarray(T.multiply(T).sum(axis=0)).ravel() > 0)
-            if len(keep) > STALL * A.shape[0]:
-                break
-            T, R = sp.csr_array(T[:, keep]), R[keep]
-            if b > 1:
-                T = sp.bsr_array(T, blocksize=(b, 1))
+            if reuse:
+                C, (T, R) = None, tents[len(levels)]  # C is read only when filtering
+            else:
+                C = symmetric_strength_of_connection(Ab, 0.0)
+                T, R = fit_candidates(sp.csr_array(standard_aggregation(C)[0]), B)
+                T = sp.csc_array(T)
+                keep = np.flatnonzero(np.asarray(T.multiply(T).sum(axis=0)).ravel() > 0)
+                if len(keep) > STALL * A.shape[0]:
+                    break
+                T, R = sp.csr_array(T[:, keep]), R[keep]
+                if b > 1:
+                    T = sp.bsr_array(T, blocksize=(b, 1))
             w = "block" if b > 1 else "diagonal"
             P = sp.csr_array(jacobi_prolongation_smoother(Ab, T, C, R, OMEGA, weighting=w))
             P.eliminate_zeros()
             Ac = sp.csr_array(P.T @ (A @ P))
             levels.append((A, P))
+            out.append((T, R))
             A, B, b = ((Ac + Ac.T) / 2).tocsr(), R, 1
     finally:
         np.random.set_state(state)
-    if A.shape[0] > CAP * max_coarse:
+    if A.shape[0] > CAP * max_coarse and not reuse:
         raise ValueError(
             f"AMG coarsening stalled at {A.shape[0]} DOF (max_coarse = {max_coarse}); "
             "the dense coarsest factor would be too large"
         )
-    return levels, A
+    return levels, A, tuple(out)
 
 
 def _diag_blocks(A, b):
@@ -117,26 +127,70 @@ def _cholesky(A):
     return Cholesky(L)
 
 
-def amg(op, free, sigma, points, *, degree=2, ratio=30.0, max_coarse=1000):
+@dataclasses.dataclass(frozen=True, eq=False)
+class AMGAggregates:
+    """The topology part of an amg setup, for amg(..., aggregates=): the Hex8Pattern, the
+    tentative prolongators and coarse candidates per SA level, the mask and a connectivity
+    fingerprint (host data)."""
+
+    pattern: Hex8Pattern
+    tents: tuple
+    free: np.ndarray
+    key: tuple
+
+
+def _fingerprint(op):
+    """Per block: element count and a hash of the DOF table (connectivity and element order)."""
+    return tuple((b.n_el, hashlib.sha1(np.asarray(b.dofs)).hexdigest()) for b in op.blocks)
+
+
+def amg(
+    op, free, sigma, points, *, degree=2, ratio=30.0, max_coarse=1000, nonsingular=False,
+    aggregates=None, return_aggregates=False,
+):  # fmt: skip
     """Multilevel V-cycle for A_P = m (K + sigma M) m + s (I - m) of an Unstructured operator, as
     a GMG pytree callable on (n_dof, k) blocks (masked output): the p-level (Chebyshev over
     node-block Jacobi on the matrix-free A_P, hex8 transfer) unless the mesh is all hex8, then
     smoothed-aggregation levels on the hex8 Galerkin matrix down to max_coarse DOF, then a dense
     Cholesky. points (n_nodes, 3) are the mesh coordinates in the operator's node order (the
     near-null space is their masked rigid modes). Chebyshev degree `degree` and `ratio` on every
-    level. sigma > 0 is concrete and required."""
-    sigma = _check("amg", op, sigma)
+    level. sigma >= 0 is concrete; sigma = 0 needs nonsingular=True, the caller's statement
+    that A_P(0) is nonsingular (no rigid modes left by the BCs; s_K > 0 is checked here).
+
+    return_aggregates=True returns (P, AMGAggregates); aggregates= reuses one from the same mesh
+    and mask (connectivity and free are checked, points are not): it skips the pattern,
+    strength, aggregation and the tentative fit and recomputes everything that depends on the
+    values. For new materials, s_K, s_M or sigma the result equals a fresh setup; for moved
+    points it keeps the old near-null space (an approximation). max_coarse is then ignored."""
+    sigma = _check("amg", op, sigma, nonsingular)
+    if nonsingular and not bool((op.s_K > 0).all()):
+        raise ValueError("nonsingular=True needs s_K > 0 on every element")
     points = np.asarray(points, np.float64)
     if points.shape != (op.n_nodes, 3):
         raise ValueError(f"points must have shape ({op.n_nodes}, 3), got {points.shape}")
-    fine, T, Ac, corner = _p_level(op, free, sigma, degree, ratio)
+    key = _fingerprint(op) if return_aggregates or aggregates is not None else None
+    if aggregates is not None:
+        if key != aggregates.key:
+            raise ValueError("aggregates come from a mesh with another connectivity")
+        if not np.array_equal(np.asarray(free, bool).ravel(), aggregates.free):
+            raise ValueError("aggregates come from another free mask")
+    pattern = aggregates.pattern if aggregates is not None else None
+    fine, Ab, pattern = _p_level(op, free, sigma, degree, ratio, pattern)
     A = fine[0]
-    fc = np.asarray(A.free, bool).reshape(-1, 3)[corner].ravel()
-    levels, coarsest = _sa_levels(Ac, _nullspace(points[corner], fc), max_coarse)
+    if aggregates is None:
+        fc = np.asarray(A.free, bool).reshape(-1, 3)[pattern.corner].ravel()
+        B, tents = _nullspace(points[pattern.corner], fc), None
+    else:
+        B, tents = None, aggregates.tents
+    levels, coarsest, tents = _sa_levels(Ab, B, max_coarse, tents)
+    del Ab
     hex8 = all(b.dofs.shape[1] == 24 for b in op.blocks)
-    out, transfers = ([], []) if hex8 else ([fine], [T])
+    out, transfers = ([], []) if hex8 else ([fine], [pattern.T])
     for i, (Al, P) in enumerate(levels):
         # all-hex8: the matrix-free A_P stands in for the assembled first SA level
         out.append(fine if hex8 and i == 0 else _level(Al, 3 if i == 0 else 1, degree, ratio))
         transfers.append(ELLTransfer(block_ell(P, 1), block_ell(P.T.tocsr(), 1)))
-    return GMG(tuple(out), tuple(transfers), _cholesky(coarsest), A.free, None)
+    P = GMG(tuple(out), tuple(transfers), _cholesky(coarsest), A.free, None)
+    if return_aggregates:
+        return P, AMGAggregates(pattern, tents, np.asarray(free, bool).ravel().copy(), key)
+    return P

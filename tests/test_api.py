@@ -15,7 +15,7 @@ from jaxmodal.materials import Material, from_euler, isotropic, transversely_iso
 from jaxmodal.memory import solve_modes_memory
 from jaxmodal.mesh import Mesh, box_mesh, voxel_mesh
 from jaxmodal.operators import assemble, dof_mask, m_orthonormalize, restrict, rigid_modes
-from jaxmodal.precond import GMG, SingularShiftError, gmg, jacobi
+from jaxmodal.precond import GMG, SingularShiftError, amg, gmg, jacobi
 
 api = importlib.import_module("jaxmodal.eigen.api")
 G = importlib.import_module("jaxmodal.precond.gmg")
@@ -260,7 +260,7 @@ def test_sigma_estimate(built, name, shape, bcs, factors, density):
     bodies build once at sigma = 0, free ones start above 0 and never raise sigma."""
     op, free, mesh = gmg_study.case(shape, bcs, factors, density)
     lam1 = gmg_study.lam1(op, free, mesh)
-    sigma, its = api._gmg_sigma(op, free, rigid(op, mesh, free))
+    sigma, its = api._precond_sigma(op, free, rigid(op, mesh, free), lambda s: api.gmg(op, free, s))
     # lower bound: the Rayleigh quotient and the reference round at eps ||K|| (4e-8 on SIMP)
     assert lam1 * (1 - 1e-6) <= sigma <= 2 * lam1, sigma / lam1
     if bcs == "clamped":
@@ -278,18 +278,17 @@ def test_sigma_rounds(monkeypatch):
     def run(probes):
         builds, probes = [], iter(probes)
 
-        def fake_gmg(op, free, sigma):
+        def build(sigma):
             if sigma == 0:
                 raise SingularShiftError("free")
             builds.append(sigma)
             return object()
 
-        monkeypatch.setattr(api, "gmg", fake_gmg)
         monkeypatch.setattr(api, "sigma_estimate", lambda *a, **kw: (100.0, None))
         monkeypatch.setattr(
             api, "lobpcg", lambda *a, **kw: ([next(probes)], None, {"iterations": 2})
         )
-        return api._gmg_sigma(None, None, None), builds
+        return api._precond_sigma(None, None, None, build), builds
 
     assert run([10.0, 20.0]) == ((10.0, 4), [100.0, 10.0])  # a rising probe keeps the minimum
     assert run([50.0]) == ((50.0, 2), [100.0])
@@ -307,7 +306,7 @@ def test_sigma_hint(built, monkeypatch):
     def fail(*a, **kw):
         raise AssertionError("pre-estimate ran despite the hint")
 
-    monkeypatch.setattr(api, "_gmg_sigma", fail)
+    monkeypatch.setattr(api, "_precond_sigma", fail)
     lam, _, info = solve_modes(mesh, STEEL, bcs, 4, tol=1e-8, sigma=hint)
     assert info["sigma"] == hint and info["sigma_iterations"] == 0 and built == [hint]
     np.testing.assert_allclose(lam, lam0, rtol=1e-7)
@@ -347,10 +346,13 @@ def test_gmg_modes(built, preconds, name):
 
 
 def test_dispatch(preconds):
-    """Test 4: "auto" picks GMG on voxel meshes and Jacobi otherwise; option errors."""
+    """Test 4 (13b test 6): "auto" picks GMG on voxel meshes and AMG otherwise; Jacobi on
+    request; option errors."""
     lam, _, info = solve_modes(box((3, 3, 2)), MAT, {"xmin": "xyz"}, 2)
+    assert info["precond"] == "amg" and info["sigma"] > 0 and info["sigma_iterations"] > 0
+    assert isinstance(preconds[-1], GMG) and info["time"]["precond"] >= 0
+    _, _, info = solve_modes(box((3, 3, 2)), MAT, {"xmin": "xyz"}, 2, precond="jacobi")
     assert info["precond"] == "jacobi" and info["sigma"] == 0.0 and info["sigma_iterations"] == 0
-    assert info["time"]["precond"] >= 0
     vox = voxel_mesh((5, 4, 3), (0.2,) * 3)
     _, _, info = solve_modes(vox, MAT, {"xmin": "xyz"}, 2, precond="jacobi")
     assert info["precond"] == "jacobi" and info["sigma"] == 0.0 and info["sigma_iterations"] == 0
@@ -365,7 +367,9 @@ def test_dispatch(preconds):
     assert {"setup", "iterations", "precond"} <= info["time"].keys()
     bad = [
         (box((2, 2, 2)), dict(precond="gmg"), "voxel mesh"),
-        (vox, dict(precond="amg"), "precond must be"),
+        (vox, dict(precond="amg"), "unstructured mesh"),
+        (vox, dict(precond="ilu"), "precond must be"),
+        (box((2, 2, 2)), dict(precond="amg", precond_dtype="float32"), "needs precond 'gmg'"),
         (vox, dict(precond="jacobi", precond_dtype="float32"), "needs precond 'gmg'"),
         (vox, dict(precond_dtype="float16"), "precond_dtype must be"),
         (vox, dict(sigma=-1.0), "sigma must be"),
@@ -374,6 +378,101 @@ def test_dispatch(preconds):
     for mesh, kw, match in bad:
         with pytest.raises(ValueError, match=match):
             solve_modes(mesh, MAT, {"xmin": "xyz"}, 2, **kw)
+
+
+@pytest.fixture
+def amg_builds(monkeypatch):
+    """(sigma, nonsingular) of every successful amg build inside eigen/api.py (forwarded to the
+    real amg; a refused sigma = 0 is not recorded)."""
+    calls = []
+
+    def spy(op, free, sigma, points, **kw):
+        P = amg(op, free, sigma, points, **kw)
+        calls.append((sigma, kw.get("nonsingular", False)))
+        return P
+
+    monkeypatch.setattr(api, "amg", spy)
+    return calls
+
+
+def check_amg_builds(calls, info):
+    """13b tests 4-5: no rigid modes -> the first build at sigma = 0 with nonsingular; rigid
+    modes -> every build at sigma > 0 without; the final build at info["sigma"]."""
+    if info["n_rigid"] == 0:
+        assert calls[0] == (0.0, True) and all(ns for _, ns in calls)
+    else:
+        assert all(s > 0 and not ns for s, ns in calls)
+    assert calls[-1][0] == info["sigma"] > 0
+
+
+AMG_BCS = {"clamped": {"xmin": "xyz"}, "free": {}, "sliding": {"xmin": "x"}}
+
+
+@pytest.mark.parametrize("case", list(AMG_BCS))
+@pytest.mark.parametrize("t, shape", [("hex20", (5, 4, 3)), ("hex8", (6, 5, 4))])
+def test_amg_modes(amg_builds, t, shape, case):
+    """13b test 4 (roadmap): solve_modes with AMG against reference_modes on non-degenerate
+    boxes (free with nodal masses): lam to 1e-8, MAC >= 1 - 1e-8, the amg builds."""
+    mesh, bcs = box(shape, t), AMG_BCS[case]
+    nodal = None
+    if case == "free":
+        nodal = np.random.default_rng(0).uniform(0.5, 1.5, len(mesh.points)) * 1e-3
+    lam, V, info = solve_modes(mesh, MAT, bcs, 6, nodal_mass=nodal, tol=1e-10)
+    assert info["precond"] == "amg" and info["converged"]
+    assert info["n_rigid"] == {"clamped": 0, "free": 6, "sliding": 3}[case]
+    K, M = assemble(mesh, MAT, nodal_mass=nodal)
+    k = info["n_rigid"]
+    lr, Vr = reference_modes(K, M, 6 + k, dof_mask(mesh, bcs), points=mesh.points)
+    assert np.abs(lam / lr[k:] - 1).max() <= 1e-8
+    assert mac(np.asarray(V), Vr[:, k:], M).diagonal().min() >= 1 - 1e-8
+    check_amg_builds(amg_builds, info)
+
+
+AMG_SIGMA_CASES = [
+    ("hex20", (8, 8, 8), "clamped"),
+    ("hex8", (12, 12, 12), "clamped"),
+    ("hex20", (16, 2, 2), "clamped"),  # beam
+    ("hex20", (12, 12, 1), "clamped"),  # plate
+    ("hex20", (6, 6, 6), "free"),
+    ("hex20", (32, 2, 2), "free"),  # free beam
+    pytest.param("hex20", (16, 16, 1), "free", marks=pytest.mark.slow),  # free plate
+]
+
+
+@pytest.mark.parametrize("t, shape, case", AMG_SIGMA_CASES)
+def test_amg_sigma(amg_builds, t, shape, case):
+    """13b test 5: the AMG-refined pre-estimate lands in [lam_1 (1 - 1e-6), 2 lam_1] (SciPy
+    lam_1); the builds as in test 4; free bodies' build shifts never increase."""
+    mesh = box_mesh(shape, (1 / max(shape),) * 3, type=t)
+    free = dof_mask(mesh, AMG_BCS[case])
+    op = api.unstructured(mesh, MAT)
+    R = rigid(op, mesh, free)
+    k = 0 if R is None else R.shape[1]
+
+    def build(s):
+        return api.amg(op, free, s, mesh.points, nonsingular=k == 0)
+
+    sigma, its = api._precond_sigma(op, free, R, build)
+    K, M = assemble(mesh, MAT)
+    lam1 = reference_modes(K, M, 6 + k, free, points=mesh.points)[0][k]  # past clusters
+    assert lam1 * (1 - 1e-6) <= sigma <= 2 * lam1, sigma / lam1
+    shifts = [s for s, _ in amg_builds]
+    if k == 0:
+        assert amg_builds[0] == (0.0, True) and all(ns for _, ns in amg_builds)
+    else:
+        assert all(s > 0 and not ns for s, ns in amg_builds)
+        assert all(b <= a for a, b in zip(shifts, shifts[1:], strict=False))
+    assert its > 0
+
+
+def test_amg_hint(amg_builds):
+    """13b test 6: a sigma hint skips the pre-estimate (one build, at the hint); sigma = 0 on a
+    free unstructured body raises SingularShiftError."""
+    mesh = box((4, 3, 3))
+    _, _, info = solve_modes(mesh, MAT, {"xmin": "xyz"}, 2, sigma=3.0)
+    assert amg_builds == [(3.0, True)] and info["sigma_iterations"] == 0
+    with pytest.raises(SingularShiftError):
+        solve_modes(mesh, MAT, {}, 2, sigma=0.0)
 
 
 def test_singular_narrow(monkeypatch):

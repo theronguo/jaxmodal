@@ -119,60 +119,98 @@ def _tables(op):
     return cid, T, owns
 
 
+@dataclasses.dataclass(frozen=True, eq=False)
+class Hex8Pattern:
+    """Host topology of the hex8 Galerkin matrix of an Unstructured operator: the NodalTransfer
+    T, the corner node ids in coarse order, per block the padded (n_pad, n) owner flags and
+    (n_pad, 64) positions of the 8 x 8 corner pairs in the node-block pattern (padded elements
+    point past the end), the int32 BSR indptr / indices (sorted) and the transpose permutation
+    of the pattern's blocks."""
+
+    T: NodalTransfer
+    corner: np.ndarray
+    owns: tuple
+    pos: tuple
+    indptr: np.ndarray
+    indices: np.ndarray
+    tp: np.ndarray
+
+
+def _pattern(op):
+    """The Hex8Pattern of op (topology only)."""
+    cid, T, owns = _tables(op)
+    nc = int(T.child.shape[0])
+    check_int32(coarse_dofs=3 * nc)
+    cns = [cid[_nodes(b)[:, :8]] for b in op.blocks]
+    cn = np.concatenate(cns)
+    E = sp.csr_array(
+        (np.ones(cn.size), cn.ravel(), np.arange(0, cn.size + 1, 8)), shape=(len(cn), nc)
+    )
+    G = (E.T @ E).tocsr()
+    G.sort_indices()
+    nnzb = len(G.indices)
+    check_int32(nnzb=nnzb, nnz=9 * nnzb)  # pyamg's CSR intermediates
+    rows = np.repeat(np.arange(nc, dtype=np.int64), np.diff(G.indptr))
+    keys = rows * nc + G.indices
+    pos, ownp = [], []
+    for b, c, own in zip(op.blocks, cns, owns, strict=True):
+        p = np.full((b.dofs.shape[0], 64), nnzb, np.int32)  # nnzb: dropped (-1 would wrap)
+        p[: b.n_el] = np.searchsorted(keys, (c[:, :, None] * nc + c[:, None, :]).reshape(-1, 64))
+        o = np.zeros((b.dofs.shape[0], own.shape[1]), bool)
+        o[: b.n_el] = own
+        pos.append(p)
+        ownp.append(o)
+    tp = np.searchsorted(keys, G.indices.astype(np.int64) * nc + rows).astype(np.int32)
+    return Hex8Pattern(
+        T, np.flatnonzero(cid >= 0), tuple(ownp), tuple(pos),
+        G.indptr.astype(np.int32), G.indices.astype(np.int32), tp,
+    )  # fmt: skip
+
+
 @jax.jit
-def _cells(op, b, sigma, m, d, own):
-    """(n_pad, 24, 24) coarse cells P_loc^T (diag(m_e) A_e diag(m_e) + D_e) P_loc of a block."""
+def _scatter_cells(data, op, b, sigma, m, d, own, pos):
+    """data (nnzb, 3, 3) plus the block's coarse cells P_loc^T (diag(m_e) A_e diag(m_e) + D_e)
+    P_loc scattered into the node-block pattern, one chunk per scan step."""
     k = b.dofs.shape[1]
     n = k // 3
     Ploc = jnp.asarray(_w8(n))
-    data = mf._block_data(op, b) | {"own": own}
-    xs = jax.tree.map(lambda a: a.reshape(-1, b.chunk, *a.shape[1:]), data)
+    xs = mf._block_data(op, b) | {"own": own, "pos": pos}
+    xs = jax.tree.map(lambda a: a.reshape(-1, b.chunk, *a.shape[1:]), xs)
 
-    def f(c):
+    def f(data, c):
         K, M = mf.element_matrices(op, b, c)
         me = m[c["dofs"]]
         A = (K + sigma * M) * me[:, :, None] * me[:, None, :]
         A = A + jnp.eye(k) * (d[c["dofs"]] * jnp.repeat(c["own"], 3, axis=1))[:, :, None]
-        A = A.reshape(-1, n, 3, n, 3)
-        return jnp.einsum("ac,eaibj,bd->ecidj", Ploc, A, Ploc).reshape(-1, 24, 24)
+        C = jnp.einsum("ac,eaibj,bd->ecdij", Ploc, A.reshape(-1, n, 3, n, 3), Ploc)
+        return data.at[c["pos"].reshape(-1)].add(C.reshape(-1, 3, 3), mode="drop"), None
 
-    return lax.map(f, xs).reshape(-1, 24, 24)
+    return lax.scan(f, data, xs)[0]
 
 
-def _hex8_galerkin(A):
-    """(Ac, T, corner) for an APOperator A of an Unstructured operator: the SciPy CSR hex8
-    Galerkin matrix P^T A P on the corner nodes, the NodalTransfer P and the corner node ids
-    in coarse order. The fine operator is never assembled. The pattern is structural (every
-    cell pair, no pruned zeros) and the values are symmetrized on it exactly."""
+def _hex8_galerkin(A, pattern=None):
+    """(Ab, pattern) for an APOperator A of an Unstructured operator: the SciPy BSR (3 x 3
+    blocks) hex8 Galerkin matrix P^T A P on the corner nodes and its Hex8Pattern (built unless
+    given). The fine operator is never assembled. The pattern is structural (every corner pair
+    of an element, no pruned zeros) and the values are symmetrized on it exactly."""
     op = A.op
+    pattern = _pattern(op) if pattern is None else pattern
     # owned diagonal (added once per node, by its owner): nodal masses, constrained diagonal
     d = A.sigma * op.nodal * A.free + A.s * (1 - A.free)
-    cid, T, owns = _tables(op)
-    n_c = 3 * int(T.child.shape[0])
-    check_int32(coarse_dofs=n_c)
-    rows, cols, vals = [], [], []
-    for b, own in zip(op.blocks, owns, strict=True):
-        ownp = np.zeros((b.dofs.shape[0], own.shape[1]))
-        ownp[: b.n_el] = own
-        C = np.asarray(_cells(op, b, A.sigma, A.free, d, jnp.asarray(ownp)))[: b.n_el]
-        cd = (3 * cid[_nodes(b)[:, :8]][:, :, None] + np.arange(3)).reshape(-1, 24).astype(np.int32)
-        rows.append(np.repeat(cd, 24, axis=1).ravel())
-        cols.append(np.tile(cd, (1, 24)).ravel())
-        vals.append(C.ravel())
-    Ac = sp.coo_array(
-        (np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))), shape=(n_c, n_c)
-    ).tocsr()  # sums duplicates, keeps explicit zeros
-    At = Ac.T.tocsr()
-    Ac.sort_indices()
-    At.sort_indices()
-    if not ((At.indptr == Ac.indptr).all() and (At.indices == Ac.indices).all()):
-        raise RuntimeError("hex8 Galerkin pattern is not symmetric")
-    Ac.data = (Ac.data + At.data) / 2
-    return Ac, T, np.flatnonzero(cid >= 0)
+    data = jnp.zeros((len(pattern.indices), 3, 3))
+    for b, own, pos in zip(op.blocks, pattern.owns, pattern.pos, strict=True):
+        data = _scatter_cells(data, op, b, A.sigma, A.free, d, own, pos)
+    v = np.array(data)  # one host copy; symmetrize in place (d[tp] is a copy, IEEE + commutes)
+    del data
+    v += v[pattern.tp].swapaxes(1, 2)
+    v *= 0.5
+    n_c = 3 * len(pattern.corner)
+    return sp.bsr_array((v, pattern.indices, pattern.indptr), shape=(n_c, n_c)), pattern
 
 
-def _check(name, op, sigma):
-    """The shared argument checks of pmg and amg; returns sigma as a float."""
+def _check(name, op, sigma, nonsingular=False):
+    """The shared argument checks of pmg and amg; returns sigma as a float. sigma = 0 needs
+    nonsingular (the caller's proof that A_P(0) is nonsingular)."""
     check_x64(name)
     if not isinstance(op, mf.Unstructured):
         raise TypeError(
@@ -180,20 +218,20 @@ def _check(name, op, sigma):
         )
     _check_sigma(sigma)
     sigma = float(sigma)
-    if sigma == 0:
+    if sigma == 0 and not nonsingular:
         raise SingularShiftError(
             f"{name} needs sigma > 0: A_P at sigma = 0 is singular when the BCs leave rigid modes"
         )
     return sigma
 
 
-def _p_level(op, free, sigma, degree, ratio):
-    """((A, S), T, Ac, corner): the matrix-free A_P with Chebyshev over node-block Jacobi, the
-    NodalTransfer, the hex8 Galerkin matrix and its corner node ids (pmg and amg)."""
+def _p_level(op, free, sigma, degree, ratio, pattern=None):
+    """((A, S), Ab, pattern): the matrix-free A_P with Chebyshev over node-block Jacobi, the BSR
+    hex8 Galerkin matrix and its Hex8Pattern (pmg and amg)."""
     A = ap_operator(op, free, sigma)
-    Ac, T, corner = _hex8_galerkin(A)
+    Ab, pattern = _hex8_galerkin(A, pattern)
     D = block_jacobi(op, free, sigma)
-    return (A, chebyshev(A, D, lmax_estimate(A, D), degree, ratio)), T, Ac, corner
+    return (A, chebyshev(A, D, lmax_estimate(A, D), degree, ratio)), Ab, pattern
 
 
 def pmg(op, free, sigma, *, degree=2, ratio=30.0):
@@ -203,5 +241,5 @@ def pmg(op, free, sigma, *, degree=2, ratio=30.0):
     host splu (test-scale only; amg is the production variant). sigma > 0 is concrete and
     required."""
     sigma = _check("pmg", op, sigma)
-    (A, S), T, Ac, _ = _p_level(op, free, sigma, degree, ratio)
-    return GMG(((A, S),), (T,), HostLU(spla.splu(Ac.tocsc())), A.free, None)
+    (A, S), Ab, pattern = _p_level(op, free, sigma, degree, ratio)
+    return GMG(((A, S),), (pattern.T,), HostLU(spla.splu(Ab.tocsc())), A.free, None)

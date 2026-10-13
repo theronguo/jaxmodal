@@ -1,6 +1,7 @@
 """Shared test references."""
 
 import functools
+import importlib
 
 import jax.numpy as jnp
 import numpy as np
@@ -144,3 +145,16 @@ def checkerboard(mesh, op):
     """op with s_K = 1e-3 on a checkerboard of the hex20 unit-box elements (4 per unit)."""
     c = np.floor(mesh.points[mesh.blocks["hex20"][:, :8]].mean(1) * 4).astype(int).sum(1) % 2
     return op.scaled(s_K=jnp.asarray(np.where(c == 1, 1e-3, 1.0)))
+
+
+def step_bytes(op, P, low, k=15):
+    """Temporaries + aliased bytes of the compiled LOBPCG step (block k) with precond P."""
+    from test_lobpcg import step_args
+
+    lob = importlib.import_module("jaxmodal.eigen.lobpcg")
+    c, _ = lob._capacity(100, 1, k, low)
+    f = lob.lobpcg_step_low if low else lob.lobpcg_step
+    args = list(step_args(op, op.n_dof, k, low, 0))
+    args[1], args[3] = op, P
+    mem = f.lower(*args, c=c).compile().memory_analysis()
+    return mem.temp_size_in_bytes + mem.alias_size_in_bytes
