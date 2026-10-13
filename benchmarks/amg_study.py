@@ -49,6 +49,7 @@ CASES = [
     *[(f"box 8^3 hz=h/{a}", "hex20", (8,) * 3, (1, 1, 1 / a), "clamped", "own", None)
       for a in (1, 2, 4, 10)],
 ]  # fmt: skip
+VARIANTS = {"plate 16^2x1 a=1": (1000, 2000)}  # extra max_coarse runs (fewer AMG levels)
 
 
 def its(op, free, sigma, P):
@@ -132,6 +133,9 @@ def main(cases=CASES, large=True, out=harness.RESULTS, write=True):
         tm = time.perf_counter()
         P = amg(op, free, sigma, mesh.points, max_coarse=MAX_COARSE)
         r["amg"] = its(op, free, sigma, P) | dict(build_s=time.perf_counter() - tm, sizes=sizes(P))
+        for mc in VARIANTS.get(name, ()):
+            P = amg(op, free, sigma, mesh.points, max_coarse=mc)
+            r[f"amg max_coarse={mc}"] = its(op, free, sigma, P) | dict(sizes=sizes(P))
         if t != "hex8" and op.n_dof < 300_000:
             r["pmg"] = its(op, free, sigma, pmg(op, free, sigma))
         print(json.dumps(r), flush=True)

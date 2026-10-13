@@ -136,6 +136,7 @@ def amg(op, free, sigma, points, *, degree=2, ratio=30.0, max_coarse=1000):
     hex8 = all(b.dofs.shape[1] == 24 for b in op.blocks)
     out, transfers = ([], []) if hex8 else ([fine], [T])
     for i, (Al, P) in enumerate(levels):
+        # all-hex8: the matrix-free A_P stands in for the assembled first SA level
         out.append(fine if hex8 and i == 0 else _level(Al, 3 if i == 0 else 1, degree, ratio))
         transfers.append(ELLTransfer(block_ell(P, 1), block_ell(P.T.tocsr(), 1)))
     return GMG(tuple(out), tuple(transfers), _cholesky(coarsest), A.free, None)

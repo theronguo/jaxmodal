@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from helpers import dense
 
 from jaxmodal.eigen import lobpcg, reference_modes, sigma_estimate
 from jaxmodal.linalg import pcg
@@ -70,10 +71,6 @@ def exact_case(name, mass="consistent"):
     K, M = assemble(m, UNIT, mass=mass, nodal_mass=nodal, s_K=s_K, s_M=s_M)
     sigma = 0.37
     return m, op, free, a_p(K + sigma * M, free).toarray(), sigma, M
-
-
-def dense(f, n):
-    return np.asarray(f(jnp.eye(n)))
 
 
 def hierarchy(P, A0):

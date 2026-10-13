@@ -11,23 +11,21 @@ import pytest
 import scipy.linalg as sla
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
-from helpers import MATERIALS, distort, rel, rhs
+from helpers import MATERIALS, STEEL, checkerboard, cube, dense, distort, lam1, rel, rhs, sigma6
 from pyamg import smoothed_aggregation_solver
 from pyamg.aggregation import fit_candidates, standard_aggregation
 from pyamg.strength import symmetric_strength_of_connection
 
 from jaxmodal.eigen import lobpcg, reference_modes
 from jaxmodal.linalg import pcg
-from jaxmodal.materials import Material, isotropic
 from jaxmodal.mesh import box_mesh, voxel_mesh
-from jaxmodal.operators import a_p, ap_operator, assemble, dof_mask, restrict, stencil, unstructured
-from jaxmodal.operators.constraints import rigid_modes
+from jaxmodal.operators import a_p, ap_operator, assemble, dof_mask, stencil, unstructured
+from jaxmodal.operators.constraints import APOperator, rigid_modes
 from jaxmodal.precond import GMG, SingularShiftError, amg, pmg
 
 AM = importlib.import_module("jaxmodal.precond.amg")
 PM = importlib.import_module("jaxmodal.precond.pmg")
 
-STEEL = {0: Material(isotropic(210e9, 0.3), 7850.0)}
 SIGMA = 0.37  # unit-material shift of the exactness tests
 SLIDE = {"xmin": "xyz", "ymin": "y"}
 
@@ -47,10 +45,6 @@ def nonzero(A):
     A = sp.csr_array(A, copy=True)
     A.eliminate_zeros()
     return A
-
-
-def dense(f, n):
-    return np.asarray(f(jnp.eye(n)))
 
 
 # ---------------------------------------------------------------- 1-3: setup
@@ -225,6 +219,7 @@ def test_vcycle_dense(t):
         mesh, bcs, mc = box_mesh((4,) * 3), {"xmin": "x", "ymin": "y", "zmin": "z"}, 20
     op, free, Ap, Ac, _, _, levels, coarsest = setup(mesh, bcs, mc)
     P = amg(op, free, SIGMA, mesh.points, degree=3, ratio=20.0, max_coarse=mc)
+    assert isinstance(P.levels[0][0], APOperator)  # matrix-free fine level (also all-hex8)
     K, M = assemble(mesh, MATERIALS)
     A = a_p(K + SIGMA * M, free, float(Ap.s)).toarray()
     m = free.astype(float)
@@ -277,24 +272,6 @@ def test_no_amg_level():
 # ---------------------------------------------------------------- 5-7: iterations (steel)
 
 
-def lam1(mesh, free, **kw):
-    """Lowest nonzero eigenvalue by eigsh (fixed v0); kw go to assemble (nodal_mass, s_K)."""
-    K, M = assemble(mesh, STEEL, **kw)
-    Kf, Mf, _ = restrict(K, M, free)
-    lam = spla.eigsh(Kf, 8, M=Mf, sigma=-1.0, v0=np.ones(Kf.shape[0]))[0]
-    return float(np.sort(lam[lam > 1e-6 * lam.max()])[0])
-
-
-def cube(t, n):
-    return box_mesh((n,) * 3, (1 / n,) * 3, type=t)
-
-
-@functools.cache
-def sigma6(t):
-    m = cube(t, 6)
-    return lam1(m, dof_mask(m, {"xmin": "xyz"}))
-
-
 def iterations(mesh, bcs, sigma=None, op=None, max_coarse=100):
     free = dof_mask(mesh, bcs)
     op = unstructured(mesh, STEEL) if op is None else op
@@ -329,18 +306,21 @@ def test_h_independence(t, n):
     assert its <= 1.2 * first(t) and its <= 1.5 * MEASURED[t]
 
 
-ROBUST = {"beam": 16, "free": 14, "curved": 14, "nodal": 14, "contrast": 20}
+ROBUST = {"beam": 16, "free": 14, "curved": 14, "nodal": 14, "contrast": 20, "plate": 36}
 
 
 @pytest.mark.parametrize("case", list(ROBUST))
 def test_robust(case):
-    """Test 6: <= 1.5x the measured count at each case's own lambda_1, max_coarse = 100."""
+    """Test 6: <= 1.5x the measured count at each case's own lambda_1, max_coarse = 100; the
+    single-layer plate (a documented flat-element limitation) as a regression bound."""
     rng = np.random.default_rng(8)
     t, clamp = "hex20", {"xmin": "xyz"}
     if case == "beam":
         its = iterations(box_mesh((20, 2, 2), (0.05,) * 3, type=t), clamp)
     elif case == "free":
         its = iterations(cube(t, 6), {})
+    elif case == "plate":
+        its = iterations(box_mesh((16, 16, 1), (1 / 16,) * 3, type=t), clamp)
     elif case == "curved":
         its = iterations(distort(box_mesh((6,) * 3, type=t), True, rng), clamp)
     elif case == "nodal":
@@ -350,8 +330,7 @@ def test_robust(case):
         its = iterations(m, clamp, lam1(m, dof_mask(m, clamp), nodal_mass=nodal), op)
     else:
         m = cube(t, 4)
-        c = np.floor(m.points[m.blocks["hex20"][:, :8]].mean(1) * 4).astype(int).sum(1) % 2
-        op = unstructured(m, STEEL).scaled(s_K=jnp.asarray(np.where(c == 1, 1e-3, 1.0)))
+        op = checkerboard(m, unstructured(m, STEEL))
         its = iterations(m, clamp, lam1(m, dof_mask(m, clamp), s_K=np.asarray(op.s_K)), op)
     assert its <= 1.5 * ROBUST[case]
 
@@ -414,6 +393,20 @@ def test_coarsest_cap(monkeypatch):
     monkeypatch.setattr(AM, "standard_aggregation", single)
     with pytest.raises(ValueError, match="stalled at 144 DOF"):
         amg(op, free, SIGMA, mesh.points, max_coarse=10)
+
+
+def test_not_finite(monkeypatch):
+    """Test 8: a non-SPD level or coarsest matrix raises instead of returning NaNs."""
+    mesh = box_mesh((3,) * 3, type="hex20")
+    op, free = unstructured(mesh, MATERIALS), dof_mask(mesh, {"xmin": "xyz"})
+    bad = sp.csr_array(-sp.eye(6))
+    monkeypatch.setattr(AM, "_sa_levels", lambda *a: ([], bad))
+    with pytest.raises(ValueError, match="coarsest factor"):
+        amg(op, free, SIGMA, mesh.points)
+    level = (sp.csr_array(-sp.eye(192)), sp.csr_array(np.ones((192, 6))))
+    monkeypatch.setattr(AM, "_sa_levels", lambda *a: ([level], sp.csr_array(sp.eye(6))))
+    with pytest.raises(ValueError, match="smoother blocks"):
+        amg(op, free, SIGMA, mesh.points)
 
 
 def test_degenerate_and_leaves():

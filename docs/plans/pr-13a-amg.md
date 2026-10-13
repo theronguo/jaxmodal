@@ -146,8 +146,7 @@ while A.shape[0] > max_coarse:
     Agg = standard_aggregation(C)
     T, R = fit_candidates(Agg, B)
     keep = columns of T with nonzero norm; T, R = T[:, keep], R[keep]   # zero-column drop
-    if len(keep) > 0.9 * A.shape[0]: break                              # no progress (skips a useless smoothing;
-                                                                        # one reviewer probe saw pyamg's ρ estimate fail there)
+    if len(keep) > 0.9 * A.shape[0]: break                              # no progress (skips a useless smoothing)
     P = jacobi_prolongation_smoother(bsr(Az, b), T, C, R, omega=4/3, weighting="block" if b == 3 else "diagonal")
     Ac = P^T Az P (SciPy CSR)
     levels.append((A, P)); A, B, b = Ac, R, 1
