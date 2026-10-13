@@ -229,6 +229,8 @@ def si_slice(
     consts = jnp.array([nK, nM, tol, C_FLOOR])
 
     n_avail = int(free.sum()) - R.shape[1] - nw  # the Krylov space cannot grow beyond it
+    if n_avail < 2 * b:
+        raise ValueError(f"2 block = {2 * b} exceeds the free space left by R and W ({n_avail})")
     limit = min(capacity, n_avail)
 
     def add(Y, key):  # append the new block, dropped columns refilled with random ones

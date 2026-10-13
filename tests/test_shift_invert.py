@@ -120,6 +120,7 @@ def check(name, lo, hi, lam, V, info, *, steps=True):
     a converged neighbour beyond each edge, and r_acc = max t_i over inside and neighbours."""
     _, free, op, K, M, _, lr, _ = prob(name)
     assert info["converged"] and not info["capacity_full"] and info["reason"] is None
+    assert info["edge_unreached"] is None
     if steps:
         assert info["steps"] < 300 // 6 // 2
     ref = lr[(lr >= lo) & (lr <= hi)]
@@ -352,6 +353,8 @@ def test_slice_sets():
     assert list(inside) == [0, 1, 2, 3] and below is None and above == 4
     inside, below, above = si._slice_sets(mu, 4.5, 6.0, r)
     assert list(inside) == [8] and below == 7 and above is None
+    inside, below, above = si._slice_sets(np.array([-1e-14, 1.0, 2.0]), 0.0, 1.5, r)
+    assert list(inside) == [1] and below is None and above == 2  # no lower neighbour at 0
     inside, below, above = si._slice_sets(mu, 3.2, 3.8, r)
     assert len(inside) == 0 and below == 4 and above == 5
 
@@ -446,7 +449,12 @@ def test_failed_solves(monkeypatch):
     assert not info["converged"] and info["reason"] == "inner solves failed" and len(lam) == 0
     monkeypatch.setattr(si, "minres", minres)
     real = si._v_chunk
-    monkeypatch.setattr(si, "_v_chunk", lambda *a: (lambda r, t: (1e3 * r, t))(*real(*a)))
+
+    def big(*a):  # the final residual pass reports residuals 1e3x larger
+        r, t = real(*a)
+        return 1e3 * r, t
+
+    monkeypatch.setattr(si, "_v_chunk", big)
     lam, V, info = solve("short", lo, hi)
     assert not info["converged"] and info["reason"] is None
 
@@ -495,6 +503,9 @@ def test_errors():
         run(1.0, 2.0, block=0)
     with pytest.raises(ValueError, match="capacity"):
         run(1.0, 2.0, capacity=6)
+    tf, top = prob("tiny")[1:3]
+    with pytest.raises(ValueError, match="free space"):  # 54 free DOFs
+        si.si_slice(top, tf, 1.0, 2.0, jacobi(top, tf, 1.0), capacity=72, block=30)
     with pytest.raises(ValueError, match="W must have shape"):
         run(1.0, 2.0, W=np.zeros((5, 2)))
     with pytest.raises(ValueError, match="R must have shape"):
