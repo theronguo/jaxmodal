@@ -405,7 +405,7 @@ def test_slice_check():
 def test_capacity_full():
     """Test 11: a capacity too small for the slice: converged False, capacity_full, the
     converged pairs returned match; hi above the spectrum: edge_unreached "hi"; lo below
-    lambda_1 / 2: edge_unreached "lo"."""
+    lambda_1 / 4: edge_unreached "lo"."""
     lr = prob("short")[6]
     lo, hi = edges(lr, 8, 20)
     for cap, n_conv in ((48, 2), (72, 11)):  # 12 modes; capacity rounds up to the chunk 24
@@ -424,8 +424,8 @@ def test_capacity_full():
     lam, V, info = solve("short", lr[0] / 4, (lr[1] + lr[2]) / 2, capacity=60)
     assert info["capacity_full"] and info["edge_unreached"] == "lo"
     assert info["neighbours"]["lo"] is None and info["neighbours"]["hi"] is not None
-    # a capacity above the free space (54 DOFs): the basis stops at the full space, where the
-    # Rayleigh-Ritz is exact
+    # a capacity above the free space (54 DOFs, 9 blocks): the basis stops at the full space,
+    # where the Rayleigh-Ritz is exact
     lo, hi = (lt[-5] + lt[-4]) / 2, lt[-1] * 2
     lam, V, info = solve("tiny", lo, hi, capacity=72)
     assert info["capacity_full"] and info["basis"] == 54 and info["edge_unreached"] == "hi"

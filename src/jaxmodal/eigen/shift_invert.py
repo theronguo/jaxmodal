@@ -179,7 +179,8 @@ def si_slice(
     hi) by block shift-invert Lanczos at sigma (default the midpoint). precond: SPD
     preconditioner of K + sigma M (fp64; a GMG with fp32 levels raises); R: M-orthonormal rigid
     modes; W: known M-orthonormal modes to deflate (host array, never returned). capacity:
-    Lanczos columns (rounded up to a multiple of the chunk width), the only resource limit.
+    Lanczos columns (rounded up to a multiple of the chunk width; the basis also stops within
+    block columns of the free space left by R and W).
     Pair i is accepted at r_i <= t_i = max(tol, 10 tau_eff delta_i, round-off floor).
 
     Returns lam (ascending: the converged pairs in [lo, hi] widened by 100 r_acc and over
