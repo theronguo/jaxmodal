@@ -381,13 +381,13 @@ def count_memory(
     step = ws + v * (a * b + c)
     if a_dup:
         step = max(step, 2 * ws + v * (a_dup * b + c))
-    wb = 4 if w_dtype == "float32" else 8
     out = dict(
         storage=op["storage"] + pc["storage"] + 2 * v * n_rigid,  # R and M R
         sampling=ws + v * COUNT_SAMPLE * b,
         step=step + pc["count"] + 2 * v * b,
-        # the chunk (plus its fp64 upcast), Y, M Y and the result, and the M apply
-        projector=n_dof * chunk * (wb + (8 if wb == 4 else 0)) + 3 * v * b + ws,
+        # two chunks in flight (plus their fp64 upcasts), Y (donated), M Y, the transfer's
+        # source and the M apply
+        projector=2 * n_dof * chunk * (12 if w_dtype == "float32" else 8) + 3 * v * b + ws,
     )
     peak = max(out["sampling"], out["step"], out["projector"])
     out["total"] = op["overhead"] + out["storage"] + peak

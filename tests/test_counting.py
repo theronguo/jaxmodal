@@ -107,7 +107,7 @@ def run(miss=(), mass="consistent", nodal=False, exact=True, **kw):
 
 @pytest.mark.parametrize("t", ["hex8", "hex20", "hex27"])
 def test_element_factor(t):
-    """Test 1: F F^T = M_e (element_matrices) to 1e-12, padded elements give 0."""
+    """Test 1: (F F^T) (x) I_3 = M_e (element_matrices) to 1e-12, padded elements give 0."""
     mesh = box_mesh((3, 2, 2), (0.3, 0.5, 0.2), type=t)
     mesh.material[:] = np.arange(mesh.n_el) % 2
     op = unstructured(mesh, MATERIALS, chunk=5).scaled(s_M=jnp.linspace(0.5, 2, mesh.n_el))
@@ -117,7 +117,8 @@ def test_element_factor(t):
         sl = {k: v[i * b.chunk : (i + 1) * b.chunk] for k, v in d.items()}
         F = element_factor(op, b, sl)
         Me = element_matrices(op, b, sl)[1]
-        assert np.abs(F @ jnp.swapaxes(F, 1, 2) - Me).max() <= 1e-12 * np.abs(Me).max()
+        FF = jnp.einsum("eaq,ebq,ij->eaibj", F, F, jnp.eye(3)).reshape(Me.shape)
+        assert np.abs(FF - Me).max() <= 1e-12 * np.abs(Me).max()
     assert np.abs(F[2:]).max() == 0
 
 
@@ -201,6 +202,21 @@ def test_polynomial():
     d, bias = count_degree(0.5, 1.25, 5000, 10**6)  # the tail bias sets d
     assert d > d_in and bias <= 0.05
     assert tail_bias(jackson_step(d - 1), 0.5, 1.25, 5000, 10**6) > 0.05
+
+
+def test_tail_bias_quad():
+    """Test 3: tail_bias against scipy quad of q(x(lam))^2 dN/dlam, the tail near the step."""
+    from scipy.integrate import quad
+
+    d, lam_top, n_top, n_free = 40, 1.25, 5000, 10**6
+    gamma = jackson_step(d)
+    lam_max = lam_top * (n_free / n_top) ** (1 / 1.5)
+    f = lambda lam: (  # noqa: E731
+        step_value(gamma, _theta(lam))[0] ** 2 * n_top * 1.5 * lam**0.5 / lam_top**1.5
+    )
+    want = quad(f, lam_top, lam_max, limit=2000, epsabs=0, epsrel=1e-10)[0]
+    got = tail_bias(gamma, 0.5, lam_top, n_top, n_free)
+    assert abs(got - want) <= 1e-3 * want, (got, want)
 
 
 def test_degree_cap():
@@ -347,7 +363,7 @@ def test_kappa():
 
 
 def test_floor():
-    """Test 8: tau two decades below the measured floor, and 1e-17: unverifiable, NaN, early
+    """Test 8: tau one decade below the measured floor, and 1e-17: unverifiable, NaN, early
     stop."""
     floor = None
     for tau in 10.0 ** -np.arange(10, 17):
@@ -355,19 +371,27 @@ def test_floor():
         if not info["verifiable"]:
             break
         floor = tau
+    assert floor is not None, "tau = 1e-10 is already unverifiable"
     print(f"Jacobi floor on the reference mesh: {floor:g}")
     d = run(exact=False)[1]["degree"]
-    for tau in (floor / 100, 1e-17):
+    for tau in (floor / 10, 1e-17):
         est, info, _ = run(exact=False, tau=tau)
         assert np.isnan(est) and not info["verifiable"] and not info["passed"]
         assert np.isnan(info["probes"]).all() and info["steps"] < d
 
 
 def test_flags(monkeypatch):
-    """Test 8: maxit = 2 and a failed y solve are unverifiable; a normal run is verifiable."""
-    assert not run(exact=False, maxit=2)[1]["verifiable"]
+    """Test 8: maxit in the recurrence (lumped: y is exact) and in the y solve (exact
+    preconditioner: the recurrence needs 1-2 iterations), and a failed y solve are unverifiable;
+    a normal run is verifiable, with the default tau rule."""
+    est, info, _ = run(mass="lumped", exact=False, maxit=2)
+    assert not info["verifiable"] and info["steps"] >= 1 and np.isnan(est)
+    est, info, _ = run(maxit=3)
+    assert not info["verifiable"] and info["steps"] == 0 and np.isnan(est)
     est, info, _ = run()
     assert info["verifiable"] and info["passed"] and est < 0.5
+    n_free = int(ref()[2].sum())
+    assert info["tau"] == pytest.approx(0.01 / (info["degree"] * np.sqrt(n_free)), rel=1e-14)
     monkeypatch.setattr(counting, "_solve_y", lambda op, m, g, tau, maxit: (g, False))
     est, info, _ = run()
     assert not info["verifiable"] and info["steps"] == 0 and np.isnan(est)
@@ -407,7 +431,7 @@ def test_step_memory(kind, pc):
         e = count_memory(est, op.n_dof, b, voxel=kind == "voxel", precond_memory=pcm)
         model = e["step"] - 2 * 8 * op.n_dof * b
         print(f"{kind} {pc} b={b}: {got / 1e6:.1f} MB, model {model / 1e6:.1f} MB")
-        assert got <= model and (pc == "mg" or got >= 0.6 * model)
+        assert got <= model and got >= (0.5 if pc == "mg" else 0.6) * model
 
 
 def test_sampling_memory():
@@ -468,19 +492,20 @@ idx = np.flatnonzero(free)[:: len(np.flatnonzero(free)) // k][:k]
 W = np.zeros((op.n_dof, k))  # host, M-orthonormal (diagonal M, disjoint supports)
 W[idx, np.arange(k)] = 1 / np.sqrt(d[idx])
 lam = np.linspace(1.0, 2.0, k)
-count(op, free, W, lam, 1.0, 1.5, degree=3, tau=1e-2, block=B, n_probes=B)  # warm-up
+count(op, free, W, lam, 1.0, 1.5, degree=3, tau=1e-2, block=B, n_probes=3 * B)  # warm-up
 del op
 """
 PEAK = """
 op = stencil(mesh, mats, mass="lumped")
-count(op, free, W, lam, 1.0, 1.5, degree=3, tau=1e-2, block=B, n_probes=B)
+count(op, free, W, lam, 1.0, 1.5, degree=3, tau=1e-2, block=B, n_probes=3 * B)
 """
 
 
 @pytest.mark.slow
 @pytest.mark.skipif(sys.platform != "darwin", reason="peak_bytes needs macOS")
 def test_count_peak():
-    """Test 9d: at count_memory >= 2 GB the measured process peak is within 20%, and W (an
+    """Test 9d: at count_memory >= 2 GB the measured process peak of a 3-block count is within
+    20%, and W (an
     n x k device copy would add 60%) stays on the host."""
     from benchmarks import harness
 
@@ -533,7 +558,7 @@ def test_benchmark_smoke():
     from benchmarks import counting_study
 
     out = counting_study.run(small=True)
-    assert out["cuts"] and out["errors"]
+    assert out["hex20"]["cuts"] and out["errors"]
 
 
 def test_errors():
@@ -542,6 +567,8 @@ def test_errors():
     W14, l14 = W[:, :KEEP], lam[:KEEP]
     bad = W14.copy()
     bad[:, 3] *= 1.01
+    R = np.zeros((len(free), 1))
+    R[np.flatnonzero(free)[0]] = 1.0  # not M-normalized
     cases = [
         (dict(lam_last=lam[6], lam_next=lam[5]), "lam_last"),
         (dict(lam_last=-1.0), "lam_last"),
@@ -556,9 +583,34 @@ def test_errors():
         (dict(maxit=0), "maxit"),
         (dict(tau=0.0), "tau"),
         (dict(tau=-1.0), "tau"),
+        (dict(degree=0), "degree"),
+        (dict(R=R), "R must be M-orthonormal"),
     ]
     for kw, msg in cases:
         args = dict(W=W14, lam=l14, lam_last=lam[5], lam_next=lam[6]) | kw
         with pytest.raises(ValueError, match=msg):
             count(op, free, args.pop("W"), args.pop("lam"), args.pop("lam_last"),
                   args.pop("lam_next"), **args)  # fmt: skip
+    for f in (free[:-1], free.astype(float)):
+        with pytest.raises(ValueError, match="free must be"):
+            count(op, f, W14, l14, lam[5], lam[6])
+
+
+def test_chunks(monkeypatch):
+    """Tests 5 and 13 with CHUNK = 4: the multi-chunk projector (last chunk padded) against the
+    dense estimator, and the sketch catches a perturbed column in a later chunk."""
+    monkeypatch.setattr(counting, "CHUNK", 4)
+    _, op, free, K, M, lam, W = ref()
+    lam_c = (lam[5] + lam[6]) / 2
+    P = exact_precond(op, free, K, M, lam_c)
+    for miss in ((), (2,)):
+        kept = np.setdiff1d(np.arange(KEEP), miss)  # 14 or 13 columns: 4 chunks, last padded
+        _, info = count(op, free, W[:, kept], lam[kept], lam[5], lam[6], precond=P, n_probes=10,
+                        tau=1e-12)  # fmt: skip
+        ref_s = dense_probes(op, free, K, M, W[:, kept], lam_c, info["degree"], 10)[0]
+        err = np.abs(info["probes"] - ref_s)
+        assert (err <= (1e-8 * ref_s if miss else 1e-10)).all(), err.max()
+    bad = W[:, :KEEP].copy()
+    bad[:, 9] *= 1.01
+    with pytest.raises(ValueError, match="M-orthonormal"):
+        count(op, free, bad, lam[:KEEP], lam[5], lam[6])

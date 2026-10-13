@@ -18,12 +18,11 @@ from .voxel import OFFSETS, _gather, _shifts
 
 
 def element_factor(op, block, chunk):
-    """(c, k, 3 nq) factor F of rho s_M M_e for one chunk of an Unstructured block (a slice of
-    _block_data): F F^T = M_e (consistent mass), columns (q, i)."""
+    """(c, n, nq) nodal factor F = sqrt(rho s_M) B_e for one chunk of an Unstructured block (a
+    slice of _block_data): (F F^T) (x) I_3 = M_e (consistent mass)."""
     N = jnp.asarray(ELEMENTS[block.type].N)  # (nq, n)
-    F = jnp.sqrt(_m_scale(op, chunk))[:, None, None] * N.T * jnp.sqrt(_wdet(block, chunk))[:, None]
-    c, n, nq = F.shape
-    return jnp.einsum("eaq,ij->eaiqj", F, jnp.eye(3)).reshape(c, 3 * n, 3 * nq)
+    w = jnp.sqrt(_m_scale(op, chunk))[:, None] * jnp.sqrt(_wdet(block, chunk))  # (c, nq)
+    return N.T * w[:, None]
 
 
 def reference_factor(op):
@@ -67,12 +66,10 @@ def _scatter_block(op, b, draw, g):
     d = _block_data(op, b)
     n_chunks = b.dofs.shape[0] // b.chunk
     xs = jax.tree.map(lambda a: a.reshape(n_chunks, b.chunk, *a.shape[1:]), d)
-    N = jnp.asarray(ELEMENTS[b.type].N)
 
     def step(g, args):
         i, d = args
-        f = jnp.sqrt(_m_scale(op, d))[:, None] * jnp.sqrt(_wdet(b, d))  # (c, nq)
-        u = jnp.einsum("qa,eq,eqim->eaim", N, f, draw(i))  # (c, n, 3, m)
+        u = jnp.einsum("eaq,eqim->eaim", element_factor(op, b, d), draw(i))  # (c, n, 3, m)
         return g.at[d["dofs"]].add(u.reshape(u.shape[0], -1, u.shape[-1])), None
 
     return lax.scan(step, g, (jnp.arange(n_chunks, dtype=jnp.int32), xs))[0]

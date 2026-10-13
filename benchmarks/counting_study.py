@@ -49,7 +49,7 @@ def cuts(mesh, n_modes, timed, precond):
     for k in range(1, n_modes):
         lam_c = (lam[k - 1] + lam[k]) / 2
         gap = (lam[k] - lam[k - 1]) / lam_c
-        d, bias = count_degree(gap, lam[-1] / lam_c, n_modes, n_free) if gap > 23e-5 else (None, 0)
+        d, bias = count_degree(gap, lam[-1] / lam_c, n_modes, n_free)
         rows.append(dict(k=k, gap=gap, degree=d, bias=bias))
     timing = []
     for k in timed:
@@ -85,6 +85,17 @@ def _graded():
     return mesh
 
 
+def _reference(mesh):
+    """free, K, M, the free-block (lam, V) by dense eigh, Mf and the 14-mode W."""
+    free = dof_mask(mesh, BCS)
+    K, M = assemble(mesh, MAT)
+    Mf = M.toarray()[np.ix_(free, free)]
+    lam, V = sla.eigh(K.toarray()[np.ix_(free, free)], Mf)
+    W = np.zeros((len(free), 14))
+    W[free] = V[:, :14]
+    return free, K, M, lam, Mf, W
+
+
 def errors(small=False):
     """|s(tau) - s(exact)| (max over 10 probes) against d and tau, AMG at lam_c."""
     meshes = {"reference": box_mesh((6, 5, 4), (1 / 6, 1 / 5, 1 / 4), type="hex20"),
@@ -93,12 +104,7 @@ def errors(small=False):
     taus = (1e-4, 1e-8) if small else (1e-4, 1e-6, 1e-8, 1e-10)
     out = []
     for name, mesh in meshes.items():
-        free = dof_mask(mesh, BCS)
-        K, M = assemble(mesh, MAT)
-        Kf, Mf = K.toarray()[np.ix_(free, free)], M.toarray()[np.ix_(free, free)]
-        lam, V = sla.eigh(Kf, Mf)
-        W = np.zeros((len(free), 14))
-        W[free] = V[:, :14]
+        free, K, M, lam, Mf, W = _reference(mesh)
         dm = np.sqrt(np.diag(Mf))
         ev = np.linalg.eigvalsh(Mf / np.outer(dm, dm))
         op = unstructured(mesh, MAT)
@@ -128,11 +134,7 @@ def floor():
     """The smallest tau (decades) at which the reference box's Jacobi count (degree 1) is
     verifiable, and which exit set it."""
     mesh = box_mesh((6, 5, 4), (1 / 6, 1 / 5, 1 / 4), type="hex20")
-    free = dof_mask(mesh, BCS)
-    K, M = assemble(mesh, MAT)
-    lam, V = sla.eigh(K.toarray()[np.ix_(free, free)], M.toarray()[np.ix_(free, free)])
-    W = np.zeros((len(free), 14))
-    W[free] = V[:, :14]
+    free, _, _, lam, _, W = _reference(mesh)
     op = unstructured(mesh, MAT)
     last = None
     for tau in 10.0 ** -np.arange(10, 18):
@@ -162,7 +164,6 @@ def run(small=False):
                       lambda mesh, op, free, s: gmg(op, free, s))  # fmt: skip
     r["errors"] = errors(small)
     r["floor"] = floor()
-    r["cuts"] = r["hex20"]["cuts"]
     return r
 
 
@@ -171,5 +172,6 @@ if __name__ == "__main__":
     p.add_argument("--out", default=harness.RESULTS)
     a = p.parse_args()
     r = run()
-    print(json.dumps({k: v for k, v in r.items() if k != "cuts"}, indent=1, default=str))
+    short = {k: v for k, v in r.items() if k not in ("hex20", "voxel")}
+    print(json.dumps(short, indent=1, default=str))
     harness.write_result("counting_study", r, a.out)

@@ -2,6 +2,7 @@
 polynomial of T = (K + lam_c M)^-1 M and preconditioned inner PCG solves. See
 docs/eigensolvers.md#completeness-count."""
 
+import functools
 import math
 import time
 
@@ -49,9 +50,9 @@ def _theta(lam):
     return 2 * np.arctan(np.sqrt(lam))
 
 
-def _grid(gamma):
-    """(theta, q) on the uniform grid theta_j = pi (j + 1/2) / N, N = 8 d (a DCT-III)."""
-    n = 8 * (len(gamma) - 1)
+def _grid(gamma, factor=8):
+    """(theta, q) on the uniform grid theta_j = pi (j + 1/2) / N, N = factor d (a DCT-III)."""
+    n = factor * (len(gamma) - 1)
     x = np.zeros(n)
     x[0], x[1 : len(gamma)] = gamma[0], gamma[1:] / 2
     return np.pi * (np.arange(n) + 0.5) / n, dct(x, type=3)
@@ -59,12 +60,13 @@ def _grid(gamma):
 
 def tail_bias(gamma, gap, lam_top, n_top, n_free):
     """Jackson-tail bias int q^2 dN over (lam_top, lam_max] with N(lam) = n_top (lam /
-    lam_top)^a, N(lam_max) = n_free; lam_top in units of lam_c."""
+    lam_top)^a, N(lam_max) = n_free; lam_top in units of lam_c. Trapezoid on a 64 d grid
+    (second order: 0.04% against quad where dN/dtheta grows fastest; 8 d gives 2.5%)."""
     if n_top >= n_free:
         return 0.0
     lam_max = lam_top * (n_free / n_top) ** (1 / WEYL_A)
     t0, t1 = _theta(lam_top), _theta(lam_max)
-    th, q = _grid(gamma)
+    th, q = _grid(gamma, 64)
     sel = (th > t0) & (th < t1)
     th = np.r_[t0, th[sel], t1]  # both ends exact: dN/dtheta peaks at t1
     q = np.r_[step_value(gamma, t0), q[sel], step_value(gamma, t1)]
@@ -89,7 +91,9 @@ def _passes(d, gap, lam_top, n_top, n_free):
 def count_degree(gap, lam_top, n_top, n_free):
     """(d, bias): the smallest degree with q^2 >= Q_MIN on the band [0, lam_c (1 - gap / 2)]
     and tail bias <= BIAS (lam_top in units of lam_c), by doubling then bisection; (None, nan)
-    when no d <= MAX_DEGREE passes."""
+    when no d <= MAX_DEGREE passes (at once when D_RULE / gap > MAX_DEGREE)."""
+    if D_RULE / gap > MAX_DEGREE:
+        return None, np.nan
     hi = 2
     while not (ok := _passes(hi, gap, lam_top, n_top, n_free))[0]:
         hi *= 2
@@ -128,7 +132,7 @@ def _solve_y(op, m, g, tau, maxit):
     return y, bool((info["converged"] & ~info["stagnated"]).all())
 
 
-@jax.jit
+@functools.partial(jax.jit, donate_argnums=0)
 def _chunk_step(Y, Wc, MY):
     Wc = Wc.astype(Y.dtype)
     return Y - Wc @ (Wc.T @ MY)
@@ -140,17 +144,16 @@ def _rigid_step(Y, R, MR, m):
 
 
 def _chunks(W):
-    """Column chunks of W (width CHUNK, the last zero-padded): one compiled width."""
+    """Column chunks of W (width CHUNK, the last zero-padded on the device): one compiled
+    width; a device W is sliced in place."""
     for i in range(0, W.shape[1], CHUNK):
-        Wc = np.asarray(W[:, i : i + CHUNK])
-        if Wc.shape[1] < CHUNK:
-            Wc = np.pad(Wc, ((0, 0), (0, CHUNK - Wc.shape[1])))
-        yield jnp.asarray(Wc)
+        Wc = jnp.asarray(W[:, i : i + CHUNK])
+        yield jnp.pad(Wc, ((0, 0), (0, CHUNK - Wc.shape[1]))) if Wc.shape[1] < CHUNK else Wc
 
 
 def _project(op, m, W, R, MR, Y):
     """Pi Y = Y - W W^T M Y - R R^T M Y, masked; W streamed in column chunks (never all on the
-    device)."""
+    device). Y is donated."""
     MY = _mm(op, m, Y)
     for Wc in _chunks(W):
         Y = _chunk_step(Y, Wc, MY)
@@ -260,9 +263,7 @@ def count(
                 std=np.nan)  # fmt: skip
     lam_top = lam.max() / lam_c
     if degree is None:
-        d, bias = (None, np.nan)
-        if D_RULE / gap <= MAX_DEGREE:
-            d, bias = count_degree(gap, lam_top, n_top, n_free)
+        d, bias = count_degree(gap, lam_top, n_top, n_free)
         if d is None:  # cost cap: not run
             info.update(degree=math.ceil(D_RULE / gap), tau=tau, bias=np.nan,
                         time=dict(total=time.perf_counter() - t0))  # fmt: skip
@@ -270,7 +271,7 @@ def count(
     else:
         d = degree
         bias = tail_bias(jackson_step(d), gap, lam_top, n_top, n_free)
-    tau = 0.01 / (d * math.sqrt(n_free)) if tau is None else tau
+    tau = 0.01 / (d * math.sqrt(n_free)) if tau is None else float(tau)
     info.update(degree=d, tau=tau, bias=bias)
 
     precond = jacobi(op, free, lam_c) if precond is None else precond
@@ -289,22 +290,25 @@ def count(
         ta = time.perf_counter()
         g = m * mass_sample_keys(op, keys[i * block : (i + 1) * block])
         y, ok = _solve_y(op, m, g, tau, maxit)
+        del g
         tb = time.perf_counter()
         t_sample += tb - ta
         if not ok:
             break
         w0 = _project(op, m, W, R, MR, y)
-        del g, y  # only w0 and the recurrence are alive in the step phase
-        u, k, isum, imax, bad = _recurrence(A, precond, m, w0, gamma, d, lam_c, tau, maxit)
+        del y  # only w0 and the recurrence are alive in the step phase
+        u, k, isum, imax, bad = _recurrence(A, precond, m, w0, gamma, d, float(lam_c), tau, maxit)
+        del w0
         k, bad = int(k), bool(bad)
         steps, it_sum, it_max = steps + k, it_sum + int(isum), max(it_max, int(imax))
+        if not bad:
+            u = _project(op, m, W, R, MR, u)
+            s_all[i * block : (i + 1) * block] = np.asarray(jnp.sum(u * _mm(op, m, u), 0))
+        del u
+        t_rec += time.perf_counter() - tb
         if bad:
             ok = False
-            t_rec += time.perf_counter() - tb
             break
-        u = _project(op, m, W, R, MR, u)
-        s_all[i * block : (i + 1) * block] = np.asarray(jnp.sum(u * _mm(op, m, u), 0))
-        t_rec += time.perf_counter() - tb
     probes = s_all[:n_probes]  # NaN for the columns of a stopped or skipped block
     estimate = float(probes.mean()) if ok else np.nan
     info.update(
