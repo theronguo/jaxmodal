@@ -15,9 +15,13 @@ Revision 4 (round 3 NITs and one MINOR): `si_memory`'s build on top of the full 
 `_slice_stop` pass whose r_acc is the reported one, unconverged large-mesh slices flagged, the
 σ-on-eigenvalue pre-check an assert, the run-time upper bound, no `n_return` parameter.
 
+Revision 6 (round 5) is folded into the Revision 5 note below.
+
 Revision 5 (round 4): candidates from μ alone (`_slice_sets`: inside extended over chains, the
 neighbours beyond the extended set; `done` needs every candidate converged and $r_{acc} \le r$);
-the host term only W, the end of run stated below the basis phase.
+the host term only W, the end of run stated below the basis phase; the sets re-formed on the host within a
+step (`_slice_check`, a pure, unit-tested helper); V formed into host chunks, the end of run a
+phase with an `n_modes` argument.
 
 Revision 3 (round 2): the per-step order of candidates, thresholds and r_acc; the inner cap based
 on the first step after a σ move; the final stage as the last step's Rayleigh–Ritz recomputed
@@ -147,9 +151,14 @@ resource limit: there is no default allocation and no step cap besides it; 15c s
   $\max(tol, 10\tau_\text{eff}\delta)$ (logged). Order per step: the sets from μ with r, the candidates'
   residuals and $t_i$, $r_{acc} = \max t_i$ over the candidates (reported as `info["r_acc"]`;
   it covers the in-slice pairs and the neighbours used, so it is never below the roadmap's
-  value; 15b/15c take the band-wide max). `done` = every candidate converged ($r_i \le t_i$),
-  every needed neighbour present, and $r_{acc} \le r$ (so the gaps and clusters were formed with
-  a value at least the reported one); otherwise the next step uses $r = r_{acc}$. $\tau_\text{eff} = \max(\tau,$ the
+  value; 15b/15c take the band-wide max). `done` requires every candidate converged
+  ($r_i \le t_i$), every needed neighbour present, and $r_{acc} \le r$ (so the gaps and
+  clusters were formed with a value at least the reported one). When $r_{acc} > r$ the sets are
+  re-formed in the same step with $r = r_{acc}$ and residuals computed only for new candidates,
+  at most 3 times, before falling through to the next step (a few K and M applies instead of a
+  MINRES block solve). This loop is `_slice_check(mu, lo, hi, r, resid) -> (done, inside, below,
+  above, r_acc)`, a pure host helper where `resid(idx)` returns $(r_i, t_i)$ for new candidate
+  indices (the step passes the chunked residual pass, tests pass a fake). $\tau_\text{eff} = \max(\tau,$ the
   running max over all steps of `minres`'s final relative residual for columns that stagnated or
   hit the cap$)$, `info["tau_raised"]`. If τ_eff exceeds $10^{-4}$ (an inner solve that failed,
   e.g. σ on an eigenvalue after the move), the slice stops with `converged` False and
@@ -161,7 +170,7 @@ resource limit: there is no default allocation and no step cap besides it; 15c s
   nearest Ritz value beyond the extended set on each side, so its gap is ≥ $100\,r$ by
   construction (`below` empty and not needed when $\lambda_{lo} = 0$; None when no Ritz value
   exists there). An unconverged neighbour keeps the slice running: it is the outside Ritz value
-  nearest σ and converges first. An empty slice has only the neighbours. 15c's edge snapping
+  on its side nearest σ and converges first. An empty slice has only the neighbours. 15c's edge snapping
   passes windows through this helper without touching the step loop.
 - **Capacity full.** When the next block does not fit before `done`, the slice returns its
   converged `inside` pairs with `converged` False, `info["capacity_full"]` True and
@@ -169,10 +178,11 @@ resource limit: there is no default allocation and no step cap besides it; 15c s
   beyond that edge: λ_lo below λ₁ or λ_hi above the spectrum, which 15c handles by its [0, f₂]
   rule or the above-spectrum error instead of splitting).
 - **Final stage.** The step's Rayleigh–Ritz already is the roadmap's "final Rayleigh–Ritz on
-  (K, M)" (a second `eigh` on X would be a no-op). At the end, the compact X of the accepted
-  `inside` pairs and neighbours is formed from the last step's Y in chunks, Q is released, and
-  the true residuals and thresholds are recomputed once from explicit K and M products of X; a
-  pair above its $t_i$ there sets `converged` False.
+  (K, M)" (a second `eigh` on X would be a no-op). At the end, the compact V of the accepted
+  `inside` pairs and neighbours is formed from the last step's Y in chunks of c columns, each
+  device chunk copied to the host and dropped (so only host V and one chunk coexist with Q); Q is
+  released, and the true residuals and thresholds are recomputed once from explicit K and M
+  products of V in chunks; a pair above its $t_i$ there sets `converged` False.
 - **Returns** `lam` (ascending, `inside`), `V` (host fp64, n × k, compact) and `info`:
   `converged`, `reason`, `sigma`, `sigma_moved`, `steps`, `basis` (Lanczos columns used),
   `minres_iterations` (per step, max over columns), `tau_eff`, `tau_raised`, `inner_maxit`,
@@ -216,7 +226,8 @@ References from SciPy `reference_modes` / `eigsh(sigma=...)` on the assembled fr
 ### 3. Slice memory model (`memory.si_memory`)
 
 ```python
-si_memory(op_memory, n_dof, capacity, block=6, precond_memory=None, n_rigid=0, n_deflate=0)
+si_memory(op_memory, n_dof, capacity, n_modes, block=6, precond_memory=None, n_rigid=0,
+          n_deflate=0)
 ```
 
 storage = operator + preconditioner storage (fp64) + basis $8\,n\,(n_\text{deflate} +
@@ -226,9 +237,11 @@ x, r1, r2, y, w, w2, b, the A apply and the explicit check: a per-column constan
 over b = 6 and 12, plus the operator and V-cycle workspace at width b), reortho (the chunked
 projector at width b, as `lobpcg_memory`'s projector term), Ritz (one chunk of c candidates:
 X, KX, MX, plus the operator workspace at width c); host = $8\,n\,n_\text{deflate}$ (W's host copy, the only host
-array alive during the steps; unified memory on macOS). The end of the run (device X and host
-V of the k accepted pairs and 2 neighbours, $2 \cdot 8n(k + 2)$, after Q is released) is below
-the basis phase since $k \le$ capacity / b, so it is stated and not a term; total = overhead + storage + host + max(operator build,
+array alive during the steps; unified memory on macOS). End (forming V while Q is alive): host V of
+the `n_modes` + 2 returned columns plus one Ritz chunk, $8n(n_\text{modes} + 2)$ + the Ritz
+phase, one more phase in the max (it grows with the slice, so it is the one phase that is not a
+constant). `n_modes` is the expected slice count, which 15c's slicing already estimates and the
+tests take from the reference; total = overhead + storage + host + max(operator build,
 preconditioner build, phases), `lobpcg_memory`'s conservative form (the estimators' `build`
 entries differ in what they include, so the build sits on top of the full storage). The phase split is returned. 15c composes it into `solve_modes_memory`.
 
@@ -280,8 +293,11 @@ from `lobpcg._norms`.
     chain across each edge extends `inside`, including a chain whose last member lies past
     $\lambda_{hi}(1 + 100r)$, and the neighbour is then the next value; the neighbour's gap is ≥
     100 r; λ_lo = 0 has no lower neighbour; no Ritz value beyond an edge gives None; an empty
-    slice. The `done` rule: an unconverged inside pair or neighbour blocks it, and so does
-    $r_{acc} > r$. On a real slice (test 1's mesh), a neighbour with large δ raises `r_acc` above
+    slice. `_slice_check` (synthetic μ, fake `resid`): all converged with $r_{acc} \le r$ → done;
+    one unconverged inside pair → not done; an unconverged or missing upper neighbour → not done;
+    lo = 0 without a lower neighbour → done; an empty slice with both neighbours converged →
+    done; a raised r that merges a neighbour into `inside` finishes in the same call, with `resid`
+    asked only for the new indices; an r_acc that keeps rising past 3 re-forms → not done. On a real slice (test 1's mesh), a neighbour with large δ raises `r_acc` above
     every in-slice $t_i$, and the reported `r_acc` equals the max $t_i$ over inside and the
     neighbours.
 11. **Capacity full and unreached edges:** capacity of 2 blocks on test 1's slice: `converged`
@@ -297,11 +313,12 @@ from `lobpcg._norms`.
 14. **Errors:** lo < 0, lo ≥ hi, a precond with fp32 levels, bad `block` or `capacity`,
     mismatched W / R shapes, a non-orthonormal W.
 15. **Memory model:** `si_memory` storage equals the leaf bytes of the operator, preconditioner
-    and basis; the host term and the build phase as their formulas. Slow (macOS), two cases with
+    and basis; the host term, the build and the end phase as their formulas. Slow (macOS), two cases with
     estimates ≥ 2 GB, each within 20% of the measured peak, the phase split printed: (a)
     MINRES-dominated: fp64 GMG voxel, capacity 4 blocks, σ near mode 5 (short solves), sized so
     the MINRES phase is ≥ 1.25× the build (asserted on the model); (b)
-    basis-dominated: a large capacity, a few steps.
+    basis-dominated: a large capacity and a slice of many modes (so the end phase is the
+    largest phase).
 16. **Benchmark smoke:** `shift_invert_study` at a tiny size runs (marked slow).
 
 Tests 9, 11–13 run on short slices (about 10 modes); if the fast suite exceeds about 60 s, the
@@ -337,5 +354,7 @@ modes 31–45 slices are marked slow.
 - τ_eff = the running max of stagnated or capped columns' final residuals; later steps capped at
   10× the first step's iterations (the first step at the σ used).
 - `si_memory` counts the build on top of the full storage and a host term, as `lobpcg_memory` does.
+- `si_memory` takes the expected slice count `n_modes` for its end phase (host V while Q is
+  alive); 15c passes its slice estimate.
 - `capacity` required (no default allocation); 15c sets it from `si_memory`.
 - The measured cost driver: depth, not δ (roadmap note; 15c's cost model on depth).
