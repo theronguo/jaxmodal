@@ -67,8 +67,9 @@ edge); a mode close behind the neighbour or a degenerate twin of a neighbour lef
   empty band) the degree was always set by the $q^2$ rule, and the exact out-of-band sum with
   the neighbours deflated was ≤ 1e-3 (correctness review). So the roadmap's "converged
   out-of-band neighbours within the polynomial's transition width" is met by the nearest pair on
-  each side; further pairs would change the estimate by about 1e-6 each, which the tail model
-  already bounds, at the cost of streaming them through every projection.
+  each side; a further known pair left in adds about 4e-6 when ≥ g past the edge, at most about
+  7e-4 when close behind the nearest pair (e.g. a split double mode), which the tail model and
+  the 0.05 budget absorb, at the cost of streaming them through every projection.
 - `si_slice` returns lam (ascending, the converged pairs in the slice widened over clusters), V
   (host, M-orthonormal), and `info["neighbours"] = {"lo": (λ, v) or None, "hi": ...}`: the
   nearest converged Ritz pair beyond each edge that is not in its W (none below for lo = 0).
@@ -256,7 +257,7 @@ budget: the new tests ≤ 60 s together outside test 6's complete case (slow, as
     flagged or unrun with `restarts == 0` and the reason; verbose line counts (`capsys`) for
     `si_checked` and for `count` (`PRINT_S` monkeypatched to 0; `count_options={"verbose":
     True}` through `solve_modes` with `band=(0, f_max)`), and the same estimate and probes with
-    and without `verbose`. A restart that does not converge (monkeypatched capacity full on the
+    and without `verbose` to 1e-12 relative (different compiled programs). A restart that does not converge (monkeypatched capacity full on the
     restart): merged modes, `converged` False, the reason, `flagged`, `restarts == 1`. W
     without `lam_W` or with a mismatched length raises.
 12. `band_count` errors: no out-of-band pair on a side, lo = 0, an out-of-band pair inside the
