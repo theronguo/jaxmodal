@@ -67,7 +67,7 @@ $B$ has the rows of constrained corner DOFs zeroed, as the roadmap says. Unmaske
 
 ### AMG build peak above 1M DOF (PR 13b, decision without user input)
 
-The measured setup peak per corner DOF grows about 0.65 kB per decade of $n_c$ (hex20 3.7 / 4.3 / 4.8 kB at $12^3$ / $24^3$ / $44^3$); `AMG_BUILD` extrapolates that trend to 10M DOF (14.6 GB hex20, 46.6 GB hex8). hex27 has two points ($12^3$, $24^3$) that grow about 1.3 kB per decade; its 6.0 kB lies between the hex20 slope (5.96 kB at 10M) and its own (about 6.6 kB). Check it with the first 10M setup (the deferred GPU check runs it on the host).
+The measured setup peak per corner DOF grows about 0.65 kB per decade of $n_c$ (hex20 3.7 / 4.3 / 4.8 kB at $12^3$ / $24^3$ / $44^3$); `AMG_BUILD` extrapolates that trend to 10M DOF (14.6 GB hex20, 46.6 GB hex8). hex27 has two points ($12^3$, $24^3$) that grow about 1.3 kB per decade; its 6.0 kB lies between the hex20 slope (about 5.75 kB at 10M DOF) and its own (about 6.6 kB). Check it with the first 10M setup (the deferred GPU check runs it on the host).
 
 ### PR 13b decisions without user input
 
