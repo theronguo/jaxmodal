@@ -12,6 +12,7 @@ from .eigen.api import (
     resolve_precond,
 )
 from .eigen.lobpcg import _block_size, _capacity, band_defaults  # shared with the solver
+from .eigen.shift_invert import _chunk
 from .elements import ELEMENTS
 from .materials import phases
 from .operators import dof_mask, rigid_modes
@@ -446,3 +447,46 @@ def band_probe_block(mesh, bcs, n_modes, n_probes, host_bytes, *, n_rigid, **opt
         total - host_bytes, n_probes, op_memory, 3 * len(mesh.points),
         voxel=mesh.voxel is not None, precond_memory=pc, n_rigid=n_rigid,
     )  # fmt: skip
+
+
+# Shift-invert slice (docs/eigensolvers.md#shift-invert-slices), memory_analysis fits (b = 6
+# and 12, c = 24): MINRES with Jacobi: workspace + 14.5 blocks of width b (12.9-14.4 at hex20
+# 20^3-32^3 and voxel 48^3-80^3; up to 17.3 on small voxel grids, 15k-108k DOF), plus its
+# right-hand side and solution; a multigrid adds at most its `count` term (0.5-0.96 of it).
+# Reorthogonalization: workspace + 4 blocks. Ritz residuals (width b, the basis read in chunks of
+# c): workspace + 6 blocks + 1 chunk (4.0-5.3 blocks at 107k-1.6M DOF; 11 on the voxel 32^3
+# grid, where the slab workspace appears twice).
+SI_MINRES = 16.5
+SI_REORTHO = 4.0
+SI_RITZ = 6.0
+
+
+def si_memory(
+    op_memory, n_dof, capacity, n_modes, block=6, precond_memory=None, n_rigid=0, n_deflate=0
+):
+    """Estimated peak bytes of si_slice(...) with `capacity` Lanczos columns, expecting at most
+    n_modes modes in the slice (the end phase assumes it). op_memory, precond_memory: m -> the
+    operator / preconditioner estimate (as lobpcg_memory); n_deflate: columns of W.
+
+    Returns storage (operator, preconditioner, basis, R and M R), host (W's host copy and the
+    projected matrix), the phases minres, reortho, ritz, end, and
+    total = overhead + storage + host + max(operator build, preconditioner build, phases)."""
+    c = _chunk(block)
+    capacity = -(-capacity // c) * c
+    op_b = op_memory(block)
+    pc = precond_memory(block) if precond_memory else dict(storage=0, build=0, count=0)
+    v, b = 8 * n_dof, 8 * n_dof * block
+    out = dict(
+        storage=op_b["storage"] + pc["storage"] + v * (-(-n_deflate // c) * c + capacity)
+        + 2 * v * n_rigid,
+        host=v * n_deflate + 8 * capacity**2,
+        minres=op_b["workspace"] + SI_MINRES * b + pc["count"],
+        reortho=op_b["workspace"] + SI_REORTHO * b,
+        ritz=op_b["workspace"] + SI_RITZ * b + v * c,
+        end=v * (n_modes + 2 + c),  # host V and one device chunk, while Q is alive
+    )  # fmt: skip
+    phases = max(out["minres"], out["reortho"], out["ritz"], out["end"])
+    out["total"] = (
+        op_b["overhead"] + out["storage"] + out["host"] + max(op_b["build"], pc["build"], phases)
+    )
+    return {k: int(x) for k, x in out.items()}
