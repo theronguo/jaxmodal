@@ -130,6 +130,7 @@ The measured setup peak per corner DOF grows about 0.65 kB per decade of $n_c$ (
 - **`lam` holds the converged `inside` set**, which extends 100 $r_{acc}$ past each edge and over clusters straddling one (the plan's "in $[\lambda_{lo}, \lambda_{hi}]$" read with its own 100 r window); 15c's duplicate removal handles the overlap.
 - **`si_memory`** counts the build on top of the full storage plus a host term (as `lobpcg_memory`), and takes the expected slice count `n_modes` for its end phase.
 - **Cost driver:** the depth of σ in the spectrum, not δ, sets the MINRES iterations (measured); 15c fits its cost model on depth (roadmap note on the two cost-model bullets).
+- **Largest-size benchmark cut (user: "Run something more reasonable", 2026-10-13).** The plan's 1M and 2M τ = 1e-14 floor solves are dropped (the floor comes from the $16^3$ / $32^3$ grids), and the 2M voxel slice sits near mode 6, not 100. The 1M hex20 slice near mode 100 was measured before the cut (converged, 9 steps of about 780 MINRES iterations, 1.7 h). `shift_invert_study.py --parts` runs one part at a time and every slice prints a progress line per step.
 
 ### GMG restriction on the GPU (PR 11 deferred GPU checks)
 

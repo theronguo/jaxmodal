@@ -1,14 +1,15 @@
 """Shift-invert study (PR 15a): MINRES iterations against depth and delta (hex20 16^3 with AMG,
 voxel 32^3 with fp64 GMG, sigma in the gap after modes 5 ... 1000 at three gap fractions), the
-tau = 1e-14 floor per depth, the floor and one real short slice near mode 100 at 1M hex20 DOF
-(AMG) and 2M voxel DOF (GMG), and a full slice (modes 51-70, hex20 12^3) against
-solve_modes(band=...). References: reference_modes (SciPy, certified). Writes
-results/shift_invert_study.json.
+tau = 1e-14 floor per depth, a full slice (modes 51-70, hex20 12^3) against
+solve_modes(band=...), and one real short slice at the largest Mac sizes: 1M hex20 DOF (AMG,
+near mode 100: about 1.7 h) and 2M voxel DOF (GMG, near mode 6). References: reference_modes
+(SciPy, certified). --parts runs a subset and merges it into results/shift_invert_study.json.
 """
 
 import argparse
 import json
 import time
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -120,11 +121,11 @@ def slice_info(info):
     return {k: info[k] for k in keep} | {"time": info["time"]}
 
 
-def large(mesh, coarse, name, block=6):
-    """The floor near mode 100 (tau = 1e-14, sigma in the coarse mesh's gap after mode 100) and
-    a short slice of about 3 modes there (capacity 10 blocks, once 20 if it ends full)."""
-    lam = reference(coarse, 110)
-    i0 = widest(lam, 95, 101)  # edges at the widest coarse gaps
+def large(mesh, coarse, name, depth, block=6):
+    """A short slice of about 3 modes after mode depth (edges at the coarse mesh's widest gaps;
+    capacity 10 blocks, once 20 if it ends full)."""
+    lam = reference(coarse, depth + 10)
+    i0 = widest(lam, max(1, depth - 5), depth + 1)  # edges at the widest coarse gaps
     i1 = widest(lam, i0 + 3, i0 + 8)
     lo, hi = (lam[i0 - 1] + lam[i0]) / 2, (lam[i1 - 1] + lam[i1]) / 2
     op, free, build = setup(mesh)
@@ -132,13 +133,9 @@ def large(mesh, coarse, name, block=6):
     P = build(op, (lo + hi) / 2)
     out = dict(n_dof=op.n_dof, lo=lo, hi=hi, precond_s=time.perf_counter() - t)
     t_it = t_iteration(op, free, P, (lo + hi) / 2)
-    print(f"{name}: {t_it:.2e} s/it, floor about {t_it * 3000 / 60:.0f} min", flush=True)
-    t = time.perf_counter()
-    out["floor"] = inner(op, free, P, (lo + hi) / 2, 1e-14)
-    out["floor"]["wall"] = time.perf_counter() - t
-    print(json.dumps(out["floor"]), flush=True)
+    print(f"{name}: {t_it:.2e} s/it, {op.n_dof} DOF, depth {depth}", flush=True)
     for cap in (10 * block, 20 * block):
-        print(f"{name} slice, capacity {cap}: about {t_it * 300 * cap / block / 60:.0f} min")
+        print(f"{name} slice, capacity {cap}", flush=True)
         t = time.perf_counter()
         lam_s, _, info = si_slice(
             op, free, lo, hi, P, capacity=cap, tol=1e-6, block=block, verbose=True
@@ -170,42 +167,46 @@ def full_slice(n, first=51, last=70):
     t = time.perf_counter()
     lb, _, ib = solve_modes(mesh, MAT, BCS, tol=1e-8, band=(0, np.sqrt(hi) / (2 * np.pi)))
     out["band"] = dict(wall=time.perf_counter() - t, n_modes=len(lb), iterations=ib["iterations"])
+    print(json.dumps(out, default=str), flush=True)
     return out
 
 
-def run(small=False):
+PARTS = ("grid_hex20", "grid_voxel", "full", "hex20_1M", "voxel_2M")
+
+
+def run(small=False, parts=PARTS):
     config.enable_x64()
-    t0 = time.perf_counter()
     if small:
         r = dict(grid=dict(hex20=grid(hex20(4), (5, 10), "hex20")))
         r["slice"] = full_slice(3, 11, 16)["slice"]
         return r
-    walls = {}
-    r = dict(grid={})
-    for name, mesh, depths in (("hex20", hex20(16), (5, 20, 50, 100, 200, 500, 1000)),
-                               ("voxel", voxel(32), (5, 20, 50, 100, 200))):  # fmt: skip
+    r, walls = {}, {}
+    jobs = dict(
+        grid_hex20=lambda: grid(hex20(16), (5, 20, 50, 100, 200, 500, 1000), "hex20"),
+        grid_voxel=lambda: grid(voxel(32), (5, 20, 50, 100, 200), "voxel"),
+        full=lambda: full_slice(12),
+        hex20_1M=lambda: large(hex20(44), hex20(12), "hex20_1M", 100),
+        voxel_2M=lambda: large(voxel(86), voxel(32), "voxel_2M", 6),
+    )
+    for name in parts:
+        print(f"== {name}", flush=True)
         t = time.perf_counter()
-        r["grid"][name] = grid(mesh, depths, name)
-        walls[f"grid_{name}"] = time.perf_counter() - t
-        jax.clear_caches()
-    t = time.perf_counter()
-    r["full"] = full_slice(12)
-    r["slice"] = r["full"]["slice"]
-    walls["full"] = time.perf_counter() - t
-    for name, mesh, coarse in (("hex20_1M", hex20(44), hex20(12)),
-                               ("voxel_2M", voxel(86), voxel(32))):  # fmt: skip
-        jax.clear_caches()
-        t = time.perf_counter()
-        r[name] = large(mesh, coarse, name)
+        r[name] = jobs[name]()
         walls[name] = time.perf_counter() - t
-    r["walls"] = walls | dict(total=time.perf_counter() - t0)
+        print(f"== {name} done in {walls[name] / 60:.1f} min", flush=True)
+        jax.clear_caches()
+    r["walls"] = walls
     return r
 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--out", default=harness.RESULTS)
+    p.add_argument("--parts", nargs="+", choices=PARTS, default=PARTS)
     a = p.parse_args()
-    r = run()
-    print(json.dumps({k: v for k, v in r.items() if k != "grid"}, indent=1, default=str))
-    harness.write_result("shift_invert_study", r, a.out)
+    r = run(parts=a.parts)
+    path = Path(a.out) / "shift_invert_study.json"
+    old = json.loads(path.read_text()) if path.exists() else {}
+    old.pop("versions", None)
+    walls = old.pop("walls", {}) | r.pop("walls")
+    harness.write_result("shift_invert_study", old | r | dict(walls=walls), a.out)
