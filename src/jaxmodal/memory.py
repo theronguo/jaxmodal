@@ -252,8 +252,9 @@ AMG_STEP = {
 }
 # Setup host peak: a fixed part plus bytes per corner DOF by element type (the largest present),
 # measured on hex20 12^3-44^3, hex27 12^3-24^3, hex8 24^3-68^3: 3.1-4.8 kB beyond the fixed
-# part, growing about 0.65 kB per decade of n_c; the constants extrapolate that trend to 10M DOF.
-AMG_BUILD = (45e6, {"hex8": 4.6e3, "hex20": 5.5e3, "hex27": 5.8e3})
+# part, growing about 0.65 kB per decade of n_c; the constants extrapolate that trend to 10M DOF
+# (hex27: two points only, steeper; see docs/open_items.md).
+AMG_BUILD = (45e6, {"hex8": 4.6e3, "hex20": 5.5e3, "hex27": 6.0e3})
 
 
 def amg_memory(mesh, m):
