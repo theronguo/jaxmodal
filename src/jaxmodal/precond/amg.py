@@ -161,6 +161,8 @@ def amg(
     strength, aggregation and the tentative fit and recomputes everything that depends on the
     values. For new materials, s_K, s_M or sigma the result equals a fresh setup; for moved
     points it keeps the old near-null space (an approximation). max_coarse is then ignored."""
+    if not (isinstance(max_coarse, int) and max_coarse >= 1):
+        raise ValueError(f"max_coarse must be an int >= 1, got {max_coarse!r}")
     sigma = _check("amg", op, sigma, nonsingular)
     if nonsingular and not bool((op.s_K > 0).all()):
         raise ValueError("nonsingular=True needs s_K > 0 on every element")
