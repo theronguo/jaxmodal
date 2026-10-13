@@ -193,7 +193,7 @@ The implementation re-measures all iteration bounds and keeps at least a 1.5× m
   - the tests list.
 
   `pmg` stays documented as the test-only exact-coarse variant.
-- **`docs/operators.md`** or wherever `block_ell` is documented: rectangular matrices.
+- **`docs/preconditioners.md`** (block-ELL section): rectangular matrices.
 - **`README.md`**: status, plus an `amg` snippet (run by `test_readme`).
 - **`docs/ROADMAP.md`**: the PR 13 split note and the 13a status line at merge.
 - **`docs/open_items.md`**:
