@@ -11,22 +11,32 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import scipy.sparse as sp
-import scipy.sparse.linalg as spla
-from helpers import MATERIALS, R, distort, mixed_mesh, rel, rhs
+from helpers import (
+    MATERIALS,
+    STEEL,
+    R,
+    checkerboard,
+    cube,
+    dense,
+    distort,
+    lam1,
+    mixed_mesh,
+    rel,
+    rhs,
+    sigma6,
+)
 
 from jaxmodal.eigen import lobpcg, reference_modes
 from jaxmodal.linalg import pcg
-from jaxmodal.materials import Material, isotropic
 from jaxmodal.mesh import box_mesh, voxel_mesh
 from jaxmodal.mesh.model import REFERENCE_NODES
-from jaxmodal.operators import a_p, ap_operator, assemble, dof_mask, restrict, stencil, unstructured
+from jaxmodal.operators import a_p, ap_operator, assemble, dof_mask, stencil, unstructured
 from jaxmodal.precond import GMG, SingularShiftError, block_jacobi, chebyshev, lmax_estimate, pmg
 
 PM = importlib.import_module("jaxmodal.precond.pmg")
 mf = importlib.import_module("jaxmodal.operators.matfree")
 krylov = importlib.import_module("jaxmodal.linalg.krylov")
 
-STEEL = {0: Material(isotropic(210e9, 0.3), 7850.0)}
 ORIENT = {1: R}  # mixed_mesh orientation labels
 
 
@@ -126,7 +136,7 @@ def test_galerkin(name, mode, mass):
     """Test 2: _hex8_galerkin = P_ref^T a_p(K + sigma M, free, s) P_ref, exactly symmetric."""
     mesh, op, free, sigma, A = galerkin_case(name, mode, mass)
     Pr, _ = p_ref(mesh)
-    Ac, _ = PM._hex8_galerkin(ap_operator(op, free, sigma))
+    Ac = PM._hex8_galerkin(ap_operator(op, free, sigma))[0]
     assert rel(Ac.toarray(), Pr.T @ A.toarray() @ Pr) <= 1e-12
     assert (Ac != Ac.T).nnz == 0
 
@@ -153,7 +163,7 @@ def test_galerkin_padded():
     b = op.blocks[0]
     assert b.dofs.shape[0] > b.n_el
     Pr, _ = p_ref(mesh)
-    Ac, _ = PM._hex8_galerkin(ap_operator(op, free, sigma))
+    Ac = PM._hex8_galerkin(ap_operator(op, free, sigma))[0]
     assert rel(Ac.toarray(), Pr.T @ A.toarray() @ Pr) <= 1e-12
     d = {k: v[-b.chunk :] for k, v in mf._block_data(op, b).items()}
     K, M = mf.element_matrices(op, b, d)
@@ -173,10 +183,6 @@ def test_galerkin_hex8():
 
 
 # ---------------------------------------------------------------- 3-4: the cycle
-
-
-def dense(f, n):
-    return np.asarray(f(jnp.eye(n)))
 
 
 @pytest.mark.parametrize("bcs", [{"xmin": "xyz"}, {"xmin": "x", "ymin": "y", "zmin": "z"}])
@@ -236,25 +242,6 @@ def test_hex8_exact():
 # ---------------------------------------------------------------- 5-7: iterations (steel)
 
 
-def lam1(mesh, free, **kw):
-    """Lowest nonzero eigenvalue by eigsh (fixed v0); kw go to assemble (nodal_mass, s_K)."""
-    K, M = assemble(mesh, STEEL, **kw)
-    Kf, Mf, _ = restrict(K, M, free)
-    lam = spla.eigsh(Kf, 8, M=Mf, sigma=-1.0, v0=np.ones(Kf.shape[0]))[0]
-    return float(np.sort(lam[lam > 1e-6 * lam.max()])[0])
-
-
-def cube(t, n):
-    return box_mesh((n,) * 3, (1 / n,) * 3, type=t)
-
-
-@functools.cache
-def sigma6(t):
-    """lambda_1 of the clamped 6^3 box: one shift for the whole h-sequence."""
-    m = cube(t, 6)
-    return lam1(m, dof_mask(m, {"xmin": "xyz"}))
-
-
 def iterations(mesh, bcs, sigma=None, op=None):
     free = dof_mask(mesh, bcs)
     op = unstructured(mesh, STEEL) if op is None else op
@@ -279,11 +266,6 @@ def test_h_independence(t, n):
     """Test 5: iterations grow <= 20% from 3^3 to n^3 at a fixed sigma (measured 14 / 13)."""
     its = iterations(cube(t, n), {"xmin": "xyz"}, sigma6(t))
     assert its <= 1.2 * first(t)
-
-
-def checkerboard(mesh, op):
-    c = np.floor(mesh.points[mesh.blocks["hex20"][:, :8]].mean(1) * 4).astype(int).sum(1) % 2
-    return op.scaled(s_K=jnp.asarray(np.where(c == 1, 1e-3, 1.0)))
 
 
 @pytest.mark.parametrize("case", ["beam", "free", "curved", "nodal", "contrast"])

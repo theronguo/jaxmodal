@@ -1,6 +1,6 @@
 """Two-level p-multigrid for unstructured hex20/hex27 meshes: Chebyshev on the matrix-free A_P,
 the hex8 Galerkin product P^T A_P P on the corner nodes, solved on the host by SciPy splu
-(development and tests only; PR 13 swaps in AMG). See docs/preconditioners.md."""
+(development and tests only; amg is the production variant). See docs/preconditioners.md."""
 
 import dataclasses
 
@@ -140,10 +140,10 @@ def _cells(op, b, sigma, m, d, own):
 
 
 def _hex8_galerkin(A):
-    """(Ac, T) for an APOperator A of an Unstructured operator: the SciPy CSR hex8 Galerkin
-    matrix P^T A P on the corner nodes and the NodalTransfer P. The fine operator is never
-    assembled. The pattern is structural (every cell pair, no pruned zeros) and the values are
-    symmetrized on it exactly."""
+    """(Ac, T, corner) for an APOperator A of an Unstructured operator: the SciPy CSR hex8
+    Galerkin matrix P^T A P on the corner nodes, the NodalTransfer P and the corner node ids
+    in coarse order. The fine operator is never assembled. The pattern is structural (every
+    cell pair, no pruned zeros) and the values are symmetrized on it exactly."""
     op = A.op
     # owned diagonal (added once per node, by its owner): nodal masses, constrained diagonal
     d = A.sigma * op.nodal * A.free + A.s * (1 - A.free)
@@ -168,27 +168,40 @@ def _hex8_galerkin(A):
     if not ((At.indptr == Ac.indptr).all() and (At.indices == Ac.indices).all()):
         raise RuntimeError("hex8 Galerkin pattern is not symmetric")
     Ac.data = (Ac.data + At.data) / 2
-    return Ac, T
+    return Ac, T, np.flatnonzero(cid >= 0)
+
+
+def _check(name, op, sigma):
+    """The shared argument checks of pmg and amg; returns sigma as a float."""
+    check_x64(name)
+    if not isinstance(op, mf.Unstructured):
+        raise TypeError(
+            f"{name} needs an Unstructured operator, got {type(op).__name__} (voxel stencils: gmg)"
+        )
+    _check_sigma(sigma)
+    sigma = float(sigma)
+    if sigma == 0:
+        raise SingularShiftError(
+            f"{name} needs sigma > 0: A_P at sigma = 0 is singular when the BCs leave rigid modes"
+        )
+    return sigma
+
+
+def _p_level(op, free, sigma, degree, ratio):
+    """((A, S), T, Ac, corner): the matrix-free A_P with Chebyshev over node-block Jacobi, the
+    NodalTransfer, the hex8 Galerkin matrix and its corner node ids (pmg and amg)."""
+    A = ap_operator(op, free, sigma)
+    Ac, T, corner = _hex8_galerkin(A)
+    D = block_jacobi(op, free, sigma)
+    return (A, chebyshev(A, D, lmax_estimate(A, D), degree, ratio)), T, Ac, corner
 
 
 def pmg(op, free, sigma, *, degree=2, ratio=30.0):
     """Two-level p-multigrid V-cycle for A_P = m (K + sigma M) m + s (I - m) of an Unstructured
     operator, as a GMG pytree callable on (n_dof, k) blocks (masked output): Chebyshev degree
     `degree` over node-block Jacobi on the fine level, the exact hex8 Galerkin coarse solve by
-    host splu (test-scale only). sigma > 0 is concrete and required."""
-    check_x64("pmg")
-    if not isinstance(op, mf.Unstructured):
-        raise TypeError(
-            f"pmg needs an Unstructured operator, got {type(op).__name__} (voxel stencils: gmg)"
-        )
-    _check_sigma(sigma)
-    sigma = float(sigma)
-    if sigma == 0:
-        raise SingularShiftError(
-            "pmg needs sigma > 0: A_P at sigma = 0 is singular when the BCs leave rigid modes"
-        )
-    A = ap_operator(op, free, sigma)
-    Ac, T = _hex8_galerkin(A)
-    D = block_jacobi(op, free, sigma)
-    S = chebyshev(A, D, lmax_estimate(A, D), degree, ratio)
+    host splu (test-scale only; amg is the production variant). sigma > 0 is concrete and
+    required."""
+    sigma = _check("pmg", op, sigma)
+    (A, S), T, Ac, _ = _p_level(op, free, sigma, degree, ratio)
     return GMG(((A, S),), (T,), HostLU(spla.splu(Ac.tocsc())), A.free, None)

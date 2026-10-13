@@ -2,6 +2,7 @@
 
 import functools
 
+import jax.numpy as jnp
 import numpy as np
 import scipy.sparse.linalg as spla
 
@@ -110,3 +111,36 @@ def box(bcs="clamped"):
 def rhs(free, k, seed=1):
     """(n_dof, k) random right-hand sides, zero on constrained DOFs."""
     return np.random.default_rng(seed).standard_normal((len(free), k)) * free[:, None]
+
+
+STEEL = {0: Material(isotropic(210e9, 0.3), 7850.0)}
+
+
+def dense(f, n):
+    """Dense matrix of the linear map f on (n, k) blocks."""
+    return np.asarray(f(jnp.eye(n)))
+
+
+def lam1(mesh, free, **kw):
+    """Lowest nonzero steel eigenvalue by eigsh (fixed v0); kw go to assemble (nodal_mass, s_K)."""
+    K, M = assemble(mesh, STEEL, **kw)
+    Kf, Mf, _ = restrict(K, M, free)
+    lam = spla.eigsh(Kf, 8, M=Mf, sigma=-1.0, v0=np.ones(Kf.shape[0]))[0]
+    return float(np.sort(lam[lam > 1e-6 * lam.max()])[0])
+
+
+def cube(t, n):
+    return box_mesh((n,) * 3, (1 / n,) * 3, type=t)
+
+
+@functools.cache
+def sigma6(t):
+    """lambda_1 of the clamped steel 6^3 box: one shift for a whole h-sequence."""
+    m = cube(t, 6)
+    return lam1(m, dof_mask(m, {"xmin": "xyz"}))
+
+
+def checkerboard(mesh, op):
+    """op with s_K = 1e-3 on a checkerboard of the hex20 unit-box elements (4 per unit)."""
+    c = np.floor(mesh.points[mesh.blocks["hex20"][:, :8]].mean(1) * 4).astype(int).sum(1) % 2
+    return op.scaled(s_K=jnp.asarray(np.where(c == 1, 1e-3, 1.0)))

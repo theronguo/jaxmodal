@@ -142,7 +142,7 @@ jax.block_until_ready(A)
 GAL_RUN = """
 import json, time
 t = time.perf_counter()
-Ac, _ = _hex8_galerkin(A)
+Ac = _hex8_galerkin(A)[0]
 json.dump(dict(n_dof=op.n_dof, time_s=time.perf_counter() - t, nnz=int(Ac.nnz)), open("{out}", "w"))
 """
 
