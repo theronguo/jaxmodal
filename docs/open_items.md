@@ -86,6 +86,23 @@ The measured setup peak per corner DOF grows about 0.65 kB per decade of $n_c$ (
 - **`amg_memory` at other `max_coarse`:** the coarse term is floored at the calibration value 1000 (an upper bound at 100–3000, loose above 1000: 4.3× at 3000); `AMG_STEP` stays calibrated at 1000, so above it the step term is not a bound (+1.3 blocks of temporaries at 4000).
 - **Chebyshev loop terms:** degree > 2 adds `AMG_LOOP_K` = 120k DOF-equivalents to `AMG_STEP`'s $K$ (fixed loop buffers, +77k–103k measured) and `GMG_LOOP` = 1.2 / 0.7 fp64 blocks (fp64 / fp32 V-cycle) to `gmg_memory` (+1.07 / 0.60 measured), calibrated on boxes like the other constants. `GMG_STEP` re-fitted after the loop lowered the default fp64 steps (4.3 / 9.0, was 5.1 / 9.9); `GMG_WORK` kept (now 7–39% above the measured temporaries at $32^3$–$64^3$).
 
+### PR 14a decisions without user input
+
+- **PR 14 split:** 14a ships the counting estimator (`count`); 14b ships the $[0, f_{max}]$ driver, the budget logic and `verify`. The roadmap tests are tagged [14a]/[14b]; no criterion is dropped.
+- **Shift $\sigma = \lambda_c$:** the spectral map $X = 2\lambda_c T - I$ puts the cut at $x = 0$ and needs no new operator; the preconditioner is built at $\lambda_c$ like any `solve_modes` shift.
+- **Probes from quadrature factors:** $M_e = B_e B_e^T$ with $B_e = N^T \operatorname{diag}\sqrt{w \det J}$ (exact, no Cholesky); lumped mass uses $\sqrt{\operatorname{diag} M}$. Constrained DOFs carry diagonal 1 in $M_P$ and are projected out of every probe (the roadmap's scaled diagonal is not needed: $g$ vanishes there, so $y$ is the same).
+- **Weyl exponent $a = 3/2$ fixed** in the tail-bias bound (3D); a 2D or 1D-like body (slender beam, thin plate) has a slower-growing count, so the bound stays conservative.
+- **Degree search:** doubling then bisection on the exact $q(x_l)^2 \ge 0.95$ and tail-bias $\le 0.05$ tests; `MAX_DEGREE` = 100 000 (beyond it `count_degree` returns `(None, nan)` and `count` is not run: the estimate is NaN, `verifiable` False; 14b must then move the cut or solve more modes).
+- **Tail-bias grid $64d$ instead of the plan's $8d$:** the trapezoid on $8d$ points was 2.5% off `quad` (second order); $64d$ gives 0.04% and costs 1–2 s for a degree search near `MAX_DEGREE`. The ripple guard stays on $8d$.
+- **Jacobi default inner preconditioner** for `count`'s `precond=None` (robust, no setup); callers (PR 14b's `verify`) pass the fp64 AMG/GMG built at $\lambda_c$.
+- **Inner tolerance rule $\tau_c = 0.01/(d\sqrt{n_{free}})$ kept although far too strict (needs your input):** the counting study measures $|\Delta s| \le \tau s$ independent of $d$ (20–400), so at the default $\tau_c$ the error is about $10^{-6}$, five orders below the 0.5 threshold. Loosening it (e.g. to $\tau = 10^{-4}$, error $\le 10^{-4}$ with $s \approx 1$) would save 1.8–3.9 PCG iterations per decade, about a third of the PCG iterations on the measured meshes, but the roadmap fixes $\tau_c \lesssim 0.01/(d\sqrt{n})$ and roadmap criteria are not relaxed without you. Default: keep; decide before or in PR 14b.
+- **Counting cost:** at 200 modes, counting at a typical cut ($g$ = 0.002–0.04, $d$ = 500–11 000) is predicted at 10²–10³ solve times (median 160–250×); only cuts with $g \gtrsim 0.6$ cost a few solves (1.2–3.6×). `verify=None` in 14b will therefore rarely enable counting; 14b should place cuts at the largest gap near the band edge.
+- **Early stop and NaN:** a block whose PCG solve fails (stagnation or `maxit`) stops the recurrence; the estimate is NaN and `verifiable` is False, so 14b never trusts a partial count.
+- **Detection test:** 100 sets of 50 probes from one 5000-probe count; each probe has its own `fold_in` key, so the sets are i.i.d. and equal 100 independent 50-probe counts (the roadmap's fixed list of 100 seeds), and results do not depend on the block size (default one block; 14b sizes it with `probe_block`).
+- **Orthonormality check:** $W^T M W = I$ is checked by a streamed random sketch (3 vectors) at `ORTHO_TOL` (1e-6 fp64, 1e-4 fp32), not a full Gram matrix.
+- **Memory constants:** `COUNT_STEP`, `GMG_COUNT`, `AMG_COUNT` are fitted on box meshes (hex20 $12^3$–$28^3$, voxel $16^3$–$64^3$); the hex20 $8^3$ case (one chunk holds the mesh) is outside the fit.
+- **No thin-plate counting test:** AMG is weak on flat elements (see "Thin plates and slender beams"); the slender hex20 cantilever (κ 2.2e9) covers the high-κ case.
+
 ### GMG restriction on the GPU (PR 11 deferred GPU checks)
 
 Restriction is the transpose of gathers, i.e. scatter-adds (6× the prolongation time on CPU at $87^3$). Default: keep; listed in the deferred GPU checks with "rewrite as gathers if it dominates".

@@ -167,6 +167,9 @@ GMG_LOOP = {"float64": 1.2, "float32": 0.7}
 # fp32); kept: the workspace estimate is 7-39% above the temporaries with the loop (32^3-64^3).
 GMG_WORK = {"float64": 15.0, "float32": 7.5}
 GMG_BUILD = 1650  # setup process peak per fine node (1.12 GB at 87^3)
+# Extra count-recurrence bytes with the V-cycle over Jacobi: 8 n (a b + c), the upper envelope
+# of memory_analysis of _recurrence at 16^3-64^3, b = 4-32 (fp64 V-cycle).
+GMG_COUNT = (7.8, 10.0)
 
 
 def _gmg_grid(mesh):
@@ -195,7 +198,8 @@ def gmg_memory(mesh, m, dtype="float64", s_K=None, degree=2):
     """Estimated bytes of gmg(stencil(mesh, ...), free, sigma, dtype=dtype, degree=degree)
     applied to (n_dof, m) blocks: storage (an upper bound: the fine level exact, coarse levels as
     full boxes; with s_K (n_el,) the island deflation), workspace (V-cycle temporaries), build
-    (the setup peak), overhead, step and step_low (extra LOBPCG step bytes over Jacobi). Same
+    (the setup peak), overhead, step and step_low (extra LOBPCG step bytes over Jacobi), count
+    (extra count-recurrence bytes over Jacobi). Same
     composition rule as the operator estimators."""
     if mesh.voxel is None:
         raise ValueError("gmg_memory needs a voxel mesh: mesh.voxel is None (no voxel grid)")
@@ -240,6 +244,7 @@ def gmg_memory(mesh, m, dtype="float64", s_K=None, degree=2):
         overhead=OVERHEAD,
         step=GMG_STEP[("9-block", dtype)] * b + loop,
         step_low=GMG_STEP[("low", dtype)] * b + loop,
+        count=8 * n_dof * (GMG_COUNT[0] * m + GMG_COUNT[1]) + loop,
     )
     return {k: int(v) for k, v in out.items()}
 
@@ -266,14 +271,19 @@ AMG_BUILD = (45e6, {"hex8": 4.6e3, "hex20": 5.5e3, "hex27": 6.0e3})
 # Chebyshev degree > 2: the smoother loop's body keeps its own n-independent buffers (block-ELL
 # scan gathers), +77k-103k DOF-equivalents in K measured at degree 3-6 (hex8/20/27, 6^3-16^3).
 AMG_LOOP_K = 120_000
+# Extra count-recurrence bytes with the V-cycle over Jacobi: 8 n (a b + c), the upper envelope
+# of memory_analysis of _recurrence on hex20 12^3-28^3, b = 4-32 (below 20k DOF the fixed
+# AMG buffers dominate and the fit does not apply).
+AMG_COUNT = (11.5, 45.0)
 
 
 def amg_memory(mesh, m, max_coarse=1000, degree=2):
     """Estimated bytes of amg(unstructured(mesh, ...), free, sigma, mesh.points, degree=degree,
     max_coarse=max_coarse) applied to (n_dof, m) blocks: storage (the p-level exact from the
     mesh, the AMG levels per corner DOF, the coarsest factor), build (the setup host peak), step
-    and step_low (extra LOBPCG step bytes over Jacobi). Calibrated on box meshes at max_coarse
-    1000; the coarse term uses max(max_coarse, 1000) (an upper bound, loose above 1000)."""
+    and step_low (extra LOBPCG step bytes over Jacobi), count (extra count-recurrence bytes).
+    Calibrated on box meshes at max_coarse 1000; the coarse term uses max(max_coarse, 1000) (an
+    upper bound, loose above 1000)."""
     n_nodes = len(mesh.points)
     blocks = [c for c in mesh.blocks.values() if len(c)]
     corner = np.unique(np.concatenate([c[:, :8].ravel() for c in blocks]))
@@ -299,6 +309,7 @@ def amg_memory(mesh, m, max_coarse=1000, degree=2):
         build=beta + max(alpha[t] for t in mesh.blocks) * n_c,
         step=8 * n_dof * (a9 * m + c9) + 8 * m * (K9 + loop),
         step_low=8 * n_dof * (al * m + cl) + 8 * m * (Kl + loop),
+        count=8 * n_dof * (AMG_COUNT[0] * m + AMG_COUNT[1]) + 8 * m * loop,
     )
     return {k: int(v) for k, v in out.items()}
 
@@ -340,3 +351,61 @@ def solve_modes_memory(
         op_memory, 3 * len(mesh.points), n_modes, chunk, guards, low_memory, basis_dtype,
         n_rigid, pc,
     )  # fmt: skip
+
+
+# Count (docs/eigensolvers.md#completeness-count). Recurrence step with Jacobi (memory_analysis
+# temporaries of _recurrence): workspace + 8 n (a b + c), and on the stencil at least
+# 2 workspace + 8 n a_dup b (the slab workspace appears twice while a slab covers most of the
+# grid); upper envelope of hex20 12^3-28^3 and voxel 16^3-64^3, b = 4-32 (hex20 below about
+# 20k DOF, where one chunk holds the whole mesh, is outside it). Plus w0 and u (2 blocks).
+COUNT_STEP = {"unstructured": (10.2, 3.0, 0.0), "stencil": (10.2, 1.0, 2.2)}
+# Sampling: the y PCG on M_P, workspace + 6 vectors per probe (memory_analysis, hex20 20^3,
+# voxel 64^3), plus g and y.
+COUNT_SAMPLE = 8.0
+
+
+def count_memory(
+    op_memory, n_dof, b, *, voxel=False, precond_memory=None, n_rigid=0, chunk=64,
+    w_dtype="float64",
+):  # fmt: skip
+    """Estimated peak device bytes of count(...) at probe block b. op_memory: m -> the operator
+    estimate (unstructured_memory or stencil_memory, voxel=True for the latter);
+    precond_memory: m -> gmg_memory or amg_memory (its "count" term), None for Jacobi. W stays
+    on the host: one chunk of `chunk` columns is on the device at a time.
+
+    Returns storage, sampling, step, projector and total = overhead + storage + max(phases)."""
+    op = op_memory(b)
+    pc = precond_memory(b) if precond_memory else dict(storage=0, count=0)
+    v, ws = 8 * n_dof, op["workspace"]
+    a, c, a_dup = COUNT_STEP["stencil" if voxel else "unstructured"]
+    step = ws + v * (a * b + c)
+    if a_dup:
+        step = max(step, 2 * ws + v * (a_dup * b + c))
+    out = dict(
+        storage=op["storage"] + pc["storage"] + 2 * v * n_rigid,  # R and M R
+        sampling=ws + v * COUNT_SAMPLE * b,
+        step=step + pc["count"] + 2 * v * b,
+        # two chunks in flight (plus their fp64 upcasts), Y (donated), M Y, the transfer's
+        # source and the M apply
+        projector=2 * n_dof * chunk * (12 if w_dtype == "float32" else 8) + 3 * v * b + ws,
+    )
+    peak = max(out["sampling"], out["step"], out["projector"])
+    out["total"] = op["overhead"] + out["storage"] + peak
+    return {k: int(x) for k, x in out.items()}
+
+
+def probe_block(budget, n_probes, op_memory, n_dof, **kwargs):
+    """The largest probe block b <= n_probes with count_memory(op_memory, n_dof, b,
+    **kwargs)["total"] <= budget; raises if even b = 1 does not fit."""
+
+    def total(b):
+        return count_memory(op_memory, n_dof, b, **kwargs)["total"]
+
+    if total(1) > budget:
+        one = total(1) / 1e9
+        raise ValueError(f"budget {budget / 1e9:.2f} GB is below one probe ({one:.2f} GB)")
+    lo, hi = 1, n_probes + 1  # total is non-decreasing in b
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        lo, hi = (mid, hi) if total(mid) <= budget else (lo, mid)
+    return lo

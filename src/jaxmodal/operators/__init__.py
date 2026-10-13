@@ -15,6 +15,7 @@ from .constraints import (
 )
 from .dofmap import check_int32, element_dofs
 from .matfree import Unstructured, unstructured
+from .sampling import mass_sample, mass_sample_keys
 from .voxel import Stencil, reference_element, stencil
 
 __all__ = [
@@ -28,6 +29,8 @@ __all__ = [
     "dof_mask",
     "element_dofs",
     "m_orthonormalize",
+    "mass_sample",
+    "mass_sample_keys",
     "masked",
     "project",
     "reference_element",

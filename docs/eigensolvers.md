@@ -1,6 +1,6 @@
 # Eigensolvers
 
-`jaxmodal.eigen.reference_modes` (module `eigen/reference.py`) is the SciPy reference eigensolver on assembled matrices; `jaxmodal.linalg.count_below` (module `linalg/inertia.py`) is the exact dense inertia count (PR 8a). They are oracles for the matrix-free LOBPCG and for later PRs; both run on the host on the SciPy matrices from `assemble`. `jaxmodal.eigen.lobpcg` (module `eigen/lobpcg.py`, PRs 9a and 9b) is the matrix-free solver, with `jacobi` (defined in `precond/jacobi.py` since PR 10, re-exported here), `sigma_estimate`, chunked solves and the estimator `jaxmodal.memory.lobpcg_memory`; see [LOBPCG](#lobpcg). `jaxmodal.eigen.solve_modes` (PR 9c) is the public entry point on top of it; see [Public API](#public-api-solve_modes).
+`jaxmodal.eigen.reference_modes` (module `eigen/reference.py`) is the SciPy reference eigensolver on assembled matrices; `jaxmodal.linalg.count_below` (module `linalg/inertia.py`) is the exact dense inertia count (PR 8a). They are oracles for the matrix-free LOBPCG and for later PRs; both run on the host on the SciPy matrices from `assemble`. `jaxmodal.eigen.lobpcg` (module `eigen/lobpcg.py`, PRs 9a and 9b) is the matrix-free solver, with `jacobi` (defined in `precond/jacobi.py` since PR 10, re-exported here), `sigma_estimate`, chunked solves and the estimator `jaxmodal.memory.lobpcg_memory`; see [LOBPCG](#lobpcg). `jaxmodal.eigen.solve_modes` (PR 9c) is the public entry point on top of it; see [Public API](#public-api-solve_modes). `jaxmodal.eigen.count` (PR 14a) is the stochastic completeness count; see [Completeness count](#completeness-count).
 
 ```python
 from jaxmodal.eigen import reference_modes
@@ -431,9 +431,99 @@ All runs: isotropic $E = 3$, $\nu = 0.3$, $\rho = 2$ on the box $(1, 0.83, 0.67)
   - The roadmap's original 9 + 2 blocks were not reached in any measured variant. A donated buffer takes its output only after every read of it, so the new $X$ and $P$ coexist with the old ones and $W$.
   - With a real operator the operator workspace adds to it: 55.6 blocks at hex20 $8^3$ (8k DOF), 16.05 at 182k and 16.00 at 1.08M, so the step reaches its 16 blocks by about 180k DOF. See [Memory model](#memory-model).
 
+## Completeness count
+
+`jaxmodal.eigen.count` (module `eigen/counting.py`, PR 14a) estimates how many eigenvalues below a cut $\lambda_c$ are missing from a set of computed modes $W$. It is the building block of PR 14b's `verify` option of `solve_modes(..., band=(0, f_max))`; on its own it takes the modes and their eigenvalues:
+
+```python
+from jaxmodal.eigen import count
+
+est, info = count(op, free, W, lam, lam_last, lam_next, R=R, precond=P)
+info["passed"]  # verifiable and est < 0.5: no mode below lam_c is missing
+```
+
+### Estimator
+
+- **The map.** With $\sigma = \lambda_c = (\lambda_\text{last} + \lambda_\text{next})/2$ (the last mode below the cut and the first above it), $T = (K + \sigma M)^{-1}M$ on the free DOFs and $X = 2\sigma T - I$, a mode $\lambda \ge 0$ becomes an eigenvalue $x = (\sigma - \lambda)/(\sigma + \lambda) \in (-1, 1]$ of $X$. No spectral bound is needed ($\lambda = 0 \mapsto 1$, $\lambda \to \infty \mapsto -1$). The cut sits at $x = 0$, where $|dx/d\ln\lambda| = 1/2$ is largest, so the relative gap $g = (\lambda_\text{next} - \lambda_\text{last})/\lambda_c$ becomes $[-g/4, g/4]$.
+- **The estimate.** With $\Pi = I - WW^\top M - RR^\top M$ (computed modes and rigid modes, M-orthonormal) and probes $y_j = M_P^{-1}g_j$, $g_j \sim N(0, M)$ masked (so $\mathrm{Cov}(y) = M_{ff}^{-1}$),
+  $$s_j = \|\Pi\,q(T)\,\Pi y_j\|_M^2,\qquad E\,s_j = \sum_{i \notin W} q(\lambda_i)^2 .$$
+  The estimate is the mean of $s_j$ over the probes (default 50). One missing in-band mode ($q^2 \ge 0.95$) gives $s \gtrsim 0.95\,\chi^2_{50}/50$, and $P(\chi^2_{50}/50 < 0.5/0.95) = 0.23\%$: the count passes when the estimate is $< 0.5$.
+- **Probes** come from `mass_sample_keys` ([`operators.md`](operators.md#probe-sampling)); probe $j$ uses `fold_in(key(seed), j)`, so a probe does not depend on the block it runs in. $y = M_P^{-1}g$ is one Jacobi PCG on $M_P = mMm + (1 - m)$ to $\tau_c$ (exact for lumped mass). The constrained diagonal is 1 rather than the roadmap's scaled diagonal: $g$ vanishes there, so $y$ is the same.
+
+### Step polynomial and degree
+
+$q(x) = \sum_{k=0}^d \gamma_k T_k(x)$ is the Jackson-damped Chebyshev series of the indicator of $x \ge 0$ (Weiße et al. 2006): $\gamma_k = c_k g_k$ with $c_0 = 1/2$, $c_k = 2\sin(k\pi/2)/(k\pi)$ and
+$$g_k = \frac{(d - k + 1)\cos(k\alpha) + \sin(k\alpha)\cot\alpha}{d + 1},\qquad \alpha = \frac{\pi}{d + 1},$$
+so $0 \le q \le 1$. `count_degree` returns the smallest $d$ (doubling, then bisection) with
+
+- $q^2 \ge 0.95$ (`Q_MIN`) at the in-band edge $\lambda_c(1 - g/2)$, by the exact $O(d)$ cosine sum, and on a DCT grid of $8d$ points over the band (a guard against ripples);
+- a Jackson-tail bias $\int q^2\,dN \le 0.05$ (`BIAS`) over the modes above $\lambda_\text{top} = \max(\texttt{lam})$, with the Weyl model $N(\lambda) = n_\text{top}(\lambda/\lambda_\text{top})^{3/2}$ (`WEYL_A`), $n_\text{top}$ = the computed and rigid modes, up to $N = n_\text{free}$; evaluated by the trapezoid rule on a finer DCT grid of $64d$ points with both ends exact (second order: within 0.04% of `scipy.integrate.quad` where $dN/d\theta$ grows fastest; $8d$ points were 2.5% off).
+
+The exponent $3/2$ is fixed: it is the 3D value and an upper bound on fits to computed modes (bulky 1.1, plate 0.4–0.5, beam 0.3–1.3), stricter than a fitted exponent. The in-band condition sets the degree, $d \approx 23/g$:
+
+| g | 0.5 | 0.2 | 0.1 | 0.05 | 0.02 | 0.01 |
+|---|---|---|---|---|---|---|
+| d | 39 | 108 | 222 | 451 | 1136 | 2279 |
+
+The tail binds only at large gaps with thousands of modes below the cut ($g = 0.5$, $n_\text{top} = 5000$). Above `MAX_DEGREE` = $10^5$ ($23/g$ larger) the count is not run: `estimate` NaN, `verifiable` False, `degree` $= \lceil 23/g\rceil$.
+
+### Recurrence and solves
+
+- **Recurrence.** $w_0 = \Pi y$, $w_1 = Xw_0$, $w_k = 2Xw_{k-1} - w_{k-2}$, $u = \sum_k \gamma_k w_k$, one jitted `lax.while_loop` (`_recurrence`). $Xw = 2\sigma\,Tw - w$ with $Tw$ = PCG on `ap_operator(op, free, σ)` with the caller's SPD preconditioner (default `jacobi(op, free, σ)`; PR 14b passes the fp64 multigrid at $\lambda_c$). $\gamma$ is zero-padded to the next power of two and $d$ is a traced loop bound: one compile per block width and size class.
+- **Π streamed.** $W$ stays where the caller keeps it (the host copy `lobpcg` returns, fp64 or fp32): $\Pi$ moves it to the device in column chunks of 64 (upcast to fp64), at the start and the end of each block. No $n \times k$ device copy exists. $W$'s M-orthonormality is checked by a streamed sketch, $e = W^\top M(Wz) - z$ with 3 seeded Gaussian columns, $\|e\| \le 10^{-6}\|z\|$ ($10^{-4}$ for fp32 $W$).
+- **Tolerance.** $\tau_c = 0.01/(d\sqrt{n_\text{free}})$. Errors propagate linearly: $|\Delta s_j| \lesssim 2\sqrt{s_j}\,\varepsilon + \varepsilon^2$, with $\varepsilon$ the accumulated M-norm error ($\lesssim \tau d\sqrt n$ in the worst case). PCG stops on the 2-norm residual, so the worst case carries $\sqrt{\kappa(M)}$, $\kappa(D^{-1/2}MD^{-1/2}) \approx 145$ on hex20: $|\Delta s| \lesssim 0.02\sqrt{\kappa(M)\,s} \approx 0.24\sqrt s$. Measured errors are far smaller ([measured](#measured-cost-and-errors)).
+- **The flag.** A probe-y or recurrence PCG column that stagnates or reaches `maxit` unconverged makes the count unverifiable: the recurrence stops at once, the remaining blocks are skipped, `estimate` is NaN and `probes` is NaN for the stopped and skipped blocks. $\tau_c$ below the attainable PCG accuracy appears as the stagnation exit.
+
+`info` holds `probes` ($s_j$), `std`, `degree`, `gap`, `lam_c`, `tau`, `bias`, `block`, `steps` (recurrence steps run), `pcg_iterations` (mean per solve, max), `verifiable`, `passed` and `time` (sampling, recurrence, step, total; only total when the degree cap skips the count, with `tau` then None unless passed).
+
+| keyword | default | why |
+|---|---|---|
+| `n_probes` | 50 | $P(\text{miss}) = 0.23\%$ for one missing mode with $q^2 \ge 0.95$ |
+| `seed` | 0 | a fixed probe list: deterministic counts |
+| `tau` | $0.01/(d\sqrt{n_\text{free}})$ | the error model above; the measured errors stay about five orders of magnitude below the 0.5 threshold (roadmap bound, kept; see below) |
+| `degree` | the degree rule | the smallest $d$ meeting `Q_MIN` and `BIAS` |
+| `block` | `n_probes` | one block; PR 14b sets it from `probe_block` and the solve's memory estimate |
+| `maxit` | 1000 | per PCG solve; a solve needing more is flagged |
+| `precond` | `jacobi(op, free, λ_c)` | building-block default; the multigrid at $\lambda_c$ is PR 14b's |
+
+Kept internal on purpose: `Q_MIN` and `BIAS` (acceptance criteria), `WEYL_A` (the 3D bound) and `MAX_DEGREE` (the cost cap; a candidate PR 14b `count_options` key).
+
+### Memory model
+
+`memory.count_memory(op_memory, n_dof, b, *, voxel, precond_memory, n_rigid, chunk, w_dtype)` returns the storage (operator, preconditioner, $R$ and $MR$) and three phases, total = overhead + storage + max(phases):
+
+- **step:** the recurrence's `memory_analysis` temporaries, operator workspace $w$ + $8n(10.2\,b + c)$ with $c = 3$ (unstructured) or 1 (stencil); on the stencil also at least $2w + 8n(2.2\,b + 1)$ (the slab workspace appears twice while a slab covers most of the grid); plus the preconditioner's `count` term (`gmg_memory`: $8n(7.8\,b + 10)$; `amg_memory`: $8n(11.5\,b + 45)$) and $w_0$, $u$ (2 blocks). Upper envelopes of hex20 $12^3$–$28^3$ and voxel $16^3$–$64^3$, $b$ = 4–32; below about 20k hex20 DOF one chunk holds the whole mesh and the fixed buffers are larger.
+- **sampling:** the y PCG, $w + 8n \cdot 8b$; the element inputs are drawn inside the scatter loop, so sampling stays below the step.
+- **projector:** two chunks of $W$ in flight (asynchronous transfers; $n \cdot 64$ entries each, plus the fp64 upcast for fp32 $W$), three blocks (Y is donated) and the M apply.
+
+`memory.probe_block(budget, n_probes, op_memory, n_dof, **kw)` is the largest block with total ≤ budget (raises below one probe).
+
+### Measured cost and errors
+
+`benchmarks/counting_study.py` (results in `benchmarks/results/counting_study.json`; Apple M-series CPU, fp64, steel cantilever clamped at `xmin`, 200 modes from `solve_modes`):
+
+**Degree and cost against the cut.** Every cut between modes $k$ and $k + 1$ of the two 200-mode solves:
+
+| mesh | DOF | solve | $d\,g$ (median) | cuts not countable | $t_\text{step}$ ($b = 10$) | PCG / solve | predicted count / solve |
+|---|---|---|---|---|---|---|---|
+| hex20 $16^3$, AMG at $\lambda_c$ | 56k | 36.5 s | 22.8 | 53 of 199 | 0.70–0.82 s | 12–14 | median 250×, 3.6× at $g = 0.6$ |
+| voxel $32^3$, GMG at $\lambda_c$ | 108k | 59.8 s | 22.8 | 52 of 199 | 0.80–0.96 s | 12–14 | median 160×, 2.4× at $g = 0.6$ |
+
+Of the cuts not countable, 50 per mesh fall inside degenerate pairs (symmetric cross-section, $g \le 10^{-12}$); the other 3 (hex20) / 2 (voxel) are near-degenerate, $g = 1.3 \cdot 10^{-5}$–$1.7 \cdot 10^{-4}$, below the cap's $23/10^5$. 14b places cuts only between clusters and away from such gaps. The predicted count time is $\lceil 50/10 \rceil\,d\,t_\text{step}$. The degree rule $d \approx 23/g$ holds for $g \le 0.5$ ($d\,g$ = 22.8 median); at large gaps the map's curvature lowers it ($d\,g$ = 19 at $g = 0.6$, 16 at $g = 1.0$). The step time does not depend on the mode index (the multigrid at $\lambda_c$ needs 12–14 iterations from index 10 to 199). The typical relative gap between consecutive modes at index 10–200 is $g \approx 0.002$–$0.04$, i.e. $d \approx 500$–$11\,000$. Counting at an arbitrary cut therefore costs 10²–10³ solves; only cuts with $g \gtrsim 0.6$ cost a few solves (3.6× / 2.4× at $g = 0.6$, 1.8× / 1.2× at $g = 1.0$). So `verify=None` (PR 14b) will enable counting rarely, as the roadmap's cost rule intends.
+
+**Error propagation.** $|s_j(\tau) - s_j(\text{exact})|$ (max over 10 probes, AMG at $\lambda_c$ against exact dense solves) on the reference box and a graded box ($1.3^i$ spacing in $x$, upper half 100× denser; scaled $\kappa(M)$ 144 and 146, 1962 free DOF) for $d$ = 20, 100, 400 and $\tau = 10^{-4}$–$10^{-10}$:
+
+- with one mode missing ($s \approx 2$) the error is $0.4$–$1.0\,\tau s$, **independent of $d$**: no $O(d)$ or $O(d^2)$ growth (the Chebyshev recurrence is stable, and the solve errors do not accumulate in the tail);
+- with $W$ complete ($s \le 1.3 \cdot 10^{-4}$) it is below $10^{-8}$ at every $\tau$ ($\tau = 10^{-4}$ included);
+- AMG needs 7–18 iterations on the reference box and 19–43 on the graded one; every count is verifiable.
+
+At the default $\tau_c = 0.01/(d\sqrt{n_\text{free}})$ ($2.3 \times 10^{-6}$ at $d = 100$ here) the error is about $10^{-6}$, five orders of magnitude below the 0.5 threshold; the rule is far stricter than needed on these meshes, but it is the roadmap's bound ($\tau_c \lesssim 0.01/(d\sqrt{n})$) and is kept (open item: 14b may loosen it to save PCG iterations, about 1.8 (reference) and 3.9 (graded) iterations per decade, a third of the PCG iterations from $\tau_c$ to $10^{-4}$ on these meshes).
+
+**Floor.** The reference box's Jacobi count (degree 1) is verifiable down to $\tau = 10^{-14}$ and stagnates at $10^{-15}$ (294 iterations; `test_floor` with its own probes reaches $10^{-15}$); the stagnation exit, not `maxit`, flags it.
+
 ## Sizes
 
-- **Reference size** means $\le$ `MAX_DENSE` = 20k free DOF: dense `eigh`, $M^{-1}$ and `count_below` are affordable (PR 9's dense $r_M$ and inertia comparisons, PR 14's exact count).
+- **Reference size** means $\le$ `MAX_DENSE` = 20k free DOF: dense `eigh`, $M^{-1}$ and `count_below` are affordable (PR 9's dense $r_M$ and inertia comparisons, PR 14's exact count and the dense estimator of PR 14a's tests).
 - **The PR 8 `eigsh`** means `reference_modes` alone: about 100k free DOF on bulky meshes with `points`, about 35k without, further on plates (used by PRs 11, 13, 16, 18).
 
 ## Dense inertia count (`count_below`)
@@ -516,6 +606,18 @@ All runs: isotropic $E = 3$, $\nu = 0.3$, $\rho = 2$ on the box $(1, 0.83, 0.67)
 - hex27 with a rotated transversely isotropic phase on half the elements and HRZ lumped mass (the rotation changes λ observably);
 - every `lobpcg` option forwarded (two option sets, 3 chunks each);
 - bad BCs raise before any operator is built; a missing material, $\rho \le 0$ and an inverted hex20 raise in the builders before `lobpcg`.
+
+`tests/test_counting.py` (PR 14a; reference mesh hex20 $6\times5\times4$ with spacing $(1/6, 1/5, 1/4)$, $E = 3$, $\nu = 0.3$, $\rho = 2$, xmin clamped, 1962 free DOF, cut after mode 6 at $g = 0.41$, exact dense $A_P^{-1}$ as the preconditioner unless the test is about it):
+
+- **Factors and covariance:** $FF^\top = M_e$ from `element_matrices` to $10^{-12}$ (hex8, hex20, hex27, padded elements 0) and $BB^\top = m_e$ of `reference_element`; $SS^\top$ masked equals the masked SciPy M to $10^{-12}$ (hex20 with nodal masses, two phases and $s_M$; mixed hex8/hex20; lumped; voxel with nodal masses; voxel lumped); a probe's column depends only on its key.
+- **Polynomial:** the DCT grid against the direct sum; $-10^{-15} \le q \le 1 + 10^{-15}$; `count_degree` meets $q(x_l)^2 \ge 0.95$ at $d$ and fails at $d - 1$, $d g \in [19, 24]$ for $g$ = 0.5–0.01; a bias-limited case ($g = 0.5$, $n_\text{top} = 5000$); `tail_bias` against `scipy.integrate.quad` to $10^{-3}$; the `MAX_DEGREE` exit values.
+- **Expected value:** the mean of 2000 probes within 5 standard errors of $\sum_{i\notin W} q(\lambda_i)^2$ from `scipy.linalg.eigh`: $W$ complete, mode 3 left out (consistent, lumped, nodal masses), a free body with $R$ and with $R$ omitted (about 6 more).
+- **Against the dense estimator** on the same probes (hex20, lumped hex20, voxel $4^3$): $10^{-8}$ relative (mode left out) and $10^{-10}$ absolute ($W$ complete) at $\tau = 10^{-12}$; within the linear error bound at the default $\tau$.
+- **Detection:** one 5000-probe count in 100 sets of 50, mode 3 left out: ≥ 97 sets ≥ 0.5 (measured 100); $W$ complete (slow): all sets < 0.5.
+- **$\kappa \ge 10^7$:** hex20 cantilever $64\times1\times1$ ($\kappa = 2.2\cdot10^9$), AMG at $\lambda_c$ (9 PCG iterations per solve), default $\tau$: verifiable, estimate < 0.5. A thin plate is not used: AMG on its flat elements (aspect 8) needs 400–480 iterations per solve and stagnates at $\tau \le 10^{-10}$.
+- **Flags:** the floor measured in the test (`count(degree=1)` on the same probes, Jacobi; $10^{-15}$), then $\tau$ = floor/10 and $10^{-17}$: NaN, unverifiable, `probes` NaN, early stop; `maxit` in the recurrence (lumped, `steps` ≥ 1) and in the y solve (exact preconditioner, `steps` 0); a failed y solve (monkeypatched `_solve_y`: `steps` 0); the default τ rule.
+- **Memory:** the recurrence's temporaries within `count_memory`'s step (hex20 $12^3$ with Jacobi and AMG, voxel $16^3$ with Jacobi and GMG, $b$ = 4, 16, 32; Jacobi ≥ 0.6× tight; the multigrid increment over Jacobi 0.7 (AMG) / 0.45 (GMG) to 1.0 of its `count` term); the sampling kernels within the sampling phase, itself below the step; `probe_block` at the budget boundary; the process peak of a 3-block count at ≥ 2 GB within 20% with a host $W$ (voxel $60^3$, $b = 24$: 2.29 GB against 2.23 GB; slow, macOS).
+- **Blocks and compiles:** $b = 7$ and $b = 50$ give the same $s_j$; degrees 100 and 120 share one compile; an fp32 $W$ changes the estimate by ≤ $10^{-4}$ and not the verdict; input errors; the benchmark smoke run (slow).
 
 `tests/test_examples.py` runs each script in `examples/` in a subprocess; it must exit 0 and print its check line.
 
