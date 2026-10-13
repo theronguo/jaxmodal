@@ -119,7 +119,7 @@ info["count"]["passed"]  # when the count ran: no mode below the cut is missing
 
 `info["count"]` is `count`'s info (when it ran) plus `ran`, `reason`, `estimate`, `lam_c`, `gap`, `degree`, `block`, `predicted_steps`, `predicted_s`, `predicted_kind` ("bound", "calibrated" or "unknown"), `solve_s`, `build_s`, `calibration_s` (and `calibrated_step`, `calibrated_block`). PR 14a's measurements apply: a typical cut costs 10²–10³ solves, so `verify=None` counts mainly when the band edge sits in a large gap ($g \gtrsim 0.6$) or the band is small.
 
-No strategy selection yet: LOBPCG from 0 is the only band strategy, and a band whose basis outgrows the device fails with an out-of-memory error (PR 15 adds shift-invert slices and the choice). `solve_modes_memory(mesh, bcs, k, band=(0, f_max))` estimates a band solve expecting $k$ modes. `memory.band_probe_block(mesh, bcs, n_modes, n_probes, host_bytes, *, n_rigid, **options)` is the count's budget rule: the largest probe block within that estimate minus `host_bytes`, with the λ_c multigrid at fp64; it raises below one probe.
+No strategy selection yet: LOBPCG from 0 is the only band strategy, and a band whose basis outgrows the device fails with an out-of-memory error ([shift-invert slices](#shift-invert-slices) exist since PR 15a; PR 15c adds slicing and the choice). `solve_modes_memory(mesh, bcs, k, band=(0, f_max))` estimates a band solve expecting $k$ modes. `memory.band_probe_block(mesh, bcs, n_modes, n_probes, host_bytes, *, n_rigid, **options)` is the count's budget rule: the largest probe block within that estimate minus `host_bytes`, with the λ_c multigrid at fp64; it raises below one probe.
 
 ### Mac acceptance budgets
 
@@ -555,6 +555,89 @@ At the default $\tau_c = 0.01/(d\sqrt{n_\text{free}})$ ($2.3 \times 10^{-6}$ at 
 
 **Floor.** The reference box's Jacobi count (degree 1) is verifiable down to $\tau = 10^{-14}$ and stagnates at $10^{-15}$ (294 iterations; `test_floor` with its own probes reaches $10^{-15}$); the stagnation exit, not `maxit`, flags it.
 
+## Shift-invert slices
+
+`si_slice` (module `eigen/shift_invert.py`, PR 15a) computes every eigenpair in one slice $[\lambda_{lo}, \lambda_{hi}]$ ($\lambda = (2\pi f)^2$, $0 \le \lambda_{lo} < \lambda_{hi}$) by block shift-invert Lanczos. It is internal: PR 15b adds the band-pass count and restarts, and PR 15c the slicing, the strategy choice and `solve_modes(..., band=(f1, f2))`, which exposes its options.
+
+```python
+from jaxmodal.eigen.shift_invert import si_slice
+
+P = amg(op, free, sigma, mesh.points)  # SPD multigrid of K + sigma M (gmg / jacobi also)
+lam, V, info = si_slice(op, free, lo, hi, P, capacity=120, sigma=sigma, R=R, W=W)
+```
+
+### Algorithm
+
+- **Shift and operator.** σ defaults to the midpoint $(\lambda_{lo} + \lambda_{hi})/2$. One step applies $T = (K - \sigma M)^{-1}M$ on the free DOFs to the newest block $Q_j$ ($n \times b$, $b$ = `block` = 6): `minres(ap_operator(op, free, -sigma), m * M(Q_j), precond, tau, maxit)`. The constrained diagonal is `ap_operator`'s default at $-\sigma$, mean diag K + σ mean diag M over the free DOFs (positive). `precond` is SPD, built by the caller at $+\sigma$ (absolute-value preconditioning, Vecharynski–Knyazev 2013); a GMG with fp32 levels raises (its asymmetry floors MINRES near $10^{-6}$). σ is a traced leaf of the operator, so one compiled MINRES serves every σ.
+- **Inner tolerance.** MINRES stops on the explicit 2-norm residual $\|r_{in}\|_2 \le \tau\|Mq\|_2$ (τ = `tau` = $10^{-8}$) or stagnates (no new minimum over 5 checks, one every 10 iterations). $\tau_\text{eff}$ is $\tau$ raised to the running maximum of the final residuals of columns that stagnated or hit the cap (`info["tau_raised"]`). Inner cap: `maxit_inner` for the first step, then $\min(\texttt{maxit\_inner},\ 10\,n_1)$ with $n_1$ the first step's iterations (the depth of σ, which sets the iterations, is fixed within a slice); a capped column sets `info["inner_maxit"]`. $\tau_\text{eff} > 10^{-4}$ stops the slice: `converged` False, `reason` "inner solves failed".
+- **σ on an eigenvalue.** If the first block stagnates above $10^3\max(\tau, 10^{-10})$ (residuals of 0.1 and more were measured with σ on an eigenvalue), σ moves once by 1% of the slice width toward $\lambda_{hi}$ and the start repeats (`info["sigma_moved"]`; `info["sigma"]` is the value used; the inner cap is based on the repeated start). The $10^{-10}$ floor of the trigger sits above the fp64 MINRES floor (about $10^{-13}$), so a τ below the floor raises $\tau_\text{eff}$ instead of moving σ. A non-finite MINRES residual also stops the slice as "inner solves failed".
+- **Basis.** A preallocated fp64 device array holds $[W \mid Q_1 \mid Q_2 \mid \dots]$, the W part padded to the projector chunk $c = \max(b, \min(4b, 64))$, the Lanczos part `capacity` columns (required, rounded up to a multiple of $c$); the basis also stops within $b$ columns of the free space left by R and W ($n_\text{free} - n_R - n_W$; the Rayleigh–Ritz is then exact when $b$ divides it; below $2b$ it raises). Each new block is projected twice against R and every filled column (`lobpcg._deflate`, chunked fp64), M-orthonormalized by SVQB, and a column lost to rank loss is replaced by a fresh random vector (at most 3 refills). Then $G_{:,new} = Q_L^\top K Q_{new}$ over the Lanczos columns only: W stays out of the projection, so its modes never return.
+- **Ritz pairs.** $\mu, Y$ = `eigh` of the symmetric $G$ (host): the Rayleigh–Ritz of $(K, M)$ on the Lanczos basis. The inexact solves only shape the subspace; Ritz values come from exact K products, so they are not limited by τ (Ritz values of the projected inexact $T$ gave residuals above $10\tau\delta$ that grew with the basis).
+- **Thresholds.** Pair $i$ is accepted at $r_i \le t_i = \max(tol,\ 10\,\tau_\text{eff}\,\delta_i,\ \text{the round-off floor})$, $\delta_i = |\mu_i - \sigma|/|\mu_i|$, $r_i$ LOBPCG's λ-scaled residual and its floor term ([convergence](#convergence)). $r_{acc} = \max t_i$ over the in-slice pairs and the neighbours, never below the roadmap's $\max(tol, 10\,\tau_\text{eff}\,\delta_\max)$.
+- **Sets and stop rule.** `_slice_sets(mu, lo, hi, r)`: `inside` = the Ritz values in $[\lambda_{lo}(1 - 100r), \lambda_{hi}(1 + 100r)]$ extended over chains of relative gaps $< 100r$ (clusters stay whole); `below` / `above` = the nearest Ritz value beyond on each side (gap $\ge 100r$ by construction; no `below` at $\lambda_{lo} = 0$). `_slice_check` forms the sets with the previous step's $r_{acc}$ (tol at first), computes residuals of the candidates (inside plus neighbours) in chunks of $b$ candidates (the basis read in $c$-column chunks), and re-forms the sets with $r = r_{acc}$ while $r_{acc} > r$, computing residuals only for new candidates. `done` = every candidate converged, every needed neighbour present, and $r_{acc} \le r$. Spurious interior Ritz values carry large residuals and stay unconverged until the subspace resolves them.
+- **Capacity full.** When the next block does not fit before `done` (in the capacity or the free space), the slice returns its converged inside pairs with `converged` False, `capacity_full` True, `reason` "capacity full" and `edge_unreached` = "lo", "hi", "both" or None: the edges beyond which no converged Ritz value ever appeared ($\lambda_{lo}$ below $\lambda_1$ or $\lambda_{hi}$ above the spectrum, for 15c's [0, f₂] rule and above-spectrum error).
+- **Final stage.** V of the accepted pairs and converged neighbours is formed from the last $Y$ in chunks of $c$ columns, each copied to the host (`_form_v`); the basis is released, and the residuals and thresholds are recomputed from explicit K and M products of V (a pair above its $t_i$ there sets `converged` False).
+
+`lam` (ascending) and `V` (host fp64, $n \times k$, M-orthonormal, constrained rows 0) are the converged `inside` pairs: the slice's modes plus those within $100\,r_{acc}$ of an edge and whole clusters straddling one (15c's duplicate removal handles the overlap between slices). `info`: `converged`, `reason` (None, "capacity full", "inner solves failed"), `sigma`, `sigma_moved`, `move_iterations` (the discarded solve's iterations, or None), `steps`, `basis` (Lanczos columns used), `minres_iterations` (per step, max over columns), `inner_cap`, `inner_maxit`, `tau_eff`, `tau_raised`, `r_acc`, `delta_max`, `residuals`, `thresholds`, `neighbours` (`{"lo": (lam, v) or None, "hi": ...}`, for 15b's deflation and 15c's edges), `capacity_full`, `edge_unreached`, `time` (setup, minres, ortho, ritz).
+
+| keyword | default | why |
+|---|---|---|
+| `capacity` | required | the basis size; 15c sets it from `si_memory` and the budget |
+| `sigma` | midpoint | the smallest worst-case δ over the slice, so the fewest steps; the depth of σ, not δ, sets the per-step MINRES cost ([measured](#measured-minres-cost-floor-and-slices)) |
+| `R`, `W` | None | rigid modes; known modes to deflate (restarts, neighbouring slices; host array, M-orthonormality checked by a sketch) |
+| `tol` | $10^{-6}$ | as `lobpcg` |
+| `tau` | $10^{-8}$ | the roadmap's inner tolerance; $r_{acc} \approx 10\tau\delta$ |
+| `block` | 6 | as LOBPCG's minimum chunk |
+| `maxit_inner` | 20000 | a backstop; later steps are capped at 10× the first |
+| `seed` | 0 | the start block |
+| `verbose` | False | one progress line per step (basis, MINRES iterations and residual, τ_eff, accepted pairs, time) and on a σ move |
+
+### Slice memory model
+
+`memory.si_memory(op_memory, n_dof, capacity, n_modes, block=6, precond_memory=None, n_rigid=0, n_deflate=0)`: storage = operator + preconditioner + the basis $8n(\lceil n_\text{deflate}/c\rceil c + \text{capacity})$ + R and MR; host = $8n\,n_\text{deflate}$ (W) + $8\,\text{capacity}^2$ (G); phases at width $b$:
+
+- **minres:** operator workspace + 16.5 blocks + the preconditioner's `count` term: 14.5 blocks for the jitted MINRES loop (`memory_analysis` fit with Jacobi: 12.9–14.4 on hex20 $20^3$–$32^3$ and voxel $48^3$–$80^3$; up to 17.3 on small voxel grids of 15k–108k DOF, far below the GB range) plus 2 for the right-hand side and the solution; a multigrid adds 0.5–0.96 of its `count` term;
+- **reortho:** workspace + 4 blocks (the chunked projector);
+- **ritz:** workspace + 6 blocks + one $c$-column chunk of the basis (residuals at width $b$);
+- **end:** host V of `n_modes` + 2 columns and one device chunk, $8n(n_\text{modes} + 2 + c)$, while the basis is alive.
+
+total = overhead + storage + host + max(operator build, preconditioner build, phases), `lobpcg_memory`'s conservative form. `n_modes` is the expected slice count (15c estimates it); a slice returning more exceeds the end term.
+
+### Measured MINRES cost, floor and slices
+
+`benchmarks/shift_invert_study.py` (results in `benchmarks/results/shift_invert_study.json`; Apple M-series CPU, fp64, 6 random columns $b = Mq$, τ = $10^{-8}$; σ in the gap above mode $d$ (the depth) at fractions 0.5, $10^{-2}$, $10^{-4}$ of the gap; `--parts` runs one part).
+
+**MINRES iterations against depth and δ** (max over the 6 columns; floor: τ = $10^{-14}$ at the gap midpoint, the smallest explicit relative residual reached):
+
+| depth | hex20 $16^3$, AMG (56k DOF) | floor | voxel $32^3$, fp64 GMG (108k DOF) | floor |
+|---|---|---|---|---|
+| 6 | 40 / 50 / 60 | 3.3e-14 | 30 / 30 / 40 | 1.9e-14 |
+| 20 | 100 / 110 / 120 | 4.7e-14 | 80 / 80 / 90 | 2.5e-14 |
+| 55 | 330 / 350 / 380 | 1.3e-13 | 230 / 250 / 270 | 6.8e-14 |
+| 100 | 770 / 810 / 870 | 3.3e-13 | 510 / 540 / stag. 1e-2 | 4.5e-13 |
+| 201 | 1710 / 1840 / stag. 3e-2 | 4.3e-13 | 1100 / 1130 / 1210 | 2.6e-13 |
+| 503 | 4970 / 5260 / stag. 5e-2 | 9.1e-13 | | |
+| 1005 | stag. 7e-3 / 3e-2 / 3e-2 | 6.8e-3 | | |
+
+(the three entries: δ from about $10^{-2}$–$10^{-1}$, $10^{-3}$–$10^{-5}$, $10^{-5}$–$10^{-7}$; "stag. x": stagnated at residual x.)
+
+- **Depth sets the cost, δ barely does.** Iterations grow about linearly with the depth (8–10 per mode on hex20, 5–5.5 on voxel), and δ over four decades changes them by at most 20% from depth 20 on (40 to 60 at depth 6). 15c's cost model uses depth.
+- **The floor** rises from 3e-14 at depth 6 to 9e-13 at depth 503, far below τ = $10^{-8}$.
+- **σ very close to an eigenvalue** (δ below about $10^{-6}$) at depth ≥ 100 stagnates at $10^{-2}$; the slice handles it as σ on an eigenvalue (moves σ once). Its midpoint σ has δ near the gap's half width, far from this regime.
+- **Depth 1000 fails:** on hex20 $16^3$ even the midpoint σ stagnates at $7 \times 10^{-3}$ (14–17k iterations), so a slice there stops with "inner solves failed". 15c must not place σ that deep with this preconditioner ([open item](open_items.md)).
+- **Mesh size barely matters** (AMG and GMG are h-robust): at 1M DOF the iterations at depth 100 match $16^3$, and at 2M DOF those at depth 6 match $32^3$ (below).
+
+**Slices at the largest Mac sizes** (capacity 10 blocks, tol $10^{-6}$; edges at the coarse mesh's widest gaps):
+
+| mesh | depth | modes | steps | MINRES its per step | $r_{acc}$ | $\tau_\text{eff}$ | $\delta_\max$ | time |
+|---|---|---|---|---|---|---|---|---|
+| hex20 $44^3$, AMG (1.08M DOF) | about 100 | 5 | 9 | 750–790 | $10^{-6}$ | $10^{-8}$ | 0.010 | 1.7 h |
+| voxel $86^3$, fp64 GMG (1.98M DOF) | about 6 | 3 | 9 | 30–40 | $10^{-6}$ | $10^{-8}$ | 0.105 | 4.6 min |
+
+Both converged with σ unmoved and τ_eff = τ. About 1 s per MINRES iteration at these sizes, so a deep slice costs hours on the Mac: past about depth 100, LOBPCG from 0 is the cheaper way to reach a band on this machine. The roadmap's floors at 1M and 2M were dropped (the small grids measure them); a 1M floor solve stopped at $2.3 \times 10^{-3}$ after 980 iterations, flagged stagnated, while the slice's solves at the same σ reached $10^{-8}$ in 780 (open item: the stall rule at large sizes).
+
+**A full slice against LOBPCG from 0** (hex20 $12^3$, 25k DOF, modes 51–70 at tol $10^{-8}$, AMG): 22 steps, 138 Lanczos columns (6.6 per mode), 270–280 MINRES iterations per step, $r_{acc} = 1.7 \times 10^{-8}$, 132 s; it returns 21 modes, because mode 70 is a double eigenvalue straddling $\lambda_{hi}$ (kept whole), all within $6 \times 10^{-15}$ of the reference. `solve_modes(band=(0, f_hi))` gets the same band in 8.5 s (53 iterations): at depth 50 LOBPCG from 0 wins by 15×, as the roadmap's crossover expects.
+
 ## Sizes
 
 - **Reference size** means $\le$ `MAX_DENSE` = 20k free DOF: dense `eigh`, $M^{-1}$ and `count_below` are affordable (PR 9's dense $r_M$ and inertia comparisons, PR 14's exact count and the dense estimator of PR 14a's tests).
@@ -664,3 +747,15 @@ The discretization itself is verified in [`verification.md`](verification.md).
 - **Roadmap cases:** $f_{max}$ at half the first frequency (clamped and free: 0 modes, count verifiable < 0.5); a double eigenvalue (square beam) returns both copies, also with `chunk=1` ending between them, count < 0.5; W missing mode 1 (not next to the cut) gives an estimate ≥ 0.5.
 - **verify:** `False` builds and counts nothing and reports $n_\text{blocks}\,d$ and the bound ($c = 2$, 0.3 with a looser `tau`); `True` runs without calibration; `None` runs or skips on the patched calibration, skips without building when the bound exceeds the solve, and reports $t_\text{build} + t_\text{cal} + n_\text{blocks}(d\,t_\text{step} + t_\text{block})$; no warm iteration time → `predicted_s` None and calibration; `MAX_DEGREE` patched to 4 → `None` skips unbuilt, `True` returns NaN; a budget below one probe → `None` skips, `True` keeps the modes and warns; a failed solve (`maxit` 3, one chunk and chunks of 8) → `converged` False, no count, a warning under `True`. Slow: the calibrated prediction within $[0.5, 2]\times$ the actual count (hex20 $12^3$, 50 steps; one run: 14.66 against 14.65 s, the bound 2.20 s) and the bound below $d\,t_\text{step}$.
 - **Growth, edge, block, errors, memory:** chunk 8 from an expected count of 8 grows the basis and equals a full-capacity run to $10^{-12}$ (fp64 and fp32 basis); $f_{max}$ above the spectrum of a 54-DOF mesh raises; the chunk defaults; the probe block is the largest with `count_memory` ≤ the budget, which is the solve's estimate minus the host modes (and with AMG the kept aggregates), at the grown capacity after growth (also from no basis: chunk 8 above an expected count of 4), with the λ_c multigrid at fp64 after an fp32 V-cycle solve; the returned `V` is a copy, not a view of the solve's buffer; argument errors; `solve_modes_memory(band=...)` = `lobpcg_memory(..., band=True)`; slow (macOS): the measured peak of a band solve with `verify=True` within 20% of the estimate (voxel $48^3$, 2.62 GB estimated, 2.83 GB measured).
+
+
+`tests/test_shift_invert.py` (PR 15a; references `eigsh(sigma=0)` on the assembled free blocks or dense `eigh` below 5k free DOF, cached per mesh; `count_below` for slice counts; tol $10^{-10}$, τ $= 10^{-8}$; edges at gap midpoints moved out to relative gaps $\ge 10^{-2}$):
+
+- **Slices against the reference:** an interior slice around modes 31–45 on hex20 $8\times6\times5$ (AMG, `max_coarse` 100) and voxel $10^3$ (GMG) (slow); a slice from $\lambda = 0$ (no lower neighbour); a free hex8 box with R (above the rigid modes and from 0, where undeflated rigid Ritz values would land inside); the free voxel cube's double and triple clusters with exact multiplicity; an empty slice inside a gap (with `verbose`, one progress line per step). Each checks: converged in under half the capacity's steps, the dense count, λ to $\max(10^{-8}, 10\varepsilon\hat\lambda_\max/\lambda)$ (gap $\ge 10^{-2}$) or $10\,r_{acc}$, $\|V^\top MV - I\| \le 10^{-10}$, $r_i \le t_i \le r_{acc}$, a converged neighbour beyond each edge (true residual $\le r_{acc}$), and $r_{acc} = \max t_i$ over the pairs and neighbours (raised by the neighbours on the interior slices). An edge between the copies of a double eigenvalue: converged, both copies, λ to $10^{-8}$.
+- **σ on an eigenvalue** (slow): MINRES at mode 21 stagnates (pre-check); σ moves once, the inner cap comes from the repeated start, the slice matches; with the move patched to 0 the slice stops ("inner solves failed").
+- **τ_eff:** τ $= 10^{-16}$ raises τ_eff to the largest stagnated residual without moving σ and the slice converges; the inner caps (`maxit_inner` first, then 10× the first step); `maxit_inner` = 20 sets `inner_maxit` and stops the slice; inner solves stopped at $10^{-6}$ (reported stagnated) give $t_i = 10\,\tau_\text{eff}\,\delta_i$ with residuals above tol, all within $t_i$, λ within $10\,r_{acc}$; a NaN MINRES residual stops the slice; a final residual pass above the thresholds makes it unconverged.
+- **Sets and stop rule** on synthetic values: values reached only through the 100r margins or only through chains (past $\lambda_{hi}(1 + 100r)$), lo = 0, a missing neighbour, an empty slice; `_slice_check` with a fake residual function: unconverged pairs and neighbours, a neighbour merged in the same call (residuals asked only for new indices), a chain of re-forms.
+- **Capacity:** capacities 48 and 72 on a 12-mode slice (2 and 11 converged pairs returned, `edge_unreached` "both"); $\lambda_{hi}$ above the spectrum ("hi"); $\lambda_{lo} < \lambda_1/4$ ("lo"); a capacity above the 54 free DOFs stops at the full space (54 = 9 blocks) with the exact top modes.
+- **W, refill, errors:** half of a slice's modes as W: the other half returned, M-orthogonal to W; a start block with two equal columns is refilled; argument errors (edges, fp32 GMG, block, capacity, R and W shapes, a non-M-orthonormal W, a free space below 2 blocks).
+- **Memory:** `si_memory`'s composition (storage, host, end phase, total); process peaks within 20% at estimates ≥ 2 GB (slow, macOS): MINRES-dominated (voxel $80^3$, capacity 4 blocks; 3.10 GB measured against 2.73 GB), basis-dominated (voxel $48^3$, capacity 744; 3.00 against 2.78 GB), and `_form_v` alone against the basis plus the end term.
+- The benchmark smoke run (slow).

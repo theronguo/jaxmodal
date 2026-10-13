@@ -132,6 +132,18 @@ The measured setup peak per corner DOF grows about 0.65 kB per decade of $n_c$ (
 - **Cost driver:** the depth of σ in the spectrum, not δ, sets the MINRES iterations (measured); 15c fits its cost model on depth (roadmap note on the two cost-model bullets).
 - **Largest-size benchmark cut (user: "Run something more reasonable", 2026-10-13).** The plan's 1M and 2M τ = 1e-14 floor solves are dropped (the floor comes from the $16^3$ / $32^3$ grids), and the 2M voxel slice sits near mode 6, not 100. The 1M hex20 slice near mode 100 was measured before the cut (converged, 9 steps of about 780 MINRES iterations, 1.7 h). `shift_invert_study.py --parts` runs one part at a time and every slice prints a progress line per step.
 
+### Shift-invert at depth 1000 (PR 15a → PR 15c)
+
+With σ near mode 1000 (hex20 $16^3$, AMG), MINRES on $K - \sigma M$ stagnates near $10^{-2}$ even with σ mid-gap (14–17k iterations), so `si_slice` stops with "inner solves failed" (it reports, never returns wrong modes). Iterations grow about linearly with the depth up to there (4970–5260 at depth 500). This matters for the 10M GPU goal, where LOBPCG's basis runs out near modes 700–1000 and the roadmap sends those bands to shift-invert. 15c must keep σ above the failing depth or strengthen the inner solve: deflate the converged modes below σ from MINRES, a stronger (e.g. higher-degree or σ-aware) multigrid, or a memory-lean LOBPCG fallback. Not decided; may need the user's input if no option meets the roadmap's 10M band criteria.
+
+### MINRES stall rule at large sizes (PR 15a → PR 15b/15c)
+
+A 6-column τ = $10^{-14}$ solve at 1M hex20 DOF near mode 100 stopped at $2.3 \times 10^{-3}$ after 980 iterations, flagged stagnated, while the slice's τ = $10^{-8}$ solves at the same σ reached $10^{-8}$ in 780. If the stall rule (5 checks, 10 iterations apart, without a new minimum) fires on a plateau of the explicit 2-norm residual, a large slice would raise τ_eff wrongly and could fail at $\tau_\text{eff} > 10^{-4}$. First check (15b): record the residual history of that solve (`minres` with a longer patience) to see whether it resumes past the plateau.
+
+### σ-move retries on failing slices (PR 15a → PR 15c)
+
+A slice whose first solve stagnates moves σ once and repeats the solve; when the failure is depth-driven (above), the retry costs a second full solve before the slice stops. 15c's strategy should not place slices where the cost model predicts stagnation, so the retry only handles σ on an eigenvalue.
+
 ### GMG restriction on the GPU (PR 11 deferred GPU checks)
 
 Restriction is the transpose of gathers, i.e. scatter-adds (6× the prolongation time on CPU at $87^3$). Default: keep; listed in the deferred GPU checks with "rewrite as gathers if it dominates".
