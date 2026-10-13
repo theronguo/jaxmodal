@@ -94,7 +94,7 @@ def count_degree(gap, lam_top, n_top, n_free):
     when no d <= MAX_DEGREE passes (at once when D_RULE / gap > MAX_DEGREE)."""
     if D_RULE / gap > MAX_DEGREE:
         return None, np.nan
-    hi = 2
+    hi = 2  # d = 1 always fails: its Jackson factor g_1 = 0, so q = 1/2
     while not (ok := _passes(hi, gap, lam_top, n_top, n_free))[0]:
         hi *= 2
         if hi > 2 * MAX_DEGREE:
