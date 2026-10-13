@@ -1,6 +1,6 @@
 # PR 14a plan: the stochastic eigenvalue count
 
-Status: draft, revised after plan review rounds 1 and 2 (log at the end); round 3 pending.
+Status: draft, revised after plan review rounds 1–3 (log at the end); round 4 pending.
 
 PR 14 (ROADMAP: "Eigenvalue counting and [0, f_max]") is split:
 - **14a (this plan):** the completeness count as a building block: probes from element-wise factors of $M_e$, the Chebyshev–Jackson step polynomial and its degree rule, the deflated estimator with preconditioned inner PCG solves, the solve tolerance $\tau_c$ and the unverifiable flag, the probe-block memory model, and the counting benchmark (degree, time and error propagation against mode index).
@@ -110,7 +110,7 @@ count(op, free, W, lam, lam_last, lam_next, *, R=None, precond=None, n_probes=50
 
 **Checks:**
 - $0 \le$ `lam_last` < `lam_next` ≤ max(lam), since the tail model needs every mode up to `lam_next` in W;
-- W shape, lam length, and M-orthonormality by a streamed sketch (two passes over W, not the $O((k/c)^2)$ Gram): $v = Wz$ with $z \sim N(0, I_k)$ of 3 columns, $e = W^\top M v - z$, $\|e\| \le \text{tol}\,\|z\|$ with tol $10^{-6}$ for fp64 W and $10^{-4}$ for fp32 W;
+- W shape, lam length, and M-orthonormality by a streamed sketch (two passes over W, not the $O((k/c)^2)$ Gram): $v = Wz$ with $z \sim N(0, I_k)$ of 3 columns from a key derived from `seed`, $e = W^\top M v - z$, $\|e\| \le \text{tol}\,\|z\|$ with tol $10^{-6}$ for fp64 W and $10^{-4}$ for fp32 W;
 - `n_probes`, `block`, `maxit` pass `is_count`;
 - τ > 0.
 
@@ -132,7 +132,7 @@ It is applied at the start and end of each block. Only one chunk of W is on the 
 4. $u \leftarrow \Pi u$, $s_j = u_j^\top M u_j$.
 
 Returns `estimate` = mean $s_j$ and `info`:
-- `probes` ($s_j$), `std`;
+- `probes` ($s_j$; NaN for columns of a stopped or skipped block), `std`;
 - `degree`, `gap`, `lam_c`, `tau`, `bias`, `block`;
 - `pcg_iterations` (mean per solve, max), `steps` (recurrence steps run);
 - `verifiable`, `passed` (= verifiable and estimate < 0.5);
@@ -173,7 +173,7 @@ Returns `estimate` = mean $s_j$ and `info`:
 
 ## Tests (`tests/test_counting.py`)
 
-Fast tests use the reference mesh hex20 $6\times5\times4$ (n = 1962). The cut is in a large gap (g ≥ 0.2, d ≈ 100), and the precond is an exact dense Cholesky pytree (PCG in 1–2 iterations), unless the test is about the preconditioner.
+Fast tests use the reference mesh hex20 $6\times5\times4$ (n = 1962). The cut is after mode 6 (g = 0.41, d ≈ 56), and the precond is an exact dense Cholesky pytree (PCG in 1–2 iterations), unless the test is about the preconditioner.
 
 1. **Element factors (ROADMAP):** $(\sqrt{w_e}B_e \otimes I_3)(\cdot)^\top = M_e$ from `element_matrices` to $10^{-12}$ (hex8, hex20, hex27; padded elements give 0). Voxel: the same against `reference_element`'s $m_e$ times $w_e$.
 2. **Probe covariance (ROADMAP):** $S S^\top$ masked equals the masked SciPy M to $10^{-12}$, with S = `mass_sample` on unit `xi` columns. Cases:
@@ -188,30 +188,32 @@ Fast tests use the reference mesh hex20 $6\times5\times4$ (n = 1962). The cut is
    - `count_degree` meets $q(x_l)^2 \ge 0.95$ (direct sum) at d and fails at d − 1;
    - $d \cdot g \in [19, 24]$ at the poly.py inputs ($n_\text{free} = 10^6$, $n_\text{top} = 50$);
    - a case where the bias sets d (g = 0.5, $n_\text{top} = 5000$): d > the in-band d, and the bias ≤ 0.05;
-   - $23/g >$ `MAX_DEGREE` gives `verifiable` False with no recurrence.
-4. **Expected value against the exact eigen-sum:** 2000 probes (one `count` call, `n_probes = 2000`, `block = 500`), mean $s_j$ against $\sum_{i \notin W} q(\lambda_i)^2$ from `scipy.linalg.eigh(K, M)` and a direct cosine-sum q, within 5 standard errors. Three cases:
+   - $23/g >$ `MAX_DEGREE`: estimate NaN, `verifiable` and `passed` False, `degree` = $\lceil 23/g\rceil$, `steps` 0.
+4. **Expected value against the exact eigen-sum:** 2000 probes (one `count` call, `n_probes = 2000`, `block = 500`), mean $s_j$ against $\sum_{i \notin W} q(\lambda_i)^2$ from `scipy.linalg.eigh(K, M)` and a direct cosine-sum q, within 5 standard errors. Cases:
    - W complete;
    - mode 3 left out (sum ≈ 1);
    - a free body with R (k = 6), plus R omitted from the call (sum ≈ 6);
    - lumped mass, and consistent mass with nodal masses, mode 3 left out (the diagonal y path and the nodal term through `count`).
 5. **Estimator against dense, same probes:** the dense NumPy estimator with exact T. τ = 1e-12: mode left out, relative $10^{-8}$; W complete, absolute $10^{-10}$. Default τ: within the linear model's bound. Cases: hex20, lumped hex20, and a voxel box ($4^3$).
-6. **Detection (ROADMAP):** mode 3 (not next to the cut) left out of W. One `count` with `n_probes = 5000`, `block = 500`, `info["probes"]` grouped into 100 consecutive sets of 50: ≥ 97 sets have mean ≥ 0.5. Deterministic; the count is reported. W complete: all 100 sets < 0.5 (Jackson bias included).
-7. **κ ≥ 10⁷ (ROADMAP):** thin hex20 plate ($12 \times 12 \times 1$, side/thickness 100, clamped edge, n ≈ 5k) with κ = λ_max/λ_1 ≥ 10⁷ asserted (`eigsh(which="LA")`), cut in a gap with g ≥ 0.2. AMG at λ_c, default τ; `verifiable` True asserted; W complete gives estimate < 0.5.
+6. **Detection (ROADMAP):** mode 3 (not next to the cut) left out of W. One `count` with `n_probes = 5000`, `block = 500`, `info["probes"]` grouped into 100 consecutive sets of 50: ≥ 97 sets have mean ≥ 0.5. Deterministic; the count is reported. W complete (slow): all 100 sets < 0.5 (Jackson bias included).
+7. **κ ≥ 10⁷ (ROADMAP):** slender hex20 cantilever ($64 \times 1 \times 1$, element side 1/64, xmin clamped, n = 2304) with κ = λ_max/λ_1 ≥ 10⁷ asserted (`eigsh(which="LA")`; measured 2.2e9). W from `scipy.linalg.eigh(K, M)` on the free DOFs, cut in the gap after mode 4 (g ≈ 1.55, d ≈ 15, τ_c ≈ 1.4e-5). AMG at λ_c (measured 10–11 PCG iterations per solve), default τ; `verifiable` True asserted; W complete gives estimate < 0.5.
+   - A thin plate is not used: AMG on its flat elements (aspect ≈ 8) needs 400–480 iterations per solve and stagnates at τ ≤ 1e-10 (reviewer probes; the known flat-element open item).
 8. **Floor and flags (ROADMAP):**
-   - The floor measured inside the test: direct `_pcg` runs with the test's preconditioner (Jacobi at λ_c) at τ = 1e-12, 1e-13, …; the smallest converging τ is the floor. τ at 1/10 of it, and τ = 1e-17: `verifiable` False, `passed` False, estimate NaN, `steps` < d (early stop).
+   - The floor measured inside the test on the count's own right-hand sides: `count(..., degree=1)` (Jacobi at λ_c, same seed) at τ = 1e-10, 1e-11, … downward; the floor is the smallest τ with `verifiable` True (converged, not stagnated). At τ = floor/10 the first recurrence step sees the same w₀ and fails deterministically. That case, and τ = 1e-17: `verifiable` False, `passed` False, estimate NaN, `steps` < d (early stop).
    - `maxit=2` at the default τ with Jacobi: `verifiable` False.
+   - The y solve forced to fail (monkeypatched to return non-converged, the recurrence uses the real PCG): `verifiable` False, `steps` 0.
    - A normal run: `verifiable` True.
 9. **Memory:**
    - (a) `memory_analysis` of `_recurrence` at width b is ≤ `count_memory`'s step on hex20 $8^3$ and voxel $16^3$ with Jacobi, GMG and AMG, and the fit is tight (≥ 0.6×) at one size.
    - (b) The sampling phase ≤ the step phase.
    - (c) `probe_block` gives the largest b with total(b) ≤ budget < total(b + 1), capped at n_probes, and raises below b = 1.
    - (d) ROADMAP, slow: at a size where `count_memory` ≥ 2 GB (`degree` = 3 steps), the measured process peak is within 20%, and the peak holds no n × k copy of W.
-10. **Block independence:** b = 7 and b = 50 give the same $s_j$ to $10^{-10}$ at τ = 1e-12.
+10. **Block independence and compiles:** b = 7 and b = 50 give the same $s_j$ to $10^{-10}$ at τ = 1e-12. `degree=100` then `degree=120` (one size class) compile `_recurrence` once (jit cache size).
 11. **fp32 W:** the estimate is within $10^{-4}$ absolute of the fp64-W estimate, and `passed` agrees.
 12. **Benchmark smoke (slow):** `counting_study.run(small=True)`.
 13. **Errors:**
     - lam_next ≤ lam_last, lam_last < 0, lam_next > max(lam);
-    - W shape, lam length, non-M-orthonormal W;
+    - W shape, lam length, non-M-orthonormal W (one column scaled by 1.01);
     - n_probes = 0, True or 2.5;
     - τ ≤ 0.
 
@@ -275,3 +277,10 @@ Fast tests use the reference mesh hex20 $6\times5\times4$ (n = 1962). The cut is
   - `MAX_DEGREE` exit values (simplicity N).
   - Lumped and nodal paths through `count` in test 4, voxel in test 5, test 8 measures its own floor (tests N).
   - ROADMAP Cholesky wording, internal constants listed, the probe grouping logged, cost units (docs N).
+- **Round 3** (simplicity, tests, performance SATISFIED; docs NOT SATISFIED; correctness NOT SATISFIED). Changes:
+  - Test 7: slender hex20 cantilever 64×1×1 (κ 2.2e9, AMG 10–11 iterations), W from dense `eigh` (docs S1, correctness S1: AMG struggles on the aspect-8 plate).
+  - Test 8's floor measured by `count(degree=1)` on the same probes, so floor/10 fails deterministically (correctness N1).
+  - Fast-test cut after mode 6 (d ≈ 56), test 6's W-complete half slow (perf N1).
+  - `probes` NaN for stopped blocks (simplicity N2).
+  - Seeded sketch, 1.01 perturbation, all `MAX_DEGREE` exit values, a y-solve-only failure test, the one-compile check (tests N1–N4).
+  - Not taken: a single in-band criterion (simplicity N1, optional); dropping τ = 1e-17 in test 8 (simplicity N3, optional; both cases kept).
