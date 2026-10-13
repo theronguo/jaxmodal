@@ -1,6 +1,7 @@
 """Block shift-invert Lanczos for the eigenvalues of one slice [lo, hi] of the masked pencil
 (K_m, M_m): inner MINRES on K - sigma M with an SPD preconditioner of K + sigma M, full
-M-reorthogonalization, Rayleigh-Ritz on (K, M). See docs/eigensolvers.md#shift-invert-slices."""
+M-reorthogonalization, Rayleigh-Ritz on (K, M); si_checked adds the completeness count and the
+restarts. See docs/eigensolvers.md#shift-invert-slices."""
 
 import functools
 import time
@@ -12,7 +13,7 @@ import numpy as np
 from ..linalg.krylov import minres
 from ..operators import ap_operator
 from ..operators.common import check_x64
-from .counting import _check_ortho
+from .counting import _check_ortho, band_count, count
 from .lobpcg import _K, _M, C_FLOOR, _deflate, _insert, _norms, _resid, _svqb_t
 
 SIGMA_MOVE = 0.01  # sigma moves by this fraction of the slice width when it hits an eigenvalue
@@ -21,6 +22,7 @@ TAU_MIN = 1e-10  # above the fp64 MINRES floor (2e-14 - 1e-12): a tiny tau does 
 INNER_GROWTH = 10  # later inner solves are capped at this multiple of the first one
 TAU_FAIL = 1e-4  # tau_eff above this ends the slice ("inner solves failed")
 REFILLS = 3  # random refills of dropped columns before a breakdown error
+RESTARTS = 2  # a slice whose count stays >= 0.5 is returned flagged after this many restarts
 
 
 def _chunk(b):
@@ -358,3 +360,112 @@ def si_slice(
         time=times,
     )
     return lam_out, V, info
+
+
+def _beyond(a, b, nb, W, lam_W):
+    """[(lam, v)] of the nearest known out-of-band pair below a and above b: si_slice's
+    neighbours nb or the caller's pairs (W, lam_W), whichever is nearer; None for a side with
+    neither."""
+    out = []
+    for side, sel, pick in (("lo", lam_W < a, np.argmax), ("hi", lam_W > b, np.argmin)):
+        cand = [nb[side]] if nb[side] is not None else []
+        if sel.any():
+            i = np.flatnonzero(sel)[pick(lam_W[sel])]
+            cand.append((float(lam_W[i]), W[:, i]))
+        out.append(min(cand, key=lambda p: abs(p[0] - (a if side == "lo" else b)), default=None))
+    return out
+
+
+def si_checked(
+    op, free, lo, hi, precond, *, capacity, W=None, lam_W=None, count_precond=None,
+    count_options=None, seed=0, verbose=False, **slice_options,
+):  # fmt: skip
+    """si_slice on [lo, hi], then the completeness count of the slice, with restarts: a
+    verifiable count >= 0.5 flags the slice and reruns si_slice with a fresh random block (seed
+    + j), deflated by the in-band modes found so far (within the first run's device memory: the
+    capacity drops by the extra deflation columns), and counts again with fresh probes; after
+    RESTARTS restarts it is returned flagged. lo > 0: band_count with the nearest out-of-band
+    pair on each side (si_slice's neighbours or the caller's W, whichever is nearer); lo = 0:
+    count, the step polynomial, below the nearest pair above. W (host), lam_W: the caller's
+    known M-orthonormal modes (e.g. adjacent slices'), deflated by si_slice. count_precond: the
+    count's preconditioner (default precond, the slice's). count_options: count's options
+    (verbose defaults to verbose). slice_options: si_slice's.
+
+    Returns lam, V (all in-band modes found, ascending) and info: the last run's si_slice info
+    (r_acc, tau_eff the max over runs; residuals, thresholds of the returned pairs) plus runs
+    (each run's info) and count: the last count's info plus ran, reason, estimate, estimates,
+    flagged (some verifiable count >= 0.5) and restarts. A failed check is flagged and not
+    passed."""
+    n = op.n_dof
+    if (W is None) != (lam_W is None):
+        raise ValueError("W and lam_W must be given together")
+    W = np.zeros((n, 0)) if W is None else np.asarray(W, np.float64)
+    lam_W = np.zeros(0) if lam_W is None else np.asarray(lam_W, float)
+    if W.ndim != 2 or W.shape != (n, len(lam_W)):
+        raise ValueError(f"W must have shape ({n}, {len(lam_W)}) (lam_W), got {W.shape}")
+    opts = {"verbose": verbose, **(count_options or {})}
+    c0 = opts.pop("seed", 0)
+    b = slice_options.get("block", 6)
+    c = _chunk(b)
+    lam_f, V_f, res, thr = np.zeros(0), np.zeros((n, 0)), np.zeros(0), np.zeros(0)
+    runs, estimates, ci, est, reason, flagged = [], [], {}, np.nan, None, False
+    for j in range(RESTARTS + 1):
+        cap = capacity  # the restart's Q (n, L0 + capacity) within the first run's
+        cap -= -(-(len(lam_W) + len(lam_f)) // c) * c - -(-len(lam_W) // c) * c
+        if cap < 2 * b:
+            reason = "restart capacity"
+            break
+        Wj = np.hstack([W, V_f]) if len(lam_f) else W
+        lam, V, info = si_slice(op, free, lo, hi, precond, capacity=cap,
+                                W=Wj if Wj.shape[1] else None, seed=seed + j, verbose=verbose,
+                                **slice_options)  # fmt: skip
+        runs.append(info)
+        lam_f, V_f = np.r_[lam_f, lam], np.hstack([V_f, V])
+        res, thr = np.r_[res, info["residuals"]], np.r_[thr, info["thresholds"]]
+        order = np.argsort(lam_f, kind="stable")
+        lam_f, V_f, res, thr = lam_f[order], V_f[:, order], res[order], thr[order]
+        if not info["converged"]:
+            reason = "slice not converged"
+            break
+        a = lam_f.min() if len(lam_f) else lo
+        e = lam_f.max() if len(lam_f) else hi
+        nb_lo, nb_hi = _beyond(a, e, info["neighbours"], W, lam_W)
+        if nb_hi is None or (lo > 0 and nb_lo is None):
+            raise RuntimeError("si_checked: no converged neighbour to place a counting edge")
+        P = precond if count_precond is None else count_precond
+        kw = dict(R=slice_options.get("R"), precond=P, seed=c0 + j, **opts)
+        if lo > 0:
+            out = [nb_lo, nb_hi]
+            est, ci = band_count(op, free, V_f, lam_f, lo, hi,
+                                 np.stack([p[1] for p in out], 1),
+                                 np.array([p[0] for p in out]), **kw)  # fmt: skip
+        else:
+            est, ci = count(op, free, (V_f, nb_hi[1][:, None]), np.r_[lam_f, nb_hi[0]], e,
+                            nb_hi[0], **kw)  # fmt: skip
+        estimates.append(est)
+        miss = ci["verifiable"] and est >= 0.5
+        flagged |= miss
+        action = ("pass" if ci["passed"] else "unverifiable" if not ci["verifiable"]
+                  else f"restart {j + 1}" if j < RESTARTS else "flagged")  # fmt: skip
+        if verbose:
+            print(f"si_checked: count {est:.3g} (degree {ci['degree']}, {ci['steps']} steps,"
+                  f" {ci['time']['total']:.0f} s): {action}", flush=True)  # fmt: skip
+        if not miss:
+            if not ci["verifiable"]:
+                reason = ("degree above MAX_DEGREE: the gap is too small to count"
+                          if ci["steps"] == 0 and np.isnan(ci["bias"]) else
+                          "count unverifiable: an inner solve failed")  # fmt: skip
+            break
+        if j == RESTARTS:
+            reason = f"count >= 0.5 after {RESTARTS} restarts"
+    out = dict(runs[-1]) if runs else {}
+    out.update(
+        r_acc=max((r["r_acc"] for r in runs), default=np.nan),
+        tau_eff=max((r["tau_eff"] for r in runs), default=np.nan),
+        residuals=res,
+        thresholds=thr,
+        runs=runs,
+        count={**ci, "ran": bool(ci), "reason": reason, "estimate": est,
+               "estimates": estimates, "flagged": flagged, "restarts": len(runs) - 1},
+    )  # fmt: skip
+    return lam_f, V_f, out

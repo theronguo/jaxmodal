@@ -1,5 +1,5 @@
-"""Stochastic completeness count: the deflated estimator with a Chebyshev-Jackson step
-polynomial of T = (K + lam_c M)^-1 M and preconditioned inner PCG solves. See
+"""Stochastic completeness count: the deflated estimator with a Chebyshev-Jackson step (or
+band-pass) polynomial of T = (K + lam_c M)^-1 M and preconditioned inner PCG solves. See
 docs/eigensolvers.md#completeness-count."""
 
 import functools
@@ -28,12 +28,14 @@ D_RULE = 23.0  # d ~ D_RULE / g (measured)
 CHUNK = 64  # projector chunk width (columns of W per host-to-device transfer)
 SKETCH = 3  # columns of the M-orthonormality sketch
 ORTHO_TOL = {"float64": 1e-6, "float32": 1e-4}
+PRINT_S = 10.0  # verbose: at most one progress line per PRINT_S seconds
 
 
-def jackson_step(d):
-    """(d + 1,) Chebyshev coefficients of the Jackson-damped indicator of x >= 0 on [-1, 1]."""
+def jackson_step(d, x0=0.0):
+    """(d + 1,) Chebyshev coefficients of the Jackson-damped indicator of x >= x0 on [-1, 1]."""
+    t = np.arccos(x0)
     k = np.arange(1, d + 1)
-    c = np.r_[0.5, 2 * np.sin(k * np.pi / 2) / (k * np.pi)]
+    c = np.r_[t / np.pi, 2 * np.sin(k * t) / (k * np.pi)]
     a = np.pi / (d + 1)
     j = np.arange(d + 1)
     g = ((d - j + 1) * np.cos(j * a) + np.sin(j * a) / np.tan(a)) / (d + 1)
@@ -58,51 +60,81 @@ def _grid(gamma, factor=8):
     return np.pi * (np.arange(n) + 0.5) / n, dct(x, type=3)
 
 
-def tail_bias(gamma, gap, lam_top, n_top, n_free):
-    """Jackson-tail bias int q^2 dN over (lam_top, lam_max] with N(lam) = n_top (lam /
-    lam_top)^a, N(lam_max) = n_free; lam_top in units of lam_c. Trapezoid on a 64 d grid
-    (second order: 0.04% against quad where dN/dtheta grows fastest; 8 d gives 2.5%)."""
-    if n_top >= n_free:
-        return 0.0
-    lam_max = lam_top * (n_free / n_top) ** (1 / WEYL_A)
-    t0, t1 = _theta(lam_top), _theta(lam_max)
+def _bias(gamma, l0, l1, n_ref, lam_ref):
+    """int q^2 dN over [l0, l1] (units of lam_c) with N(lam) = n_ref (lam / lam_ref)^a.
+    Trapezoid on a 64 d grid (second order: 0.04% against quad where dN/dtheta grows fastest;
+    8 d gives 2.5%)."""
+    t0, t1 = _theta(l0), _theta(l1)
     th, q = _grid(gamma, 64)
     sel = (th > t0) & (th < t1)
-    th = np.r_[t0, th[sel], t1]  # both ends exact: dN/dtheta peaks at t1
+    th = np.r_[t0, th[sel], t1]  # both ends exact: dN/dtheta peaks at the top
     q = np.r_[step_value(gamma, t0), q[sel], step_value(gamma, t1)]
     lam = np.tan(th / 2) ** 2
     dlam = np.tan(th / 2) / np.cos(th / 2) ** 2  # d lam / d theta
-    dN = n_top * WEYL_A * lam ** (WEYL_A - 1) / lam_top**WEYL_A * dlam
+    dN = n_ref * WEYL_A * lam ** (WEYL_A - 1) / lam_ref**WEYL_A * dlam
     return float(np.trapezoid(q**2 * dN, th))
 
 
-def _passes(d, gap, lam_top, n_top, n_free):
+def tail_bias(gamma, gap, lam_top, n_top, n_free):
+    """Jackson-tail bias int q^2 dN over (lam_top, lam_max] with N(lam) = n_top (lam /
+    lam_top)^a, N(lam_max) = n_free; lam_top in units of lam_c."""
+    if n_top >= n_free:
+        return 0.0
+    lam_max = lam_top * (n_free / n_top) ** (1 / WEYL_A)
+    return _bias(gamma, lam_top, lam_max, n_top, lam_top)
+
+
+def _gamma(d, lower):
+    """The step coefficients, or the band-pass ones for lower = (lam_in, lam_bot)."""
     gamma = jackson_step(d)
-    tl = _theta(1 - gap / 2)
-    if step_value(gamma, tl)[0] ** 2 < Q_MIN:
+    if lower is None:
+        return gamma
+    a = sum(lower) / 2  # c_lo / lam_c
+    return gamma - jackson_step(d, (1 - a) / (1 + a))
+
+
+def _g_eff(gap, lower):
+    """The governing gap: the smaller edge gap in theta-resolution terms (lower edge: the
+    relative gap g_lo times 2 sqrt(a) / (1 + a), a = c_lo / lam_c)."""
+    if lower is None:
+        return gap
+    a = sum(lower) / 2
+    return min(gap, (lower[0] - lower[1]) / a * 2 * np.sqrt(a) / (1 + a))
+
+
+def _passes(d, gap, lam_top, n_top, n_free, lower):
+    gamma = _gamma(d, lower)
+    t0, t1 = (0.0 if lower is None else _theta(lower[0])), _theta(1 - gap / 2)
+    ends = step_value(gamma, [t1] if lower is None else [t0, t1])
+    if (ends**2).min() < Q_MIN:
         return False, np.nan
     th, q = _grid(gamma)
-    if (q[th < tl] ** 2).min(initial=1.0) < Q_MIN:  # ripples inside the band
+    if (q[(th > t0) & (th < t1)] ** 2).min(initial=1.0) < Q_MIN:  # ripples inside the band
         return False, np.nan
     bias = tail_bias(gamma, gap, lam_top, n_top, n_free)
+    if lower is not None:  # the lower tail, from 0 (rigid modes deflated: N(0) = 0)
+        bias += _bias(gamma, 0.0, lower[1], n_top, lam_top)
     return bias <= BIAS, bias
 
 
-def count_degree(gap, lam_top, n_top, n_free):
+def count_degree(gap, lam_top, n_top, n_free, lower=None):
     """(d, bias): the smallest degree with q^2 >= Q_MIN on the band [0, lam_c (1 - gap / 2)]
     and tail bias <= BIAS (lam_top in units of lam_c), by doubling then bisection; (None, nan)
-    when no d <= MAX_DEGREE passes (at once when D_RULE / gap > MAX_DEGREE)."""
-    if D_RULE / gap > MAX_DEGREE:
+    when no d <= MAX_DEGREE passes (at once when D_RULE / g_eff > MAX_DEGREE). lower =
+    (lam_in, lam_bot) in units of lam_c (the lowest in-band eigenvalue and the nearest one
+    below the band) switches to the band-pass polynomial on [lam_in, lam_c (1 - gap / 2)],
+    with the lower tail over [0, lam_bot] added to the bias."""
+    if D_RULE / _g_eff(gap, lower) > MAX_DEGREE:
         return None, np.nan
     hi = 2  # d = 1 always fails: its Jackson factor g_1 = 0, so q = 1/2
-    while not (ok := _passes(hi, gap, lam_top, n_top, n_free))[0]:
+    while not (ok := _passes(hi, gap, lam_top, n_top, n_free, lower))[0]:
         hi *= 2
         if hi > 2 * MAX_DEGREE:
             return None, np.nan
     lo, best = hi // 2, (hi, ok[1])
     while best[0] - lo > 1:
         mid = (lo + best[0]) // 2
-        ok = _passes(mid, gap, lam_top, n_top, n_free)
+        ok = _passes(mid, gap, lam_top, n_top, n_free, lower)
         lo, best = (lo, (mid, ok[1])) if ok[0] else (mid, best)
     return best if best[0] <= MAX_DEGREE else (None, np.nan)
 
@@ -143,28 +175,43 @@ def _rigid_step(Y, R, MR, m):
     return m * (Y - R @ (MR.T @ Y))
 
 
-def _chunks(W):
-    """Column chunks of W (width CHUNK, the last zero-padded on the device): one compiled
-    width; a device W is sliced in place."""
-    for i in range(0, W.shape[1], CHUNK):
-        Wc = jnp.asarray(W[:, i : i + CHUNK])
-        yield jnp.pad(Wc, ((0, 0), (0, CHUNK - Wc.shape[1]))) if Wc.shape[1] < CHUNK else Wc
+def _chunks(Ws):
+    """(chunk, width): column chunks of the arrays Ws (width CHUNK, each array's last chunk
+    zero-padded on the device): one compiled width; a device array is sliced in place."""
+    for W in Ws:
+        for i in range(0, W.shape[1], CHUNK):
+            Wc = jnp.asarray(W[:, i : i + CHUNK])
+            w = Wc.shape[1]
+            yield (jnp.pad(Wc, ((0, 0), (0, CHUNK - w))) if w < CHUNK else Wc), w
 
 
-def _project(op, m, W, R, MR, Y):
-    """Pi Y = Y - W W^T M Y - R R^T M Y, masked; W streamed in column chunks (never all on the
-    device). Y is donated."""
+def _project(op, m, Ws, R, MR, Y):
+    """Pi Y = Y - W W^T M Y - R R^T M Y, masked, W the columns of the arrays Ws streamed in
+    chunks (never all on the device). Y is donated."""
     MY = _mm(op, m, Y)
-    for Wc in _chunks(W):
+    for Wc, _ in _chunks(Ws):
         Y = _chunk_step(Y, Wc, MY)
     return _rigid_step(Y, R, MR, m)
 
 
-@jax.jit
-def _recurrence(A, P, m, w0, gamma, d, lam_c, tau, maxit):
+_PROGRESS = {}  # verbose state of the running count: d, block width, t0, last line time
+
+
+def _report(k, it_sum, it_max):
+    """Host side of the verbose callback: one line per PRINT_S seconds at most."""
+    s, t = _PROGRESS, time.perf_counter()
+    if t - s["last"] >= PRINT_S:
+        s["last"] = t
+        print(f"count: step {int(k)} of {s['d']}, pcg {int(it_sum) / (int(k) * s['b']):.1f} mean"
+              f" / {int(it_max)} max, {t - s['t0']:.0f} s", flush=True)  # fmt: skip
+
+
+@functools.partial(jax.jit, static_argnames="verbose")
+def _recurrence(A, P, m, w0, gamma, d, lam_c, tau, maxit, verbose=False):
     """u = sum_k gamma_k T_k(X) w0 for k <= d, X = 2 lam_c T - I, T w by PCG on A (= A_P of
     K + lam_c M). Stops early when a solve stagnates or does not converge (bad). Returns
-    (u, steps, iteration sum, iteration max, bad)."""
+    (u, steps, iteration sum, iteration max, bad). verbose: a host callback per step
+    (scalars only)."""
 
     def body(s):
         k, w_prev, w, u, it_sum, it_max, _ = s
@@ -174,8 +221,10 @@ def _recurrence(A, P, m, w0, gamma, d, lam_c, tau, maxit):
         w_new = w_new - jnp.where(first, 0.0, 1.0) * w_prev
         bad = ~(info["converged"] & ~info["stagnated"]).all()
         its = info["iterations"]
-        return (k + 1, w, w_new, u + gamma[k] * w_new, it_sum + its.sum(),
-                jnp.maximum(it_max, its.max()), bad)  # fmt: skip
+        it_sum, it_max = it_sum + its.sum(), jnp.maximum(it_max, its.max())
+        if verbose:
+            jax.debug.callback(_report, k, it_sum, it_max)
+        return k + 1, w, w_new, u + gamma[k] * w_new, it_sum, it_max, bad
 
     zero = jnp.zeros((), int)
     s = (zero + 1, jnp.zeros_like(w0), w0, gamma[0] * w0, zero, zero, jnp.zeros((), bool))
@@ -188,17 +237,21 @@ def _pow2(n):
 
 
 def _check_ortho(op, m, W, seed):
-    """Streamed sketch of W^T M W - I: two passes over W, e = W^T M (W z) - z."""
-    k = W.shape[1]
+    """Streamed sketch of W^T M W - I (W an array or a tuple of arrays, their columns side by
+    side): two passes over W, e = W^T M (W z) - z."""
+    Ws = W if isinstance(W, tuple) else (W,)
+    k = sum(A.shape[1] for A in Ws)
     key = jax.random.fold_in(jax.random.key(seed), 2**32 - 1)
     z = np.asarray(jax.random.normal(key, (k, SKETCH)))
-    z_pad = np.pad(z, ((0, -k % CHUNK), (0, 0)))
-    v = jnp.zeros((W.shape[0], SKETCH))
-    for i, Wc in enumerate(_chunks(W)):
-        v = v + Wc.astype(v.dtype) @ jnp.asarray(z_pad[i * CHUNK : (i + 1) * CHUNK])
+    v, j = jnp.zeros((Ws[0].shape[0], SKETCH)), 0
+    for Wc, w in _chunks(Ws):
+        zc = np.zeros((CHUNK, SKETCH))
+        zc[:w] = z[j : j + w]
+        v, j = v + Wc.astype(v.dtype) @ jnp.asarray(zc), j + w
     Mv = _mm(op, m, v)
-    e = np.concatenate([np.asarray(Wc.astype(Mv.dtype).T @ Mv) for Wc in _chunks(W)])[:k] - z
-    tol = ORTHO_TOL.get(str(W.dtype), ORTHO_TOL["float32"])
+    e = np.concatenate([np.asarray(Wc.astype(Mv.dtype).T @ Mv)[:w] for Wc, w in _chunks(Ws)])
+    e = e - z
+    tol = max(ORTHO_TOL.get(str(A.dtype), ORTHO_TOL["float32"]) for A in Ws)
     if not np.linalg.norm(e) <= tol * np.linalg.norm(z):
         raise ValueError(
             f"W must be M-orthonormal on the free DOFs: sketch error "
@@ -206,42 +259,12 @@ def _check_ortho(op, m, W, seed):
         )
 
 
-def count(
-    op, free, W, lam, lam_last, lam_next, *, R=None, precond=None, n_probes=50, seed=0,
-    tau=None, degree=None, block=None, maxit=1000, _steps=None,
-):  # fmt: skip
-    """Stochastic count of the eigenvalues below lam_c = (lam_last + lam_next) / 2 that are
-    missing from W. Returns (estimate, info); passed = verifiable and estimate < 0.5.
-
-    W (n, k): the computed modes, M-orthonormal (NumPy or device, fp64 or fp32), with
-    eigenvalues lam (k,); lam_last: the last mode below the cut (or the band edge when none is
-    returned), lam_next: the first mode above it, both in lam's units, lam_next <= max(lam)
-    (the tail model needs every mode up to lam_next in W). R: the rigid modes (M-orthonormal).
-    precond: SPD preconditioner for K + lam_c M (default jacobi(op, free, lam_c); PR 14b passes
-    the fp64 multigrid). degree overrides the degree rule, tau the inner tolerance
-    0.01 / (d sqrt(n_free)); block: probes per block (default n_probes); maxit: per PCG solve.
-    A stagnated or unconverged solve makes the count unverifiable: the remaining work is
-    skipped and the estimate is NaN. info["time"]: sampling (the y solves), recurrence (the
-    recurrences alone), projection (the projections and the reduction), step (recurrence per
-    step), block ((sampling + projection) per block run) and total. _steps (internal, the
-    calibration in solve_modes): run at most this many steps per block, with the degree-d
-    polynomial's compiled shape (the estimate is then not the count's).
-    """
-    check_x64("count")
-    t0 = time.perf_counter()
+def _inputs(op, free, R, n_probes, maxit, block, degree, tau):
+    """Shared checks: (free, m, R, MR)."""
     n = op.n_dof
     free = np.asarray(free)
     if free.shape != (n,) or free.dtype != bool:
         raise ValueError(f"free must be a ({n},) bool mask")
-    lam = np.asarray(lam, float)
-    if lam.ndim != 1 or len(lam) == 0:
-        raise ValueError("lam must be a non-empty 1-D array")
-    if W.ndim != 2 or W.shape != (n, len(lam)):
-        raise ValueError(f"W must have shape ({n}, {len(lam)}), got {W.shape}")
-    if not 0 <= lam_last < lam_next <= lam.max():
-        raise ValueError(
-            f"need 0 <= lam_last < lam_next <= max(lam), got {lam_last}, {lam_next}, {lam.max()}"
-        )
     for name, v in (("n_probes", n_probes), ("maxit", maxit)):
         if not is_count(v):
             raise ValueError(f"{name} must be an int >= 1, got {v!r}")
@@ -255,34 +278,27 @@ def count(
     MR = _mm(op, m, R) if R.shape[1] else R
     if R.shape[1] and np.abs(np.asarray(R.T @ MR) - np.eye(R.shape[1])).max() > 1e-8:
         raise ValueError("R must be M-orthonormal on the free DOFs")
-    _check_ortho(op, m, W, seed)
+    return free, m, R, MR
 
-    lam_c = (lam_last + lam_next) / 2
-    gap = (lam_next - lam_last) / lam_c
-    n_free, n_top = int(free.sum()), len(lam) + R.shape[1]
-    block = n_probes if block is None else min(block, n_probes)
-    n_blocks = -(-n_probes // block)
-    info = dict(gap=gap, lam_c=lam_c, block=block, steps=0, pcg_iterations=(np.nan, 0),
-                verifiable=False, passed=False, probes=np.full(n_probes, np.nan),
-                std=np.nan)  # fmt: skip
-    lam_top = lam.max() / lam_c
-    if degree is None:
-        d, bias = count_degree(gap, lam_top, n_top, n_free)
-        if d is None:  # cost cap: not run
-            info.update(degree=math.ceil(D_RULE / gap), tau=tau, bias=np.nan,
-                        time=dict(total=time.perf_counter() - t0))  # fmt: skip
-            return np.nan, info
-    else:
-        d = degree
-        bias = tail_bias(jackson_step(d), gap, lam_top, n_top, n_free)
-    tau = 0.01 / (d * math.sqrt(n_free)) if tau is None else float(tau)
-    info.update(degree=d, tau=tau, bias=bias)
 
-    precond = jacobi(op, free, lam_c) if precond is None else precond
+def _columns(op, W, name):
+    """W (an array or a tuple of arrays, each (n_dof, k_i)) as a tuple, and its total columns."""
+    Ws = W if isinstance(W, tuple) else (W,)
+    for A in Ws:
+        if A.ndim != 2 or A.shape[0] != op.n_dof:
+            raise ValueError(f"{name} must have shape ({op.n_dof}, k), got {A.shape}")
+    return Ws, sum(A.shape[1] for A in Ws)
+
+
+def _estimate(op, free, m, Ws, R, MR, precond, gamma, d, lam_c, tau, *, n_probes, block, seed,
+              maxit, verbose, _steps, t0):  # fmt: skip
+    """The probe loop shared by count and band_count: (estimate, info updates). gamma: the
+    (d + 1,) coefficients; W the columns of the arrays Ws."""
     A = ap_operator(op, free, lam_c)
-    gamma = np.zeros(_pow2(d + 1))
-    gamma[: d + 1] = jackson_step(d)
-    gamma = jnp.asarray(gamma)
+    g = np.zeros(_pow2(d + 1))
+    g[: d + 1] = gamma
+    gamma = jnp.asarray(g)
+    n_blocks = -(-n_probes // block)
     # probe j from fold_in(key, j): independent of the block size and of n_probes
     fold = jax.vmap(jax.random.fold_in, (None, 0))
     keys = fold(jax.random.key(seed), jnp.arange(n_blocks * block))
@@ -300,29 +316,35 @@ def count(
         t_sample += tb - ta
         if not ok:
             break
-        w0 = _project(op, m, W, R, MR, y)
+        w0 = _project(op, m, Ws, R, MR, y)
         del y  # only w0 and the recurrence are alive in the step phase
         w0.block_until_ready()
         tc = time.perf_counter()
+        if verbose:
+            _PROGRESS.update(d=d_run, b=block, t0=t0, last=time.perf_counter())
         u, k, isum, imax, bad = _recurrence(
-            A, precond, m, w0, gamma, d_run, float(lam_c), tau, maxit
+            A, precond, m, w0, gamma, d_run, float(lam_c), tau, maxit, verbose=verbose
         )
         del w0
         k, bad = int(k), bool(bad)
         td = time.perf_counter()
         steps, it_sum, it_max = steps + k, it_sum + int(isum), max(it_max, int(imax))
         if not bad:
-            u = _project(op, m, W, R, MR, u)
+            u = _project(op, m, Ws, R, MR, u)
             s_all[i * block : (i + 1) * block] = np.asarray(jnp.sum(u * _mm(op, m, u), 0))
         del u
         t_rec += td - tc
         t_proj += time.perf_counter() - td + tc - tb
+        if verbose:
+            print(f"count: block {i + 1} of {n_blocks}, {k} steps, "
+                  f"{'failed' if bad else 'done'}, {time.perf_counter() - t0:.0f} s",
+                  flush=True)  # fmt: skip
         if bad:
             ok = False
             break
     probes = s_all[:n_probes]  # NaN for the columns of a stopped or skipped block
     estimate = float(probes.mean()) if ok else np.nan
-    info.update(
+    return estimate, dict(
         probes=probes,
         std=float(probes.std(ddof=1)) if ok and n_probes > 1 else np.nan,
         steps=steps,
@@ -338,4 +360,137 @@ def count(
             total=time.perf_counter() - t0,
         ),  # fmt: skip
     )
-    return estimate, info
+
+
+def _run(op, free, m, Ws, R, MR, info, lower, gap, lam_top, n_top, lam_c, *, precond, n_probes,
+         seed, tau, degree, block, maxit, verbose, _steps, t0):  # fmt: skip
+    """Degree, tau and the probe loop for count and band_count; info is filled in place."""
+    n_free = int(free.sum())
+    block = n_probes if block is None else min(block, n_probes)
+    info.update(lam_c=lam_c, gap=_g_eff(gap, lower), block=block, steps=0, n_top=n_top,
+                pcg_iterations=(np.nan, 0), verifiable=False, passed=False,
+                probes=np.full(n_probes, np.nan), std=np.nan)  # fmt: skip
+    if degree is None:
+        d, bias = count_degree(gap, lam_top, n_top, n_free, lower)
+        if d is None:  # cost cap: not run
+            info.update(degree=math.ceil(D_RULE / info["gap"]), tau=tau, bias=np.nan,
+                        time=dict(total=time.perf_counter() - t0))  # fmt: skip
+            return np.nan, info
+    else:
+        d = degree
+        gamma = _gamma(d, lower)
+        bias = tail_bias(gamma, gap, lam_top, n_top, n_free)
+        if lower is not None:
+            bias += _bias(gamma, 0.0, lower[1], n_top, lam_top)
+    tau = 0.01 / (d * math.sqrt(n_free)) if tau is None else float(tau)
+    info.update(degree=d, tau=tau, bias=bias)
+    precond = jacobi(op, free, lam_c) if precond is None else precond
+    est, out = _estimate(op, free, m, Ws, R, MR, precond, _gamma(d, lower), d, lam_c, tau,
+                         n_probes=n_probes, block=block, seed=seed, maxit=maxit,
+                         verbose=verbose, _steps=_steps, t0=t0)  # fmt: skip
+    info.update(out)
+    return est, info
+
+
+def count(
+    op, free, W, lam, lam_last, lam_next, *, R=None, precond=None, n_probes=50, seed=0,
+    tau=None, degree=None, block=None, maxit=1000, verbose=False, _steps=None,
+):  # fmt: skip
+    """Stochastic count of the eigenvalues below lam_c = (lam_last + lam_next) / 2 that are
+    missing from W. Returns (estimate, info); passed = verifiable and estimate < 0.5.
+
+    W (n, k): the computed modes, M-orthonormal (NumPy or device, fp64 or fp32; or a tuple of
+    such arrays, their columns side by side, streamed without a copy), with eigenvalues lam
+    (k,); lam_last: the last mode below the cut (or the band edge when none is returned),
+    lam_next: the first mode above it, both in lam's units, lam_next <= max(lam) (the tail model
+    needs every mode up to lam_next in W). R: the rigid modes (M-orthonormal).
+    precond: SPD preconditioner for K + lam_c M (default jacobi(op, free, lam_c); PR 14b passes
+    the fp64 multigrid). degree overrides the degree rule, tau the inner tolerance
+    0.01 / (d sqrt(n_free)); block: probes per block (default n_probes); maxit: per PCG solve.
+    A stagnated or unconverged solve makes the count unverifiable: the remaining work is
+    skipped and the estimate is NaN. verbose: progress lines (at most one per PRINT_S seconds
+    in the recurrence, one per block; compiles its own loop variant). info["time"]: sampling
+    (the y solves), recurrence (the recurrences alone), projection (the projections and the
+    reduction), step (recurrence per step), block ((sampling + projection) per block run) and
+    total. _steps (internal, the calibration in solve_modes): run at most this many steps per
+    block, with the degree-d polynomial's compiled shape (the estimate is then not the count's).
+    """
+    check_x64("count")
+    t0 = time.perf_counter()
+    free, m, R, MR = _inputs(op, free, R, n_probes, maxit, block, degree, tau)
+    lam = np.asarray(lam, float)
+    if lam.ndim != 1 or len(lam) == 0:
+        raise ValueError("lam must be a non-empty 1-D array")
+    Ws, k = _columns(op, W, "W")
+    if k != len(lam):
+        raise ValueError(f"W must have shape ({op.n_dof}, {len(lam)}), got {k} columns")
+    if not 0 <= lam_last < lam_next <= lam.max():
+        raise ValueError(
+            f"need 0 <= lam_last < lam_next <= max(lam), got {lam_last}, {lam_next}, {lam.max()}"
+        )
+    _check_ortho(op, m, Ws, seed)
+    lam_c = (lam_last + lam_next) / 2
+    gap = (lam_next - lam_last) / lam_c
+    return _run(op, free, m, Ws, R, MR, {}, None, gap, lam.max() / lam_c,
+                len(lam) + R.shape[1], lam_c, precond=precond, n_probes=n_probes, seed=seed,
+                tau=tau, degree=degree, block=block, maxit=maxit, verbose=verbose,
+                _steps=_steps, t0=t0)  # fmt: skip
+
+
+def band_edges(lam, lo, hi, lam_out):
+    """(c_lo, c_hi, g_lo, g_hi): the counting edges of the band [lo, hi] with in-band modes lam
+    (possibly none) and known out-of-band eigenvalues lam_out, each midway between the outermost
+    in-band eigenvalue (the band edge when lam is empty) and the nearest lam_out beyond it, and
+    the edge gaps relative to them. Raises when lam_out has no value on a side or one inside the
+    in-band interval."""
+    lam, lam_out = np.asarray(lam, float), np.asarray(lam_out, float)
+    a = lam.min() if len(lam) else lo
+    b = lam.max() if len(lam) else hi
+    if ((lam_out >= a) & (lam_out <= b)).any():
+        raise ValueError(f"lam_out has values inside the in-band interval [{a}, {b}]")
+    below, above = lam_out[lam_out < a], lam_out[lam_out > b]
+    if not len(below) or not len(above):
+        raise ValueError("lam_out needs a value below and above the band (the edge neighbours)")
+    nb_lo, nb_hi = below.max(), above.min()
+    c_lo, c_hi = (nb_lo + a) / 2, (nb_hi + b) / 2
+    return c_lo, c_hi, (a - nb_lo) / c_lo, (nb_hi - b) / c_hi
+
+
+def band_count(
+    op, free, V, lam, lo, hi, V_out, lam_out, *, R=None, precond=None, n_probes=50, seed=0,
+    tau=None, degree=None, block=None, maxit=1000, verbose=False,
+):  # fmt: skip
+    """Stochastic count of the eigenvalues in the interior band [lo, hi] (0 < lo < hi) missing
+    from V, by a Jackson band-pass polynomial of T = (K + c_hi M)^-1 M between the counting
+    edges of band_edges. Returns (estimate, info); passed = verifiable and estimate < 0.5.
+
+    V (n, k >= 0), lam (k,): the in-band modes found (the out-of-band pairs are added here, not
+    passed in V). V_out (n, j), lam_out (j,): known converged out-of-band pairs, at least the
+    nearest one on each side (si_slice's neighbours); all are deflated with V. All M-orthonormal
+    together. precond: SPD preconditioner for K + c_hi M (default jacobi(op, free, c_hi)). The
+    Weyl tail model (no mode index in a band) is fitted to the in-band modes and the nearest
+    out-of-band pair on each side. Other options and info as count's, plus edges (c_lo, c_hi)
+    and gaps (g_lo, g_hi); lam_c = c_hi, gap = the governing gap, n_top the fitted model count
+    at the upper neighbour.
+    """
+    check_x64("band_count")
+    t0 = time.perf_counter()
+    free, m, R, MR = _inputs(op, free, R, n_probes, maxit, block, degree, tau)
+    if not 0 < lo < hi:
+        raise ValueError(f"need 0 < lo < hi (a band from 0: count), got {lo}, {hi}")
+    lam, lam_out = np.atleast_1d(np.asarray(lam, float)), np.asarray(lam_out, float)
+    for name, X, n in (("V", V, len(lam)), ("V_out", V_out, len(lam_out))):
+        if X.ndim != 2 or X.shape != (op.n_dof, n):
+            raise ValueError(f"{name} must have shape ({op.n_dof}, {n}), got {X.shape}")
+    c_lo, c_hi, g_lo, g_hi = band_edges(lam, lo, hi, lam_out)
+    a = lam.min() if len(lam) else lo
+    nb_lo = lam_out[lam_out < a].max()
+    nb_hi = lam_out[lam_out > (lam.max() if len(lam) else hi)].min()
+    Ws = (V, V_out)
+    _check_ortho(op, m, Ws, seed)
+    top, bot = nb_hi / c_hi, nb_lo / c_hi
+    n_top = (len(lam) + 1) / (top**WEYL_A - bot**WEYL_A) * top**WEYL_A  # n - 1 intervals
+    info = dict(edges=(c_lo, c_hi), gaps=(g_lo, g_hi))
+    return _run(op, free, m, Ws, R, MR, info, (a / c_hi, bot), g_hi, top, n_top, c_hi,
+                precond=precond, n_probes=n_probes, seed=seed, tau=tau, degree=degree,
+                block=block, maxit=maxit, verbose=verbose, _steps=None, t0=t0)  # fmt: skip

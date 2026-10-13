@@ -242,6 +242,17 @@ def band_solve(f_max=None, **kw):
     return solve_modes(mesh, MAT, bcs, band=(0, f_max or mid("clamped", 3)), tol=TOL, **kw)
 
 
+def test_count_verbose(monkeypatch, capsys):
+    """PR 15b test 11: count_options verbose reaches count: one progress line per step
+    (PRINT_S = 0) and one per block."""
+    monkeypatch.setattr(counting, "PRINT_S", 0.0)
+    opts = {"degree": 4, "n_probes": 2, "verbose": True}
+    info = band_solve(verify=True, count_options=opts)[2]
+    out = capsys.readouterr().out
+    assert info["count"]["ran"] and out.count("count: step") == 4
+    assert out.count("count: block 1 of 1, 4 steps, done") == 1
+
+
 def test_verify_false(monkeypatch, spy):
     """Test 7: False neither builds nor counts and reports the steps and the bound; a looser
     tau gives factor 0.3."""
@@ -468,6 +479,7 @@ def test_probe_block(monkeypatch, budgets):
         ({"band": (0.0, 1.0), "verify": "yes"}, ValueError, "verify must be"),
         ({"band": (0.0, 1.0), "count_options": {"tau": 0}}, ValueError, "tau must be > 0"),
         ({"band": (0.0, 1.0), "count_options": {"block": 0}}, ValueError, "block must be"),
+        ({"band": (0.0, 1.0), "count_options": {"verbose": 1}}, ValueError, "verbose must"),
         ({"n_modes": 3, "verify": True}, ValueError, "need band"),
     ],
 )

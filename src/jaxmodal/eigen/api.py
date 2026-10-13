@@ -45,7 +45,7 @@ PRECOND_OPTIONS = {
     "jacobi": (),
 }
 SIGMA_OPTIONS = ("tol", "maxit", "rounds", "drop", "estimate_maxit")
-COUNT_OPTIONS = ("n_probes", "seed", "tau", "degree", "block", "maxit")
+COUNT_OPTIONS = ("n_probes", "seed", "tau", "degree", "block", "maxit", "verbose")
 # Builder parameters solve_modes sets itself or through its own keywords (dtype: precond_dtype).
 RESERVED = {
     "unstructured": {"mesh", "materials", "orientations", "mass", "nodal_mass"},
@@ -86,6 +86,8 @@ def _check_count_options(opts):
             raise ValueError(f"count_options {key} must be an int >= 1, got {opts[key]!r}")
     if "tau" in opts and not opts["tau"] > 0:
         raise ValueError(f"count_options tau must be > 0, got {opts['tau']!r}")
+    if "verbose" in opts and not isinstance(opts["verbose"], bool):
+        raise ValueError(f"count_options verbose must be a bool, got {opts['verbose']!r}")
 
 
 def check_band(band):
