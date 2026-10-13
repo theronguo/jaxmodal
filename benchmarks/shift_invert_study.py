@@ -140,7 +140,9 @@ def large(mesh, coarse, name, block=6):
     for cap in (10 * block, 20 * block):
         print(f"{name} slice, capacity {cap}: about {t_it * 300 * cap / block / 60:.0f} min")
         t = time.perf_counter()
-        lam_s, _, info = si_slice(op, free, lo, hi, P, capacity=cap, tol=1e-6, block=block)
+        lam_s, _, info = si_slice(
+            op, free, lo, hi, P, capacity=cap, tol=1e-6, block=block, verbose=True
+        )
         out[f"slice_{cap}"] = slice_info(info) | dict(lam=lam_s.tolist(),
                                                      wall=time.perf_counter() - t)  # fmt: skip
         print(json.dumps(out[f"slice_{cap}"], default=str), flush=True)
@@ -158,7 +160,7 @@ def full_slice(n, first=51, last=70):
     op, free, build = setup(mesh)
     t = time.perf_counter()
     P = build(op, (lo + hi) / 2)
-    lam_s, _, info = si_slice(op, free, lo, hi, P, capacity=60 * 6, tol=1e-8)
+    lam_s, _, info = si_slice(op, free, lo, hi, P, capacity=60 * 6, tol=1e-8, verbose=True)
     wall = time.perf_counter() - t
     n_ref = int(((lam >= lo) & (lam <= hi)).sum())
     out = dict(n_dof=op.n_dof, slice=slice_info(info) | dict(

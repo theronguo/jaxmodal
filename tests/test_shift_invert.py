@@ -214,14 +214,17 @@ def test_multiplicity(size):
     assert len(lam) == size and np.ptp(lam) <= 1e-8 * lam[0]
 
 
-def test_empty():
-    """Test 5: a slice strictly inside a gap: no modes, converged, both neighbours."""
+def test_empty(capsys):
+    """Test 5: a slice strictly inside a gap: no modes, converged, both neighbours;
+    verbose prints one line per step."""
     lr = prob("short")[6]
     i = int(np.argmax(np.diff(lr[:20]) / lr[1:20])) + 1  # the widest gap
     lo, hi = lr[i - 1] + 0.4 * (lr[i] - lr[i - 1]), lr[i - 1] + 0.6 * (lr[i] - lr[i - 1])
-    lam, V, info = solve("short", lo, hi)
+    lam, V, info = solve("short", lo, hi, verbose=True)
     check("short", lo, hi, lam, V, info)
     assert len(lam) == 0 and V.shape == (prob("short")[2].n_dof, 0)
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == info["steps"] and lines[-1].startswith(f"si_slice: step {info['steps']},")
 
 
 def test_edge_cluster():

@@ -173,7 +173,7 @@ def _random_block(key, n, b):
 
 def si_slice(
     op, free, lo, hi, precond, *, capacity, sigma=None, R=None, W=None, tol=1e-6, tau=1e-8,
-    block=6, maxit_inner=20000, seed=0,
+    block=6, maxit_inner=20000, seed=0, verbose=False,
 ):  # fmt: skip
     """Eigenpairs of the masked pencil (K_m, M_m) in the slice [lo, hi] (eigenvalues, 0 <= lo <
     hi) by block shift-invert Lanczos at sigma (default the midpoint). precond: SPD
@@ -182,6 +182,7 @@ def si_slice(
     Lanczos columns (rounded up to a multiple of the chunk width; the basis also stops within
     block columns of the free space left by R and W).
     Pair i is accepted at r_i <= t_i = max(tol, 10 tau_eff delta_i, round-off floor).
+    verbose: print one progress line per Lanczos step (and on a sigma move).
 
     Returns lam (ascending: the converged pairs in [lo, hi] widened by 100 r_acc and over
     clusters straddling an edge), V (host fp64, M-orthonormal) and info:
@@ -280,6 +281,8 @@ def si_slice(
         if not iters and moved is None and bad.any() and res[bad].max() > stag:
             sigma += SIGMA_MOVE * (hi - lo)  # sigma on an eigenvalue: move once, repeat
             A, moved = ap_operator(op, free, -sigma), its  # the discarded solve's iterations
+            if verbose:
+                print(f"si_slice: sigma moved to {sigma:.6g} ({its} its discarded)", flush=True)
             continue
         iters.append(its)
         if len(iters) == 1:
@@ -308,6 +311,10 @@ def si_slice(
             [(e, i) for e, i in (("lo", below), ("hi", above)) if i in ok],
         )
         times["ritz"] += time.perf_counter() - t
+        if verbose:
+            print(f"si_slice: step {len(iters)}, basis {k}, minres {its} its (res {res.max():.1e}),"
+                  f" tau_eff {tau_eff:.1e}, accepted {len(last[2])}/{len(inside)}, r {r:.1e},"
+                  f" {time.perf_counter() - t0:.0f} s", flush=True)  # fmt: skip
         if done:
             break
     # final stage: the accepted pairs and neighbours, V formed on the host, Q released
