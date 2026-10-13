@@ -15,6 +15,10 @@ Revision 4 (round 3 NITs and one MINOR): `si_memory`'s build on top of the full 
 `_slice_stop` pass whose r_acc is the reported one, unconverged large-mesh slices flagged, the
 σ-on-eigenvalue pre-check an assert, the run-time upper bound, no `n_return` parameter.
 
+Revision 5 (round 4): candidates from μ alone (`_slice_sets`: inside extended over chains, the
+neighbours beyond the extended set; `done` needs every candidate converged and $r_{acc} \le r$);
+the host term only W, the end of run stated below the basis phase.
+
 Revision 3 (round 2): the per-step order of candidates, thresholds and r_acc; the inner cap based
 on the first step after a σ move; the final stage as the last step's Rayleigh–Ritz recomputed
 explicitly (no second `eigh`); a build phase and a host term in `si_memory`, with test 15(a)
@@ -130,8 +134,9 @@ resource limit: there is no default allocation and no step cap besides it; 15c s
   subspace; Ritz values and vectors come from exact K products, so their accuracy is not limited
   by τ (correctness review: θ of the inexact projected T gave residuals above $10\tau\delta$ that
   grew with the basis; Rayleigh–Ritz on (K, M) over the same basis gave 5e-10 at τ = 1e-8).
-  Candidates: the Ritz values in $[\lambda_{lo}(1 - 100 r), \lambda_{hi}(1 + 100 r)]$ plus the
-  nearest one beyond each edge, with r = the previous step's $r_{acc}$ (tol at the first step).
+  Candidates (from μ alone, before any residual): `_slice_sets(mu, lo, hi, r)` (below), with
+  r = the previous step's $r_{acc}$ (tol at the first step), returns `inside` and the two
+  neighbours; the candidates are `inside` plus the neighbours.
   Their residuals are computed in
   chunks of c candidate columns at one compiled width (zero-padded, masked): $X_c = Q_L Y_c$, one
   K and one M apply, `lobpcg._resid`, discarded. Spurious interior Ritz values of the Rayleigh–
@@ -139,23 +144,25 @@ resource limit: there is no default allocation and no step cap besides it; 15c s
 - **Thresholds and r_acc (the roadmap's per-pair rule).** Pair i is accepted at $r_i \le t_i =
   \max(tol,\ 10\,\tau_\text{eff}\,\delta_i,\ \text{its \_resid floor})$ with $\delta_i = |\mu_i -
   \sigma|/|\mu_i|$. The floor term is LOBPCG's round-off threshold, added to the roadmap's
-  $\max(tol, 10\tau_\text{eff}\delta)$ (logged). Order per step: $t_i$ for every candidate,
-  $r_{acc} = \max t_i$ over the candidates, then `_slice_stop` once with it. That same value is
-  reported (`info["r_acc"]`): the candidates are the window plus the nearest Ritz value beyond
-  each edge, so it covers the in-slice pairs and the neighbours, is never below the roadmap's
-  value, and is exactly the value the gaps were tested with (15b/15c take the band-wide max). $\tau_\text{eff} = \max(\tau,$ the
+  $\max(tol, 10\tau_\text{eff}\delta)$ (logged). Order per step: the sets from μ with r, the candidates'
+  residuals and $t_i$, $r_{acc} = \max t_i$ over the candidates (reported as `info["r_acc"]`;
+  it covers the in-slice pairs and the neighbours used, so it is never below the roadmap's
+  value; 15b/15c take the band-wide max). `done` = every candidate converged ($r_i \le t_i$),
+  every needed neighbour present, and $r_{acc} \le r$ (so the gaps and clusters were formed with
+  a value at least the reported one); otherwise the next step uses $r = r_{acc}$. $\tau_\text{eff} = \max(\tau,$ the
   running max over all steps of `minres`'s final relative residual for columns that stagnated or
   hit the cap$)$, `info["tau_raised"]`. If τ_eff exceeds $10^{-4}$ (an inner solve that failed,
   e.g. σ on an eigenvalue after the move), the slice stops with `converged` False and
   `info["reason"]` = "inner solves failed".
-- **Stop rule: `_slice_stop(mu, r, t, lo, hi, r_acc)`**, a pure host helper (unit-tested on
-  synthetic arrays, as 14b's `_band_count`) returning `(done, inside, below, above)` index sets:
-  `inside` = the Ritz values in $[\lambda_{lo}, \lambda_{hi}]$ extended over clusters on both
-  edges (relative gaps < $100\,r_{acc}$); `below`/`above` = the nearest converged Ritz value
-  beyond each edge past a gap ≥ $100\,r_{acc}$ from `inside` (`below` empty and not needed when
-  $\lambda_{lo} = 0$); `done` = every `inside` pair converged and both neighbours found. An empty
-  slice needs only the neighbours. 15c's edge snapping passes windows through this helper without
-  touching the step loop.
+- **Sets: `_slice_sets(mu, lo, hi, r)`**, a pure host helper on the sorted Ritz values
+  (unit-tested on synthetic arrays, as 14b's `_band_count`) returning `(inside, below, above)`:
+  `inside` = the Ritz values in $[\lambda_{lo}, \lambda_{hi}]$ extended over chains with relative
+  gaps < $100\,r$ on both sides (a chain may run past any fixed window); `below`/`above` = the
+  nearest Ritz value beyond the extended set on each side, so its gap is ≥ $100\,r$ by
+  construction (`below` empty and not needed when $\lambda_{lo} = 0$; None when no Ritz value
+  exists there). An unconverged neighbour keeps the slice running: it is the outside Ritz value
+  nearest σ and converges first. An empty slice has only the neighbours. 15c's edge snapping
+  passes windows through this helper without touching the step loop.
 - **Capacity full.** When the next block does not fit before `done`, the slice returns its
   converged `inside` pairs with `converged` False, `info["capacity_full"]` True and
   `info["edge_unreached"]` = "lo", "hi", "both" or None (no converged Ritz value ever appeared
@@ -218,10 +225,10 @@ x, r1, r2, y, w, w2, b, the A apply and the explicit check: a per-column constan
 `memory_analysis` of the jitted MINRES loop on the stencil and unstructured operators, envelope
 over b = 6 and 12, plus the operator and V-cycle workspace at width b), reortho (the chunked
 projector at width b, as `lobpcg_memory`'s projector term), Ritz (one chunk of c candidates:
-X, KX, MX, plus the operator workspace at width c); the final Rayleigh–Ritz holds the compact X
-after Q is released (at most the basis); host = $8\,n\,(n_\text{deflate} + \text{capacity}/b +
-2)$ (W's host copy, the compact V bounded by capacity / b modes, the two neighbours; unified
-memory on macOS); total = overhead + storage + host + max(operator build,
+X, KX, MX, plus the operator workspace at width c); host = $8\,n\,n_\text{deflate}$ (W's host copy, the only host
+array alive during the steps; unified memory on macOS). The end of the run (device X and host
+V of the k accepted pairs and 2 neighbours, $2 \cdot 8n(k + 2)$, after Q is released) is below
+the basis phase since $k \le$ capacity / b, so it is stated and not a term; total = overhead + storage + host + max(operator build,
 preconditioner build, phases), `lobpcg_memory`'s conservative form (the estimators' `build`
 entries differ in what they include, so the build sits on top of the full storage). The phase split is returned. 15c composes it into `solve_modes_memory`.
 
@@ -269,12 +276,14 @@ from `lobpcg._norms`.
    `tau_raised`, $r_{acc} = 10\,\tau_\text{eff}\,\delta_{max}$ (above tol), every $t_i$ =
    max(tol, 10 τ_eff δ_i, floor), at least one returned residual above tol, all ≤ their $t_i$, λ
    within 10 r_acc of `eigsh`.
-10. **Stop rule (`_slice_stop`, synthetic arrays):** a neighbour within 100 r_acc of the extended
-    set does not count; a cluster chain across each edge extends `inside`; an unconverged
-    neighbour does not count; λ_lo = 0 needs no lower neighbour; an empty slice; an unconverged
-    inside pair blocks `done`. On a real slice (test 1's mesh), a neighbour with large δ raises
-    `r_acc` above every in-slice $t_i$ and the reported `r_acc` equals the max $t_i$ over the
-    candidates, the value `_slice_stop` used.
+10. **Sets and stop (`_slice_sets`, synthetic arrays, plus the step's `done`):** a cluster
+    chain across each edge extends `inside`, including a chain whose last member lies past
+    $\lambda_{hi}(1 + 100r)$, and the neighbour is then the next value; the neighbour's gap is ≥
+    100 r; λ_lo = 0 has no lower neighbour; no Ritz value beyond an edge gives None; an empty
+    slice. The `done` rule: an unconverged inside pair or neighbour blocks it, and so does
+    $r_{acc} > r$. On a real slice (test 1's mesh), a neighbour with large δ raises `r_acc` above
+    every in-slice $t_i$, and the reported `r_acc` equals the max $t_i$ over inside and the
+    neighbours.
 11. **Capacity full and unreached edges:** capacity of 2 blocks on test 1's slice: `converged`
     False, `capacity_full`, `edge_unreached` None or the edge lacking a neighbour, and the
     converged pairs returned match `eigsh`; on the tiny mesh, `hi` above the spectrum with a
