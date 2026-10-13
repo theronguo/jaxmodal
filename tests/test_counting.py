@@ -1,4 +1,5 @@
-"""PR 14a: the stochastic completeness count (docs/plans/pr-14a-counting.md, tests 1-13)."""
+"""PR 14a: the stochastic completeness count (docs/plans/pr-14a-counting.md, tests 1-13); PR
+15b: the band-pass count (docs/plans/pr-15b-bandpass-count.md, tests 1-8, 11, 12)."""
 
 import functools
 import sys
@@ -17,6 +18,8 @@ from jaxmodal.eigen.counting import (
     Q_MIN,
     _grid,
     _theta,
+    band_count,
+    band_edges,
     count,
     count_degree,
     jackson_step,
@@ -228,6 +231,7 @@ def test_degree_cap():
     g = (lam_next - lam[5]) / ((lam_next + lam[5]) / 2)
     assert np.isnan(est) and not info["verifiable"] and not info["passed"]
     assert info["degree"] == int(np.ceil(23 / g)) > MAX_DEGREE and info["steps"] == 0
+    assert info["capped"]
     assert np.isnan(info["probes"]).all()
 
 
@@ -271,8 +275,9 @@ def test_expected_rigid():
         assert abs(est - exp) <= 5 * se
 
 
-def dense_probes(op, free, K, M, W, lam_c, d, n, seed=0):
-    """The dense estimator with exact solves on the same probes as count."""
+def dense_probes(op, free, K, M, W, lam_c, d, n, seed=0, gamma=None):
+    """The dense estimator with exact solves on the same probes as count (gamma: the
+    coefficients, default the step's)."""
     Kf, Mf = _dense_free(K, M, free)
     keys = jax.vmap(jax.random.fold_in, (None, 0))(jax.random.key(seed), jnp.arange(n))
     g = np.asarray(mass_sample_keys(op, keys))[free]
@@ -280,7 +285,7 @@ def dense_probes(op, free, K, M, W, lam_c, d, n, seed=0):
     proj = lambda Z: Z - Wf @ (Wf.T @ (Mf @ Z))  # noqa: E731
     cf = sla.cho_factor(Kf + lam_c * Mf)
     X = lambda Z: 2 * lam_c * sla.cho_solve(cf, Mf @ Z) - Z  # noqa: E731
-    gamma = jackson_step(d)
+    gamma = jackson_step(d) if gamma is None else gamma
     w_prev, w = 0, proj(np.linalg.solve(Mf, g))
     u = gamma[0] * w
     for k in range(1, d + 1):
@@ -633,3 +638,271 @@ def test_chunks(monkeypatch):
     bad[:, 9] *= 1.01
     with pytest.raises(ValueError, match="M-orthonormal"):
         count(op, free, bad, lam[:KEEP], lam[5], lam[6])
+
+
+# ---------------------------------------------------------------- PR 15b: band-pass count
+
+BAND = (13, 19)  # modes 13-18 (0-based) of ref(): edge gaps 0.09 below and 0.16 above
+MID = 15  # an interior mode, not next to an edge
+
+
+def _jackson_damping(d):
+    a = np.pi / (d + 1)
+    j = np.arange(d + 1)
+    return ((d - j + 1) * np.cos(j * a) + np.sin(j * a) / np.tan(a)) / (d + 1)
+
+
+def band_case(bcs="clamped", band=BAND):
+    """(op, free, K, M, lam, W, lo, hi, out): the band between the gap midpoints around modes
+    band[0] .. band[1] - 1, out = the two neighbours."""
+    _, op, free, K, M, lam, W = ref(bcs=bcs)
+    i0, i1 = band
+    lo, hi = (lam[i0 - 1] + lam[i0]) / 2, (lam[i1 - 1] + lam[i1]) / 2
+    return op, free, K, M, lam, W, lo, hi, np.array([i0 - 1, i1])
+
+
+def band_expected(lam, deflated, info):
+    """sum over modes not deflated of q(lam_i)^2 (direct cosine sum)."""
+    c_hi = info["edges"][1]
+    q = step_value(_band_gamma(info), _theta(np.maximum(np.delete(lam, deflated), 0) / c_hi))
+    return float((q**2).sum())
+
+
+def _band_gamma(info):
+    c_lo, c_hi = info["edges"]
+    a, d = c_lo / c_hi, info["degree"]
+    return jackson_step(d) - jackson_step(d, (1 - a) / (1 + a))  # independent of _gamma
+
+
+def band_run(miss=(), bcs="clamped", band=BAND, R=None, **kw):
+    """band_count on band_case with the in-band modes minus miss, exact preconditioner at c_hi;
+    (estimate, info, the exact expectation)."""
+    op, free, K, M, lam, W, lo, hi, out = band_case(bcs, band)
+    kept = np.setdiff1d(np.arange(*band), miss)
+    c_hi = band_edges(lam[kept], lo, hi, lam[out])[1]
+    P = exact_precond(op, free, K, M, c_hi)
+    est, info = band_count(op, free, W[:, kept], lam[kept], lo, hi, W[:, out], lam[out], R=R,
+                           precond=P, **kw)  # fmt: skip
+    rig = np.arange(6) if R is not None else np.zeros(0, int)
+    return est, info, band_expected(lam, np.r_[kept, out, rig], info)
+
+
+def test_band_polynomial():
+    """15b test 1: jackson_step(d, 0) is 14a's; the coefficients of x >= x0 against quad of
+    the indicator's Chebyshev projection; the band-pass grid stays in [0, 1]."""
+    from scipy.integrate import quad
+
+    d = 40
+    k = np.arange(1, d + 1)
+    old = np.r_[0.5, 2 * np.sin(k * np.pi / 2) / (k * np.pi)] * _jackson_damping(d)
+    assert np.abs(jackson_step(d) - old).max() <= 1e-15
+    for x0 in (-0.6, 0.2, 0.7):
+        t = np.arccos(x0)
+        cq = [quad(lambda th, j=j: np.cos(j * th), 0, t)[0] * (1 if j == 0 else 2) / np.pi
+              for j in range(8)]  # fmt: skip
+        got = jackson_step(d, x0)[:8] / _jackson_damping(d)[:8]
+        assert np.abs(got - cq).max() <= 1e-12
+    gamma = counting._gamma(57, (0.4, 0.3))
+    th, q = _grid(gamma)
+    assert q.min() >= -1e-14 and q.max() <= 1 + 1e-14
+
+
+def _band_lower(a, g_lo):
+    return a * (1 + g_lo / 2), a * (1 - g_lo / 2)
+
+
+@pytest.mark.parametrize("a", [0.25, 0.5, 0.9])
+def test_band_degree(a):
+    """15b test 2: q^2 >= Q_MIN at both in-band ends for d, d - 1 fails; d g_hi in [19, 24]
+    with the upper edge tighter, d g_lo 2 sqrt(a) / (1 + a) in [19, 24] with the lower one; a
+    dense spectrum makes the bias set d."""
+    for g_lo, g_hi in ((0.06, 0.02), (0.02, 0.06)):
+        lower = _band_lower(a, g_lo)
+        d, bias = count_degree(g_hi, 1 + g_hi / 2, 50, 10**6, lower)
+        ends = _theta(np.array([lower[0], 1 - g_hi / 2]))
+        assert (step_value(counting._gamma(d, lower), ends) ** 2 >= Q_MIN).all()
+        assert not counting._passes(d - 1, g_hi, 1 + g_hi / 2, 50, 10**6, lower)[0]
+        x = d * g_hi if g_hi < g_lo else d * g_lo * 2 * np.sqrt(a) / (1 + a)
+        print(f"a {a}, g_lo {g_lo}, g_hi {g_hi}: d {d}, normalized {x:.1f}, bias {bias:.1e}")
+        assert 19 <= x <= 24 and bias <= 0.05
+    lower = _band_lower(a, 0.1)
+    d_in = count_degree(0.1, 1.05, 50, 10**7, lower)[0]
+    d, bias = count_degree(0.1, 1.05, 500_000, 10**7, lower)  # the tail bias sets d
+    assert d > d_in and bias <= 0.05
+    assert not counting._passes(d - 1, 0.1, 1.05, 500_000, 10**7, lower)[0]
+    gamma = jackson_step(d) - jackson_step(d, (1 - a) / (1 + a))
+    lo_tail = counting._bias(gamma, 0.0, lower[1], 500_000, 1.05)
+    assert lo_tail > 0 and bias == pytest.approx(  # the lower tail is part of the bias
+        tail_bias(gamma, 0.1, 1.05, 500_000, 10**7) + lo_tail, rel=1e-12)  # fmt: skip
+
+
+def test_band_lower_tail():
+    """15b test 3: the lower tail against scipy quad of q^2 dN/dlam over (0, lam_bot)."""
+    from scipy.integrate import quad
+
+    a = counting.WEYL_A
+    lower, top, n_top = _band_lower(0.5, 0.2), 1.1, 400
+    gamma = counting._gamma(60, lower)
+    f = lambda lam: step_value(gamma, _theta(lam))[0] ** 2 * n_top * a * lam ** (a - 1) / top**a  # noqa: E731
+    want = quad(f, 0, lower[1], limit=2000, epsabs=0, epsrel=1e-10)[0]
+    got = counting._bias(gamma, 0.0, lower[1], n_top, top)
+    assert abs(got - want) <= 1e-3 * want, (got, want)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("case", ["missing", "free"])
+def test_band_expected(case):
+    """15b test 4: the mean of 2000 probes against the exact sum over modes not deflated, within
+    5 standard errors: an interior mode missing, and a free body with R (band above the rigid
+    modes, elastic modes 8-16)."""
+    if case == "missing":
+        est, info, exp = band_run((MID,), n_probes=2000, block=500, tau=1e-10)
+    else:
+        mesh = ref(bcs="free")[0]
+        M = ref(bcs="free")[4]
+        Rn = rigid_modes(mesh)
+        L = np.linalg.cholesky(Rn.T @ (M @ Rn))
+        est, info, exp = band_run(bcs="free", band=(14, 23), R=np.linalg.solve(L, Rn.T).T,
+                                  n_probes=2000, block=500, tau=1e-10)  # fmt: skip
+    se = info["std"] / np.sqrt(2000)
+    print(f"{case}: {est:.4g} vs {exp:.4g} (se {se:.2g}), d {info['degree']}")
+    assert info["verifiable"] and abs(est - exp) <= 5 * se
+
+
+def test_band_against_dense():
+    """15b test 5: band_count's s_j against the dense band-pass estimator on the same probes."""
+    op, free, K, M, lam, W, lo, hi, out = band_case()
+    for miss in ((), (MID,)):
+        _, info, _ = band_run(miss, n_probes=20, tau=1e-12)
+        kept = np.r_[np.setdiff1d(np.arange(*BAND), miss), out]
+        ref_s = dense_probes(op, free, K, M, W[:, kept], info["lam_c"], info["degree"], 20,
+                             gamma=_band_gamma(info))[0]  # fmt: skip
+        err = np.abs(info["probes"] - ref_s)
+        assert (err <= (1e-8 * ref_s if miss else 1e-10)).all(), err.max()
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("miss", [(MID,), ()], ids=["missing", "complete"])
+def test_band_detection(miss):
+    """15b test 6 (roadmap): 100 sets of 50 probes (one 5000-probe count): the interior mode
+    left out is detected in >= 97 sets; with V complete every set is < 0.5."""
+    _, info, _ = band_run(miss, n_probes=5000, block=500)
+    sets = info["probes"].reshape(100, 50).mean(1)
+    print(f"miss={miss}: {(sets >= 0.5).sum()} of 100 sets >= 0.5")
+    if miss:
+        assert (sets >= 0.5).sum() >= 97
+    else:
+        assert (sets < 0.5).all()
+
+
+def test_band_planted():
+    """15b test 7 (roadmap, the count part; si_checked's empty band is in test_shift_invert):
+    the band in the middle third of the largest gap (lam_2, lam_3); the density scaled by s =
+    lam_3 / centre plants mode 3 at the band centre, its neighbours (scaled modes 2 and 4)
+    stay outside; band_count with V empty gives >= 0.5, and < 0.5 on the unscaled model."""
+    mesh, op, free, K, M, lam, W = ref()
+    g = np.diff(lam[:30]) / lam[1:30]
+    j = int(np.argmax(g))
+    assert j == 2
+    lo, hi = lam[j] + (lam[j + 1] - lam[j]) / 3, lam[j] + 2 * (lam[j + 1] - lam[j]) / 3
+    none = np.zeros((op.n_dof, 0))
+    out = np.array([j, j + 1])
+    c_hi = band_edges([], lo, hi, lam[out])[1]
+    est, info = band_count(op, free, none, [], lo, hi, W[:, out], lam[out],
+                           precond=exact_precond(op, free, K, M, c_hi))  # fmt: skip
+    assert info["verifiable"] and est < 0.5
+    s = lam[j + 1] / ((lo + hi) / 2)
+    mat = {0: Material(isotropic(3.0, 0.3), 2.0 * s)}
+    ops = unstructured(mesh, mat)
+    ls, Ws = lam / s, W / np.sqrt(s)
+    assert ls[j] < lo and ls[j + 2] > hi and lo < ls[j + 1] < hi
+    out = np.array([j, j + 2])
+    c_hi = band_edges([], lo, hi, ls[out])[1]
+    est, info = band_count(ops, free, none, [], lo, hi, Ws[:, out], ls[out],
+                           precond=exact_precond(ops, free, K, s * M, c_hi))  # fmt: skip
+    print(f"planted: {est:.3g}, d {info['degree']}")
+    assert info["verifiable"] and est >= 0.5
+
+
+def test_band_neighbours():
+    """15b test 8 (roadmap): V complete, tau_c = 1e-12: the estimate is < 0.5; without the
+    neighbours (same gamma, d, lam_c, probes) it rises by the probe mean of
+    sum_i q(mu_i)^2 (v_i^T M y_j)^2 to 1e-8 relative."""
+    op, free, K, M, lam, W, lo, hi, out = band_case()
+    est, info, _ = band_run(tau=1e-12)
+    assert info["verifiable"] and est < 0.5
+    gamma, d, c_hi = _band_gamma(info), info["degree"], info["lam_c"]
+    m = jnp.asarray(free, float)[:, None]
+    R0 = jnp.zeros((op.n_dof, 0))
+    P = exact_precond(op, free, K, M, c_hi)
+    off, _ = counting._estimate(op, free, m, (W[:, np.arange(*BAND)],), R0, R0, P, gamma, d,
+                                c_hi, 1e-12, n_probes=50, block=50, seed=0, maxit=1000,
+                                verbose=False, _steps=None, t0=0.0)  # fmt: skip
+    keys = jax.vmap(jax.random.fold_in, (None, 0))(jax.random.key(0), jnp.arange(50))
+    g = np.asarray(mass_sample_keys(op, keys))[free]  # M y_j = g_j on the free DOFs
+    q = step_value(gamma, _theta(lam[out] / c_hi))
+    pred = ((q[:, None] * (W[free][:, out].T @ g)) ** 2).sum(0).mean()
+    print(f"rise {off - est:.6e}, predicted {pred:.6e}")
+    assert abs((off - est) - pred) <= 1e-8 * pred
+
+
+def test_band_info_and_errors():
+    """15b test 12: band_edges cases, info fields, n_top, count with a tuple W, input checks."""
+    op, free, K, M, lam, W, lo, hi, out = band_case()
+    kept = np.arange(*BAND)
+    # band_edges: in-band modes, an empty band, a nearer out-of-band value
+    c_lo, c_hi, g_lo, g_hi = band_edges(lam[kept], lo, hi, lam[out])
+    assert c_lo == (lam[12] + lam[13]) / 2 and c_hi == (lam[18] + lam[19]) / 2
+    assert g_lo == pytest.approx((lam[13] - lam[12]) / c_lo, rel=1e-14)
+    assert band_edges([], lo, hi, lam[out])[:2] == ((lam[12] + lo) / 2, (lam[19] + hi) / 2)
+    assert band_edges(lam[kept], lo, hi, lam[[12, 20, 19]])[1] == c_hi
+    est, info, _ = band_run(n_probes=4, degree=30)
+    assert info["edges"] == (c_lo, c_hi) and info["gaps"] == (g_lo, g_hi)
+    a = c_lo / c_hi
+    assert info["lam_c"] == c_hi and info["degree"] == 30 and not info["capped"]
+    assert info["gap"] == min(g_hi, g_lo * 2 * np.sqrt(a) / (1 + a))
+    top, bot, w = lam[19] / c_hi, lam[12] / c_hi, counting.WEYL_A
+    assert info["n_top"] == pytest.approx(7 / (top**w - bot**w) * top**w, rel=1e-14)
+    gamma, n_free = _band_gamma(info), int(band_case()[1].sum())  # the lower tail at given d
+    assert info["bias"] == pytest.approx(tail_bias(gamma, g_hi, top, info["n_top"], n_free)
+                                         + counting._bias(gamma, 0.0, bot, info["n_top"], top),
+                                         rel=1e-12)  # fmt: skip
+    # count with a tuple W equals its concatenation
+    lc = (lam[5] + lam[6]) / 2
+    P = exact_precond(op, free, K, M, lc)
+    one = count(op, free, W[:, :KEEP], lam[:KEEP], lam[5], lam[6], precond=P, n_probes=4)
+    two = count(op, free, (W[:, :5], W[:, 5:KEEP]), lam[:KEEP], lam[5], lam[6], precond=P,
+                n_probes=4)  # fmt: skip
+    assert np.abs(one[1]["probes"] - two[1]["probes"]).max() <= 1e-12 * one[0]
+    with pytest.raises(ValueError, match="W must have shape"):
+        count(op, free, (W[:, :5], W[:, 5:9]), lam[:KEEP], lam[5], lam[6])
+    cases = [
+        (dict(lam_out=lam[[12]], V_out=W[:, [12]]), "below and above"),
+        (dict(lo=0.0), "0 < lo < hi"),
+        (dict(lam_out=lam[[12, 15]], V_out=W[:, [12, 15]]), "inside the in-band"),
+        (dict(V=W[:, kept[:-1]]), "V must have shape"),
+        (dict(V_out=W[:, [12]]), "V_out must have shape"),
+        (dict(n_probes=0), "n_probes"),
+    ]
+    for kw, msg in cases:
+        args = dict(V=W[:, kept], lam=lam[kept], lo=lo, hi=hi, V_out=W[:, out],
+                    lam_out=lam[out]) | kw  # fmt: skip
+        with pytest.raises(ValueError, match=msg):
+            band_count(op, free, args.pop("V"), args.pop("lam"), args.pop("lo"), args.pop("hi"),
+                       args.pop("V_out"), args.pop("lam_out"), **args)  # fmt: skip
+
+
+def test_verbose(monkeypatch, capsys):
+    """15b test 11: verbose count lines (PRINT_S = 0: one per step and one per block), the same
+    estimate and probes as without verbose; quiet at the default PRINT_S on this mesh."""
+    est, info, _ = run(n_probes=4, degree=20, verbose=True)
+    lines = capsys.readouterr().out.splitlines()
+    assert sum(ln.startswith("count: block") for ln in lines) == 1
+    assert not any(ln.startswith("count: step") for ln in lines)
+    monkeypatch.setattr(counting, "PRINT_S", 0.0)
+    est_v, info_v, _ = run(n_probes=4, degree=20, verbose=True)
+    lines = capsys.readouterr().out.splitlines()
+    assert sum(ln.startswith("count: step") for ln in lines) == 20
+    assert lines[-1].startswith("count: block 1 of 1, 20 steps, done")
+    q, _, _ = run(n_probes=4, degree=20)
+    assert abs(est_v - q) <= 1e-12 * q and abs(est - q) <= 1e-12 * q
