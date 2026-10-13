@@ -2,7 +2,7 @@
 
 Large-scale 3D linear modal analysis, $K v = \lambda M v$, in JAX. It uses matrix-free operators, preconditioned LOBPCG, hex8/hex20/hex27 and solid-shell elements, and linear anisotropic elasticity. The targets are the lowest modes and modes in frequency bands, with FFD shape optimization and topology optimization later.
 
-**Status:** early development. PR 0 (scaffold, benchmark harness, conventions), PR 1 (mesh data model, readers, voxel generator), PR 2 (anisotropic materials, rotations, phases), PR 3 (hex8/hex20/hex27 element kernels), PR 4 (DOF map, assembled SciPy reference operators, Dirichlet masking, box meshes), PR 5 (matrix-free unstructured operator, RCM reordering, memory estimator), PR 6 (voxel stencil operator), PR 7 (rigid body modes, M-orthonormalization, deflation projector), PR 8a (certified SciPy reference eigensolver, dense inertia count, sliding-block verification), PR 8b (Srinivas–Rao plates, anisotropic Visscher box, MAC mode matching), PR 8c (NAFEMS FV52/FV12, Lamb sphere, graded box meshes), PR 9a (matrix-free LOBPCG with Jacobi), PR 9b (chunked LOBPCG with locking, fp32 deflation basis, low-memory mode, LOBPCG memory estimator), PR 9c (the public `solve_modes` API, milestone examples, Mac acceptance budgets), PR 10 (PCG, MINRES, block-ELL, node-block Jacobi, Chebyshev, the matrix-free $A_P$), PR 11a (voxel geometric multigrid) and PR 11b (GMG by default in `solve_modes` with a GMG-refined σ pre-estimate, fp32 V-cycle, GMG memory estimator, `solve_modes_memory`; a 2M-DOF voxel solve in about 1 min on a laptop) are done: milestone M2 (first modes end to end) and the voxel half of M3. PRs 12–13 (multigrid for unstructured meshes) come next. See [`docs/ROADMAP.md`](docs/ROADMAP.md); decisions taken without user input and deferred weaknesses are in [`docs/open_items.md`](docs/open_items.md).
+**Status:** early development. PR 0 (scaffold, benchmark harness, conventions), PR 1 (mesh data model, readers, voxel generator), PR 2 (anisotropic materials, rotations, phases), PR 3 (hex8/hex20/hex27 element kernels), PR 4 (DOF map, assembled SciPy reference operators, Dirichlet masking, box meshes), PR 5 (matrix-free unstructured operator, RCM reordering, memory estimator), PR 6 (voxel stencil operator), PR 7 (rigid body modes, M-orthonormalization, deflation projector), PR 8a (certified SciPy reference eigensolver, dense inertia count, sliding-block verification), PR 8b (Srinivas–Rao plates, anisotropic Visscher box, MAC mode matching), PR 8c (NAFEMS FV52/FV12, Lamb sphere, graded box meshes), PR 9a (matrix-free LOBPCG with Jacobi), PR 9b (chunked LOBPCG with locking, fp32 deflation basis, low-memory mode, LOBPCG memory estimator), PR 9c (the public `solve_modes` API, milestone examples, Mac acceptance budgets), PR 10 (PCG, MINRES, block-ELL, node-block Jacobi, Chebyshev, the matrix-free $A_P$), PR 11a (voxel geometric multigrid), PR 11b (GMG by default in `solve_modes` with a GMG-refined σ pre-estimate, fp32 V-cycle, GMG memory estimator, `solve_modes_memory`; a 2M-DOF voxel solve in about 1 min on a laptop) and PR 12 (p-multigrid for hex20/hex27 meshes, with a test-scale coarse solve) are done: milestone M2 (first modes end to end) and the voxel half of M3. PR 13 (algebraic coarse solve, p-MG in `solve_modes`) comes next. See [`docs/ROADMAP.md`](docs/ROADMAP.md); decisions taken without user input and deferred weaknesses are in [`docs/open_items.md`](docs/open_items.md).
 
 ## Install
 
@@ -194,7 +194,19 @@ assert info["precond"] == "gmg" and info["converged"]  # info["sigma"]: the shif
 solve_modes_memory(cube, {"xmin": "xyz"}, 6, precond_dtype="float32")["total"]  # bytes
 ```
 
-See [`docs/preconditioners.md`](docs/preconditioners.md) for the solvers' stopping rules, the preconditioners, block-ELL, the measured h-study and the voxel GMG (fp32 V-cycle, memory estimator).
+p-multigrid for unstructured hex20/hex27 meshes (PR 12): Chebyshev smoothing on the matrix-free operator and the hex8 Galerkin matrix on the corner nodes as the coarse level, about 14 PCG iterations at every mesh size. The coarse level is solved by SciPy `splu` on the host, which limits it to about 50k coarse DOF until PR 13 swaps in AMG:
+
+```python
+from jaxmodal.precond import pmg
+
+hbox = box_mesh((12, 3, 3), spacing=(1 / 12,) * 3, type="hex20")
+hop, hfree = unstructured(hbox, materials), dof_mask(hbox, {"xmin": "xyz"})
+P = pmg(hop, hfree, 1e5)  # a GMG (the shared V-cycle) with a p-level; sigma > 0 is required
+mu, V, info = lobpcg(hop, hfree, 4, tol=1e-8, precond=P)
+assert info["converged"] and info["iterations"] <= 40
+```
+
+See [`docs/preconditioners.md`](docs/preconditioners.md) for the solvers' stopping rules, the preconditioners, block-ELL, the measured h-study, the voxel GMG (fp32 V-cycle, memory estimator) and p-MG.
 
 The scripts in [`examples/`](examples) walk through each milestone (`m0_foundations.py`: meshes, VTU, materials; `m1_operators.py`: element matrices and operators against the assembled matrices; `m2_modes.py`: a cantilever against Euler–Bernoulli and a free voxel cube); each ends with a check and runs as a smoke test.
 

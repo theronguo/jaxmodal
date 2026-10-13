@@ -318,14 +318,19 @@ def _k_apply(op, b, d, v):
     return d["s_K"][:, None, None] * y
 
 
+def _bmat(b, d):
+    """otf: the strain-displacement matrices B of a chunk."""
+    geo = d["geo"]
+    return kernels.bmatrix(kernels.gradients(b.type, geo[..., :9].reshape(len(geo), -1, 3, 3)))
+
+
 def _k_diag(op, b, d):
     if op.mode == "stored":
         k = b.dofs.shape[1]
         i = np.arange(k)
         diag = d["Ke"][:, _packed_index(k)[i, i]]
     else:
-        c = d["geo"].shape[0]
-        B = kernels.bmatrix(kernels.gradients(b.type, d["geo"][..., :9].reshape(c, -1, 3, 3)))
+        B = _bmat(b, d)
         diag = jnp.einsum("eq,eqvk,evw,eqwk->ek", d["geo"][..., 9], B, op.C[d["phase"]], B)
     return (d["s_K"][:, None] * diag)[..., None]
 
@@ -337,8 +342,7 @@ def _k_blocks(op, b, d):
     if op.mode == "stored":
         blocks = d["Ke"][:, _packed_index(k)[np.arange(k)[:, None], cols]]
     else:
-        c = d["geo"].shape[0]
-        B = kernels.bmatrix(kernels.gradients(b.type, d["geo"][..., :9].reshape(c, -1, 3, 3)))
+        B = _bmat(b, d)
         blocks = jnp.einsum(
             "eq,eqvk,evw,eqwkj->ekj", d["geo"][..., 9], B, op.C[d["phase"]], B[..., cols]
         )
@@ -356,6 +360,25 @@ def _m_apply(op, b, d, v):
     Nu = jnp.einsum("qb,ebim->eqim", N, u.reshape(c, k // 3, 3, m))
     y = jnp.einsum("eq,qa,eqim->eaim", _wdet(b, d), N, Nu).reshape(c, k, m)
     return _m_scale(op, d)[:, None, None] * y
+
+
+def element_matrices(op, block, chunk):
+    """(s_K K_e, rho s_M M_e), each (c, k, k), for one chunk of a block (a slice of
+    _block_data); M_e consistent or lumped as op.mass. Padded elements give zeros."""
+    k = block.dofs.shape[1]
+    if op.mode == "stored":
+        Ke = chunk["Ke"][:, _packed_index(k)]
+    else:
+        B = _bmat(block, chunk)
+        Ke = jnp.einsum("eq,eqvk,evw,eqwl->ekl", chunk["geo"][..., 9], B, op.C[chunk["phase"]], B)
+    wdet = _wdet(block, chunk)
+    if op.mass == "lumped":
+        mn = jax.vmap(jnp.diag)(kernels.lumped_nodal(block.type, wdet))
+    else:
+        N = jnp.asarray(ELEMENTS[block.type].N)
+        mn = jnp.einsum("eq,qa,qb->eab", wdet, N, N)
+    Me = jnp.einsum("eab,ij->eaibj", mn, jnp.eye(3)).reshape(Ke.shape)
+    return chunk["s_K"][:, None, None] * Ke, _m_scale(op, chunk)[:, None, None] * Me
 
 
 def _m_diag(op, b, d):

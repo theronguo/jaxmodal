@@ -117,6 +117,7 @@ $u_e = v[\text{dofs}_e]$ is $(c, k, m)$ with $k = 3n$.
   i.e. $\sum_q w_q\det J_q B_q^\top \sigma_q$ without forming $K_e$ or $B$.
 - **Consistent mass** (from $w\det J$, the scalar $n\times n$ form of `docs/elements.md`): $y_{e,ai} = \rho_e s_{M,e} \sum_q w_q\det J_q N_{qa} \sum_b N_{qb} u_{e,bi}$.
 - **Lumped mass:** $y = (d + \text{nodal}) \odot v$ with $d$ assembled per call from the element diagonals (it depends on $s_M$, $\rho$): row-sum (hex8, hex27) $d_a = \rho_e s_{M,e}\sum_q w_q\det J_q N_{qa}$; HRZ (hex20) $d_a = \rho_e s_{M,e} V_e \frac{\sum_q w_q\det J_q N_{qa}^2}{\sum_b\sum_q w_q\det J_q N_{qb}^2}$, $V_e = \sum_q w_q \det J_q$ (PR 3's `lumped_nodal`).
+- **Element matrices** (`element_matrices(op, block, chunk)`, for PR 12's Galerkin product): $s_{K,e}K_e$ and $\rho_e s_{M,e}M_e$ as $(c, k, k)$ arrays for one chunk (a slice of the block's data). Stored mode unpacks $K_e$; otf forms $\sum_q w_q\det J_q B_q^\top C_e B_q$; $M_e$ is the consistent $\sum_q w_q\det J_q N_{qa}N_{qb}$ or the diagonal lumped $d_a$ above, $\otimes I_3$ in the $3a + i$ order. Padded elements ($s_K = s_M = 0$) give zeros.
 - **Diagonals:** `diag_K` assembles $s_{K,e}\,\mathrm{diag}\,K_e$ (stored: the packed diagonal; otf: $\sum_q w_q\det J_q\, b_{qai}^\top C_e b_{qai}$, $b_{qai}$ the $B$ column of DOF $(a, i)$). `diag_M` assembles $\rho_e s_{M,e}\sum_q w_q\det J_q N_{qa}^2$ (×3) or the lumped $d$, plus `nodal`. Diagonals and $d$ go through the operator's own path (kernels returning $(c, k, 1)$).
 
 ### Assembly paths

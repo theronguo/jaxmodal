@@ -206,6 +206,9 @@ class Transfer:
     def __call__(self, x):
         return _prolong(self, x)
 
+    def restrict(self, r):
+        return _restrict(self, r)
+
 
 register(Transfer, ["cshape", "n_coarse"])
 
@@ -239,14 +242,29 @@ def _group_apply(inv, idx, pos, r):
 
 
 @dataclasses.dataclass(frozen=True)
+class Cholesky:
+    """Coarsest solve b -> A^{-1} b from the lower Cholesky factor L, in L's dtype (fp64)."""
+
+    L: jax.Array
+
+    def __call__(self, b):
+        return cho_solve((self.L, True), b.astype(self.L.dtype)).astype(b.dtype)
+
+
+register(Cholesky, [])
+
+
+@dataclasses.dataclass(frozen=True)
 class GMG:
-    """V-cycle approximating A_P^{-1}, deflated: r -> Q r + (I - Q A) m V(m (I - A Q) r),
-    Q = Z E^+ Z^T. Levels are (A, S) for all but the coarsest, transfers[l] maps level l+1 to
-    l, L is the coarsest Cholesky factor. V runs in dtype; L, free and defl stay fp64."""
+    """The shared multilevel V-cycle approximating A_P^{-1} (gmg's voxel hierarchy, pmg's
+    p-level), deflated: r -> Q r + (I - Q A) m V(m (I - A Q) r), Q = Z E^+ Z^T. Levels are
+    (A, S) for all but the coarsest, transfers[l] (prolongation call, .restrict) maps level
+    l+1 to l, coarse is the coarsest solve (any pytree callable: Cholesky, pmg's HostLU).
+    V runs in dtype; coarse, free and defl stay fp64."""
 
     levels: tuple
     transfers: tuple
-    L: jax.Array
+    coarse: object
     free: jax.Array
     defl: tuple | None  # (rows, isl, Z, AZ, Einv): island rigid modes, A_P Z per support row
     dtype: str = "float64"
@@ -264,11 +282,11 @@ register(GMG, ["dtype"])
 
 def _vcycle(P, b, lvl):
     if lvl == len(P.levels):
-        return cho_solve((P.L, True), b.astype(P.L.dtype)).astype(b.dtype)
+        return P.coarse(b)
     A, S = P.levels[lvl]
     T = P.transfers[lvl]
     x = S(b)
-    x = x + T(_vcycle(P, _restrict(T, b - A(x)), lvl + 1))
+    x = x + T(_vcycle(P, T.restrict(b - A(x)), lvl + 1))
     return x + S(b - A(x))
 
 
@@ -493,7 +511,7 @@ def gmg(op, free, sigma, *, degree=2, coarse_degree=4, ratio=30.0, dtype="float6
     defl = _deflation(A0, F, np.asarray(op.spacing), free, _islands(cell_ids, s_K))
     if dtype == "float32":
         levels, transfers = _to32(levels), cast_floats(transfers, jnp.float32)
-    return GMG(tuple(levels), tuple(transfers), L, fl, defl, dtype)
+    return GMG(tuple(levels), tuple(transfers), Cholesky(L), fl, defl, dtype)
 
 
 def _to32(levels):
