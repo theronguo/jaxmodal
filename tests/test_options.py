@@ -11,7 +11,7 @@ import pytest
 from exact import mac
 from helpers import STEEL, owned_bytes, step_bytes
 
-from jaxmodal.eigen import lobpcg, reference_modes, solve_modes
+from jaxmodal.eigen import count, lobpcg, reference_modes, solve_modes
 from jaxmodal.materials import Material, isotropic
 from jaxmodal.memory import (
     AMG_LOOP_K,
@@ -514,6 +514,7 @@ def test_option_sets_pinned():
     assert params(api._precond_sigma) - {"op", "free", "R", "build", "seed"} == set(
         api.SIGMA_OPTIONS
     )
+    assert params(count) - api.RESERVED["count"] - {"_steps"} == set(api.COUNT_OPTIONS)
 
 
 # ------------------------------------------------------------- 7: Chebyshev loop

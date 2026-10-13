@@ -4,8 +4,14 @@ import functools
 
 import numpy as np
 
-from .eigen.api import OPERATOR_OPTIONS, PRECOND_OPTIONS, _check_options, resolve_precond
-from .eigen.lobpcg import _block_size, _capacity  # shared with the solver on purpose
+from .eigen.api import (
+    OPERATOR_OPTIONS,
+    PRECOND_OPTIONS,
+    _check_options,
+    check_band,
+    resolve_precond,
+)
+from .eigen.lobpcg import _block_size, _capacity, band_defaults  # shared with the solver
 from .elements import ELEMENTS
 from .materials import phases
 from .operators import dof_mask, rigid_modes
@@ -117,9 +123,10 @@ STEP_FIT = {"9-block": (16, 2.5), "low": (11, 1.75)}
 
 def lobpcg_memory(
     op_memory, n_dof, n_modes, chunk=None, guards=None, low_memory=False, basis_dtype="float64",
-    n_rigid=0, precond_memory=None,
+    n_rigid=0, precond_memory=None, band=False,
 ):  # fmt: skip
-    """Estimated peak bytes of lobpcg(...). op_memory: m -> the operator estimate at block width
+    """Estimated peak bytes of lobpcg(...) (band: a band solve expecting n_modes modes, whose
+    host V holds one more block). op_memory: m -> the operator estimate at block width
     m, e.g. lambda m: unstructured_memory(mesh, m); precond_memory: m -> the preconditioner
     estimate (e.g. lambda m: gmg_memory(mesh, m)), None for the default Jacobi.
 
@@ -139,7 +146,7 @@ def lobpcg_memory(
         # freed step output and the fp64 modes on the host; a chunked solve adds 4 blocks of
         # transients between chunks (start block, seed, allocator slack: up to about 6.5
         # blocks measured, varying between runs; docs/open_items.md)
-        host=(5 if cap else 1) * b + 8 * n_dof * n_modes,
+        host=(5 if cap else 1) * b + 8 * n_dof * n_modes + (b if band else 0),
         precond=pc["storage"],
     )
     out["total"] = (
@@ -314,17 +321,8 @@ def amg_memory(mesh, m, max_coarse=1000, degree=2):
     return {k: int(v) for k, v in out.items()}
 
 
-def solve_modes_memory(
-    mesh, bcs, n_modes, *, mass="consistent", chunk=None, guards=None, basis_dtype="float64",
-    low_memory=False, precond="auto", precond_dtype="float64", n_rigid=None,
-    operator_options=None, precond_options=None,
-):  # fmt: skip
-    """Estimated peak bytes of solve_modes(mesh, ..., bcs, n_modes, ...) with the same options:
-    the operator, preconditioner and lobpcg estimates composed (lobpcg_memory's dict).
-    operator_options and precond_options as in solve_modes (coarse_degree and ratio change no
-    memory). n_rigid=None counts the rigid modes left by bcs on the host (builds the dense rigid
-    modes: about 20 GB at 100M DOF; pass n_rigid for large meshes)."""
-    pc = None
+def _models(mesh, mass, precond, precond_dtype, operator_options, precond_options):
+    """(op_memory, precond_memory) of solve_modes' operator and preconditioner: m -> estimate."""
     name = resolve_precond(mesh, precond, precond_dtype)
     voxel = mesh.voxel is not None
     op_opts = _check_options(
@@ -334,6 +332,7 @@ def solve_modes_memory(
     for key in ("degree", "max_coarse"):
         if key in pc_opts and not is_count(pc_opts[key]):
             raise ValueError(f"{key} must be an int >= 1, got {pc_opts[key]!r}")
+    pc = None
     if name == "gmg":
         pc = functools.partial(
             gmg_memory, mesh, dtype=precond_dtype, degree=pc_opts.get("degree", 2)
@@ -344,12 +343,34 @@ def solve_modes_memory(
             degree=pc_opts.get("degree", 2),
         )  # fmt: skip
     est = stencil_memory if voxel else unstructured_memory
-    op_memory = functools.partial(est, mesh, mass=mass, **op_opts)
+    return functools.partial(est, mesh, mass=mass, **op_opts), pc
+
+
+def solve_modes_memory(
+    mesh, bcs, n_modes=None, *, mass="consistent", chunk=None, guards=None,
+    basis_dtype="float64", low_memory=False, precond="auto", precond_dtype="float64",
+    n_rigid=None, operator_options=None, precond_options=None, band=None,
+):  # fmt: skip
+    """Estimated peak bytes of solve_modes(mesh, ..., bcs, n_modes, ...) with the same options:
+    the operator, preconditioner and lobpcg estimates composed (lobpcg_memory's dict).
+    operator_options and precond_options as in solve_modes (coarse_degree and ratio change no
+    memory). n_rigid=None counts the rigid modes left by bcs on the host (builds the dense rigid
+    modes: about 20 GB at 100M DOF; pass n_rigid for large meshes). band=(0, f_max): the band
+    solve expecting n_modes modes (n_modes and chunk default as in solve_modes); its count fits
+    by construction (solve_modes sizes the probe block from this estimate)."""
+    if band is not None:
+        check_band(band)
+    elif n_modes is None:
+        raise ValueError("pass n_modes or band")
+    op_memory, pc = _models(mesh, mass, precond, precond_dtype, operator_options, precond_options)
+    free = dof_mask(mesh, bcs)
     if n_rigid is None:
-        n_rigid = rigid_modes(mesh, dof_mask(mesh, bcs)).shape[1]
+        n_rigid = rigid_modes(mesh, free).shape[1]
+    if band is not None:
+        n_modes, chunk = band_defaults(n_modes, chunk, guards, int(free.sum()) - n_rigid)
     return lobpcg_memory(
         op_memory, 3 * len(mesh.points), n_modes, chunk, guards, low_memory, basis_dtype,
-        n_rigid, pc,
+        n_rigid, pc, band is not None,
     )  # fmt: skip
 
 
@@ -409,3 +430,19 @@ def probe_block(budget, n_probes, op_memory, n_dof, **kwargs):
         mid = (lo + hi) // 2
         lo, hi = (mid, hi) if total(mid) <= budget else (lo, mid)
     return lo
+
+
+def band_probe_block(mesh, bcs, n_modes, n_probes, host_bytes, *, n_rigid, **options):
+    """The probe block of a band solve's count: probe_block within solve_modes_memory(mesh,
+    bcs, n_modes, n_rigid=n_rigid, **options) minus host_bytes (the converged modes and AMG
+    aggregates on the host; host and device share memory on the Mac), the multigrid at lam_c in
+    fp64. Raises ValueError when even one probe does not fit."""
+    total = solve_modes_memory(mesh, bcs, n_modes, n_rigid=n_rigid, **options)["total"]
+    op_memory, pc = _models(
+        mesh, options.get("mass", "consistent"), options.get("precond", "auto"), "float64",
+        options.get("operator_options"), options.get("precond_options"),
+    )  # fmt: skip
+    return probe_block(
+        total - host_bytes, n_probes, op_memory, 3 * len(mesh.points),
+        voxel=mesh.voxel is not None, precond_memory=pc, n_rigid=n_rigid,
+    )  # fmt: skip

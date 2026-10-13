@@ -1,0 +1,33 @@
+{
+  "hex20": {
+    "n_dof": 56355,
+    "chunk": 40,
+    "t_iteration": 0.22277593629106002,
+    "t_step": 0.5918096806465959,
+    "bound_step": 0.09282330678794168,
+    "ratio": 6.37565823849184,
+    "solve_s": 5.900798290967941,
+    "degree": 16
+  },
+  "voxel": {
+    "n_dof": 107811,
+    "chunk": 40,
+    "t_iteration": 0.3450067916928674,
+    "t_step": 0.6739279026708876,
+    "bound_step": 0.1437528298720281,
+    "ratio": 4.688101815253536,
+    "solve_s": 8.427721166983247,
+    "degree": 16
+  },
+  "versions": {
+    "jax": "0.11.2",
+    "jaxlib": "0.11.2",
+    "numpy": "2.5.3",
+    "platform": "macOS-27.2-arm64-arm-64bit",
+    "cpu_count": 16,
+    "p_cores": 12,
+    "e_cores": 4,
+    "xla_flags": null,
+    "jax_num_cpu_devices": true
+  }
+}
