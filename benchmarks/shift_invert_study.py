@@ -172,6 +172,7 @@ def recheck(path, depth=1005):
     t = t_iteration(op, free, P, sigma)
     print(f"recheck {depth}: {t:.2e} s/it, at most {t * 20000 / 60:.0f} min", flush=True)
     out = dict(depth=depth, frac=0.5, sigma=sigma, **inner(op, free, P, sigma, 1e-8))
+    out["note"] = "second run at the stored sigma, best-iterate MINRES (245cfc3 on)"
     print(json.dumps(out), flush=True)
     return out
 

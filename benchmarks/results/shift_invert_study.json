@@ -700,7 +700,8 @@
     "seconds": 592.6646115420153,
     "s_per_it": 0.04124318799874846,
     "residual": 9.75610228416975e-09,
-    "stagnated": false
+    "stagnated": false,
+    "note": "second run at the stored sigma, best-iterate MINRES (245cfc3 on)"
   },
   "versions": {
     "jax": "0.11.2",
