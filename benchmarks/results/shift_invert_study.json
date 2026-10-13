@@ -303,7 +303,18 @@
         "residual": 0.006804865478378303,
         "stagnated": true
       }
-    ]
+    ],
+    "recheck_1005": {
+      "depth": 1005,
+      "frac": 0.5,
+      "sigma": 452.38786227886976,
+      "note": "rerun with the best-iterate MINRES (PR 15a review round 4)",
+      "iterations": 14370,
+      "seconds": 592.6646115420153,
+      "s_per_it": 0.04124318799874846,
+      "residual": 9.75610228416975e-09,
+      "stagnated": false
+    }
   },
   "grid_voxel": {
     "n_dof": 107811,
@@ -565,7 +576,7 @@
       ],
       "wall": 6170.849287083023
     },
-    "note": "slice from the first run (log); floor dropped"
+    "note": "slice from the first run (log); a tau = 1e-14 floor attempt at the slice sigma (depth about 100) with the pre-fix MINRES stopped at 2.28e-3 after 980 iterations, flagged stagnated (last iterate returned); the floor at the largest size is floor_1M (depth 6)"
   },
   "full": {
     "n_dof": 24843,
@@ -665,10 +676,32 @@
       "wall": 278.6708616251126
     }
   },
+  "floor_2M": {
+    "n_dof": 1975509,
+    "depth": 6,
+    "sigma": 5.91249487406235,
+    "iterations": 100,
+    "seconds": 96.2644370830385,
+    "s_per_it": 0.962644370830385,
+    "residual": 3.273965343726773e-14,
+    "stagnated": true
+  },
+  "floor_1M": {
+    "n_dof": 1075275,
+    "depth": 6,
+    "sigma": 5.901519292489903,
+    "iterations": 110,
+    "seconds": 100.30816724989563,
+    "s_per_it": 0.9118924295445058,
+    "residual": 6.9795204209357e-14,
+    "stagnated": true
+  },
   "walls": {
     "hex20_1M": 6170.849287083023,
     "full": 148.55784804094583,
-    "voxel_2M": 347.1955800000578
+    "voxel_2M": 347.1955800000578,
+    "floor_2M": 164.23039766598959,
+    "floor_1M": 130.93240858404897
   },
   "versions": {
     "jax": "0.11.2",

@@ -148,6 +148,20 @@ def large(mesh, coarse, name, depth, block=6):
     return out
 
 
+def floor(mesh, coarse, name, depth=6):
+    """The tau = 1e-14 floor at the largest Mac size: one 6-column solve with sigma mid-gap
+    after mode depth of the coarse mesh."""
+    lam = reference(coarse, depth + 10)
+    d = widest(lam, depth, depth + 6)
+    sigma = (lam[d - 1] + lam[d]) / 2
+    op, free, build = setup(mesh)
+    P = build(op, sigma)
+    print(f"{name}: {t_iteration(op, free, P, sigma):.2e} s/it, depth {d}", flush=True)
+    out = dict(n_dof=op.n_dof, depth=d, sigma=sigma, **inner(op, free, P, sigma, 1e-14))
+    print(json.dumps(out), flush=True)
+    return out
+
+
 def full_slice(n, first=51, last=70):
     """Modes first..last (1-based) of hex20 n^3 at tol 1e-8 by one slice and by
     solve_modes(band=(0, f(hi))) (LOBPCG from 0)."""
@@ -171,7 +185,7 @@ def full_slice(n, first=51, last=70):
     return out
 
 
-PARTS = ("grid_hex20", "grid_voxel", "full", "hex20_1M", "voxel_2M")
+PARTS = ("grid_hex20", "grid_voxel", "full", "hex20_1M", "voxel_2M", "floor_1M", "floor_2M")
 
 
 def run(small=False, parts=PARTS):
@@ -187,6 +201,8 @@ def run(small=False, parts=PARTS):
         full=lambda: full_slice(12),
         hex20_1M=lambda: large(hex20(44), hex20(12), "hex20_1M", 100),
         voxel_2M=lambda: large(voxel(86), voxel(32), "voxel_2M", 6),
+        floor_1M=lambda: floor(hex20(44), hex20(12), "floor_1M"),
+        floor_2M=lambda: floor(voxel(86), voxel(32), "floor_2M"),
     )
     for name in parts:
         print(f"== {name}", flush=True)

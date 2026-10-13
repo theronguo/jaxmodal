@@ -216,7 +216,7 @@ References from SciPy `reference_modes` / `eigsh(sigma=...)` on the assembled fr
   once at 20 if it ends `capacity_full`), recording `converged`, `capacity_full`, `r_acc`,
   `tau_eff`, `delta_max`, steps and seconds; an unconverged slice's r_acc is reported with that
   flag in the JSON and docs, never as a converged value.
-- *Amended at implementation (user: "Run something more reasonable"):* the 1M and 2M floor solves are dropped and the 2M slice sits near mode 6 (see `docs/open_items.md`); the 1M slice near mode 100 ran (1.7 h, not 40–70 min: 780 MINRES iterations per step, not 300).
+- *Amended at implementation (user: "Run something more reasonable"):* the 1M and 2M floor solves run near mode 6 and so does the 2M slice (see `docs/open_items.md`); the 1M slice near mode 100 ran (1.7 h, not 40–70 min: 780 MINRES iterations per step, not 300).
 - **A full slice vs LOBPCG from 0:** hex20 $12^3$, modes 51–70 at tol 1e-8: steps, Lanczos
   columns per mode, MINRES iterations per step, seconds; the same band by `solve_modes(band=...)`
   (a first data point for 15c's crossover).

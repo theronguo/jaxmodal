@@ -130,25 +130,27 @@ The measured setup peak per corner DOF grows about 0.65 kB per decade of $n_c$ (
 - **`lam` holds the converged `inside` set**, which extends 100 $r_{acc}$ past each edge and over clusters straddling one (the plan's "in $[\lambda_{lo}, \lambda_{hi}]$" read with its own 100 r window); 15c's duplicate removal handles the overlap.
 - **`si_memory`** counts the build on top of the full storage plus a host term (as `lobpcg_memory`), and takes the expected slice count `n_modes` for its end phase.
 - **Cost driver:** the depth of σ in the spectrum, not δ, sets the MINRES iterations (measured); 15c fits its cost model on depth (roadmap note on the two cost-model bullets).
-- **Largest-size benchmark cut (user: "Run something more reasonable", 2026-10-13).** The plan's 1M and 2M τ = 1e-14 floor solves are dropped (the floor comes from the $16^3$ / $32^3$ grids), and the 2M voxel slice sits near mode 6, not 100. The 1M hex20 slice near mode 100 was measured before the cut (converged, 9 steps of about 780 MINRES iterations, 1.7 h). `shift_invert_study.py --parts` runs one part at a time and every slice prints a progress line per step.
+- **Largest-size benchmark cut (user: "Run something more reasonable", 2026-10-13).** The plan's 1M and 2M τ = 1e-14 floor solves run near mode 6, not 100 (about 2 min each), and the 2M voxel slice sits near mode 6 too. The 1M hex20 slice near mode 100 was measured before the cut (converged, 9 steps of about 780 MINRES iterations, 1.7 h). `shift_invert_study.py --parts` runs one part at a time and every slice prints a progress line per step.
 
-### Shift-invert at depth 1000 (PR 15a → PR 15c)
+### Shift-invert cost near mode 1000 (PR 15a → PR 15c)
 
-With σ near mode 1000 (hex20 $16^3$, AMG), MINRES on $K - \sigma M$ stagnates near $10^{-2}$ even with σ mid-gap (14–17k iterations), so `si_slice` stops with "inner solves failed" (it reports, never returns wrong modes). Iterations grow about linearly with the depth up to there (4970–5260 at depth 500). This matters for the 10M GPU goal, where LOBPCG's basis runs out near modes 700–1000 and the roadmap sends those bands to shift-invert. 15c must keep σ above the failing depth or strengthen the inner solve: deflate the converged modes below σ from MINRES, a stronger (e.g. higher-degree or σ-aware) multigrid, or a memory-lean LOBPCG fallback. Not decided; may need the user's input if no option meets the roadmap's 10M band criteria.
+With σ near mode 1000 (hex20 $16^3$, AMG), a mid-gap MINRES solve takes about 14k iterations (4970–5260 at depth 500); at 1M DOF on the Mac that is about 4 h per slice step. Before the best-iterate fix it was reported stagnated at $6.8 \times 10^{-3}$; with the fix it converged (one rerun), so the depth limit is cost, not failure, but the stall at that depth may be marginal (σ near an eigenvalue still stagnated there, measured before the fix). This matters for the 10M GPU goal, where LOBPCG's basis runs out near modes 700–1000 and the roadmap sends those bands to shift-invert. 15c's cost model must price it; options if it is too slow: deflate the converged modes below σ from MINRES, a stronger (higher-degree or σ-aware) multigrid, or a memory-lean LOBPCG fallback. May need the user's input if no option meets the roadmap's 10M band criteria.
 
-### MINRES stall rule at large sizes (PR 15a → PR 15b/15c)
+### σ-move retries (PR 15a → PR 15c)
 
-A 6-column τ = $10^{-14}$ solve at 1M hex20 DOF near mode 100 stopped at $2.3 \times 10^{-3}$ after 980 iterations, flagged stagnated, while the slice's τ = $10^{-8}$ solves at the same σ reached $10^{-8}$ in 780. If the stall rule (5 checks, 10 iterations apart, without a new minimum) fires on a plateau of the explicit 2-norm residual, a large slice would raise τ_eff wrongly and could fail at $\tau_\text{eff} > 10^{-4}$. First check (15b): record the residual history of that solve (`minres` with a longer patience) to see whether it resumes past the plateau.
+A slice whose first solve stagnates moves σ once and repeats the solve; when the stagnation is depth-driven, the retry costs a second full solve before the slice stops. 15c's strategy should not place slices where the cost model predicts stagnation, so the retry only handles σ on an eigenvalue.
 
-### σ-move retries on failing slices (PR 15a → PR 15c)
+### End-to-end `jax.grad` and eigenvector sensitivities (user, 2026-10-13)
 
-A slice whose first solve stagnates moves σ once and repeats the solve; when the failure is depth-driven (above), the retry costs a second full solve before the slice stops. 15c's strategy should not place slices where the cost model predicts stagnation, so the retry only handles σ on an eigenvalue.
+Asked whether `solve_modes` should support `jax.grad` end to end (a custom VJP wrapping PR 21's sensitivities) or eigenvector sensitivities. User: "No idea. Just follow the roadmap". Default: the roadmap as written (principle 5: eigenvalue sensitivities by a separate element-kernel pass in PR 21; solvers and preconditioners never differentiated; no eigenvector gradients). Revisit if an optimization use case needs mode-shape objectives.
 
 ### GMG restriction on the GPU (PR 11 deferred GPU checks)
 
 Restriction is the transpose of gathers, i.e. scatter-adds (6× the prolongation time on CPU at $87^3$). Default: keep; listed in the deferred GPU checks with "rewrite as gathers if it dominates".
 
 ## Resolved
+
+- **MINRES returned its last iterate (PR 15a review round 4).** After a stall the returned residual had drifted up to 40× above the minimum (σ on an eigenvalue), which inflated τ_eff and most likely made a 1M floor attempt look stuck at $2.3 \times 10^{-3}$ and the depth-1000 midpoint solve at $6.8 \times 10^{-3}$. `minres` now keeps and returns the best iterate (one more block); the 1M / 2M floors at depth 6 are $7.0 \times 10^{-14}$ / $3.3 \times 10^{-14}$ and the depth-1000 solve converges.
 
 - **p-MG refuses σ = 0 (PR 12 → PR 13b, decision without user input).** `amg(..., nonsingular=True)` accepts σ = 0 when the caller states that $A_P(0)$ is nonsingular (it checks `s_K > 0` itself); `solve_modes` passes it when no rigid modes are left, so clamped bodies start the σ pre-estimate at σ = 0. `pmg` keeps refusing σ = 0 (test-only).
 
