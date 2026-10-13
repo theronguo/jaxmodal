@@ -15,6 +15,11 @@ already spent, an explicit `degree` is never capped, the band `chunk` follows `n
 that does not fit the budget is handled, test placements at the solver's own thresholds, tests
 of the bound, the calibration and `count`'s `_steps`, and a cheap ≥ 2 GB memory test.
 
+Revision 4 (round 3): `verify=True` keeps the modes when the count does not fit; the bound is
+tested against warm step time and on the loose-τ branch; `t_iteration` = 0 without a warm
+iteration; the slack ratio is measured in the implementation; the kept aggregates leave the
+budget; test 7b pinned to about 200 steps.
+
 ## Scope
 
 - `solve_modes(mesh, materials, bcs, n_modes=None, ..., band=None, verify=None,
@@ -54,7 +59,9 @@ New internal keyword `lam_stop=None` ($(2\pi f_{max})^2$, the pencil's units). W
   reports it; the Options table says so). `info["chunk"]` reports the chunk used.
 - Chunk 0's warm time per iteration (its iterations after the first, which compiles) is
   recorded as `info["t_iteration"]` (one `perf_counter` pair around the first iteration and the
-  chunk); chunk 0 has no locked modes, so it times the applies without the projector.
+  chunk); chunk 0 has no locked modes, so it times the applies without the projector. If
+  chunk 0 ran a single iteration there is no warm time: `t_iteration` = 0, so the bound never
+  skips and `verify=None` goes to the calibration.
 - Every chunk is lockable (the guard error applies to every chunk).
 - **Band rule** (host helper `_band_count(lam, t, lam_stop) -> i`, unit-tested on synthetic
   arrays): `i` = the number of Ritz values $\le$ `lam_stop`$\,(1 + 100\,t)$ (a neighbour within
@@ -103,22 +110,25 @@ One helper `_predict(...)` (the test seam) returns the decision inputs.
   Probe block `b = probe_block(budget, n_probes, op_memory, n_dof, voxel, precond_memory,
   n_rigid)` unless `count_options["block"]`, with `budget` = the solve's
   `solve_modes_memory(...)["total"]` at the returned capacity minus $8\,n\,k_{all}$ (the host W:
-  host and device share memory on the Mac; conservative on a GPU). The λ_c multigrid is fp64
+  host and device share memory on the Mac; conservative on a GPU) and minus the kept AMG
+  aggregates' host bytes. The λ_c multigrid is fp64
   (`precond_memory` at fp64 even when the solve ran an fp32 V-cycle). `n_blocks` =
   $\lceil n_{probes}/b\rceil$; `predicted_steps` = $n_{blocks}\,d$, reported in every mode.
   `probe_block` raising (the budget below `count_memory(1)`, possible when the solve ran an
   fp32 V-cycle and the λ_c multigrid is fp64): `verify=None` skips with reason "count does not
-  fit the solve's memory"; `verify=True` raises a ValueError naming both sizes and
-  `count_options["block"]` (the user may accept a larger peak by setting it).
+  fit the solve's memory"; `verify=True` also returns the modes with `ran: False`, the reason
+  naming both sizes and `count_options={"block": 1}` (the user may accept a larger peak), and a
+  warning (the check can only run after the solve; raising would discard it).
 - **A-priori bound (free):** a count step runs ≥ 7 PCG iterations at width b (measured 7–14 at
   λ_c at the default τ, 14a), each at least one operator and one preconditioner apply; a LOBPCG
   iteration is two operator and one preconditioner apply at width m plus its dense work (at
   most about 1.5× the applies at m = 48), so a step costs ≥ about 2.3 (b/m) $t_{it}$.
   `predicted_s_bound` = $c$ · `predicted_steps` · (b/m) · $t_{it}$ with $c = 2$, or $c = 0.3$
   (one PCG iteration) when `count_options["tau"]` is looser than the rule; $t_{it}$ =
-  `info["t_iteration"]` (chunk 0, warm). Measured: real step / bound ≈ 4.5 at hex20 16³ AMG,
-  b = 10 (0.50 s vs 0.11 s); the implementation checks the voxel/GMG case once and the docs
-  give both ratios. Dropping the build and calibration keeps it a lower bound.
+  `info["t_iteration"]` (chunk 0, warm). Round-2 probes put real step / bound at 4.5–6.8 on
+  hex20 16³ AMG, b = 10 (0.50 s probe vs 0.70–0.82 s in the 14a table, with a different load);
+  the implementation measures the ratio with the recurrence-only `time["step"]` on hex20 and
+  voxel/GMG, and the docs give those measured values. Dropping the build and calibration keeps it a lower bound.
 - `verify is False`: no build, no count; `info["count"]` = `{ran: False, degree, block,
   predicted_steps, predicted_s: predicted_s_bound, predicted_kind: "bound"}`.
 - `verify is True`: build the fp64 preconditioner at $\lambda_c$ and run the count (no
@@ -180,12 +190,16 @@ The count fits by construction (budget = this estimate minus the host W).
    (builder patched to raise); `predicted_s` = `build_s + calibration_s` +
    $n_{blocks}(d\,t_{step} + t_{block})$ from the info values; a capped `d`
    (`counting.MAX_DEGREE` monkeypatched to 4, so the rule returns None): `None` skips without
-   building, `True` returns NaN unverifiable; the bound ≤ the actual recurrence time of the
-   `verify=True` run; a budget patched below `count_memory(1)`: `None` skips with the reason,
-   `True` raises.
-7b. **Calibration accuracy** (slow): a cut with a few thousand recurrence steps of work
-   (hex20 $12^3$, `_predict` patched to force the run): the calibrated `predicted_s` minus the
-   spent part is within $[0.5, 2]\times$ the actual count time.
+   building, `True` returns NaN unverifiable; the bound equals $c$ · `predicted_steps` · (b/m)
+   · `t_iteration` with $c = 2$ at the default τ and $c = 0.3$ with `count_options={"tau":
+   1e-4}`; `t_iteration` = 0 forced (patched) makes `None` calibrate; a budget patched below
+   `count_memory(1)`: `None` skips with the reason, `True` returns the modes with `ran: False`
+   and warns.
+7b. **Calibration accuracy and the bound** (slow): hex20 $12^3$, `_predict` patched to force
+   the run, `count_options={"degree": 200, "block": 10, "n_probes": 10}` (one block, about 200
+   steps, far more than the 3 calibration steps): the calibrated `predicted_s` minus the spent
+   part is within $[0.5, 2]\times$ the actual count time, and the bound ≤ $n_{blocks}\,d\,
+   t_{step}$ with the calibrated warm $t_{step}$.
 7c. **`count` changes** (`tests/test_counting.py`): `_steps=3` runs exactly 3 steps;
    `_steps >= d` gives the same estimate as no limit; `time["step"]` and `time["block"]` exist
    and `step·steps + block ≤ total`.
@@ -219,7 +233,7 @@ The count fits by construction (budget = this estimate minus the host W).
 - `docs/open_items.md`: no strategy selection and no basis-fit check (PR 15); growth transient
   and recompiles, no `max_modes` cap (the free-DOF error and the expected count instead); band
   `chunk` default 40 and the 2M DOF limit; the a-priori bound's assumptions (factor 2, measured
-  slack ≈ 4.5×); an explicit `degree` bypasses the cap; `verify=True` raising when the count
-  does not fit; budget = solve
-  estimate minus host W; the final chunk converges modes beyond the band (up to `chunk`; a
+  slack as measured); an explicit `degree` bypasses the cap; `verify=True` keeps the modes and
+  warns when the count does not fit; budget = solve estimate minus host W and the kept
+  aggregates; the final chunk converges modes beyond the band (up to `chunk`; a
   stop callback could save iterations); the τ_c question carried over from 14a.
