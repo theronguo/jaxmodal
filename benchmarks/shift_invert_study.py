@@ -162,6 +162,20 @@ def floor(mesh, coarse, name, depth=6):
     return out
 
 
+def recheck(path, depth=1005):
+    """The mid-gap tau = 1e-8 solve at depth of the hex20 16^3 grid again, sigma read from the
+    stored grid (a second run: at depth 1000 the outcome depends on round-off)."""
+    rows = json.loads(Path(path).read_text())["grid_hex20"]["rows"]
+    sigma = next(r["sigma"] for r in rows if r["depth"] == depth and r["frac"] == 0.5)
+    op, free, build = setup(hex20(16))
+    P = build(op, sigma)
+    t = t_iteration(op, free, P, sigma)
+    print(f"recheck {depth}: {t:.2e} s/it, at most {t * 20000 / 60:.0f} min", flush=True)
+    out = dict(depth=depth, frac=0.5, sigma=sigma, **inner(op, free, P, sigma, 1e-8))
+    print(json.dumps(out), flush=True)
+    return out
+
+
 def full_slice(n, first=51, last=70):
     """Modes first..last (1-based) of hex20 n^3 at tol 1e-8 by one slice and by
     solve_modes(band=(0, f(hi))) (LOBPCG from 0)."""
@@ -186,9 +200,10 @@ def full_slice(n, first=51, last=70):
 
 
 PARTS = ("grid_hex20", "grid_voxel", "full", "hex20_1M", "voxel_2M", "floor_1M", "floor_2M")
+EXTRA = ("recheck_1005",)  # run only when named
 
 
-def run(small=False, parts=PARTS):
+def run(small=False, parts=PARTS, out=harness.RESULTS):
     config.enable_x64()
     if small:
         r = dict(grid=dict(hex20=grid(hex20(4), (5, 10), "hex20")))
@@ -203,6 +218,7 @@ def run(small=False, parts=PARTS):
         voxel_2M=lambda: large(voxel(86), voxel(32), "voxel_2M", 6),
         floor_1M=lambda: floor(hex20(44), hex20(12), "floor_1M"),
         floor_2M=lambda: floor(voxel(86), voxel(32), "floor_2M"),
+        recheck_1005=lambda: recheck(Path(out) / "shift_invert_study.json"),
     )
     for name in parts:
         print(f"== {name}", flush=True)
@@ -218,9 +234,9 @@ def run(small=False, parts=PARTS):
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--out", default=harness.RESULTS)
-    p.add_argument("--parts", nargs="+", choices=PARTS, default=PARTS)
+    p.add_argument("--parts", nargs="+", choices=PARTS + EXTRA, default=PARTS)
     a = p.parse_args()
-    r = run(parts=a.parts)
+    r = run(parts=a.parts, out=a.out)
     path = Path(a.out) / "shift_invert_study.json"
     old = json.loads(path.read_text()) if path.exists() else {}
     old.pop("versions", None)

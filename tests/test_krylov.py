@@ -144,6 +144,12 @@ def test_minres_best():
     assert r == pytest.approx(info["residuals"][0], rel=1e-12)
     _, early = run(minres, A, b, P, 1e-8, maxit=its - (1 + STALL_C) * CHECK + CHECK)
     assert info["residuals"][0] <= early["residuals"][0]
+    # maxit between checks: the unchecked last iterate is better than the check at 10
+    A, P, b = ap_operator(op, free, -(lam[2] + lam[3]) / 2), jacobi(op, free, lam[2]), rhs(free, 2)
+    x, info = run(minres, A, b, P, 1e-14, maxit=15)
+    _, check = run(minres, A, b, P, 1e-14, maxit=10)
+    r = np.linalg.norm(b - np.asarray(A(jnp.asarray(x))), axis=0) / np.linalg.norm(b, axis=0)
+    assert np.allclose(r, info["residuals"], rtol=1e-12) and (r < check["residuals"]).all()
 
 
 def test_minres_exits():

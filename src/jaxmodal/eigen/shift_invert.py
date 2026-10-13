@@ -17,7 +17,7 @@ from .lobpcg import _K, _M, C_FLOOR, _deflate, _insert, _norms, _resid, _svqb_t
 
 SIGMA_MOVE = 0.01  # sigma moves by this fraction of the slice width when it hits an eigenvalue
 STAGNATION = 1e3  # first-solve residual (relative to max(tau, TAU_MIN)) above which sigma moves
-TAU_MIN = 1e-10  # above the fp64 MINRES floor (about 1e-13), so a tiny tau does not move sigma
+TAU_MIN = 1e-10  # above the fp64 MINRES floor (2e-14 - 1e-12): a tiny tau does not move sigma
 INNER_GROWTH = 10  # later inner solves are capped at this multiple of the first one
 TAU_FAIL = 1e-4  # tau_eff above this ends the slice ("inner solves failed")
 REFILLS = 3  # random refills of dropped columns before a breakdown error

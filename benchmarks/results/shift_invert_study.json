@@ -303,18 +303,7 @@
         "residual": 0.006804865478378303,
         "stagnated": true
       }
-    ],
-    "recheck_1005": {
-      "depth": 1005,
-      "frac": 0.5,
-      "sigma": 452.38786227886976,
-      "note": "rerun with the best-iterate MINRES (PR 15a review round 4)",
-      "iterations": 14370,
-      "seconds": 592.6646115420153,
-      "s_per_it": 0.04124318799874846,
-      "residual": 9.75610228416975e-09,
-      "stagnated": false
-    }
+    ]
   },
   "grid_voxel": {
     "n_dof": 107811,
@@ -702,6 +691,16 @@
     "voxel_2M": 347.1955800000578,
     "floor_2M": 164.23039766598959,
     "floor_1M": 130.93240858404897
+  },
+  "recheck_1005": {
+    "depth": 1005,
+    "frac": 0.5,
+    "sigma": 452.38786227886976,
+    "iterations": 14370,
+    "seconds": 592.6646115420153,
+    "s_per_it": 0.04124318799874846,
+    "residual": 9.75610228416975e-09,
+    "stagnated": false
   },
   "versions": {
     "jax": "0.11.2",

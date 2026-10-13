@@ -151,6 +151,7 @@ def minres(A, b, precond=None, tol=1e-8, maxit=10000):
     independent columns of b (n, k): x and info (iterations, residuals, converged, stagnated).
     The explicit 2-norm residual is checked every CHECK iterations; a column converges when it
     meets tol ||b|| and stagnates after STALL_C checks without a new minimum. Returns the iterate
-    with the smallest explicit residual (the last one or the best check)."""
+    with the smallest explicit residual (the last one or the best check); a non-finite residual is
+    reported as NaN, as in pcg."""
     _check("minres", b, maxit)
     return _minres(A, Partial(_identity) if precond is None else precond, b, tol, maxit)

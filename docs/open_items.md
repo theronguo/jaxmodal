@@ -134,7 +134,7 @@ The measured setup peak per corner DOF grows about 0.65 kB per decade of $n_c$ (
 
 ### Shift-invert cost near mode 1000 (PR 15a → PR 15c)
 
-With σ near mode 1000 (hex20 $16^3$, AMG), a mid-gap MINRES solve takes about 14k iterations (4970–5260 at depth 500); at 1M DOF on the Mac that is about 4 h per slice step. Before the best-iterate fix it was reported stagnated at $6.8 \times 10^{-3}$; with the fix it converged (one rerun), so the depth limit is cost, not failure, but the stall at that depth may be marginal (σ near an eigenvalue still stagnated there, measured before the fix). This matters for the 10M GPU goal, where LOBPCG's basis runs out near modes 700–1000 and the roadmap sends those bands to shift-invert. 15c's cost model must price it; options if it is too slow: deflate the converged modes below σ from MINRES, a stronger (higher-degree or σ-aware) multigrid, or a memory-lean LOBPCG fallback. May need the user's input if no option meets the roadmap's 10M band criteria.
+With σ near mode 1000 (hex20 $16^3$, AMG), a mid-gap MINRES solve takes about 14k iterations (4970–5260 at depth 500); at 1M DOF on the Mac that is about 4 h per slice step. Of two runs at the same settings one had a column stagnate (last iterate $6.8 \times 10^{-3}$) and one converged ($9.8 \times 10^{-9}$), the difference from round-off in the recompiled loop (the best-iterate fix leaves the iterates and exits unchanged): at that depth the inner solve is marginal, and σ near an eigenvalue stagnated there too. So the limit is both cost and possible failure. This matters for the 10M GPU goal, where LOBPCG's basis runs out near modes 700–1000 and the roadmap sends those bands to shift-invert. 15c's cost model must price it; options if it is too slow: deflate the converged modes below σ from MINRES, a stronger (higher-degree or σ-aware) multigrid, or a memory-lean LOBPCG fallback. May need the user's input if no option meets the roadmap's 10M band criteria.
 
 ### σ-move retries (PR 15a → PR 15c)
 
@@ -150,7 +150,7 @@ Restriction is the transpose of gathers, i.e. scatter-adds (6× the prolongation
 
 ## Resolved
 
-- **MINRES returned its last iterate (PR 15a review round 4).** After a stall the returned residual had drifted up to 40× above the minimum (σ on an eigenvalue), which inflated τ_eff and most likely made a 1M floor attempt look stuck at $2.3 \times 10^{-3}$ and the depth-1000 midpoint solve at $6.8 \times 10^{-3}$. `minres` now keeps and returns the best iterate (one more block); the 1M / 2M floors at depth 6 are $7.0 \times 10^{-14}$ / $3.3 \times 10^{-14}$ and the depth-1000 solve converges.
+- **MINRES returned its last iterate (PR 15a review round 4).** After a stall the returned residual had drifted up to 40× above the minimum (σ on an eigenvalue), which inflated τ_eff. `minres` now keeps and returns the best iterate (one more block). The fix changes only the returned iterate and its reported residual, not the iterates, flags or counts. The 1M / 2M floors at depth 6 are $7.0 \times 10^{-14}$ / $3.3 \times 10^{-14}$; the 1M attempt at depth 100 that ended at $2.3 \times 10^{-3}$ stays unexplained (not rerun).
 
 - **p-MG refuses σ = 0 (PR 12 → PR 13b, decision without user input).** `amg(..., nonsingular=True)` accepts σ = 0 when the caller states that $A_P(0)$ is nonsingular (it checks `s_K > 0` itself); `solve_modes` passes it when no rigid modes are left, so clamped bodies start the σ pre-estimate at σ = 0. `pmg` keeps refusing σ = 0 (test-only).
 
