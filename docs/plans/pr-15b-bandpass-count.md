@@ -12,6 +12,12 @@ lower-edge degree formula, a segmented recurrence with progress lines, W streame
 host arrays, no `neighbours=` option (test 8 calls the private loop), test 4 cut to one case
 plus a free body with R, concrete ranges and budgets in the tests.
 
+Revision 3 (round 2): only the nearest out-of-band pair on each side is deflated (from
+`si_slice`'s neighbours and the caller's W), so no large deflation set is streamed; progress
+lines by a host callback inside the existing loop (no segmentation, no carry or memory change);
+`verbose` in `solve_modes`'s `count_options`; the result of an unconverged restart; `gap` = the
+governing gap; `n_top` in `info`; `lam_W` required with W.
+
 ## Scope
 
 - **In:** the band-pass count `band_count` (two counting edges, deflation of the known
@@ -55,12 +61,14 @@ Roadmap [15b] tests (all here, none dropped):
   `count_degree`, never 23/g).
 - Out-of-band weight at d = 23/g (performance review): $q^2 \approx 6.7\text{e-}4$ at a
   neighbour g/2 past its counting edge, 3.9e-6 at g, 2.6e-7 at 1.5g. One deflated neighbour per
-  edge removes everything above about 4e-6; a degenerate twin of a neighbour left in adds at most
+  edge typically removes everything above about 4e-6 (when the next mode is ≥ g past the
+edge); a mode close behind the neighbour or a degenerate twin of a neighbour left in adds at most
   about 7e-4. On the 14a reference spectrum (bands at modes 11–16, 31–40, 61–66, 101–110, an
   empty band) the degree was always set by the $q^2$ rule, and the exact out-of-band sum with
   the neighbours deflated was ≤ 1e-3 (correctness review). So the roadmap's "converged
   out-of-band neighbours within the polynomial's transition width" is met by the nearest pair on
-  each side, plus any further known out-of-band pairs the caller passes.
+  each side; further pairs would change the estimate by about 1e-6 each, which the tail model
+  already bounds, at the cost of streaming them through every projection.
 - `si_slice` returns lam (ascending, the converged pairs in the slice widened over clusters), V
   (host, M-orthonormal), and `info["neighbours"] = {"lo": (λ, v) or None, "hi": ...}`: the
   nearest converged Ritz pair beyond each edge that is not in its W (none below for lo = 0).
@@ -109,10 +117,11 @@ est, info = band_count(op, free, V, lam, lo, hi, V_out, lam_out, *, R=None, prec
 
 - V (n, k ≥ 0), lam: the in-band modes (as `si_slice` returns them; the out-of-band pairs are
   added by `band_count`, not passed in V); lo < hi: the band edges (eigenvalues, lo > 0; a band
-  from 0 uses `count`). V_out, lam_out: every known converged out-of-band pair (`si_slice`'s
-  neighbours, the caller's W such as adjacent slices' modes), a host array or a tuple of host
-  arrays (streamed, never concatenated); none may lie in $[\lambda_{in,lo}, \lambda_{in,hi}]$,
-  and at least one must lie on each side (otherwise the edge cannot be placed: raises).
+  from 0 uses `count`). V_out, lam_out: the known converged out-of-band pairs nearest the band (`si_slice`'s
+  neighbours, the nearest pair of the caller's W beyond each edge), a host array (n, j) and
+  its eigenvalues (j,); in practice 2–4 columns. None may lie in
+  $[\lambda_{in,lo}, \lambda_{in,hi}]$, and at least one must lie on each side (otherwise the
+  edge cannot be placed: raises). All of them are deflated.
 - `band_edges` (roadmap "Band edges"): $\lambda_{in,lo}$ = min(lam) (lo when lam is empty),
   $\lambda_{in,hi}$ = max(lam) (hi when empty); $\lambda_{nb,lo}$, $\lambda_{nb,hi}$ = the
   nearest lam_out below and above; $c_{lo} = (\lambda_{nb,lo} + \lambda_{in,lo})/2$, $g_{lo} =
@@ -120,25 +129,28 @@ est, info = band_count(op, free, V, lam, lo, hi, V_out, lam_out, *, R=None, prec
   $q^2 \ge 0.95$ holds on $[\lambda_{in,lo}, \lambda_{in,hi}]$, the in-band interval up to the
   returned modes (up to the band edges when none). 15c uses it with `count_degree` to predict
   the cost before building anything.
-- W = (V, V_out...) streamed in chunks; the R term as in `count`.
+- W = (V, V_out): `_chunks`, `_project` and `_check_ortho` take a tuple of host arrays and
+  stream across it (a few lines), so V is never copied to append V_out; `count` accepts a tuple
+  W too (the total columns checked against len(lam)). The R term as in `count`.
 - `precond`: the SPD preconditioner of $K + c_{hi} M$ (default `jacobi(op, free, c_hi)`), as
   `count`'s `precond` at λ_c.
 - τ_c, blocks, flags, the degree cap (unverifiable, not run), NaN on a failed solve: as
   `count`. `info` as `count`'s plus `edges` ($c_{lo}$, $c_{hi}$) and `gaps` ($g_{lo}$, $g_{hi}$)
-  (`lam_c` = $c_{hi}$, `gap` = $g_{hi}$ as in `count`).
+  (`lam_c` = $c_{hi}$; `gap` = the governing gap $g_{eff}$, the roadmap's "smaller of the edge
+  gaps" in θ-resolution terms), and `n_top` (the fitted model count at `lam_top`).
 - **Refactor.** `count`'s probe loop moves to a private `_estimate(op, m, Ws, R, MR, precond,
   gamma, d, lam_c, tau, n_probes, block, seed, maxit, verbose, _steps)` returning the estimate
   and the shared info; `count` and `band_count` validate, place the edges, pick d and call it.
-  `_chunks`, `_project` and `_check_ortho` take a tuple of arrays and stream across them (the
-  sketch is over all columns). No behaviour change for `count`.
-- **Progress.** `_recurrence` runs in segments of `SEGMENT = 256` steps: it takes and returns
-  the carry (k, w_prev, w, u, counters; d stays a traced bound, one compile), and the host loop
-  calls it until k > d or a solve fails. With `verbose` (new on `count` too) each segment
-  prints steps done of d, PCG iterations (mean, max) and elapsed time, and each block one
-  line. At 1M DOF near index 100–1000 a count runs for hours (performance review), so it must
-  not be silent.
-- Memory: the deflation set is streamed, so `count_memory` / `probe_block` apply unchanged
-  (the host holds V, V_out and the caller's W once each).
+  No behaviour change for `count`.
+- **Progress.** With `verbose` (new on `count` too; a static flag of `_recurrence`), the loop
+  body calls `jax.debug.callback` every `PRINT_EVERY = 16` steps (under `lax.cond`) with
+  (k, iteration sum, iteration max); the host side prints steps done of d, PCG iterations and
+  elapsed time when at least `PRINT_S = 10` s passed since its last line, and each block prints
+  one line. The carry and the loop are unchanged, so the step-phase memory (`count_memory`) and
+  the results are unchanged. At 1M DOF a step takes about 65–85 s (50 probes), so this prints
+  about every 20 minutes; on test meshes it stays quiet. `verbose` joins `solve_modes`'s
+  `COUNT_OPTIONS` (rule: every option reachable; 14b band counts get progress too).
+- Memory: `count_memory` / `probe_block` apply unchanged (V_out adds 2–4 host columns).
 
 ### 3. `si_checked` (`eigen/shift_invert.py`, internal like `si_slice`)
 
@@ -148,20 +160,23 @@ lam, V, info = si_checked(op, free, lo, hi, precond, *, capacity, W=None, lam_W=
                           **slice_options)
 ```
 
-- Run `si_slice` (W, seed, verbose and every other option pass through). If it converged,
-  count: `band_count(op, free, V, lam, lo, hi, (W, v_lo, v_hi), (lam_W, λ_lo, λ_hi))` for
-  lo > 0 (W's pairs deflated too: when an adjacent slice's mode is the nearest beyond an edge it
-  places that edge); for lo = 0, `count(op, free, (V, W_up, v_hi), ...)` with lam_last =
-  `lam.max() if len(lam) else hi` and lam_next = the nearest out-of-band λ above (the step
-  polynomial; roadmap: an edge at λ = 0 has no counting edge), where W_up are the W pairs above
-  the slice (W below the slice is not allowed for lo = 0). `count_precond` defaults to the
+- W (host, M-orthonormal, the caller's known modes, e.g. adjacent slices') needs `lam_W` of
+  matching length (raises otherwise). Run `si_slice` (W, seed, verbose and every other option
+  pass through). If it converged, count with V = all in-band modes found and V_out = the nearest
+  out-of-band pair on each side among `si_slice`'s neighbours and W (when an adjacent slice's
+  mode is nearer than the neighbour, it places that edge): `band_count(op, free, V, lam, lo,
+  hi, V_out, lam_out)` for lo > 0; for lo = 0, `count(op, free, (V, v_up), [lam, λ_up],
+  lam_last, λ_up)` with lam_last = `lam.max() if len(lam) else hi` and v_up the nearest pair
+  above (the step polynomial; roadmap: an edge at λ = 0 has no counting edge; the deflation set
+  is then contiguous from 0, as `count`'s tail model needs). `count_precond` defaults to the
   slice's `precond` (the SPD fp64 multigrid of $K + \sigma M$, σ the midpoint, a good
   preconditioner of $K + c_{hi} M$: no second build, no second preconditioner alive); 15c may
   pass one built at $c_{hi}$. `count_options` (n_probes, seed, tau, degree, block, maxit) pass
   through.
 - **Restart rule (roadmap).** A verifiable count ≥ 0.5 flags the slice and restarts it:
   `si_slice` with a fresh random block (seed + j for restart j) and W extended by the in-band
-  modes found so far (lam_W too). Only in-band modes are added: the neighbours must reappear as
+  modes found so far (lam_W too; this extended W is only for `si_slice`, the count keeps
+  V = the found in-band modes and V_out as above). Only in-band modes are added: the neighbours must reappear as
   Ritz values to anchor the stop rule (deflated, the rule would wait for the next modes beyond
   each edge). The restart's capacity is `capacity` − L0_extra, L0_extra the extra deflation
   columns rounded up to the chunk (`si_slice`'s Q is (n, L0 + capacity)), so its device peak
@@ -172,7 +187,10 @@ lam, V, info = si_checked(op, free, lo, hi, precond, *, capacity, W=None, lam_W=
   probes (count seed + j: a false alarm from one probe draw does not repeat with V unchanged).
   After 2 restarts with the count still ≥ 0.5 the slice is returned with the count flagged.
   An unverifiable count (degree cap, solve floor) and a slice that did not converge are not
-  restarted: they are returned flagged (`passed` False).
+  restarted: they are returned flagged (`passed` False). A restart that does not converge
+  ends the loop: the found modes merged with its converged in-band pairs are returned,
+  `converged` False, `count["reason"]` "slice not converged", `flagged` True, `restarts` = j,
+  and the count fields of the last count that ran.
 - `info`: the last run's `si_slice` info (r_acc and tau_eff the max over runs; residuals and
   thresholds of all returned pairs; `converged` of the last run) plus `runs` (each run's info)
   and `count`, one dict shaped like 14b's `info["count"]`: `count`'s / `band_count`'s info of
@@ -196,10 +214,11 @@ budget: the new tests ≤ 60 s together outside test 6's complete case (slow, as
    coefficients of $x \ge x_0$ against scipy quad of the indicator's Chebyshev projection; the
    band-pass grid in [−ε, 1 + ε].
 2. Band degree rule: for a = 0.25, 0.5, 0.9 with each edge the tighter one: $q^2 \ge 0.95$ at
-   both in-band ends for d, and $< 0.95$ at the tighter end for d − 1; upper edge tighter:
+   both in-band ends for d, and d − 1 fails the rule; upper edge tighter:
    $d\,g_{hi} \in [19, 24]$; lower edge tighter: $d\,g_{lo}\cdot 2\sqrt a/(1 + a) \in [19, 24]$.
    A synthetic dense out-of-band spectrum (large n_top, as 14a's test) makes the bias set d.
-   `band_edges` on a few cases (empty band, straddling cluster, W nearer than the neighbour).
+   `band_edges` on a few cases (empty band, straddling cluster, W nearer than the neighbour);
+   `info["n_top"]` equals $C\lambda_{top}^a$ of the contiguous core for a known case.
 3. Lower tail against scipy quad of $q^2\, dN/d\lambda$ over $(0, \lambda_{bot})$, 1e-3
    relative (as 14a's upper-tail test).
 4. Expected value (as 14a test 4): the mean of 2000 probes against the exact sum
@@ -235,10 +254,14 @@ budget: the new tests ≤ 60 s together outside test 6's complete case (slow, as
 11. Not restarted: an unverifiable count (monkeypatched `band_count` returning NaN,
     unverifiable), an unconverged slice (capacity full) and a restart without capacity return
     flagged or unrun with `restarts == 0` and the reason; verbose line counts (`capsys`) for
-    `si_checked` and for a segmented `count` (with `SEGMENT` monkeypatched small).
+    `si_checked` and for `count` (`PRINT_S` monkeypatched to 0; `count_options={"verbose":
+    True}` through `solve_modes` with `band=(0, f_max)`), and the same estimate and probes with
+    and without `verbose`. A restart that does not converge (monkeypatched capacity full on the
+    restart): merged modes, `converged` False, the reason, `flagged`, `restarts == 1`. W
+    without `lam_W` or with a mismatched length raises.
 12. `band_count` errors: no out-of-band pair on a side, lo = 0, an out-of-band pair inside the
-    in-band interval, bad shapes; info fields (`edges`, `gaps`, `degree`); a tuple V_out gives
-    the same estimate as its concatenation.
+    in-band interval, bad shapes; info fields (`edges`, `gaps`, `gap`, `degree`); `count` with a
+    tuple W gives the same estimate as with its concatenation.
 
 Run: these tests after each commit, then the full `pytest -m "not gpu"` (slow included).
 
@@ -257,14 +280,17 @@ including tight lower edges, goes into the docs for 15c's cost model (seconds, n
   justification, progress lines, the degree table; "Shift-invert slices": `si_checked`, the
   restart rule, its `info["count"]` layout; "Validation": the new tests in both files.
 - `README.md`: status line; a `band_count` line next to `count`.
+- `docs/eigensolvers.md` options table: `count_options` gains `verbose`.
 - `docs/ROADMAP.md`: PR 15b status.
 - `docs/open_items.md`: the decisions below.
 
 ## Decisions without user input (to log)
 
 - The band tail model is fitted to the contiguous core (no mode index in a slice).
-- One nearest neighbour per side from `si_slice`, plus any known out-of-band pairs the caller
-  passes, meets "the converged neighbours within the transition width" (numbers above).
+- The nearest out-of-band pair per side (from `si_slice` or the caller's W) meets "the
+  converged neighbours within the transition width" (numbers above).
+- `verbose` progress by `jax.debug.callback` inside the loop, throttled to one line per 10 s;
+  `verbose` added to `COUNT_OPTIONS`.
 - `band_count` needs lo > 0; bands from 0 use `count`. The lower tail has N(0) = 0 with the
   rigid modes deflated.
 - σ of the band count at the upper counting edge (roadmap); the lower-edge cost
