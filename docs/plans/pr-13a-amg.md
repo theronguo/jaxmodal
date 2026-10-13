@@ -44,7 +44,9 @@ The setup loop is the one in Design (node-block strength on the first AMG level,
 |---|---|---|---|
 | hex20 $3^3$ / $6^3$ / $12^3$ / $24^3$, p-MG + AMG, `max_coarse` = 100 | 624 – 182k | 192→48 / 1029→162→6 / 6591→750→48 / 46875→4374→162→6 | 15 / 14 / 14 / 14 (exact `splu` coarse: 14 / 14 / 14 / 14) |
 | hex20 $44^3$, p-MG + AMG, `max_coarse` = 1000 | 1.08M | 273375→20250→750 | 14 |
-| hex8 $6^3$ / $12^3$ / $24^3$ / $48^3$, AMG under the matrix-free $A_P$ | 1k – 353k | to 108 / 600 / 162 / 48 | 13 / 13 / 13 / 13 |
+| hex8 $6^3$ / $12^3$ / $24^3$ / $48^3$, AMG under the matrix-free $A_P$, `max_coarse` = 1000 (test 5 re-measures at 100) | 1k – 353k | to 108 / 600 / 162 / 48 | 13 / 13 / 13 / 13 |
+| hex27 $3^3$ / $6^3$ / $12^3$, `max_coarse` = 100 | 1k – 47k (hex8 level) | 192→48 / 1029→162→6 / 6591→750→48 | 13 / 13 / 13 |
+| hex8 $6^3$ / $12^3$ / $24^3$, `max_coarse` = 100 | 1k – 47k | 1029→108→6 / 6591→600→30 / 46875→3888→162→6 | 13 / 13 / 13 |
 | AMG alone on the hex8 Galerkin matrix of hex20 $6^3$–$24^3$ | 1k – 47k | | 13 |
 
 **Robustness, exact coarse against AMG.** The AMG counts were measured with pyamg's host cycle using block Gauss–Seidel; on the boxes the device Chebyshev cycle gave the same counts. The shipped device cycle re-measures this table into `amg_study.json`, and the docs quote only those numbers.
@@ -72,7 +74,10 @@ The setup loop is the one in Design (node-block strength on the first AMG level,
 | next (20k) | 47 MB | 11 MB | 8 MB |
 
 - Operator complexity is 1.15–1.20.
-- 13b consequence: the ROADMAP memory table's "AMG ≈ 0.4 GB" at 1M hex20 becomes about 0.5 GB, about 5 GB at 10M. 13b updates the table with its estimator.
+- 13b consequences for the ROADMAP memory table (13b's estimator re-derives them):
+  - "AMG ≈ 0.4 GB" at 1M hex20 becomes about 0.5 GB, about 5 GB at 10M hex20;
+  - "Preconditioner workspace (≈ 4 blocks × m)" becomes about 12 fine blocks with p-MG + AMG (about 2.6 GB at 1M hex20, $m = 25$; about 29 GB at 10M hex20, $m = 30$);
+  - so "80 GB GPU: 10M fits" must be re-derived (about 84 GB with the 9-block LOBPCG step, about 72 GB with the low-memory step); 13b decides between the low-memory step and a smaller $m$.
 
 **Zero tentative columns.**
 - They occur only with rank-deficient constraints. With a seeded random DOF mask, 30% free, on a $6^3$ box: 10 columns (hex20) and 4 (hex8) on the first AMG level.
@@ -141,8 +146,9 @@ while A.shape[0] > max_coarse:
     Agg = standard_aggregation(C)
     T, R = fit_candidates(Agg, B)
     keep = columns of T with nonzero norm; T, R = T[:, keep], R[keep]   # zero-column drop
+    if len(keep) > 0.9 * A.shape[0]: break                              # no progress (before smoothing:
+                                                                        # pyamg's ρ estimate fails on trivial levels)
     P = jacobi_prolongation_smoother(bsr(Az, b), T, C, R, omega=4/3, weighting="block" if b == 3 else "diagonal")
-    if len(keep) > 0.9 * A.shape[0]: break                              # no progress
     Ac = P^T Az P (SciPy CSR)
     levels.append((A, P)); A, B, b = Ac, R, 1
 if A.shape[0] > 4 * max_coarse: raise ValueError(...)                   # coarsest cap
@@ -169,7 +175,7 @@ return levels, A
 **`linalg/ell.py` extension** (square behaviour unchanged):
 - `block_ell` accepts rectangular matrices (both dimensions divisible by `b`). `BlockELL.n_dof` is the output row count, i.e. the operator size for square matrices. Only transfers are rectangular, and they never reach code that assumes a square operator.
 - Padding entries point to column 0, not to the row's own block column, which may be out of range for a rectangular matrix.
-- Each bucket's scan step is bounded by entries, not rows: `c = clip(ENTRIES // (w b²), 8, chunk)` with `ENTRIES = 2048 · 27`, so the voxel GMG's 27-wide buckets keep today's chunk. Without this, a $P^\top$ bucket of width 512 gathers about one fine block per step at $m = 25$ (measured: 341 MB → 135 MB for the $44^3$ $P_0^\top$ apply at chunk 512, time 61 → 53 ms).
+- Each bucket's scan step is bounded by blocks, not rows: `c = clip(BLOCKS // w, 8, chunk)` with `BLOCKS = 2048 · 27`, so square `block_ell` matrices with width ≤ 27 (the hex8 Galerkin level, $b = 3$, $w = 27$) keep today's chunk of 2048 (a $b^2$ in the denominator would cut that level to 227 rows, measured 35% slower). The voxel GMG builds its ELL through `gmg._ell` and is unaffected. Without this, a $P^\top$ bucket of width 512 gathers about one fine block per step at $m = 25$ (measured: 341 MB → 135 MB for the $44^3$ $P_0^\top$ apply at chunk 512, time 61 → 53 ms).
 
 **What the pytree holds.** Device arrays only. The SciPy matrices and the pyamg intermediates are host locals and are freed when `amg` returns; 13b's memory ordering relies on this.
 
@@ -197,7 +203,7 @@ No 13a choice blocks 13b's 10M hex8 case, but two pieces are 13b's:
 - `src/jaxmodal/precond/amg.py` (new): `amg`, `_sa_levels`, `_nullspace`, `ELLTransfer`.
 - `src/jaxmodal/precond/pmg.py`: `_p_level`; `_hex8_galerkin` returns `corner`.
 - `src/jaxmodal/precond/__init__.py`: export `amg`.
-- `src/jaxmodal/linalg/ell.py`: rectangular `block_ell`, padding to column 0, entry-bounded chunks.
+- `src/jaxmodal/linalg/ell.py`: rectangular `block_ell`, padding to column 0, block-bounded chunks.
 - `tests/test_amg.py` (new); `tests/test_ell.py` (rectangular cases); `tests/test_pmg.py` (the `_hex8_galerkin` return value).
 - `benchmarks/amg_study.py` (new) → `benchmarks/results/amg_study.json`: h-sequences, robustness table, cost and storage at hex20 $44^3$.
 - Docs as below.
@@ -219,7 +225,7 @@ Common setup as in `tests/test_pmg.py`:
    Plus:
    - two calls give bitwise-identical hierarchies, and the global `np.random` state is unchanged;
    - `_nullspace` on a straight hex20 box spans the corner restriction of `rigid_modes(mesh)` (principal angles below $10^{-10}$), and rows of constrained DOFs are exactly 0.
-2. **First-level prolongator against pyamg.** On hex20 $12^3$ and hex8 $12^3$ (clamped, no drops), the first-level $P$ equals the first-level $P$ of `smoothed_aggregation_solver` (settings as in Measured facts, same seed) to $10^{-12}$. This kills block-size, weighting, ω and strength mutants: a scalar-aggregation mutant gives the same sizes and counts, so only this test sees it.
+2. **First-level prolongator against pyamg.** On hex20 $12^3$ and hex8 $12^3$ (clamped, no drops), the first-level $P$ equals the first-level $P$ of `smoothed_aggregation_solver(bsr_matrix(Az, blocksize=(3, 3)), B=B, strength=("symmetric", {"theta": 0.0}), improve_candidates=None, smooth=("jacobi", {"omega": 4/3, "weighting": "block"}), max_levels=2, keep=True)` to $10^{-12}$, with $A_z$ the explicit-zero-free matrix the loop uses and `np.random.seed(0)` right before both setups (the defaults differ: `improve_candidates` 0.5, `weighting="diagonal"` 0.1). This kills block-size, weighting, ω and strength mutants: a scalar-aggregation mutant gives the same sizes and counts, so only this test sees it.
 3. **Zero-column drop and straddling aggregates** (roadmap).
    - A hex20 and a hex8 $6^3$ box with a seeded random mask, 30% free:
      - the first level drops at least one column (asserted > 0);
@@ -233,10 +239,10 @@ Common setup as in `tests/test_pmg.py`:
 4. **Dense V-cycle and symmetry.** Each case composes a NumPy V-cycle from the dense level matrices, transfers, test-built smoothers (seeded `lmax_estimate`) and the dense coarsest inverse, and compares it with `amg(...)(U)` to $10^{-10}$. Cases:
    - (a) hex20 $3\times2\times2$, `max_coarse` small enough for two AMG levels;
    - (b) hex8 $4^3$ with a sliding mask, two AMG levels; the constrained rows of $P_0$ are exactly 0;
-   - (c) the no-AMG-level paths: hex20 $3^3$ at the default `max_coarse` (p-level plus Cholesky) and hex8 $3^3$ (`levels == ()`, a direct solve: PCG converges in 1 iteration).
+   - (c) the no-AMG-level paths: hex20 $3^3$ at the default `max_coarse` (p-level plus Cholesky) and hex8 $3^3$ (`levels == ()`, a direct solve: PCG converges in 1 iteration in exact arithmetic; the test allows 2).
 
    For (a) and (b): $u^\top V v = v^\top V u$ to $10^{-12}$; the free block of $V$ is positive definite; constrained outputs are exactly 0.
-5. **h-independence** (roadmap). Iterations grow ≤ 20% from the first size to the last, at `max_coarse` = 100 so that every size has an AMG level:
+5. **h-independence** (roadmap). Iterations grow ≤ 20% from the first size to the last, and each count is ≤ 1.5× the re-measured count at that size, at `max_coarse` = 100 so that every size has an AMG level:
    - hex20 $3^3$, $6^3$, $12^3$, $24^3$ ($24^3$ `slow`);
    - hex27 $3^3$, $6^3$, $12^3$;
    - hex8 $6^3$, $12^3$, $24^3$.
@@ -246,15 +252,16 @@ Common setup as in `tests/test_pmg.py`:
    - A `Stencil` raises `TypeError`; a wrong `points` shape raises `ValueError`.
    - σ = 0 raises `SingularShiftError`; σ < 0 and NaN raise `ValueError`.
    - x64 off raises.
-   - A monkeypatched `standard_aggregation` returning singletons triggers the coarsest-cap `ValueError`.
+   - Monkeypatching `jaxmodal.precond.amg.standard_aggregation` to return singletons (with `max_coarse` below $n/4$) triggers the coarsest-cap `ValueError`.
+   - A degenerate `max_coarse` (hex20 $3\times2\times2$, `max_coarse` = 3) stops at the 6-DOF level instead of crashing.
    - Every leaf of the result is a `jax.Array`.
    - `type(amg(...)) is GMG`, and `amg` and `pmg` apply through the same `gmg._vcycle_apply`.
 
 `tests/test_ell.py`:
 - rectangular `block_ell` ($b = 1$ and $b = 3$, plain and sliced, tall and wide) equals SciPy to $10^{-12}$, with the output shape asserted;
 - padding columns are 0;
-- a wide-bucket rectangular apply's `memory_analysis` temporaries stay below one entry-bounded chunk's gather;
-- square cases unchanged.
+- a wide-bucket rectangular apply's `memory_analysis` temporaries stay below one block-bounded chunk's gather;
+- square cases unchanged: a $b = 3$, $w = 27$ square matrix keeps `chunks == (2048,)`.
 
 The implementation re-measures all iteration bounds with the shipped code and keeps at least a 1.5× margin.
 
@@ -273,12 +280,12 @@ The implementation re-measures all iteration bounds with the shipped code and ke
     - limitations;
     - the tests list.
   - `pmg` stays documented as the test-only exact-coarse variant.
-  - The block-ELL section: rectangular matrices, padding to column 0, entry-bounded chunks.
+  - The block-ELL section: rectangular matrices, padding to column 0, block-bounded chunks.
 - **`README.md`**: status, plus an `amg` snippet (run by `test_readme`).
 - **`docs/ROADMAP.md`**:
   - the PR 13 split and deviation note (own setup loop over pyamg primitives, and why);
   - the 13a status line at merge;
-  - a 13b note that the memory table's AMG row becomes about 0.5 GB at 1M hex20.
+  - a 13b note that the memory table's AMG row (about 0.5 GB at 1M hex20), workspace row (about 12 fine blocks) and "10M fits" line are re-derived by 13b's estimator.
 - **`docs/open_items.md`** (decisions taken without user input marked as such):
   - "Thin plates": the AMG numbers; 13a attempts neither fix; retargeted to M4 / PR 18.
   - "p-MG on curved elements": resolved, with corner-evaluated $B$ (curved count unchanged).
