@@ -45,7 +45,7 @@ The setup loop is the one in Design (node-block strength on the first AMG level,
 | hex20 $3^3$ / $6^3$ / $12^3$ / $24^3$, p-MG + AMG, `max_coarse` = 100 | 624 – 182k | 192→48 / 1029→162→6 / 6591→750→48 / 46875→4374→162→6 | 15 / 14 / 14 / 14 (exact `splu` coarse: 14 / 14 / 14 / 14) |
 | hex20 $44^3$, p-MG + AMG, `max_coarse` = 1000 | 1.08M | 273375→20250→750 | 14 |
 | hex8 $6^3$ / $12^3$ / $24^3$ / $48^3$, AMG under the matrix-free $A_P$, `max_coarse` = 1000 (test 5 re-measures at 100) | 1k – 353k | to 108 / 600 / 162 / 48 | 13 / 13 / 13 / 13 |
-| hex27 $3^3$ / $6^3$ / $12^3$, `max_coarse` = 100 | 1k – 47k (hex8 level) | 192→48 / 1029→162→6 / 6591→750→48 | 13 / 13 / 13 |
+| hex27 $3^3$ / $6^3$ / $12^3$, `max_coarse` = 100 | 1k – 47k | 192→48 / 1029→162→6 / 6591→750→48 | 13 / 13 / 13 |
 | hex8 $6^3$ / $12^3$ / $24^3$, `max_coarse` = 100 | 1k – 47k | 1029→108→6 / 6591→600→30 / 46875→3888→162→6 | 13 / 13 / 13 |
 | AMG alone on the hex8 Galerkin matrix of hex20 $6^3$–$24^3$ | 1k – 47k | | 13 |
 
@@ -77,7 +77,7 @@ The setup loop is the one in Design (node-block strength on the first AMG level,
 - 13b consequences for the ROADMAP memory table (13b's estimator re-derives them):
   - "AMG ≈ 0.4 GB" at 1M hex20 becomes about 0.5 GB, about 5 GB at 10M hex20;
   - "Preconditioner workspace (≈ 4 blocks × m)" becomes about 12 fine blocks with p-MG + AMG (about 2.6 GB at 1M hex20, $m = 25$; about 29 GB at 10M hex20, $m = 30$);
-  - so "80 GB GPU: 10M fits" must be re-derived (about 84 GB with the 9-block LOBPCG step, about 72 GB with the low-memory step); 13b decides between the low-memory step and a smaller $m$.
+  - so "80 GB GPU: 10M fits" must be re-derived (about 84 GB with the 9-block LOBPCG step, about 72 GB with the low-memory step); 13b decides between the low-memory step and a smaller $m$. These totals add the standalone V-cycle temporaries and are upper bounds: 13b's estimator models p-MG + AMG as a step extra, like `GMG_STEP` (5.1 blocks against about 12 standalone for GMG).
 
 **Zero tentative columns.**
 - They occur only with rank-deficient constraints. With a seeded random DOF mask, 30% free, on a $6^3$ box: 10 columns (hex20) and 4 (hex8) on the first AMG level.
@@ -146,8 +146,8 @@ while A.shape[0] > max_coarse:
     Agg = standard_aggregation(C)
     T, R = fit_candidates(Agg, B)
     keep = columns of T with nonzero norm; T, R = T[:, keep], R[keep]   # zero-column drop
-    if len(keep) > 0.9 * A.shape[0]: break                              # no progress (before smoothing:
-                                                                        # pyamg's ρ estimate fails on trivial levels)
+    if len(keep) > 0.9 * A.shape[0]: break                              # no progress (skips a useless smoothing;
+                                                                        # one reviewer probe saw pyamg's ρ estimate fail there)
     P = jacobi_prolongation_smoother(bsr(Az, b), T, C, R, omega=4/3, weighting="block" if b == 3 else "diagonal")
     Ac = P^T Az P (SciPy CSR)
     levels.append((A, P)); A, B, b = Ac, R, 1
@@ -172,10 +172,10 @@ return levels, A
 - **Smoother:** `chebyshev(A, D, lmax_estimate(A, D), degree, ratio)` on every level.
 - **Transfers.** $P_l$ and $P_l^\top$ are each stored as a rectangular scalar block-ELL, so prolongation and restriction are both gathers (no scatter-add; restriction equals $P^\top$ by test). `ELLTransfer(P, PT)` supplies `__call__` and `restrict`.
 
-**`linalg/ell.py` extension** (square behaviour unchanged):
+**`linalg/ell.py` extension** (square behaviour unchanged for widths ≤ 27):
 - `block_ell` accepts rectangular matrices (both dimensions divisible by `b`). `BlockELL.n_dof` is the output row count, i.e. the operator size for square matrices. Only transfers are rectangular, and they never reach code that assumes a square operator.
 - Padding entries point to column 0, not to the row's own block column, which may be out of range for a rectangular matrix.
-- Each bucket's scan step is bounded by blocks, not rows: `c = clip(BLOCKS // w, 8, chunk)` with `BLOCKS = 2048 · 27`, so square `block_ell` matrices with width ≤ 27 (the hex8 Galerkin level, $b = 3$, $w = 27$) keep today's chunk of 2048 (a $b^2$ in the denominator would cut that level to 227 rows, measured 35% slower). The voxel GMG builds its ELL through `gmg._ell` and is unaffected. Without this, a $P^\top$ bucket of width 512 gathers about one fine block per step at $m = 25$ (measured: 341 MB → 135 MB for the $44^3$ $P_0^\top$ apply at chunk 512, time 61 → 53 ms).
+- Each bucket's scan step is bounded by blocks, not rows: `c = min(chunk, max(8, chunk * 27 // w), -(-r // 8) * 8)` (today's rule plus the middle term; $r$ is the bucket's row count), so square `block_ell` matrices with width ≤ 27 (the hex8 Galerkin level, $b = 3$, $w = 27$) keep today's chunk of 2048 (a $b^2$ in the denominator would cut that level to 227 rows, measured 35% slower). The voxel GMG builds its ELL through `gmg._ell` and is unaffected. Without this, a $P^\top$ bucket of width 512 gathers about one fine block per step at $m = 25$ (measured: 341 MB → 135 MB for the $44^3$ $P_0^\top$ apply at chunk 512, time 61 → 53 ms).
 
 **What the pytree holds.** Device arrays only. The SciPy matrices and the pyamg intermediates are host locals and are freed when `amg` returns; 13b's memory ordering relies on this.
 
@@ -261,7 +261,7 @@ Common setup as in `tests/test_pmg.py`:
 - rectangular `block_ell` ($b = 1$ and $b = 3$, plain and sliced, tall and wide) equals SciPy to $10^{-12}$, with the output shape asserted;
 - padding columns are 0;
 - a wide-bucket rectangular apply's `memory_analysis` temporaries stay below one block-bounded chunk's gather;
-- square cases unchanged: a $b = 3$, $w = 27$ square matrix keeps `chunks == (2048,)`.
+- square matrices with $w \le 27$ unchanged: a $b = 3$, $w = 27$ square matrix keeps `chunks == (2048,)` (wider square buckets, e.g. PR 10's sliced hex20 matrices in tests and benchmarks, get smaller chunks; no `src` caller).
 
 The implementation re-measures all iteration bounds with the shipped code and keeps at least a 1.5× margin.
 
