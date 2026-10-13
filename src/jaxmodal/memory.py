@@ -135,7 +135,7 @@ def lobpcg_memory(
         basis=n_dof * cap * (4 if basis_dtype == "float32" else 8),
         rigid=2 * 8 * n_dof * n_rigid,  # R and M R, fp64
         # freed step output and the fp64 modes on the host; a chunked solve adds 4 blocks of
-        # transients between chunks (start block, seed, allocator slack: up to about 5
+        # transients between chunks (start block, seed, allocator slack: up to about 6.5
         # blocks measured, varying between runs; docs/open_items.md)
         host=(5 if cap else 1) * b + 8 * n_dof * n_modes,
         precond=pc["storage"],
