@@ -509,8 +509,7 @@ count(op, free, W, lam, 1.0, 1.5, degree=3, tau=1e-2, block=B, n_probes=3 * B)
 @pytest.mark.skipif(sys.platform != "darwin", reason="peak_bytes needs macOS")
 def test_count_peak():
     """Test 9d: at count_memory >= 2 GB the measured process peak of a 3-block count is within
-    20%, and W (an
-    n x k device copy would add 60%) stays on the host."""
+    20%, and W stays on the host (an n x k device copy would add 60%)."""
     from benchmarks import harness
 
     s, b = 60, 24
