@@ -163,8 +163,8 @@ t = time.perf_counter()
 jax.block_until_ready(amg(op, free, 1e6, mesh.points, aggregates=agg))
 json.dump(dict(fresh_s=fresh, reuse_s=time.perf_counter() - t), open("{out}", "w"))
 """
-SETUP_SIZES = [("hex20", 12), ("hex20", 24), ("hex20", 44), ("hex27", 24), ("hex8", 24),
-               ("hex8", 48), ("hex8", 68)]  # fmt: skip
+SETUP_SIZES = [("hex20", 12), ("hex20", 24), ("hex20", 44), ("hex27", 12), ("hex27", 24),
+               ("hex8", 24), ("hex8", 48), ("hex8", 68)]  # fmt: skip
 
 
 def setup(sizes=SETUP_SIZES):

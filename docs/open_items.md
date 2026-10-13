@@ -65,7 +65,11 @@ $B$ has the rows of constrained corner DOFs zeroed, as the roadmap says. Unmaske
 
 `amg_memory`'s per-corner-DOF storage constant, its step constants `AMG_STEP` and its setup term are fitted on box meshes (hex20 $8^3$–$44^3$, hex27 $6^3$–$24^3$, hex8 $12^3$–$68^3$; a distorted hex20 box stays inside the bound). Other geometries aggregate differently. Default: document; revisit if a real mesh falls outside the roadmap's ±20% band.
 
-### PR 13b decisions without user input
+### AMG build peak above 1M DOF (PR 13b, decision without user input)
+
+The measured setup peak per corner DOF grows about 0.65 kB per decade of $n_c$ (hex20 3.7 / 4.3 / 4.8 kB at $12^3$ / $24^3$ / $44^3$); `AMG_BUILD` extrapolates that trend to 10M DOF (14.6 GB hex20, 46.6 GB hex8). Check it with the first 10M setup (the deferred GPU check runs it on the host).
+
+## PR 13b decisions without user input
 
 - **10M GPU configuration:** the memory table assumed $m = 30$ for 10M; with AMG 30 modes do not fit the 76 GB pool (about 89–94 GB device), so the deferred GPU check runs 20 modes ($m = 25$, stored Ke, 9-block step; 71.5 GB by the shipped `solve_modes_memory`, fits thinly; 30 modes: 92.6 GB), with on-the-fly Ke (about 60 GB) as fallback. The roadmap check names no mode count, so no criterion is relaxed.
 - **Mac 10M run:** 10 modes, stored Ke, 9-block step; `amg_study.large` stops above 52 GB; the shipped model gives 52.2 GB, so the run was skipped (the 10M acceptance is the deferred GPU check).
