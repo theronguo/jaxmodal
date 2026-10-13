@@ -57,6 +57,8 @@ BCs, masks, `masked`, `a_p`, rigid body modes and the deflation projector are de
 
 ## Matrix-free operator (`unstructured`)
 
+`solve_modes` forwards `mode`, `path`, `chunk` and `range_nodes` through `operator_options` ([`eigensolvers.md`](eigensolvers.md#options)).
+
 ```python
 from jaxmodal.mesh import rcm
 from jaxmodal.operators import unstructured
@@ -190,6 +192,8 @@ Call it on the mesh that will be used (after `rcm`, if any), with the same keywo
 - **Composition:** later estimators (PR 9/11/13/14/15) add PR 5's `storage + workspace` and count `overhead` once; they count their own vectors.
 
 ## Voxel stencil (`stencil`)
+
+`solve_modes` forwards `slab` through `operator_options` ([`eigensolvers.md`](eigensolvers.md#options)).
 
 ```python
 from jaxmodal.operators import reference_element, stencil

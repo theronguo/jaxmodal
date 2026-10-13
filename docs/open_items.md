@@ -78,6 +78,14 @@ The measured setup peak per corner DOF grows about 0.65 kB per decade of $n_c$ (
 - **The COO assembler is gone:** `pmg`'s Galerkin matrix now comes from the production assembler (same values to rounding, BSR instead of CSR).
 - **Aggregate reuse with moved points approximates:** it keeps the old near-null space; only connectivity and `free` are checked.
 
+### PR 13c decisions without user input
+
+- **Option dicts, not flat keywords:** `operator_options`, `precond_options`, `sigma_options` keep the `solve_modes` signature stable as builders gain options, and avoid the clash between the operator's `chunk` (elements per scan step) and the solver's `chunk` (modes per locking chunk).
+- **Options kept internal:** `lobpcg`'s `R` and `precond` (set by `solve_modes`); `amg`'s `nonsingular` (a proof, derived from the rigid-mode count) and `aggregates` / `return_aggregates` (state: compose the building blocks); `gmg`'s `dtype` (the top-level `precond_dtype`; the pre-estimate builds stay fp64 for robustness); `pmg` (test scale, superseded by `amg`); `block_jacobi` / `chebyshev` alone (without a coarse level they gain nothing, PR 10). Passing a pre-built operator or preconditioner to `solve_modes` is not supported; revisit if a user needs it.
+- **No default changes:** every default is the robust option measured in PRs 9–13 (table in `docs/eigensolvers.md#options`); smoother degree 2 is the fastest in a full solve (7.0 / 8.8 / 10.3 s at degree 2 / 3 / 4) and stays.
+- **`amg_memory` at other `max_coarse`:** the coarse term is floored at the calibration value 1000 (an upper bound at 100–3000, loose above 1000: 4.3× at 3000); `AMG_STEP` stays calibrated at 1000, so above it the step term is not a bound (+1.3 blocks of temporaries at 4000).
+- **Chebyshev loop terms:** degree > 2 adds `AMG_LOOP_K` = 120k DOF-equivalents to `AMG_STEP`'s $K$ (fixed loop buffers, +77k–103k measured) and `GMG_LOOP` = 1.2 / 0.7 fp64 blocks (fp64 / fp32 V-cycle) to `gmg_memory` (+1.07 / 0.60 measured), calibrated on boxes like the other constants. `GMG_STEP` re-fitted after the loop lowered the default fp64 steps (4.3 / 9.0, was 5.1 / 9.9); `GMG_WORK` kept (now 7–39% above the measured temporaries at $32^3$–$64^3$).
+
 ### GMG restriction on the GPU (PR 11 deferred GPU checks)
 
 Restriction is the transpose of gathers, i.e. scatter-adds (6× the prolongation time on CPU at $87^3$). Default: keep; listed in the deferred GPU checks with "rewrite as gathers if it dominates".

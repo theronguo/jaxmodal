@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 from jax import lax
 
-from ..operators.common import check_x64, register
+from ..operators.common import check_x64, is_count, register
 
 SAFETY = 1.1  # lambda_max safety factor, applied inside chebyshev
 
@@ -73,13 +73,16 @@ def _chebyshev(S, r):
     sigma = theta / delta
     rho = 1 / sigma
     d = S.precond(r) / theta
-    x = d
-    for _ in range(S.degree - 1):
+
+    def step(_, c):
+        # a loop, not unrolled: XLA then keeps one step's temporaries for any degree
+        r, d, x, rho = c
         r = r - S.A(d)
         rho_new = 1 / (2 * sigma - rho)
         d = rho_new * rho * d + 2 * rho_new / delta * S.precond(r)
-        x, rho = x + d, rho_new
-    return x
+        return r, d, x + d, rho_new
+
+    return lax.fori_loop(0, S.degree - 1, step, (r, d, d, rho))[2]
 
 
 def chebyshev(A, precond, lmax, degree=2, ratio=30.0):
@@ -87,8 +90,10 @@ def chebyshev(A, precond, lmax, degree=2, ratio=30.0):
     estimate (lmax_estimate); the 1.1 safety factor is applied here. degree >= 1 is static:
     degree precond applies and degree - 1 A applies."""
     check_x64("chebyshev")
-    if not (isinstance(degree, int) and degree >= 1):
+    if not is_count(degree):
         raise ValueError(f"degree must be an int >= 1, got {degree!r}")
+    if not ratio > 1:
+        raise ValueError(f"ratio must be > 1, got {ratio!r}")
     return Chebyshev(
-        A, precond, jnp.asarray(lmax, jnp.float64), jnp.asarray(ratio, jnp.float64), degree
+        A, precond, jnp.asarray(lmax, jnp.float64), jnp.asarray(ratio, jnp.float64), int(degree)
     )

@@ -3,6 +3,7 @@
 import functools
 import importlib
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import scipy.sparse.linalg as spla
@@ -158,3 +159,10 @@ def step_bytes(op, P, low, k=15):
     args[1], args[3] = op, P
     mem = f.lower(*args, c=c).compile().memory_analysis()
     return mem.temp_size_in_bytes + mem.alias_size_in_bytes
+
+
+def owned_bytes(P, op):
+    """Device bytes of P's leaves, de-duplicated, without the operator's."""
+    shared = {id(x) for x in jax.tree_util.tree_leaves(op)}
+    leaves = {id(x): x for x in jax.tree_util.tree_leaves(P) if isinstance(x, jax.Array)}
+    return sum(x.nbytes for i, x in leaves.items() if i not in shared)

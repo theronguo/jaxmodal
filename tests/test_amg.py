@@ -23,6 +23,7 @@ from helpers import (
     distort,
     lam1,
     mixed_mesh,
+    owned_bytes,
     rel,
     rhs,
     sigma6,
@@ -504,13 +505,6 @@ def test_no_survivors():
 # ---------------------------------------------------------------- 13b: amg_memory, benchmarks
 
 LOB = importlib.import_module("jaxmodal.eigen.lobpcg")
-
-
-def owned_bytes(P, op):
-    """Device bytes of P's leaves, de-duplicated, without the operator's."""
-    shared = {id(x) for x in jax.tree_util.tree_leaves(op)}
-    leaves = {id(x): x for x in jax.tree_util.tree_leaves(P) if isinstance(x, jax.Array)}
-    return sum(x.nbytes for i, x in leaves.items() if i not in shared)
 
 
 STORAGE_CASES = {

@@ -4,11 +4,12 @@ import functools
 
 import numpy as np
 
-from .eigen.api import resolve_precond
+from .eigen.api import OPERATOR_OPTIONS, PRECOND_OPTIONS, _check_options, resolve_precond
 from .eigen.lobpcg import _block_size, _capacity  # shared with the solver on purpose
 from .elements import ELEMENTS
 from .materials import phases
 from .operators import dof_mask, rigid_modes
+from .operators.common import is_count
 from .operators.matfree import layout
 from .operators.voxel import grid_layout
 from .precond.gmg import _ell_rows, _islands
@@ -151,13 +152,19 @@ def lobpcg_memory(
 # GMG (docs/preconditioners.md). Extra LOBPCG step blocks with the V-cycle over Jacobi: upper
 # envelope of memory_analysis of the steps at 16^3-87^3 (m = 15).
 GMG_STEP = {
-    ("9-block", "float64"): 5.1,
+    ("9-block", "float64"): 4.3,
     ("9-block", "float32"): 0.0,
-    ("low", "float64"): 9.9,
+    ("low", "float64"): 9.0,
     ("low", "float32"): 4.5,
 }
+# Fine-level Chebyshev degree > 2, fp64 blocks: the smoother loop carries about one more fine
+# vector, +1.07 (fp64) / +0.60 (fp32 V-cycle) blocks of V-cycle temporaries at 8^3-87^3; the
+# steps rise 1.07 (fp64, from 48^3 up) and up to 2.06 (fp64 low step, 8^3-32^3, inside the
+# GMG_STEP slack), fp32 steps by at most 0.6.
+GMG_LOOP = {"float64": 1.2, "float32": 0.7}
 # V-cycle temporaries beyond the stencil's slab workspace, fp64 blocks: upper envelope of
-# memory_analysis at 16^3-87^3 (m = 15; 10.6-14.9 fp64, 5.0-7.5 fp32).
+# memory_analysis at 16^3-87^3 before PR 13c's Chebyshev loop (m = 15; 10.6-14.9 fp64, 5.0-7.5
+# fp32); kept: the workspace estimate is 7-39% above the temporaries with the loop (32^3-64^3).
 GMG_WORK = {"float64": 15.0, "float32": 7.5}
 GMG_BUILD = 1650  # setup process peak per fine node (1.12 GB at 87^3)
 
@@ -184,11 +191,11 @@ def _smoother_bytes(shape, n, n_groups, dt):
     return n_groups * (3 * k) ** 2 * dt + 4 * (n_groups * k + n)
 
 
-def gmg_memory(mesh, m, dtype="float64", s_K=None):
-    """Estimated bytes of gmg(stencil(mesh, ...), free, sigma, dtype=dtype) applied to
-    (n_dof, m) blocks: storage (an upper bound: the fine level exact, coarse levels as full
-    boxes; with s_K (n_el,) the island deflation), workspace (V-cycle temporaries), build (the
-    setup peak), overhead, step and step_low (extra LOBPCG step bytes over Jacobi). Same
+def gmg_memory(mesh, m, dtype="float64", s_K=None, degree=2):
+    """Estimated bytes of gmg(stencil(mesh, ...), free, sigma, dtype=dtype, degree=degree)
+    applied to (n_dof, m) blocks: storage (an upper bound: the fine level exact, coarse levels as
+    full boxes; with s_K (n_el,) the island deflation), workspace (V-cycle temporaries), build
+    (the setup peak), overhead, step and step_low (extra LOBPCG step bytes over Jacobi). Same
     composition rule as the operator estimators."""
     if mesh.voxel is None:
         raise ValueError("gmg_memory needs a voxel mesh: mesh.voxel is None (no voxel grid)")
@@ -213,7 +220,8 @@ def gmg_memory(mesh, m, dtype="float64", s_K=None):
         shape, n_fine = cs, nc
     storage += (3 * nc) ** 2 * 8  # coarsest Cholesky factor
     b = 8 * n_dof * m
-    work = GMG_WORK[dtype] * b + dt / 8 * stencil_memory(mesh, m)["workspace"]
+    loop = GMG_LOOP[dtype] * b if degree > 2 else 0
+    work = GMG_WORK[dtype] * b + dt / 8 * stencil_memory(mesh, m)["workspace"] + loop
     if s_K is not None:
         islands = _islands(cell, np.asarray(s_K))
         if islands:
@@ -230,8 +238,8 @@ def gmg_memory(mesh, m, dtype="float64", s_K=None):
         workspace=work,
         build=GMG_BUILD * n_nodes,  # fp32: the cast copy (< 300 B/node) fits under it
         overhead=OVERHEAD,
-        step=GMG_STEP[("9-block", dtype)] * b,
-        step_low=GMG_STEP[("low", dtype)] * b,
+        step=GMG_STEP[("9-block", dtype)] * b + loop,
+        step_low=GMG_STEP[("low", dtype)] * b + loop,
     )
     return {k: int(v) for k, v in out.items()}
 
@@ -255,13 +263,17 @@ AMG_STEP = {
 # part, growing about 0.65 kB per decade of n_c; the constants extrapolate that trend to 10M DOF
 # (hex27: two points only, steeper; see docs/open_items.md).
 AMG_BUILD = (45e6, {"hex8": 4.6e3, "hex20": 5.5e3, "hex27": 6.0e3})
+# Chebyshev degree > 2: the smoother loop's body keeps its own n-independent buffers (block-ELL
+# scan gathers), +77k-103k DOF-equivalents in K measured at degree 3-6 (hex8/20/27, 6^3-16^3).
+AMG_LOOP_K = 120_000
 
 
-def amg_memory(mesh, m):
-    """Estimated bytes of amg(unstructured(mesh, ...), free, sigma, mesh.points) at the default
-    max_coarse applied to (n_dof, m) blocks: storage (the p-level exact from the mesh, the AMG
-    levels per corner DOF, the coarsest factor), build (the setup host peak), step and
-    step_low (extra LOBPCG step bytes over Jacobi). Calibrated on box meshes."""
+def amg_memory(mesh, m, max_coarse=1000, degree=2):
+    """Estimated bytes of amg(unstructured(mesh, ...), free, sigma, mesh.points, degree=degree,
+    max_coarse=max_coarse) applied to (n_dof, m) blocks: storage (the p-level exact from the
+    mesh, the AMG levels per corner DOF, the coarsest factor), build (the setup host peak), step
+    and step_low (extra LOBPCG step bytes over Jacobi). Calibrated on box meshes at max_coarse
+    1000; the coarse term uses max(max_coarse, 1000) (an upper bound, loose above 1000)."""
     n_nodes = len(mesh.points)
     blocks = [c for c in mesh.blocks.values() if len(c)]
     corner = np.unique(np.concatenate([c[:, :8].ravel() for c in blocks]))
@@ -277,15 +289,16 @@ def amg_memory(mesh, m):
             pairs.append(c[:, a].astype(np.int64).ravel() * n_nodes + c[:, j].ravel())
         child = np.unique(np.unique(np.concatenate(pairs)) % n_nodes, return_counts=True)[1]
         storage += 12 * (w * n_nodes + child.max() * len(corner))
-    storage += AMG_STORAGE[fam] * n_c + 8 * min(n_c, 1000) ** 2
+    storage += AMG_STORAGE[fam] * n_c + 8 * min(n_c, max(max_coarse, 1000)) ** 2
     beta, alpha = AMG_BUILD
     a9, c9, K9 = AMG_STEP[(fam, "9-block")]
     al, cl, Kl = AMG_STEP[(fam, "low")]
+    loop = AMG_LOOP_K if degree > 2 else 0
     out = dict(
         storage=storage,
         build=beta + max(alpha[t] for t in mesh.blocks) * n_c,
-        step=8 * n_dof * (a9 * m + c9) + 8 * m * K9,
-        step_low=8 * n_dof * (al * m + cl) + 8 * m * Kl,
+        step=8 * n_dof * (a9 * m + c9) + 8 * m * (K9 + loop),
+        step_low=8 * n_dof * (al * m + cl) + 8 * m * (Kl + loop),
     )
     return {k: int(v) for k, v in out.items()}
 
@@ -293,21 +306,34 @@ def amg_memory(mesh, m):
 def solve_modes_memory(
     mesh, bcs, n_modes, *, mass="consistent", chunk=None, guards=None, basis_dtype="float64",
     low_memory=False, precond="auto", precond_dtype="float64", n_rigid=None,
+    operator_options=None, precond_options=None,
 ):  # fmt: skip
     """Estimated peak bytes of solve_modes(mesh, ..., bcs, n_modes, ...) with the same options:
     the operator, preconditioner and lobpcg estimates composed (lobpcg_memory's dict).
-    n_rigid=None counts the rigid modes left by bcs on the host (builds the dense rigid modes:
-    about 20 GB at 100M DOF; pass n_rigid for large meshes)."""
+    operator_options and precond_options as in solve_modes (coarse_degree and ratio change no
+    memory). n_rigid=None counts the rigid modes left by bcs on the host (builds the dense rigid
+    modes: about 20 GB at 100M DOF; pass n_rigid for large meshes)."""
     pc = None
     name = resolve_precond(mesh, precond, precond_dtype)
+    voxel = mesh.voxel is not None
+    op_opts = _check_options(
+        "operator", operator_options, OPERATOR_OPTIONS["stencil" if voxel else "unstructured"]
+    )
+    pc_opts = _check_options(f"{name} precond", precond_options, PRECOND_OPTIONS[name])
+    for key in ("degree", "max_coarse"):
+        if key in pc_opts and not is_count(pc_opts[key]):
+            raise ValueError(f"{key} must be an int >= 1, got {pc_opts[key]!r}")
     if name == "gmg":
-        pc = functools.partial(gmg_memory, mesh, dtype=precond_dtype)
+        pc = functools.partial(
+            gmg_memory, mesh, dtype=precond_dtype, degree=pc_opts.get("degree", 2)
+        )
     elif name == "amg":
-        pc = functools.partial(amg_memory, mesh)
-    if mesh.voxel is not None:
-        op_memory = functools.partial(stencil_memory, mesh, mass=mass)
-    else:
-        op_memory = functools.partial(unstructured_memory, mesh, mass=mass)
+        pc = functools.partial(
+            amg_memory, mesh, max_coarse=pc_opts.get("max_coarse", 1000),
+            degree=pc_opts.get("degree", 2),
+        )  # fmt: skip
+    est = stencil_memory if voxel else unstructured_memory
+    op_memory = functools.partial(est, mesh, mass=mass, **op_opts)
     if n_rigid is None:
         n_rigid = rigid_modes(mesh, dof_mask(mesh, bcs)).shape[1]
     return lobpcg_memory(
