@@ -1,6 +1,6 @@
 # PR 13b plan: AMG in `solve_modes`, production hex8 assembler, reuse, estimator, Mac acceptance
 
-Status: draft (plan review round 1).
+Status: draft (plan review round 2; round 1 findings applied, see the end).
 
 PR 13b completes PR 13 (M3) on top of 13a's `amg(op, free, sigma, points)`. It makes AMG the default preconditioner of `solve_modes` on unstructured meshes and adds:
 - the production hex8 Galerkin assembler (a device scatter into a precomputed node-block pattern; it replaces the COO path for every `amg` and `pmg` build);
@@ -75,7 +75,7 @@ Steel unit boxes, `xmin` clamped unless noted, as in `benchmarks/amg_study.py`.
 
 - The budget is 15 min (12× margin). The model in `docs/eigensolvers.md` assumed $N_\text{it}$ = 150; measured 19.
 - σ = 1.000 λ₁ (11 923 132 against the converged λ₁ 11 923 130).
-- Projected estimate: `lobpcg_memory` (Jacobi, stored) 5.28 GB + AMG storage 0.55 GB + 6.0 step blocks (1.29 GB) ≈ 7.1 GB, 6% below the cold peak; the warm peaks are measured in the implementation.
+- Projected estimate: `lobpcg_memory` (Jacobi, stored) 5.28 GB + AMG storage 0.55 GB + 6.0 step blocks (1.29 GB) ≈ 7.1 GB, 7% below the cold peak (1 − est/peak; 7.4 GB with the size envelope of Design 5, 3% below); the warm peaks are measured in the implementation.
 
 **LOBPCG step with AMG** (`p13b/stepmem.py`; temporaries plus aliased state of the compiled step, extra fp64 blocks over the Jacobi step; standalone V-cycle temporaries for comparison):
 
@@ -88,7 +88,7 @@ Steel unit boxes, `xmin` clamped unless noted, as in `benchmarks/amg_study.py`.
 | hex8 $48^3$ / $68^3$ | 25 | 9.70 / 9.01 | 14.15 / 13.79 | 15.6 / 14.9 |
 | hex20 $12^3$ (small: the Jacobi step itself is 25–29 blocks) | 15 | 10.19 | 13.46 | 29.1 |
 
-- The extra falls with $m$: in bytes it fits $8n(a\,m + c)$ (hex20 $44^3$: $a$ = 4.9, $c$ = 27; hex8 $68^3$: $a$ = 4.7, $c$ = 107), so a per-family model $a\,m + c$ fits better than fixed blocks.
+- The extra falls with $m$ and with $n$. Per family it fits $8n(a\,m + c) + 8mK$: the last term is n-independent (about 3 MB per column: the block-ELL scan-chunk gathers of the levels, $P$ and $P^\top$, bounded by chunk × width), which is why small meshes carry 10–40 extra blocks (hex20 $8^3$: 27.3 at $m = 15$; low-memory about 40 at hex20 $8^3$, hex8 $12^3$/$16^3$, hex27 $6^3$; reviewer probes `r13b/tests/step_small.py`, `r13b/perf/small.py`). A pure $8n(a\,m + c)$ envelope cannot be an upper bound at $12^3$ and tight at $44^3$ at once.
 - All-hex8 costs more: its first transfer $P_0$ acts on the fine DOFs.
 - Unlike GMG (`GMG_STEP`: 5.1 / 9.9), the low-memory step gains nothing with AMG: 9-block and low-memory totals are within 1% at $m = 25$.
 
@@ -99,8 +99,12 @@ Steel unit boxes, `xmin` clamped unless noted, as in `benchmarks/amg_study.py`.
 | hex20 $24^3$ / $44^3$ | 0.098 / 0.550 GB | 541 / 511 B | 0.042 / 0.236 GB | 0.044 / 0.241 GB | 0.2 / 4.5 MB |
 | hex27 $24^3$ | 0.119 GB | 337 B | 0.042 | 0.044 | 0.2 MB |
 | hex8 $48^3$ / $68^3$ | 0.402 / 1.079 GB | 1140 / 1095 B | 0.068 / 0.177 | 0.320 / 0.862 | 0 |
+| hex20 $12^3$ (reviewer) | 18.5 MB AMG part | 2800 B per corner DOF | 8 MB | 6 MB | 4.5 MB |
+| hex8 $8^3$ / $16^3$ / $24^3$ (reviewer) | | 774 / 1106 / 1187 B | | | |
 
-The rest of the hex20/hex27 total is the p-level (node-block Jacobi inverses, `NodalTransfer` tables, mask).
+The rest of the hex20/hex27 total is the p-level (node-block Jacobi inverses, `NodalTransfer` tables, mask). The dense coarsest factor does not scale with $n$ (it is set by where coarsening stops), so at small sizes a per-corner-DOF constant fitted at $24^3$–$44^3$ under-predicts (hex20 $12^3$: 53% above it).
+
+**Whole `amg` with the production assembler** (performance reviewer's emulation, fresh subprocesses): hex20 $24^3$ / $44^3$ 0.29 / 1.61 GB, 1.9 / 5.2 s (6.2 / 5.9 kB per corner DOF); hex8 $48^3$ / $68^3$ 1.77 / 4.95 GB, 5.3 / 13.0 s (5.0 kB per DOF). The build term binds for all-hex8 at 10 modes (the 1M hex8 step is about 3.5 GB).
 
 **SIMP study** (`p13b/simp.py`; the checked-in $32^3$ field and the 11a seeds as unstructured hex8 meshes, `s_K` = ρ³, `s_M` = ρ, σ from `gmg_study.json`; PCG to $10^{-8}$, 4 right-hand sides):
 
@@ -120,119 +124,135 @@ The rest of the hex20/hex27 total is the p-level (node-block Jacobi inverses, `N
 
 | modes ($m$) | stored Ke, 9-block | stored, low-memory | on-the-fly, 9-block |
 |---|---|---|---|
-| 10 (15) | 48.5 GB | 48.3 GB | 38.1 GB |
-| 20 (25) | 68.7 GB (65 GB device) | 68.5 GB | 58.3 GB |
-| 30 (36) | 90.9 GB | 90.6 GB | 80.5 GB |
+| 10 (15) | 48.5–51.2 GB | 48.3 GB | 38.1–40.9 GB |
+| 20 (25) | 68.4–71.2 GB | 68.5 GB | 58.0–60.8 GB |
+| 30 (36) | 89.6–94.7 GB | 90.6 GB | 80.5 GB |
 
-- GPU (76 GB usable pool): 10M hex20 with 20 modes fits with the 9-block step (about 65 GB on the device; the host term is not device memory); 30 modes does not. The roadmap's "10M fits" line and the AMG rows are rewritten with these numbers (re-derived by `amg_memory` in the implementation).
-- Mac (64 GB unified): the optional 10M run uses 10 modes (48.5 GB), stored Ke, 9-block step.
+Ranges: the $44^3$ fit to a $24^3$–$68^3$ envelope (performance reviewer, `r13b/perf/proj.py`); Design 5's model with the fixed per-column term lands near the lower end. The step model is fitted at $m$ = 15–25, so the $m = 36$ row is an extrapolation (enough for "does not fit").
+
+- GPU (76 GB usable pool): only the fp64 modes of the `host` term live on the host; its freed-step-output block is device memory. Device estimate for 20 modes, stored Ke, 9-block: about 67–70 GB, and the 1M cold peak ran 3–7% above the estimate, so 71–74 GB against 76 GB: it fits, thinly. 30 modes does not (about 85–90 GB). Fallback if the GPU run does not fit: on-the-fly Ke (about 56–59 GB device), which needs `unstructured(mode="otf")` + `amg` + `lobpcg` directly (`solve_modes` has no `mode=`), or fewer modes. The 10M setup is host-side: about 16 GB host RAM (5.9 kB per corner DOF).
+- Mac (64 GB unified): the optional 10M run uses 10 modes, stored Ke, 9-block step (about 49–51 GB, plus the cold excursion about 52–55 GB). `large()` prints `solve_modes_memory` first and stops above 52 GB.
 
 ## Design
 
 ### 1. Production hex8 Galerkin assembler (`pmg.py`)
 
-`_hex8_galerkin(A, pattern=None) -> (Ab, T, corner, pattern)`:
-- **`_pattern(op)`** (host, topology only): PR 12's `_tables` (corner ids, `NodalTransfer`, owner flags), the node-block pattern `indptr`, `indices` (int32, sorted) of $E^\top E$, per block an `(n_pad, 64)` int32 position table (padded elements point past the end and are dropped by the scatter), and the transpose permutation of the pattern's blocks. Returned as a small frozen host dataclass `Hex8Pattern`.
+`_hex8_galerkin(A, pattern=None) -> (Ab, pattern)`:
+- **`_pattern(op) -> Hex8Pattern`** (host, topology only; a small frozen dataclass): PR 12's `_tables` output (corner ids, the `NodalTransfer` `T`, owner flags) plus `corner` (corner node ids in coarse order), the node-block pattern `indptr`, `indices` (int32, sorted) of $E^\top E$, per block an `(n_pad, 64)` int32 position table, and the transpose permutation of the pattern's blocks. Padded elements get position `nnzb` (past the end; never −1, which JAX would wrap to the last block before `mode="drop"`). `check_int32` covers `nnzb` and the scalar count $9\,\text{nnzb}$ (pyamg's CSR intermediates).
 - **`_scatter_cells(data, op, b, sigma, m, d, own, pos)`** (jitted): one `lax.scan` over the block's chunks; each step builds the chunk's cells exactly as PR 12's `_cells` (owned diagonal, masks, `element_matrices`, the $P_\text{loc}^\top A_e P_\text{loc}$ contraction, now straight into `(c, 8, 8, 3, 3)`) and scatter-adds them (`mode="drop"`) into the carried `(nnzb, 3, 3)` values.
-- Symmetrize on the device, `(data + data[tp].swapaxes(1, 2)) / 2` (exact: the pattern is symmetric by construction), copy to the host once, wrap as `scipy.sparse.bsr_array` with 3×3 blocks.
-- `_cells` and the COO path are removed. `pmg` converts to CSC for `splu`.
-- 13a's `_sa_levels` takes the BSR first level as is (`eliminate_zeros` on BSR drops all-zero blocks; strength and smoothing accept BSR), saving the CSR copy.
-- Determinism: the scatter order on the device may vary, so values may differ from run to run by rounding; symmetry stays exact, and 13a's bitwise-determinism test applies to the SA loop on a fixed matrix (it does today).
+- Copy the values to the host once and symmetrize there with the transpose permutation, `(d + d[tp].swapaxes(1, 2)) / 2` (exact: IEEE addition commutes, so blocks $ij$ and $ji$ come out exact transposes); one device copy instead of three. Wrap as `scipy.sparse.bsr_array` with 3×3 blocks.
+- Callers read `pattern.T` and `pattern.corner`; `_p_level` returns `((A, S), Ab, pattern)` (13a's trigger for slimming its tuple: a third consumer). `_cells` and the COO path are removed. `pmg` converts to CSC for `splu`.
+- 13a's `_sa_levels` takes the BSR first level as is: BSR `eliminate_zeros` drops exactly the all-zero blocks (reviewer probe), the same block pattern as today's CSR copy, so 13a's pyamg-equality test is unaffected.
+- Determinism: on CPU the scatter is deterministic (bitwise-identical rebuilds); on a GPU scatter-add order may vary by rounding. Tests that compare rebuilds use $10^{-15}$ relative, not bitwise; the GPU behaviour joins the deferred GPU list.
 
-### 2. Aggregate reuse
+### 2. Aggregate reuse (an `amg` option, roadmap; for PRs 21–23)
 
 `amg(..., aggregates=None, return_aggregates=False)`:
-- `return_aggregates=True` returns `(P, aggregates)`; `aggregates` is a frozen host dataclass `AMGAggregates` holding the `Hex8Pattern`, the tentative prolongators $T_l$ (after the zero-column drop) and coarse candidates $R_l$ per level, a copy of `free`, `max_coarse` and the corner count.
-- With `aggregates=` the build skips the pattern, the corner tables, strength, aggregation and the tentative fit; it recomputes the cells, the smoothed prolongators, the Galerkin products and the device export from the current values. A different `free`, node count or `max_coarse` raises `ValueError`.
-- Meaning: aggregates are structural under θ = 0, so a reused setup equals a fresh one (test 2 asserts both the roadmap's ≤ 20% and the equality). The option saves about 13% of a build and pins the hierarchy sizes, so PRs 21–23 can rebuild per design iteration without new shapes. `solve_modes` uses it across its σ rounds.
+- `return_aggregates=True` returns `(P, aggregates)`; `aggregates` is a frozen host dataclass `AMGAggregates`: the `Hex8Pattern`, the tentative prolongators $T_l$ (after the zero-column drop) and coarse candidates $R_l$ per level, a copy of `free`, and a connectivity fingerprint (per block: element count and a hash of `dofs`).
+- With `aggregates=` the build skips the pattern, the corner tables, strength, aggregation and the tentative fit; it recomputes the cells, the smoothed prolongators (`jacobi_prolongation_smoother` reads its strength argument only when filtering, so it gets `None`), the Galerkin products and the device export. It runs under the same local `np.random.seed(0)` and the same smoother call order: the spectral-radius estimate is the only RNG consumer, so skipping aggregation does not shift the stream (code comment). A different `free`, node count or connectivity fingerprint raises `ValueError`.
+- Meaning:
+  - **Values change, geometry fixed** (σ, `s_K`, `s_M`, materials): under θ = 0 first-level aggregates depend only on the pattern, the mask and $B$; coarser levels on the pattern of $P^\top A P$, which values change only through exact cancellations (none observed, even at uniform density). So a reused setup equals a fresh one (reviewer probes: identical $T_l$, strength nnz and $P$, difference 0.0, for σ = 0 vs > 0, ρ vs a 20% perturbation, uniform vs perturbed).
+  - **Moved points** (FFD, PR 22): reuse keeps the old near-null space $B$ (points are not checked). It is still an SPD V-cycle and only approximates a fresh setup; documented, and test 2 bounds its iterations.
+- The option saves about 13% of a build and pins the hierarchy sizes. `solve_modes` does not use it (under 1% of the acceptance run, and under θ = 0 its hierarchy shapes are identical anyway).
 
 ### 3. σ = 0 in `amg`
 
-`amg(..., nonsingular=False)`: σ = 0 raises `SingularShiftError` as in 13a unless `nonsingular=True`, which states that the caller has proven $A_P$ nonsingular at σ = 0 (no rigid modes left by the BCs, every `s_K > 0`). `amg` checks `s_K > 0` itself (`ValueError` otherwise) and trusts the rest; the coarsest factor's finiteness check stays as the backstop. `pmg` keeps refusing σ = 0 (test-only). This closes the "p-MG refuses σ = 0" open item as the item proposed.
+`amg(..., nonsingular=False)`: σ = 0 raises `SingularShiftError` as in 13a unless `nonsingular=True`, which states that the caller has proven $A_P$ nonsingular at σ = 0 (no rigid modes left by the BCs, every `s_K > 0`). `amg` checks `s_K > 0` itself (`ValueError` otherwise) and trusts the rest; the coarsest factor's finiteness check stays as the backstop (a singular coarsest matrix can factor with rounding-level pivots, so the backstop alone is not enough: hence the explicit flag). `pmg` keeps refusing σ = 0 (test-only). This closes the "p-MG refuses σ = 0" open item as the item proposed.
 
 ### 4. `solve_modes`
 
-- `precond`: `"auto"` (GMG on voxel meshes, AMG otherwise), `"gmg"`, `"amg"`, `"jacobi"`. `"amg"` on a voxel mesh raises (`ValueError`: the stencil operator is not `Unstructured`; the SIMP study gives no reason to offer it). `precond_dtype="float32"` stays GMG-only (fp32 AMG is PR 18).
-- `_gmg_sigma` becomes `_precond_sigma(op, free, R, build)`: `build(σ)` returns the preconditioner and raises `SingularShiftError` when σ = 0 is refused; the round logic is PR 11b's unchanged. GMG passes `lambda s: gmg(op, free, s)`; AMG passes a closure that calls `amg(op, free, s, mesh.points, nonsingular=(k == 0), aggregates=agg, return_aggregates=True)` and keeps `agg` for the next call (the final build reuses it too).
-- `k == 0` is solid evidence: `rigid_modes(mesh, free)` returned no columns and did not raise (it rejects edge and vertex contacts); `solve_modes` passes no `s_K`, so every `s_K` is 1.
+- `precond`: `"auto"` (GMG on voxel meshes, AMG otherwise), `"gmg"`, `"amg"`, `"jacobi"`. `"amg"` on a voxel mesh raises (`ValueError`: the stencil operator is not `Unstructured`; mirrors `"gmg"` on unstructured meshes; the SIMP study gives no reason to offer it). `precond_dtype="float32"` stays GMG-only (fp32 AMG is PR 18).
+- `_gmg_sigma` becomes `_precond_sigma(op, free, R, build)`: `build(σ)` returns the preconditioner and raises `SingularShiftError` when σ = 0 is refused; the round logic is PR 11b's unchanged. GMG passes `lambda s: gmg(op, free, s)`, AMG `lambda s: amg(op, free, s, mesh.points, nonsingular=(k == 0))`.
+- `k == 0` is solid evidence: `rigid_modes(mesh, free)` works per face-connected part, returned no columns and did not raise (it rejects edge and vertex contacts; a floating part gives k > 0); `solve_modes` passes no `s_K`, so every `s_K` is 1.
 - `info["precond"]` is `"amg"`; `info["sigma"]`, `sigma_iterations` and `time["precond"]` as in 11b.
-- Every existing unstructured `solve_modes` test, the m2 example and the README snippet now run AMG; they keep their assertions.
+- The existing unstructured `solve_modes` tests, the m2 example and the README snippet now run AMG and keep their accuracy assertions; `test_dispatch` changes (its `"auto"` → `"jacobi"` assertion on a box mesh becomes `"amg"`; test 6).
 
 ### 5. `memory.amg_memory(mesh, m)`
 
-Same keys as `gmg_memory`: `storage`, `workspace`, `build`, `overhead`, `step`, `step_low`. Two families: all-hex8 meshes and the rest (hex20/hex27/mixed, with a p-level).
-- **storage**: the p-level exactly from the mesh (node-block Jacobi inverses $72\,n_\text{nodes}$, `NodalTransfer` table widths from the element types, mask) plus the AMG part as a per-corner-DOF constant (hex20/hex27: AMG levels, transfers and coarsest ≈ 1760–1835 B per corner DOF at $24^3$–$44^3$; all-hex8: ≈ 1100–1140 B per DOF, mostly $P_0$). Constants are the envelope over the measured sizes with ≥ 5% margin, fitted on box meshes (documented as such).
-- **step**, **step_low**: per family $8n(a\,m + c)$ envelopes over $24^3$–$68^3$ and $m$ = 15–25 (`AMG_STEP`).
-- **workspace**: the standalone V-cycle temporaries, per family $8n(a\,m + c)$ (`AMG_WORK`).
-- **build**: the setup host peak (assembler + SA loop + export), a per-corner-DOF constant fitted on the setup benchmark (Design 7).
-- `solve_modes_memory` uses `amg_memory` for `precond="amg"` (and `"auto"` on unstructured meshes); the composition rule (`max(op build, precond build, step)`) is unchanged.
+Returns the four keys `lobpcg_memory` reads from a preconditioner estimate: `storage`, `build`, `step`, `step_low` (no `workspace` or `overhead`: nothing consumes them). Two families: all-hex8 meshes and the rest (hex20/hex27/mixed, with a p-level).
+- **storage** = the p-level exactly from the mesh (node-block Jacobi inverses $72\,n_\text{nodes}$, `NodalTransfer` table widths from the element types, mask) + the AMG levels and transfers as a per-corner-DOF constant (envelope over hex20 $12^3$–$44^3$ / hex8 $16^3$–$68^3$ excluding the coarsest, ≥ 5% margin) + the coarsest factor $8\min(n_c, \texttt{max\_coarse})^2$ (a stall up to the 4·`max_coarse` cap can exceed it; documented). Calibrated on box meshes (documented).
+- **step**, **step_low**: per family $8n(a\,m + c) + 8mK$ over Jacobi's step (`AMG_STEP`: $a$, $c$, $K$ per family and step kind), fitted as an envelope on hex20 $12^3$–$44^3$, hex27 $24^3$ and hex8 $12^3$–$68^3$ at $m$ = 15 and 25, so it bounds the small sizes and stays tight (≤ about 1 block) at 1M.
+- **build**: the `amg` setup host peak, per family a per-corner-DOF constant fitted on the setup benchmark (hex20 about 6 kB, hex8 about 5 kB per corner DOF), checked on hex27 too.
+- `solve_modes_memory` uses `amg_memory` for `precond="amg"` and `"auto"` on unstructured meshes; the composition rule (`max(op build, precond build, step)`) is unchanged.
 
 ### 6. Memory ordering
 
 Setup → free the assembled A → allocate LOBPCG:
-- `amg` keeps no host matrix: the BSR values, SciPy levels and pyamg intermediates are locals freed on return (13a's leaves test pins the pytree; a new test checks that no `scipy.sparse` object survives `amg` via `gc`). The device copy of the hex8 values dies with the scatter's output once the host copy exists.
+- `amg` keeps no host matrix and no setup device array: the device values are copied to the host and dropped inside `_hex8_galerkin`; the BSR values, SciPy levels and pyamg intermediates are locals freed on return. Test 11 checks both (`gc` for SciPy objects, `jax.live_arrays()` for device bytes).
 - `solve_modes` drops each σ-round hierarchy before the next build (11b), and the final `amg` returns before `lobpcg` allocates its blocks.
-- `AMGAggregates` holds the $T_l$ (host, about 0.1 GB at 1M hex20); `solve_modes` drops it before `lobpcg`.
-- Measured by test 10 (peak within 20% of `solve_modes_memory`, whose `max(build, step)` term is this ordering).
+- Measured by test 10 (peak within 20% of `solve_modes_memory`, whose `max(build, step)` term is this ordering) and pinned for the build by test 12.
 
 ### 7. Benchmarks (`benchmarks/amg_study.py`, report-only)
 
-- `setup()`: per size, time and host peak (fresh subprocess) of the assembler, the SA loop and the whole `amg`, hex20 $12^3$/$24^3$/$44^3$ and hex8 $24^3$/$48^3$/$68^3$; plus the reuse build time.
+- `setup()`: per size, time and host peak (fresh subprocess) of the assembler, the SA loop and the whole `amg`, hex20 $12^3$/$24^3$/$44^3$, hex27 $24^3$ and hex8 $24^3$/$48^3$/$68^3$, plus the reuse build time. This replaces `pmg_study`'s `galerkin_1m` entry (its COO numbers are history; removed from `pmg_study`, the pmg docs point to `amg_study.setup`).
 - `simp()`: the SIMP table above (AMG at θ = 0 only; the θ = 0.02 probe stays in the plan and `open_items.md`).
 - `acceptance(n=44, n_modes=20)`: as `gmg_study.acceptance`, the cold `solve_modes` run (time, iterations, σ) and the peaks of two warm runs next to `solve_modes_memory`.
-- `large(n=95, n_modes=10)`: the optional 10M run (cold, one process), recorded when run by hand (`--large`); not in the default run.
+- `large(n=95, n_modes=10)`: the optional 10M run (cold, one process), run by hand (`--large`), not in the default run; prints `solve_modes_memory` first and stops above 52 GB.
 - The cost entry is re-run with the production assembler.
 
 ### 8. ROADMAP memory rows and the deferred GPU check
 
-- Multigrid row: AMG device storage from `amg_memory` (≈ 0.55 GB at 1M hex20, ≈ 5.4 GB at 10M), the setup host peak from the benchmark.
-- Preconditioner workspace row: AMG as a step extra (≈ 6 blocks with the 9-block step at $m = 25$, ≈ 11 with the low-memory step) instead of "≈ 4 blocks".
-- "80 GB GPU: 10M fits" becomes "10M hex20 fits with 20 modes ($m = 25$, 9-block step): ≈ 65 GB on the device; 30 modes does not (≈ 87 GB)", with the figures re-derived by the shipped `solve_modes_memory`.
-- Deferred GPU check entry "PR 13: 10M hex20 modal solve on one GPU" gets that configuration.
+All figures from the shipped `solve_modes_memory` / `amg_memory`:
+- Multigrid row, unstructured columns (1M hex20, 10M hex20): AMG device storage (≈ 0.55 GB / ≈ 5.4 GB) and the setup host peak (≈ 1.6 GB / ≈ 16 GB). The voxel columns keep GMG's figures.
+- Preconditioner workspace row, unstructured columns only: AMG as a step extra (about 6 blocks at $m = 25$ with the 9-block step; about 11 with the low-memory step, which therefore gains nothing).
+- "80 GB GPU: 10M fits" becomes: 10M hex20 with 20 modes ($m = 25$, stored Ke, 9-block step) needs about 67–70 GB on the device (fits the 76 GB pool thinly); 30 modes does not; fallback on-the-fly Ke.
+- Deferred GPU check entry "PR 13: 10M hex20 modal solve on one GPU" gets that configuration, the fallback and the host RAM (about 16 GB); a new entry: assembler scatter determinism and speed on the GPU.
+- Decision without user input (logged): the table assumed $m = 30$ for 10M; with AMG that does not fit, so the GPU check runs 20 modes. The roadmap check names no mode count, so no criterion is relaxed.
 
 ## Files
 
-- `src/jaxmodal/precond/pmg.py`: `Hex8Pattern`, `_pattern`, `_scatter_cells`, `_hex8_galerkin(A, pattern=None)`; `_cells` and the COO path removed.
-- `src/jaxmodal/precond/amg.py`: `AMGAggregates`, `aggregates`/`return_aggregates`/`nonsingular` keywords, BSR first level.
+- `src/jaxmodal/precond/pmg.py`: `Hex8Pattern`, `_pattern`, `_scatter_cells`, `_hex8_galerkin(A, pattern=None) -> (Ab, pattern)`, `_p_level`; `_cells` and the COO path removed.
+- `src/jaxmodal/precond/amg.py`: `AMGAggregates`, `aggregates` / `return_aggregates` / `nonsingular` keywords, BSR first level.
 - `src/jaxmodal/eigen/api.py`: `"amg"` dispatch, `_precond_sigma`.
-- `src/jaxmodal/memory.py`: `amg_memory`, `AMG_STEP`, `AMG_WORK`, constants; `solve_modes_memory` dispatch.
-- `benchmarks/amg_study.py`, `benchmarks/results/amg_study.json`; `benchmarks/pmg_study.py` (new `_hex8_galerkin` return).
-- Tests: `tests/test_amg.py`, `tests/test_pmg.py`, `tests/test_api.py`, `tests/test_gmg.py` (shared step helper moves to `tests/helpers.py` if reused).
+- `src/jaxmodal/memory.py`: `amg_memory`, `AMG_STEP`, storage and build constants; `solve_modes_memory` dispatch.
+- `benchmarks/amg_study.py`, `benchmarks/results/amg_study.json`; `benchmarks/pmg_study.py` (new `_hex8_galerkin` return, `galerkin_1m` removed), `benchmarks/results/pmg_study.json` entry removed.
+- Tests: `tests/test_amg.py`, `tests/test_pmg.py`, `tests/test_api.py`; the step helper moves from `test_gmg.py` to `tests/helpers.py`.
 - Docs as below.
 
 ## Tests
 
-1. **Assembler against the oracle** (`test_pmg.py`). For hex20 $5\times4\times3$ with a sliding face and nodal masses, hex27 $3^3$, hex8 $5^3$ and a mixed hex8 + hex20 mesh (if the mesh builders give one; else two blocks of one type): `_hex8_galerkin(A)` equals $P^\top A_P P$ from PR 4's `assemble` and a dense $P$ from `NodalTransfer` to $10^{-12}$ relative; the pattern equals the structural corner adjacency (9 entries per adjacent corner pair, pinned by an independent count); exact symmetry; a chunk size that leaves padded elements; `pattern=` reuse gives the same matrix bitwise when nothing changes. Indices are int32.
-2. **Aggregate reuse** (roadmap). hex20 $6^3$ and hex8 $8^3$ with a seeded random density (`s_K` = ρ³, `s_M` = ρ, ρ ∈ [0.5, 1]); aggregates from ρ, then a 20% seeded perturbation ρ': PCG iterations with reuse ≤ 1.2× a fresh setup on ρ' (roadmap), and the reused V-cycle equals the fresh one to $10^{-12}$ (θ = 0: aggregates are structural). Errors: another `free`, another mesh size, another `max_coarse` raise `ValueError`. A spy shows that strength, aggregation and `fit_candidates` are not called with reuse.
+1. **Assembler against an independent oracle** (`test_pmg.py`). Reference: `p_ref(mesh)` (the element loop over reference nodes, independent of `_tables`) with PR 4's `assemble` and `a_p`. Cases: hex20 $5\times4\times3$ (consistent and lumped mass, sliding face, nodal masses), hex27 $3^3$, hex8 $5^3$, and `helpers.mixed_mesh` with nodal masses on the shared interface nodes and a mask that constrains some shared nodes (catches a doubled or missing owned diagonal). Each: `_hex8_galerkin(A)` equals $P^\top A_P P$ to $10^{-12}$ relative; the pattern equals the structural corner adjacency (9 entries per adjacent corner pair, by an independent count); exact symmetry; a chunk size that leaves padded elements, with the last block asserted exact (catches a −1 padding position); `pattern=` reuse gives the same matrix to $10^{-15}$; indices are int32.
+2. **Aggregate reuse** (roadmap). hex20 $6^3$ and hex8 $8^3$, clamped plus a sliding face, seeded random density (`s_K` = ρ³, `s_M` = ρ, ρ ∈ [0.5, 1]); aggregates from ρ, then a 20% seeded perturbation ρ':
+   - PCG iterations with reuse ≤ 1.2× a fresh setup on ρ' (roadmap);
+   - the reused V-cycle equals the fresh one to $10^{-12}$ (the smoothed $P$ changes by 12–13% between ρ and ρ', so this catches stale cells, $P$ or Galerkin products);
+   - σ = 0 aggregates reused at σ > 0 (with `nonsingular`) equal a fresh σ > 0 setup;
+   - moved points (seeded 2% perturbation): reuse converges within 1.2× a fresh setup (documents the approximation);
+   - a spy shows that `_pattern`, `_tables`, strength, aggregation and `fit_candidates` are not called with reuse;
+   - errors: another `free`, another node count, another connectivity with the same node count (a renumbered element order) raise `ValueError`.
 3. **σ = 0.** `amg(σ = 0)` raises `SingularShiftError`; with `nonsingular=True` on a clamped hex20 and hex8 box, PCG on $A_P(0)$ converges and the V-cycle is finite; `s_K` with a zero entry and `nonsingular=True` raises `ValueError`.
-4. **`solve_modes` against `reference_modes`** (roadmap). hex20 (clamped, free with nodal masses, sliding) and pure hex8 (clamped, free), 6 modes, tol $10^{-10}$: λ to $10^{-8}$ and MAC ≥ $1 - 10^{-8}$ (PR 9 / 11b tolerances); `info["precond"] == "amg"`; the final build is at `info["sigma"]`; clamped bodies build first at σ = 0 (spy on `amg`).
-5. **σ pre-estimate cases.** On the unstructured cases of the table above (hex20 $8^3$, hex8 $12^3$, beam, plate, free box, free beam, free plate; the slow ones marked `slow`): `_precond_sigma` with the AMG builder lands in $[\lambda_1(1 - 10^{-6}), 2\lambda_1]$; clamped bodies build once at σ = 0; free bodies never raise σ. The round-logic unit test runs against the generalized function.
-6. **Dispatch and errors.** `"auto"` on a box mesh → `"amg"`; `"amg"` on a voxel mesh raises; `precond_dtype="float32"` with `"amg"` raises; a σ hint skips the pre-estimate (one build, at the hint); σ = 0 hint on a free body raises `SingularShiftError`; `"jacobi"` still works on unstructured meshes.
-7. **`amg_memory` storage and workspace.** On hex20 $12^3$, hex27 $6^3$, hex8 $16^3$ and a sliding-mask case: `storage` ≥ the measured preconditioner-owned device bytes and ≤ 1.3× them; `workspace` ≥ `memory_analysis` of the V-cycle; tight at a mid size (≤ 1.25×). A non-box hex20 mesh (`distort`) stays inside the bound (documents the box calibration).
-8. **AMG step constants.** The LOBPCG step with AMG ≤ `lobpcg_memory(..., precond_memory=amg_memory)`'s step (9-block and low-memory, hex20 and hex8); a `slow` tight test at hex20 $24^3$ and hex8 $48^3$ (where the constants bind) asserts the measured extra within 0.6 blocks below the model, as 11b's `test_gmg_step_tight`.
-9. **Benchmark smokes** (`slow`): `amg_study.setup` at small sizes records times and peaks; `amg_study.simp` at a $8^3$ field runs and records counts for AMG and GMG.
+4. **`solve_modes` against `reference_modes`** (roadmap). Non-degenerate boxes (hex20 $5\times4\times3$, hex8 $6\times5\times4$; clamped, free with nodal masses, sliding), 6 modes, tol $10^{-10}$: λ to $10^{-8}$ and MAC ≥ $1 - 10^{-8}$ (PR 9 / 11b tolerances); `info["precond"] == "amg"`; the final build is at `info["sigma"]`. An `amg` spy asserts: clamped bodies build first at σ = 0 with `nonsingular=True`; free and sliding bodies call it only with σ > 0 and `nonsingular=False`.
+5. **σ pre-estimate cases.** On hex20 $8^3$, hex8 $12^3$, beam, plate, free box, free beam, free plate (the slow ones marked `slow`): `_precond_sigma` with the AMG builder lands in $[\lambda_1(1 - 10^{-6}), 2\lambda_1]$; the spy assertions of test 4; free bodies' successive build shifts never increase. The round-logic unit test runs against the generalized function.
+6. **Dispatch and errors** (updates `test_dispatch`). `"auto"` on a box mesh → `"amg"`; `"amg"` on a voxel mesh raises; `precond_dtype="float32"` with `"amg"` raises; a σ hint skips the pre-estimate (one build, at the hint); σ = 0 hint on a free unstructured body raises `SingularShiftError`; `"jacobi"` still works on unstructured meshes.
+7. **`amg_memory` storage.** On hex20 $12^3$, hex27 $6^3$, hex8 $16^3$ and a sliding-mask case: `storage` ≥ the measured preconditioner-owned device bytes (leaves shared with the operator excluded) and ≤ 1.3× them; a distorted hex20 mesh (`distort`) stays inside the bound (documents the box calibration).
+8. **AMG step constants.** The LOBPCG step with AMG ≤ `lobpcg_memory(..., precond_memory=amg_memory)`'s step for 9-block and low-memory at hex20 $8^3$ and $12^3$, hex27 $6^3$, hex8 $12^3$ (non-slow); a `slow` tight test at hex20 $24^3$ and hex8 $48^3$ asserts the measured extra within 1 block below the model (as 11b's `test_gmg_step_tight`).
+9. **Benchmark smokes** (`slow`): `amg_study.setup` at small sizes records times and peaks; `amg_study.simp` at an $8^3$ field records counts for AMG and GMG.
 10. **Mac acceptance** (roadmap; `slow`, Darwin only). `amg_study.acceptance(44)`: the cold run ≤ 900 s, all converged; the larger of two warm peaks within 20% of `solve_modes_memory` (estimate ≥ 2 GB). A smoke at $8^3$ checks the recorded keys and that the estimate is `solve_modes_memory`'s.
-11. **No host matrices survive `amg`.** After `amg(...)` and `gc.collect()`, no new `scipy.sparse` arrays are alive (compare `gc.get_objects()` counts before and after).
+11. **Nothing from the setup survives `amg`.** With `return_aggregates=False`, after `amg(...)` and `gc.collect()`: no new `sp.sparray`/`sp.spmatrix` instances, and `jax.live_arrays()` bytes beyond the operator, mask and the returned pytree are 0.
+12. **Build term** (`slow`, subprocess via `harness.measure`). The whole `amg` host peak at hex20 $24^3$, hex27 $12^3$ and hex8 $48^3$: `amg_memory(...)["build"]` ≥ measured and ≤ 1.3× measured.
 
 The implementation re-measures every iteration bound and memory constant with the shipped code.
 
 ## Docs
 
-- `docs/preconditioners.md`: the production assembler (pattern, fused scan, times and peaks); aggregate reuse (what is reused, why it equals a fresh setup under θ = 0, the saving); σ = 0 with `nonsingular`; `amg_memory`; the SIMP study (with the θ = 0.02 probe); the setup benchmark table; tests list.
-- `docs/eigensolvers.md`: `solve_modes` dispatch (`"amg"`), the σ pre-estimate with AMG (table), the acceptance result in the Mac budget table (measured row for hex20).
-- `README.md`: status (PR 13 complete, M3 done), the `solve_modes` snippet note that unstructured meshes use AMG, `solve_modes_memory` with AMG.
-- `docs/ROADMAP.md`: PR 13b status line; the memory table rows and "10M fits" line (Design 8); the deferred GPU check configuration.
+- `docs/preconditioners.md`: the production assembler (pattern, fused scan, host symmetrization, times and peaks), replacing the pmg section's COO assembly steps and its `galerkin_1m` cost text; aggregate reuse (what is reused, why it equals a fresh setup for value changes, the approximation for moved points, the saving); σ = 0 with `nonsingular`; `amg_memory` (model, size range, box calibration); the SIMP study (with the θ = 0.02 probe); the setup benchmark table; tests list.
+- `docs/eigensolvers.md`: `solve_modes` dispatch (`"amg"`), the σ pre-estimate with AMG (table); the memory section: `solve_modes_memory` composes `amg_memory`, the `step` bullet gains `AMG_STEP` (form, fitted range, $m = 36$ extrapolation, no low-memory gain), the measured-peak paragraph gains the acceptance peaks; the Mac budget table gets the measured hex20 row, and the hex20 setup sentence the measured setup times.
+- `README.md`: status (PR 13 complete, M3 done), unstructured meshes use AMG in `solve_modes`, `solve_modes_memory` with AMG.
+- `docs/ROADMAP.md`: PR 13b status line (noting the COO path replacement); the memory table rows and "10M fits" line (Design 8); the deferred GPU entries.
 - `docs/open_items.md`:
   - "Voxel GMG on high-contrast SIMP fields": the AMG study answers the revisit (AMG is worse at θ = 0; θ = 0.02 helps at own λ₁ but turns the coarse levels dense); retargeted to PRs 21–23.
   - "p-MG refuses σ = 0": resolved for `amg` (`nonsingular`, used by `solve_modes`); `pmg` keeps refusing.
   - "AMG memory figures in the ROADMAP table": resolved (Design 8).
   - "Binary-field λ₁ miss": unchanged (AMG is no better there).
-  - New, decision without user input: θ = 0 kept, no `theta` keyword.
+  - New, decisions without user input: θ = 0 kept, no `theta` keyword; the 10M GPU configuration (20 modes, $m = 25$, instead of the table's $m = 30$); the Mac 10M run at 10 modes; `nonsingular=True` trusts the caller apart from `s_K > 0`, and `solve_modes` derives it from `rigid_modes`; `"amg"` on voxel meshes raises; the COO assembler removed (pmg's Galerkin numbers change); reuse with moved points approximates.
   - New: AMG memory constants are calibrated on box meshes.
 
 ## Not covered
 
 - fp32 AMG (PR 18).
 - AMG on solid-shell meshes (PR 18) and flat-element fixes (M4).
-- A `mode="otf"` option in `solve_modes` (the 10M Mac run uses stored Ke at 10 modes).
+- A `mode="otf"` option in `solve_modes` (the 10M Mac run uses stored Ke at 10 modes; the GPU fallback composes the building blocks).
 - High-contrast fixes (PRs 21–23).
+
+## Review log
+
+Round 1 (5 reviewers, none satisfied, no BLOCKING): reuse removed from `solve_modes`; `amg_memory` trimmed to the consumed keys; `_hex8_galerkin` returns `(Ab, pattern)`; reuse validates connectivity and states the moved-points approximation; step model gains the n-independent term $8mK$ and the storage model an explicit coarsest term, with explicit test sizes; spy assertions on σ = 0 / `nonsingular` for free and sliding bodies; independent assembler oracle (`p_ref`, `mixed_mesh`, owner and padding cases); device-array survivor check; tested build term; GPU device arithmetic (only the modes are host) with a fallback; Mac 10M guard; host symmetrization; docs list completed and decisions logged.
