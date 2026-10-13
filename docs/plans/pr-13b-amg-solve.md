@@ -1,6 +1,6 @@
 # PR 13b plan: AMG in `solve_modes`, production hex8 assembler, reuse, estimator, Mac acceptance
 
-Status: draft (plan review round 3; rounds 1–2 applied, see the Review log).
+Status: draft (plan review round 4; rounds 1–3 applied, see the Review log).
 
 PR 13b completes PR 13 (M3) on top of 13a's `amg(op, free, sigma, points)`. It makes AMG the default preconditioner of `solve_modes` on unstructured meshes and adds:
 - the production hex8 Galerkin assembler (a device scatter into a precomputed node-block pattern; it replaces the COO path for every `amg` and `pmg` build);
@@ -75,7 +75,7 @@ Steel unit boxes, `xmin` clamped unless noted, as in `benchmarks/amg_study.py`.
 
 - The budget is 15 min (12× margin). The model in `docs/eigensolvers.md` assumed $N_\text{it}$ = 150; measured 19.
 - σ = 1.000 λ₁ (11 923 132 against the converged λ₁ 11 923 130).
-- Projected estimate: `lobpcg_memory` (Jacobi, stored) 5.28 GB + AMG storage 0.55 GB + 6.0 step blocks (1.29 GB) ≈ 7.1 GB, 7% below the cold peak (1 − est/peak; 7.4 GB with the size envelope of Design 5, 3% below); the warm peaks are measured in the implementation.
+- Projected estimate with Design 5's model: `lobpcg_memory` (Jacobi, stored) 5.28 GB + `amg_memory` storage 0.73 GB (measured 0.55 GB; the per-corner envelope over-predicts by about 0.18 GB) + 6.0 step blocks (1.29 GB) ≈ 7.3 GB, 4% below the cold peak (1 − est/peak; 7.4 GB with the step envelope's 0.6-block gap, 2% below); the warm peaks are measured in the implementation.
 
 **LOBPCG step with AMG** (`p13b/stepmem.py`; temporaries plus aliased state of the compiled step, extra fp64 blocks over the Jacobi step; standalone V-cycle temporaries for comparison):
 
@@ -142,14 +142,14 @@ Every measured point is bounded and every gap at the tight-test sizes is under 1
 
 | modes ($m$) | stored Ke, 9-block | stored, low-memory | on-the-fly, 9-block |
 |---|---|---|---|
-| 10 (15) | 48.5–51.2 GB | 48.3 GB | 38.1–40.9 GB |
-| 20 (25) | 68.4–71.2 GB | 68.5 GB | 58.0–60.8 GB |
-| 30 (36) | 89.6–94.7 GB | 90.6 GB | 80.5 GB |
+| 10 (15) | 50.4–53.1 GB | 50.2 GB | 40.0–42.8 GB |
+| 20 (25) | 70.3–73.1 GB | 70.4 GB | 59.9–62.7 GB |
+| 30 (36) | 91.5–96.6 GB | 92.5 GB | 82.4 GB |
 
-Ranges: the $44^3$ fit to a $24^3$–$68^3$ envelope (performance reviewer, `r13b/perf/proj.py`); Design 5's model with the fixed per-column term lands near the lower end. The step model is fitted at $m$ = 15–25, so the $m = 36$ row is an extrapolation (enough for "does not fit").
+All figures use `amg_memory`'s model (storage ≈ 7.3 GB at 10M: exact p-level + 2400 B per corner DOF + coarsest), about 1.9 GB above the measured-storage projection (5.4 GB). Ranges: the $44^3$ step fit to a $24^3$–$68^3$ envelope (performance reviewer, `r13b/perf/proj.py`); Design 5's model with the fixed per-column term lands near the lower end. The step model is fitted at $m$ = 15–25, so the $m = 36$ row is an extrapolation (enough for "does not fit").
 
-- GPU (76 GB usable pool): only the fp64 modes of the `host` term live on the host; its freed-step-output block is device memory. Device estimate for 20 modes, stored Ke, 9-block: about 67–70 GB, and the 1M cold peak ran 3–7% above the estimate, so 71–74 GB against 76 GB: it fits, thinly. 30 modes does not (about 87–92 GB). Fallback if the GPU run does not fit: on-the-fly Ke (about 56–59 GB device), which needs `unstructured(mode="otf")` + `amg` + `lobpcg` directly (`solve_modes` has no `mode=`), or fewer modes. The 10M setup is host-side: about 16 GB host RAM (5.9 kB per corner DOF).
-- Mac (64 GB unified): the optional 10M run uses 10 modes, stored Ke, 9-block step (about 49–51 GB, plus the cold excursion about 52–55 GB). `large()` prints `solve_modes_memory` first and stops above 52 GB.
+- GPU (76 GB usable pool): only the fp64 modes of the `host` term live on the host; its freed-step-output block is device memory. Device estimate for 20 modes, stored Ke, 9-block: `amg_memory`'s model gives about 69–72 GB. The 1M cold peak ran 3–7% above the measured-storage estimate (67–70 GB at 10M), so the expected peak is about 69–75 GB; the model's storage over-prediction (about 1.9 GB) already absorbs part of that excursion, so the two are not stacked. Against 76 GB: it fits, thinly. 30 modes does not (about 89–94 GB). Fallback if the GPU run does not fit: on-the-fly Ke (about 58–61 GB device), which needs `unstructured(mode="otf")` + `amg` + `lobpcg` directly (`solve_modes` has no `mode=`), or fewer modes. The 10M setup is host-side: about 16 GB host RAM (5.9 kB per corner DOF).
+- Mac (64 GB unified): the optional 10M run uses 10 modes, stored Ke, 9-block step (model about 51–53 GB; measured-storage estimate about 49–51 GB, about 50–55 GB with the cold excursion). `large()` prints `solve_modes_memory` first and stops above 52 GB, so the Mac run may be skipped; the 10M acceptance is the deferred GPU check.
 
 ## Design
 
@@ -189,9 +189,9 @@ Ranges: the $44^3$ fit to a $24^3$–$68^3$ envelope (performance reviewer, `r13
 
 Returns the four keys `lobpcg_memory` reads from a preconditioner estimate: `storage`, `build`, `step`, `step_low` (no `workspace` or `overhead`: nothing consumes them). Two families: all-hex8 meshes and the rest (hex20/hex27/mixed, with a p-level).
 `amg_memory` models `amg`'s default `max_coarse` (the only value `solve_modes` uses).
-- **storage** = the p-level exactly from the mesh (node-block Jacobi inverses $72\,n_\text{nodes}$, `NodalTransfer` table widths from the element types, mask) + the AMG levels, smoothers and transfers as a per-corner-DOF constant (envelope over hex20 $8^3$–$44^3$, hex27 $6^3$–$24^3$, hex8 $12^3$–$68^3$, excluding the coarsest; measured 866–2287 B, so about 2400 B for hex20/hex27 and about 1200 B for hex8; the hex20 $12^3$ maximum comes from a nearly dense 750-DOF last level, so the 1M AMG part is over-predicted by about 1.3×, +0.18 GB at the acceptance, documented) + the coarsest factor $8\min(n_c, \texttt{max\_coarse})^2$. The coarsest term is exact without an AMG level ($n_c \le$ `max_coarse`) and an upper bound otherwise (coarsening usually stops well below `max_coarse`; a stall up to the 4·`max_coarse` cap can exceed it, documented). Calibrated on box meshes (documented).
+- **storage** = the p-level exactly from the mesh (node-block Jacobi inverses $72\,n_\text{nodes}$, `NodalTransfer` table widths from the element types, mask) + the AMG levels, smoothers and transfers as a per-corner-DOF constant (envelope over hex20 $8^3$–$44^3$, hex27 $6^3$–$24^3$, hex8 $12^3$–$68^3$, excluding the coarsest; measured 866–2287 B, so about 2400 B for hex20/hex27 and about 1200 B for hex8; the hex20 $12^3$ maximum comes from a nearly dense 750-DOF last level, so the 1M AMG part is over-predicted by about 1.3×, +0.18 GB at the acceptance, documented) + the coarsest factor $8\min(n_c, \texttt{max\_coarse})^2$. The coarsest term is exact without an AMG level ($n_c \le$ `max_coarse`) and an upper bound otherwise (coarsening usually stops well below `max_coarse`; a stall up to the 4·`max_coarse` cap can exceed it, documented). Calibrated on box meshes (documented). Small meshes with few AMG levels sit up to about 1.6× below the envelope (hex20 $8^3$, hex27 $6^3$); the bound is safe there, only loose.
 - **step**, **step_low**: per family $8n(a\,m + c) + 8mK$ over Jacobi's step (`AMG_STEP`: $a$, $c$, $K$ per family and step kind), fitted as an envelope over every size test 8 asserts (hex20 $8^3$–$44^3$, hex27 $6^3$–$24^3$, hex8 $12^3$–$68^3$) at $m$ = 15 and 25, so it bounds the small sizes by construction and stays within about 1 block at 1M.
-- **build**: the `amg` setup host peak, $\beta + \alpha_t\,n_c$: a fixed part β (about 40 MB) plus a per-corner-DOF constant per element type (hex8 about 5 kB, hex20 about 6 kB, hex27 about 7 kB; mixed meshes take the largest type present), fitted as an envelope over hex20 $12^3$–$44^3$, hex27 $12^3$–$24^3$ and hex8 $24^3$–$68^3$.
+- **build**: the `amg` setup host peak, $\beta + \alpha_t\,n_c$: a fixed part β (about 40 MB) plus a per-corner-DOF constant per element type (hex8 about 5 kB, hex20 about 6 kB, hex27 about 7 kB; mixed meshes take the largest type present, an upper bound for them), fitted as an envelope over hex20 $12^3$–$44^3$, hex27 $12^3$–$24^3$ and hex8 $24^3$–$68^3$.
 - `solve_modes_memory` uses `amg_memory` for `precond="amg"` and `"auto"` on unstructured meshes; the composition rule (`max(op build, precond build, step)`) is unchanged.
 
 ### 6. Memory ordering
@@ -212,9 +212,9 @@ Setup → free the assembled A → allocate LOBPCG:
 ### 8. ROADMAP memory rows and the deferred GPU check
 
 All figures from the shipped `solve_modes_memory` / `amg_memory`:
-- Multigrid row, unstructured columns (1M hex20, 10M hex20): AMG device storage (≈ 0.55 GB / ≈ 5.4 GB) and the setup host peak (≈ 1.6 GB / ≈ 16 GB). The voxel columns keep GMG's figures.
+- Multigrid row, unstructured columns (1M hex20, 10M hex20): AMG device storage from `amg_memory` (≈ 0.73 GB / ≈ 7.3 GB; measured at 1M: 0.55 GB, the model over-predicts as documented) and the setup host peak (≈ 1.6 GB / ≈ 16 GB). The voxel columns keep GMG's figures.
 - Preconditioner workspace row, unstructured columns only: AMG as a step extra (about 6 blocks at $m = 25$ with the 9-block step; about 11 with the low-memory step, which therefore gains nothing).
-- "80 GB GPU: 10M fits" becomes: 10M hex20 with 20 modes ($m = 25$, stored Ke, 9-block step) needs about 67–70 GB on the device (fits the 76 GB pool thinly); 30 modes does not; fallback on-the-fly Ke.
+- "80 GB GPU: 10M fits" becomes: 10M hex20 with 20 modes ($m = 25$, stored Ke, 9-block step) needs about 69–72 GB on the device by `solve_modes_memory` (fits the 76 GB pool thinly); 30 modes does not; fallback on-the-fly Ke.
 - Deferred GPU check entry "PR 13: 10M hex20 modal solve on one GPU" gets that configuration, the fallback and the host RAM (about 16 GB); a new entry: assembler scatter determinism and speed on the GPU.
 - Decision without user input (logged): the table assumed $m = 30$ for 10M; with AMG that does not fit, so the GPU check runs 20 modes. The roadmap check names no mode count, so no criterion is relaxed.
 
@@ -242,7 +242,7 @@ All figures from the shipped `solve_modes_memory` / `amg_memory`:
 4. **`solve_modes` against `reference_modes`** (roadmap). Non-degenerate boxes (hex20 $5\times4\times3$, hex8 $6\times5\times4$; clamped, free with nodal masses, sliding), 6 modes, tol $10^{-10}$: λ to $10^{-8}$ and MAC ≥ $1 - 10^{-8}$ (PR 9 / 11b tolerances); `info["precond"] == "amg"`; the final build is at `info["sigma"]`. An `amg` spy, keyed on `info["n_rigid"]`, asserts: with no rigid modes the first build is at σ = 0 with `nonsingular=True`; with rigid modes (free, and the `xmin: "x"` sliding case, k = 3) every build has σ > 0 and `nonsingular=False`.
 5. **σ pre-estimate cases.** On hex20 $8^3$, hex8 $12^3$, beam, plate, free box, free beam, free plate (the slow ones marked `slow`): `_precond_sigma` with the AMG builder lands in $[\lambda_1(1 - 10^{-6}), 2\lambda_1]$; the spy assertions of test 4; free bodies' successive build shifts never increase. The round-logic unit test runs against the generalized function.
 6. **Dispatch and errors** (updates `test_dispatch`). `"auto"` on a box mesh → `"amg"`; `"amg"` on a voxel mesh raises; `precond_dtype="float32"` with `"amg"` raises; a σ hint skips the pre-estimate (one build, at the hint); σ = 0 hint on a free unstructured body raises `SingularShiftError`; `"jacobi"` still works on unstructured meshes.
-7. **`amg_memory` storage.** On hex20 $12^3$, hex27 $6^3$, hex8 $16^3$ and a sliding-mask case: `storage` ≥ the measured preconditioner-owned device bytes (leaves shared with the operator excluded); the coarse term ≥ `P.coarse.L.nbytes`; tightness on the part that scales with $n$: storage − coarse term ≤ 1.3 × (measured − actual coarsest bytes); a distorted hex20 mesh (`distort`) stays inside the bound (documents the box calibration).
+7. **`amg_memory` storage.** On hex20 $12^3$, hex27 $6^3$, hex8 $16^3$ and a sliding-mask case: `storage` ≥ the measured preconditioner-owned device bytes (leaves shared with the operator excluded); the coarse term ≥ `P.coarse.L.nbytes`; tightness on the part that scales with $n$, at hex20 $12^3$ and hex8 $16^3$ only (where the AMG part is near the per-corner envelope): storage − coarse term ≤ 1.3 × (measured − actual coarsest bytes); hex27 $6^3$ (one AMG level, 1550 B per corner DOF against the 2400 B envelope, ratio 1.40), the sliding case and a distorted hex20 mesh (`distort`) stays inside the bound (documents the box calibration).
 8. **AMG step constants.** The LOBPCG step with AMG ≤ `lobpcg_memory(..., precond_memory=amg_memory)`'s step for 9-block and low-memory at hex20 $8^3$ and $12^3$, hex27 $6^3$, hex8 $12^3$ (non-slow), with `step_bytes`' block size equal to the block `lobpcg_memory` derives from its `n_modes` (asserted); a `slow` tight test at hex20 $24^3$ and hex8 $48^3$ asserts the measured extra within 1 block below the model (as 11b's `test_gmg_step_tight`).
 9. **Benchmark smokes** (`slow`): `amg_study.setup` at small sizes records times and peaks; `amg_study.simp` at an $8^3$ field records counts for AMG and GMG.
 10. **Mac acceptance** (roadmap; `slow`, Darwin only). `amg_study.acceptance(44)`: the cold run ≤ 900 s, all converged; the larger of two warm peaks within 20% of `solve_modes_memory` (estimate ≥ 2 GB). A smoke at $8^3$ checks the recorded keys and that the estimate is `solve_modes_memory`'s.
@@ -273,6 +273,8 @@ The implementation re-measures every iteration bound and memory constant with th
 - High-contrast fixes (PRs 21–23).
 
 ## Review log
+
+Round 3 (simplicity, performance satisfied; correctness, tests, docs not, no BLOCKING): test 7's 1.3× tightness asserted only at hex20 $12^3$ and hex8 $16^3$ (hex27 $6^3$ measures 1.40× under the shared constant; upper bound everywhere); all ROADMAP and 10M figures now quote `amg_memory`'s model (storage 0.73 / 7.3 GB, 10M device 69–72 GB, expected 69–75 GB without stacking the excursion on the model's over-prediction), acceptance projection 7.3 GB; mixed-mesh build term stated as an upper bound. The hex27 build constant (7 kB vs a 6.2 kB minimal envelope) is settled by the implementation's re-fit.
 
 Round 2 (simplicity, docs satisfied; correctness, tests, performance not, no BLOCKING): storage tightness asserted on the n-scaling part with a separate coarse-term check; build = fixed part + per-element-type constant; step fit set includes every tested size (LP envelope from the tests reviewer recorded); `step_bytes` block size pinned; in-place host symmetrization; spy keyed on the rigid-mode count; `max_coarse` ignored with `aggregates`; redundant node-count check dropped; test 11 by array ids after a warm-up; 30-mode device figure corrected.
 
