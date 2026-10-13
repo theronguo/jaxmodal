@@ -248,7 +248,9 @@ assert cinfo["verifiable"] and cinfo["passed"] and est < 0.5
 
 ```python
 f = info["frequencies"]
-mub, Vb, binfo = solve_modes(hbox, materials, {"xmin": "xyz"}, band=(0, (f[1] + f[2]) / 2), verify=True)
+mub, Vb, binfo = solve_modes(
+    hbox, materials, {"xmin": "xyz"}, band=(0, (f[1] + f[2]) / 2), verify=True
+)
 assert len(mub) == 2 and binfo["count"]["passed"]  # the two bending modes, none missing
 ```
 
