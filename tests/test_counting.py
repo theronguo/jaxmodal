@@ -412,8 +412,8 @@ def _recurrence_temps(op, free, P, b):
 @pytest.mark.parametrize("pc", ["jacobi", "mg"])
 @pytest.mark.parametrize("kind", ["hex20", "voxel"])
 def test_step_memory(kind, pc):
-    """Test 9a: memory_analysis of the recurrence <= count_memory's step (w0 and u aside), and
-    the fit is tight at one size."""
+    """Test 9a: memory_analysis of the recurrence <= count_memory's step (w0 and u aside), the
+    fit is tight, and the multigrid increment over Jacobi is 0.45-1.0 of its `count` term."""
     if kind == "hex20":
         mesh = box_mesh((12,) * 3, (1 / 12,) * 3, type="hex20")
         op, est = unstructured(mesh, STEEL), lambda b: unstructured_memory(mesh, b)
@@ -433,6 +433,9 @@ def test_step_memory(kind, pc):
         model = e["step"] - 2 * 8 * op.n_dof * b
         print(f"{kind} {pc} b={b}: {got / 1e6:.1f} MB, model {model / 1e6:.1f} MB")
         assert got <= model and got >= (0.5 if pc == "mg" else 0.6) * model
+        if pc == "mg":
+            inc = got - _recurrence_temps(op, free, jacobi(op, free, 1.0), b)
+            assert 0.45 <= inc / pcm(b)["count"] <= 1.0, inc / pcm(b)["count"]
 
 
 def test_sampling_memory():
