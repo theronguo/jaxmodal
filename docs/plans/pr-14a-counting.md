@@ -1,6 +1,6 @@
 # PR 14a plan: the stochastic eigenvalue count
 
-Status: draft, revised after plan review round 1 (log at the end); round 2 pending.
+Status: draft, revised after plan review rounds 1 and 2 (log at the end); round 3 pending.
 
 PR 14 (ROADMAP: "Eigenvalue counting and [0, f_max]") is split:
 - **14a (this plan):** the completeness count as a building block: probes from element-wise factors of $M_e$, the Chebyshev–Jackson step polynomial and its degree rule, the deflated estimator with preconditioned inner PCG solves, the solve tolerance $\tau_c$ and the unverifiable flag, the probe-block memory model, and the counting benchmark (degree, time and error propagation against mode index).
@@ -47,7 +47,7 @@ PR 14 (ROADMAP: "Eigenvalue counting and [0, f_max]") is split:
 - **Cost** (performance probe, hex20 $12^3$, n = 24,843):
   - PCG iterations per solve at τ = 1e-6 / 1e-8 / 1e-10 / 1e-12: AMG at λ_c 11 / 14 / 17 / 20, Jacobi 215 / 283 / 351 / 408.
   - One AMG solve at τ = 1e-10 takes 0.44 s at width 8 and 1.22 s at width 32.
-  - A count costs about $\lceil N/b\rceil \cdot d \cdot (\text{it}_\text{PCG}(t_A + t_P) + t_M)$: $10^2$–$10^3$ LOBPCG solves at moderate g. So 14b's `verify=None` default rarely turns it on beyond the lowest modes.
+  - A count costs about $\lceil N/b\rceil \cdot d \cdot (\text{it}_\text{PCG}(t_A + t_P) + t_M)$: $10^2$–$10^3$ times the LOBPCG solve time at moderate g. So 14b's `verify=None` default rarely turns it on beyond the lowest modes.
 - **Memory** (performance probe, `memory_analysis` of one step: M apply, PCG, update), temporaries $8n(a\,b + c)$:
   - Jacobi: a ≈ 10 vectors per probe, c ≈ 150.
   - AMG: a ≈ 21, c ≈ 200.
@@ -87,9 +87,9 @@ PR 14 (ROADMAP: "Eigenvalue counting and [0, f_max]") is split:
 - `count_degree(gap, lam_top, n_top, n_free)` returns `(d, bias)`: the smallest passing d found by doubling then bisection. Measured, $q(x_l)$ is monotone in d.
   - **In-band:** $q(x_l)^2 \ge 0.95$ at $x_l = x(\lambda_c(1 - g/2))$, evaluated exactly by an $O(d)$ cosine sum.
   - Also the minimum over a DCT-II θ grid of $8d$ points on $[x_l, 1]$, which guards against ripples.
-  - **Tail bias:** $\int q^2\,dN$ with $N(\lambda) = n_\text{top}(\lambda/\lambda_\text{top})^{3/2}$ from $\lambda_\text{top}$ up to $N = n_\text{free}$. It is evaluated on the same uniform θ grid (spacing $\pi/(8d)$, which resolves the transition), with $dN/d\theta$.
+  - **Tail bias:** $\int q^2\,dN$ with $N(\lambda) = n_\text{top}(\lambda/\lambda_\text{top})^{3/2}$ from $\lambda_\text{top}$ up to $N = n_\text{free}$. It is evaluated on the same uniform θ grid (spacing $\pi/(8d)$, which resolves the transition), with $dN/d\theta$, and $\theta_\text{max} = \theta(\lambda_\text{max})$ is a grid endpoint, where $dN/d\theta$ peaks.
   - **Weyl exponent.** a = 3/2 is fixed: the 3D exponent, an upper bound on fits to the computed modes (bulky 1.1, plate 0.4–0.5, beam 0.3–1.3, correctness probe). This is stricter than the ROADMAP's "a fitted to computed modes". The ROADMAP wording is updated and the change logged.
-  - **Degree cap.** If $23/g >$ `MAX_DEGREE`, the search is skipped and `count` returns `verifiable = False` without running (the ROADMAP's cost-model cap; 14b's cost model may lower it).
+  - **Degree cap.** If $23/g >$ `MAX_DEGREE`, the search is skipped and `count` returns without running: `estimate` NaN, `verifiable` and `passed` False, `degree` = $\lceil 23/g\rceil$, `steps` 0 (the ROADMAP's cost-model cap; 14b's cost model may lower it, and it is a candidate `count_options` key).
 - **Inputs.** `count` computes $\lambda_c = (\lambda_l + \lambda_n)/2$ and $g = (\lambda_n - \lambda_l)/\lambda_c$ from `lam_last` and `lam_next`.
   - `lam_last` may be the band edge $(2\pi f)^2$ when no mode is returned.
   - `lam_top` = max(lam); `n_top` = len(lam) + R columns.
@@ -110,7 +110,7 @@ count(op, free, W, lam, lam_last, lam_next, *, R=None, precond=None, n_probes=50
 
 **Checks:**
 - $0 \le$ `lam_last` < `lam_next` ≤ max(lam), since the tail model needs every mode up to `lam_next` in W;
-- W shape, lam length, and $\|W^\top M W - I\|$ (chunked, as `lobpcg`'s R check);
+- W shape, lam length, and M-orthonormality by a streamed sketch (two passes over W, not the $O((k/c)^2)$ Gram): $v = Wz$ with $z \sim N(0, I_k)$ of 3 columns, $e = W^\top M v - z$, $\|e\| \le \text{tol}\,\|z\|$ with tol $10^{-6}$ for fp64 W and $10^{-4}$ for fp32 W;
 - `n_probes`, `block`, `maxit` pass `is_count`;
 - τ > 0.
 
@@ -122,12 +122,13 @@ count(op, free, W, lam, lam_last, lam_next, *, R=None, precond=None, n_probes=50
 It is applied at the start and end of each block. Only one chunk of W is on the device at a time.
 
 **Per block:**
-1. Sample g; y by Jacobi PCG (Design 1).
+1. Sample g; y by Jacobi PCG (Design 1). A y column that stagnates or does not converge sets `bad` too.
 2. $w_0 = \Pi y$.
 3. `_recurrence(A, P, op, m, w0, gamma, tau, maxit)` (jitted, one compile per width) runs $w_1 = X w_0$, $w_k = 2Xw_{k-1} - w_{k-2}$, $u = \sum_k \gamma_k w_k$ in a `lax.while_loop`.
    - $Xw = 2\lambda_c\,T w - w$, with $Tw$ = `_pcg(ap_operator(op, free, λ_c), P, m ⊙ M(m ⊙ w), tau, maxit)`.
    - The carry holds the PCG iteration sum and max and a `bad` flag (any column stagnated or not converged).
-   - The loop stops early when `bad` is set: an unverifiable block need not run d stagnating solves. The ROADMAP's 10M-near-index-1000 case expects that.
+   - The loop stops early when `bad` is set: an unverifiable block need not run d stagnating solves. The ROADMAP's 10M-near-index-1000 case expects that. The remaining blocks are skipped, and `estimate` is NaN (a truncated sum means nothing).
+   - γ is zero-padded to the next power of two and d is a traced loop bound, so one compile serves every degree up to that size.
 4. $u \leftarrow \Pi u$, $s_j = u_j^\top M u_j$.
 
 Returns `estimate` = mean $s_j$ and `info`:
@@ -139,7 +140,7 @@ Returns `estimate` = mean $s_j$ and `info`:
 
 ### 4. Solve tolerance and the unverifiable flag
 
-- **Default** $\tau_c = 0.01/(d\sqrt{n_\text{free}})$ (ROADMAP). With the linear model of Facts, the accumulated M-norm error is $\lesssim 0.01\sqrt{\kappa}$, so $|\Delta s| \lesssim 0.02\sqrt{s}$, far below the 0.5 threshold.
+- **Default** $\tau_c = 0.01/(d\sqrt{n_\text{free}})$ (ROADMAP). With the linear model of Facts, $|\Delta s| \lesssim 0.02\sqrt{\kappa(M)\,s}$ in the worst case (about $0.24\sqrt{s}$ on uniform hex20). The measured error is far smaller (Facts), and the benchmark's contrast case checks it.
 - **The benchmark measures** $|s(\tau) - s(10^{-13})|$ against d and τ. Cases:
   - W complete;
   - a mode left out ($s = O(1)$);
@@ -156,7 +157,7 @@ Returns `estimate` = mean $s_j$ and `info`:
 - **storage:** the operator and preconditioner storage, R and MR.
 - **sampling:** about 7–8 vectors per probe, below the recurrence. Stated, and checked by test 9b.
 - **step:** $8n(a_c b + c_c)$ (`COUNT_STEP`, fitted by `memory_analysis` of `_recurrence` with Jacobi), plus the operator workspace and the preconditioner's step term at width b (`gmg_memory`'s workspace, `amg_memory`'s step), as in `lobpcg_memory`.
-- **projector:** a chunk of W, $n \cdot c \cdot$ bytes, plus (c + b) temporaries during Π.
+- **projector:** a chunk of W, $n \cdot c \cdot$ bytes, plus its fp64 upcast $8nc$ when `w_dtype` is fp32, plus (c + b) temporaries during Π.
 - **total:** storage + max(phases).
 
 `probe_block(budget, ...)` gives b in closed form. The total is affine in b, so $b = \min(n_\text{probes}, \lfloor(\text{budget} - \text{fixed})/\text{per probe}\rfloor)$. If b < 1 it raises. 14b passes the budget (the solve's own estimate, so counting never raises the peak). 14a's `count` takes an explicit `block`.
@@ -165,9 +166,9 @@ Returns `estimate` = mean $s_j$ and `info`:
 
 - **Degree and cost against mode index:** hex20 $16^3$ and voxel $32^3$ boxes, W from `lobpcg` (≈ 200 modes).
   - For each cut k: g, d (cheap).
-  - S = 30 recurrence steps timed (`degree=S`, AMG/GMG at λ_c, b = 10), PCG iterations per solve, the predicted total $\lceil 50/b\rceil \cdot d \cdot t_\text{step}$, against the LOBPCG solve time.
+  - At 6 cuts (k = 5, 10, 25, 50, 100, 200): S = 30 recurrence steps timed (`degree=S`, AMG/GMG at λ_c, b = 10) and PCG iterations per solve. The other cuts use the nearest timed $t_\text{step}$. The predicted total $\lceil 50/b\rceil \cdot d \cdot t_\text{step}$ is reported against the LOBPCG solve time. `run(small=True)` times 2 cuts.
 - **Error propagation:** full counts at small n (hex20 $6\times5\times4$, and a graded box with a density-contrast phase) for d from 20 to about 1000. W complete and a mode left out, τ ∈ {1e-4, …, 1e-12} against τ = 1e-13.
-- **Floor:** the smallest τ at which PCG converges on the test mesh, used by test 7.
+- **Floor:** the smallest τ at which PCG converges on the test mesh, for the docs (test 8 measures its own).
 - **Memory:** `count_memory` against the measured process peak at the test-9 size.
 
 ## Tests (`tests/test_counting.py`)
@@ -188,15 +189,16 @@ Fast tests use the reference mesh hex20 $6\times5\times4$ (n = 1962). The cut is
    - $d \cdot g \in [19, 24]$ at the poly.py inputs ($n_\text{free} = 10^6$, $n_\text{top} = 50$);
    - a case where the bias sets d (g = 0.5, $n_\text{top} = 5000$): d > the in-band d, and the bias ≤ 0.05;
    - $23/g >$ `MAX_DEGREE` gives `verifiable` False with no recurrence.
-4. **Expected value against the exact eigen-sum:** 2000 probes (one `count` call, `n_probes = 2000`), mean $s_j$ against $\sum_{i \notin W} q(\lambda_i)^2$ from `scipy.linalg.eigh(K, M)` and a direct cosine-sum q, within 5 standard errors. Three cases:
+4. **Expected value against the exact eigen-sum:** 2000 probes (one `count` call, `n_probes = 2000`, `block = 500`), mean $s_j$ against $\sum_{i \notin W} q(\lambda_i)^2$ from `scipy.linalg.eigh(K, M)` and a direct cosine-sum q, within 5 standard errors. Three cases:
    - W complete;
    - mode 3 left out (sum ≈ 1);
-   - a free body with R (k = 6), plus R omitted from the call (sum ≈ 6).
-5. **Estimator against dense, same probes:** the dense NumPy estimator with exact T. τ = 1e-12: mode left out, relative $10^{-8}$; W complete, absolute $10^{-10}$. Default τ: within the linear model's bound.
-6. **Detection (ROADMAP):** mode 3 (not next to the cut) left out of W. One `count` with `n_probes = 5000`, `info["probes"]` grouped into 100 consecutive sets of 50: ≥ 97 sets have mean ≥ 0.5. Deterministic; the count is reported. W complete: all 100 sets < 0.5 (Jackson bias included).
-7. **κ ≥ 10⁷ (ROADMAP):** thin hex20 plate with κ = λ_max/λ_1 ≥ 10⁷ asserted (`eigsh(which="LA")`). AMG at λ_c, default τ; `verifiable` True asserted; W complete gives estimate < 0.5.
+   - a free body with R (k = 6), plus R omitted from the call (sum ≈ 6);
+   - lumped mass, and consistent mass with nodal masses, mode 3 left out (the diagonal y path and the nodal term through `count`).
+5. **Estimator against dense, same probes:** the dense NumPy estimator with exact T. τ = 1e-12: mode left out, relative $10^{-8}$; W complete, absolute $10^{-10}$. Default τ: within the linear model's bound. Cases: hex20, lumped hex20, and a voxel box ($4^3$).
+6. **Detection (ROADMAP):** mode 3 (not next to the cut) left out of W. One `count` with `n_probes = 5000`, `block = 500`, `info["probes"]` grouped into 100 consecutive sets of 50: ≥ 97 sets have mean ≥ 0.5. Deterministic; the count is reported. W complete: all 100 sets < 0.5 (Jackson bias included).
+7. **κ ≥ 10⁷ (ROADMAP):** thin hex20 plate ($12 \times 12 \times 1$, side/thickness 100, clamped edge, n ≈ 5k) with κ = λ_max/λ_1 ≥ 10⁷ asserted (`eigsh(which="LA")`), cut in a gap with g ≥ 0.2. AMG at λ_c, default τ; `verifiable` True asserted; W complete gives estimate < 0.5.
 8. **Floor and flags (ROADMAP):**
-   - τ at 1/10 of the benchmark's measured floor on the test mesh, and τ = 1e-17: `verifiable` False, `passed` False, `steps` < d (early stop).
+   - The floor measured inside the test: direct `_pcg` runs with the test's preconditioner (Jacobi at λ_c) at τ = 1e-12, 1e-13, …; the smallest converging τ is the floor. τ at 1/10 of it, and τ = 1e-17: `verifiable` False, `passed` False, estimate NaN, `steps` < d (early stop).
    - `maxit=2` at the default τ with Jacobi: `verifiable` False.
    - A normal run: `verifiable` True.
 9. **Memory:**
@@ -221,9 +223,11 @@ Fast tests use the reference mesh hex20 $6\times5\times4$ (n = 1962). The cut is
   - τ_c and the measured error propagation (linear model) and floor, the flag;
   - streamed Π, the probe-block memory model, the counting cost against mode index;
   - each `count` keyword's default and why it is robust (50 probes: P(miss) = 0.23%; τ rule; block; maxit), for 14b's Options table;
+  - the "kept internal" sentence gains `Q_MIN` and `BIAS` (acceptance criteria), `WEYL_A` (the 3D bound), and `MAX_DEGREE` (cost cap; a candidate 14b `count_options` key);
   - the validation list.
 - `docs/operators.md`: `mass_sample` and the quadrature factor.
 - ROADMAP:
+  - "Cholesky factors of $M_e$" → "quadrature factors of $M_e$" (the test, the sampling text and the validation list);
   - the PR 14 split note, with each PR 14 test tagged 14a / 14b;
   - dependency rows "14a Counting | 9, 10, 11 (13 optional)" and "14b [0, f_max], verify | 14a";
   - the d ≈ 25/g note (measured 23/g), the a = 3/2 wording, the status line.
@@ -242,7 +246,9 @@ Fast tests use the reference mesh hex20 $6\times5\times4$ (n = 1962). The cut is
 - Default precond Jacobi at λ_c in 14a.
 - The τ_c rule may change by measurement in either direction.
 - The memory budget moves to 14b.
-- Early stop of unverifiable blocks.
+- Early stop of unverifiable blocks; NaN estimate after an early stop.
+- Detection probes grouped as 100 sets of 50 from one 5000-probe call: probes are i.i.d. per key, so this equals 100 independent 50-probe counts.
+- The M-orthonormality check by a random sketch, not the full Gram.
 
 ## Review log
 
@@ -259,3 +265,13 @@ Fast tests use the reference mesh hex20 $6\times5\times4$ (n = 1962). The cut is
   - `lam_next ≤ max(lam)` (correctness S7).
   - 14b scope gains `count_options` and Options rows (docs S1).
   - Constants instead of options for q_min/bias (simplicity N4); no duplicate estimate (N3); `jackson_step(d)` (correctness N6); and the remaining NITs.
+- **Round 2** (tests, simplicity, correctness, performance SATISFIED; docs NOT SATISFIED). Changes:
+  - The τ_c bound carries $\sqrt{\kappa(M)}$ (docs S1).
+  - Streamed sketch for the W check with a dtype-dependent tolerance (perf S1, correctness N3).
+  - `block = 500` in tests 4 and 6 (perf S2, simplicity N).
+  - Benchmark times 6 cuts (perf S3).
+  - γ padded to a power of two, one compile per size class (perf N1); fp32 upcast in the projector term (perf N2); test 7 mesh and gap (perf N3).
+  - y solve in `bad`; NaN and skipped blocks after an early stop; θ_max on the grid (correctness N1/N2).
+  - `MAX_DEGREE` exit values (simplicity N).
+  - Lumped and nodal paths through `count` in test 4, voxel in test 5, test 8 measures its own floor (tests N).
+  - ROADMAP Cholesky wording, internal constants listed, the probe grouping logged, cost units (docs N).
