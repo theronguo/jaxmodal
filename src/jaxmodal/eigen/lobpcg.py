@@ -549,6 +549,7 @@ def _solve(
         V[:, count : count + j] = np.asarray(X[:, :j])
         if count + k > B.shape[1]:  # band: grow the basis (new zeros, copy, old freed)
             # room for the next lock too; the + 1 keeps n_modes > chunk (a modelled basis)
+            # when count + j + k is a multiple of c
             new = -(-max(3 * B.shape[1] // 2, count + j + k + 1) // c) * c
             B = _insert(jnp.zeros((n, new), B.dtype), B, jnp.asarray(0, jnp.int32))
             n_modes = new - k  # the expected count this capacity serves (_capacity -> new)
@@ -557,7 +558,8 @@ def _solve(
         X0, state = state[0][:, j:], None  # free the old state before the next start
     end = count + jj if band else min(count + jj, n_modes)
     V[:, count:end] = np.asarray(state[0][:, : end - count])
-    cap, B, state, args = B.shape[1], None, None, None  # free the device blocks before the copy
+    cap = B.shape[1]
+    B = state = args = X = X0 = None  # free the device blocks before the copy
     V = np.ascontiguousarray(V[:, :end]) if band else V[:, :end]  # band: free the buffer
     info = dict(
         iterations=iterations,

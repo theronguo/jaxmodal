@@ -395,15 +395,17 @@ def test_growth(budgets, dtype):
     assert _capacity(info["capacity"] - m, 8, m, False)[1] == info["capacity"]
 
 
-def test_growth_from_zero(budgets):
+@pytest.mark.parametrize("low", [False, True])
+def test_growth_from_zero(budgets, low):
     """Test 8: n_modes 4 below chunk 8 (no basis at first): the first lock grows the basis for
     the next lock too, and the budget's expected count maps back to the grown capacity."""
     mesh, bcs, _, lr = ref("clamped")
     lam, _, info = solve_modes(mesh, MAT, bcs, n_modes=4, chunk=8, band=(0, mid("clamped", 12)),
-                               tol=TOL, verify=False)  # fmt: skip
+                               tol=TOL, low_memory=low, verify=True,
+                               count_options={"degree": 4, "n_probes": 2})  # fmt: skip
     assert len(lam) == 12 and np.abs(lam / lr[:12] - 1).max() <= 10 * TOL
     n_eff = budgets["n_modes"][0]
-    assert 8 < n_eff and _capacity(n_eff, 8, 13, False)[1] == info["capacity"] > 0
+    assert 8 < n_eff and _capacity(n_eff, 8, 13, low)[1] == info["capacity"] > 0
 
 
 def test_edge_above():
