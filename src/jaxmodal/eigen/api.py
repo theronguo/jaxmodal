@@ -250,7 +250,8 @@ def solve_modes(
     chunk default min(40, ceil(1.25 n_modes) + 2)). verify: True runs the completeness count at
     the cut after the band, False only predicts its cost, None (default) runs it when predicted
     to cost no more than the solve; count_options (COUNT_OPTIONS) go to count. info adds band,
-    n_beyond, chunk, capacity and count (docs/eigensolvers.md#frequency-band-0-f_max)."""
+    n_beyond, chunk, capacity, t_iteration and count
+    (docs/eigensolvers.md#frequency-band-0-f_max)."""
     if band is None:
         if n_modes is None:
             raise ValueError("pass n_modes or band")

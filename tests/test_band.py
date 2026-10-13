@@ -166,6 +166,8 @@ def check_band(name, f_max, spy, expect, **kw):
     assert (ckw["R"] is None) == bool(MESHES[name][1])
     if ckw["R"] is not None:
         assert ckw["R"].shape[1] == 6
+    if info["precond"] != "jacobi":  # built at lam_c (AMG: from the solve's aggregates)
+        assert spy["build"]
     if spy["build"]:
         assert spy["build"][-1] == pytest.approx(c["lam_c"], rel=1e-14)
     return lam, info
@@ -393,6 +395,17 @@ def test_growth(budgets, dtype):
     assert _capacity(info["capacity"] - m, 8, m, False)[1] == info["capacity"]
 
 
+def test_growth_from_zero(budgets):
+    """Test 8: n_modes 4 below chunk 8 (no basis at first): the first lock grows the basis for
+    the next lock too, and the budget's expected count maps back to the grown capacity."""
+    mesh, bcs, _, lr = ref("clamped")
+    lam, _, info = solve_modes(mesh, MAT, bcs, n_modes=4, chunk=8, band=(0, mid("clamped", 12)),
+                               tol=TOL, verify=False)  # fmt: skip
+    assert len(lam) == 12 and np.abs(lam / lr[:12] - 1).max() <= 10 * TOL
+    n_eff = budgets["n_modes"][0]
+    assert 8 < n_eff and _capacity(n_eff, 8, 13, False)[1] == info["capacity"] > 0
+
+
 def test_edge_above():
     """Test 9: f_max above the spectrum raises; the tiny-mesh chunk default and the chunk from
     n_modes."""
@@ -461,6 +474,26 @@ def test_errors(kw, err, match):
     mesh, bcs, _, _ = ref("tiny")
     with pytest.raises(err, match=match):
         solve_modes(mesh, MAT, bcs, **kw)
+
+
+def test_fp64_count_model():
+    """Test 10: after an fp32 V-cycle solve the probe block is sized with the fp64 multigrid
+    the count builds at lam_c: a budget that holds one probe under the fp32 model raises."""
+    mesh, bcs = voxel_mesh((16,) * 3, (1 / 16,) * 3), {"zmin": "xyz"}
+    n, band, kw = 3 * len(mesh.points), (0, 1.0), dict(precond="gmg", precond_dtype="float32")
+    total = solve_modes_memory(mesh, bcs, 10, band=band, n_rigid=0, **kw)["total"]
+
+    def one(dtype):
+        pc = lambda m: memory.gmg_memory(mesh, m, dtype=dtype)  # noqa: E731
+        return count_memory(lambda m: memory.stencil_memory(mesh, m), n, 1, voxel=True,
+                            precond_memory=pc)["total"]  # fmt: skip
+
+    assert one("float32") < one("float64")
+    h = total - one("float32")  # host bytes leaving exactly one fp32-model probe
+    with pytest.raises(ValueError, match="below one probe"):
+        memory.band_probe_block(mesh, bcs, 10, 50, h, n_rigid=0, band=band, **kw)
+    h = total - one("float64")
+    assert memory.band_probe_block(mesh, bcs, 10, 50, h, n_rigid=0, band=band, **kw) == 1
 
 
 def test_memory():
