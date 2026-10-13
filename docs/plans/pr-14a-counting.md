@@ -1,6 +1,6 @@
 # PR 14a plan: the stochastic eigenvalue count
 
-Status: draft, revised after plan review rounds 1–3 (log at the end); round 4 pending.
+Status: draft, revised after plan review rounds 1–3; round 4 satisfied (log at the end).
 
 PR 14 (ROADMAP: "Eigenvalue counting and [0, f_max]") is split:
 - **14a (this plan):** the completeness count as a building block: probes from element-wise factors of $M_e$, the Chebyshev–Jackson step polynomial and its degree rule, the deflated estimator with preconditioned inner PCG solves, the solve tolerance $\tau_c$ and the unverifiable flag, the probe-block memory model, and the counting benchmark (degree, time and error propagation against mode index).
@@ -122,7 +122,7 @@ count(op, free, W, lam, lam_last, lam_next, *, R=None, precond=None, n_probes=50
 It is applied at the start and end of each block. Only one chunk of W is on the device at a time.
 
 **Per block:**
-1. Sample g; y by Jacobi PCG (Design 1). A y column that stagnates or does not converge sets `bad` too.
+1. Sample g; y by Jacobi PCG (Design 1) in a module-level helper `_solve_y(op, m, g, tau, maxit)` that also holds the lumped shortcut. A y column that stagnates or does not converge sets `bad` too.
 2. $w_0 = \Pi y$.
 3. `_recurrence(A, P, op, m, w0, gamma, tau, maxit)` (jitted, one compile per width) runs $w_1 = X w_0$, $w_k = 2Xw_{k-1} - w_{k-2}$, $u = \sum_k \gamma_k w_k$ in a `lax.while_loop`.
    - $Xw = 2\lambda_c\,T w - w$, with $Tw$ = `_pcg(ap_operator(op, free, λ_c), P, m ⊙ M(m ⊙ w), tau, maxit)`.
@@ -173,7 +173,7 @@ Returns `estimate` = mean $s_j$ and `info`:
 
 ## Tests (`tests/test_counting.py`)
 
-Fast tests use the reference mesh hex20 $6\times5\times4$ (n = 1962). The cut is after mode 6 (g = 0.41, d ≈ 56), and the precond is an exact dense Cholesky pytree (PCG in 1–2 iterations), unless the test is about the preconditioner.
+Fast tests use the reference mesh `box_mesh((6, 5, 4), (1/6, 1/5, 1/4), type="hex20")`, xmin clamped, E = 3, ν = 0.3, ρ = 2 (n = 1962; the dense prototype's mesh). The cut is after mode 6 (g = 0.41, d ≈ 56), and the precond is an exact dense Cholesky pytree (PCG in 1–2 iterations), unless the test is about the preconditioner.
 
 1. **Element factors (ROADMAP):** $(\sqrt{w_e}B_e \otimes I_3)(\cdot)^\top = M_e$ from `element_matrices` to $10^{-12}$ (hex8, hex20, hex27; padded elements give 0). Voxel: the same against `reference_element`'s $m_e$ times $w_e$.
 2. **Probe covariance (ROADMAP):** $S S^\top$ masked equals the masked SciPy M to $10^{-12}$, with S = `mass_sample` on unit `xi` columns. Cases:
@@ -199,9 +199,9 @@ Fast tests use the reference mesh hex20 $6\times5\times4$ (n = 1962). The cut is
 7. **κ ≥ 10⁷ (ROADMAP):** slender hex20 cantilever ($64 \times 1 \times 1$, element side 1/64, xmin clamped, n = 2304) with κ = λ_max/λ_1 ≥ 10⁷ asserted (`eigsh(which="LA")`; measured 2.2e9). W from `scipy.linalg.eigh(K, M)` on the free DOFs, cut in the gap after mode 4 (g ≈ 1.55, d ≈ 15, τ_c ≈ 1.4e-5). AMG at λ_c (measured 10–11 PCG iterations per solve), default τ; `verifiable` True asserted; W complete gives estimate < 0.5.
    - A thin plate is not used: AMG on its flat elements (aspect ≈ 8) needs 400–480 iterations per solve and stagnates at τ ≤ 1e-10 (reviewer probes; the known flat-element open item).
 8. **Floor and flags (ROADMAP):**
-   - The floor measured inside the test on the count's own right-hand sides: `count(..., degree=1)` (Jacobi at λ_c, same seed) at τ = 1e-10, 1e-11, … downward; the floor is the smallest τ with `verifiable` True (converged, not stagnated). At τ = floor/10 the first recurrence step sees the same w₀ and fails deterministically. That case, and τ = 1e-17: `verifiable` False, `passed` False, estimate NaN, `steps` < d (early stop).
+   - The floor measured inside the test on the count's own right-hand sides: `count(..., degree=1)` (Jacobi at λ_c, same seed) at τ = 1e-10, 1e-11, … downward; the floor is the smallest τ with `verifiable` True (converged, not stagnated). At τ = floor/100 (two decades below, robust to the different compiled size class of the full-degree run), and τ = 1e-17: `verifiable` False, `passed` False, estimate NaN, `probes` all NaN, `steps` < d (early stop). The docs report which exit (stagnation or `maxit`) set the floor.
    - `maxit=2` at the default τ with Jacobi: `verifiable` False.
-   - The y solve forced to fail (monkeypatched to return non-converged, the recurrence uses the real PCG): `verifiable` False, `steps` 0.
+   - The y solve forced to fail (`_solve_y` monkeypatched to return non-converged, the recurrence uses the real PCG): `verifiable` False, `steps` 0.
    - A normal run: `verifiable` True.
 9. **Memory:**
    - (a) `memory_analysis` of `_recurrence` at width b is ≤ `count_memory`'s step on hex20 $8^3$ and voxel $16^3$ with Jacobi, GMG and AMG, and the fit is tight (≥ 0.6×) at one size.
@@ -284,3 +284,4 @@ Fast tests use the reference mesh hex20 $6\times5\times4$ (n = 1962). The cut is
   - `probes` NaN for stopped blocks (simplicity N2).
   - Seeded sketch, 1.01 perturbation, all `MAX_DEGREE` exit values, a y-solve-only failure test, the one-compile check (tests N1–N4).
   - Not taken: a single in-band criterion (simplicity N1, optional); dropping τ = 1e-17 in test 8 (simplicity N3, optional; both cases kept).
+- **Round 4** (all 5 SATISFIED). NITs applied: `probes` NaN asserted in test 8, floor/100 (correctness N1), the floor's exit reported (correctness N2), the `_solve_y` hook (simplicity N1), the reference mesh spelled out (docs N1).
