@@ -1,6 +1,6 @@
 # Operators
 
-`jaxmodal.operators` holds the global DOF map, the int32 overflow assert, the assembled SciPy reference operators (the oracle), the matrix-free device operators (`unstructured`, PR 5; the voxel stencil `stencil`, PR 6), and Dirichlet masking, rigid body modes and deflation (PR 7, [`boundary_conditions.md`](boundary_conditions.md)).
+`jaxmodal.operators` holds the global DOF map, the int32 overflow assert, the assembled SciPy reference operators (the oracle), the matrix-free device operators (`unstructured`, PR 5; the voxel stencil `stencil`, PR 6), Dirichlet masking, rigid body modes and deflation (PR 7, [`boundary_conditions.md`](boundary_conditions.md)), and probes with covariance $M$ (PR 14a, [probe sampling](#probe-sampling)).
 
 ```python
 from jaxmodal.mesh import box_mesh
@@ -252,6 +252,14 @@ est = stencil_memory(mesh, m, mass="consistent", slab=None)  # same keys as unst
 - 2.04M DOF box, m = 24: storage 35 MB, workspace 0.57 GB; with six `(n_dof, 24)` arrays the estimate is 4.14 GB against a measured peak of 3.87 GB.
 - 100M voxel DOF (a ≈ $322^3$ cube, one 104k-cell layer per slab): operator (grids and `phase`) ≈ 0.4 GB; $s_K$, $s_M$, `nodal` ≈ 1.3 GB; workspace ≈ 0.3 GB (P = 1) or 0.5 GB (P ≥ 2) at m = 8.
 
+## Probe sampling
+
+`mass_sample(op, xi)` and `mass_sample_keys(op, keys)` (module `operators/sampling.py`) return $g$ of shape $(n_\text{dof}, b)$ with $\mathrm{Cov}(g) = M$, for either operator; the completeness count draws its probes from them ([`eigensolvers.md`](eigensolvers.md#completeness-count)).
+
+- **Consistent mass, quadrature factor.** The nodal element mass is $m_e = \sum_q (w\det J)_q N_q N_q^\top = B_eB_e^\top$ with $B_e = N^\top\mathrm{diag}\big(\sqrt{(w\det J)_q}\big)$ of size $(k/3)\times n_q$, so $\sqrt{\rho s_M}\,B_e \otimes I_3$ is an exact factor of $M_e$. It replaces the roadmap's Cholesky factors: no factorization, no breakdown at $s_M = 0$, padded elements ($w\det J = 0$) give $B_e = 0$. `element_factor(op, block, chunk)` returns it for one chunk; voxels share one reference $B$ (`reference_factor`, hex8 $2^3$ Gauss points, VTK corner order).
+- $g = \sum_e P_e\sqrt{\rho s_M}(B_e \otimes I_3)\xi_e + \sqrt{m_\text{nodal}}\,\xi_n$ with standard-normal $\xi_e$ of shape $(n_q, 3)$ per element and $\xi_n$ per DOF. **Lumped mass** is diagonal: $g = \sqrt{\mathrm{diag}\,M}\,\xi_n$.
+- `mass_sample(op, xi)` is linear in a dict `xi` shaped by `xi_shapes(op)` plus the probe axis (one entry per scatter-loop step: element chunks, or voxel slabs). `mass_sample_keys(op, keys)` draws column $j$ from `keys[j]` alone, the element inputs per loop step from `fold_in`, so they never exist for the whole mesh (sampling temporaries: the operator workspace plus 1–2 vectors per probe).
+
 ## Validation
 
 `tests/test_operators.py`:
@@ -270,6 +278,7 @@ est = stencil_memory(mesh, m, mass="consistent", slab=None)  # same keys as unst
   - **int32** checks and casts; input errors; `None` leaves per mode and path.
   - **Estimator storage** equals the operator's leaf bytes exactly (except the tiny `rho`, `C`) for every mode and path.
   - **Slow:** compile time of apply_K + apply_M at 1M hex20 elements ≤ 1.5× that at 10k (fresh subprocesses, no cache, both modes and paths); the estimator total within 20% of the measured peak (build + apply_K + apply_M) at hex20 $55^3$ (2.08M DOF, estimate ≥ 2 GB) for both paths and $m = 1, 16$, and apply_K alone within 20% of workspace + output; `memory_analysis` temporaries within 10% of the workspace and build formulas.
+- **Probe sampling** (`tests/test_counting.py`, PR 14a): $FF^\top = M_e$ (hex8, hex20, hex27, padded elements 0) and $BB^\top = m_e$; $SS^\top$ masked equals the masked SciPy M to $10^{-12}$ for hex20 with nodal masses, phases and $s_M$, the mixed mesh, lumped, voxel with nodal masses and voxel lumped.
 - **Voxel stencil** (`tests/test_stencil.py`), all meshes with anisotropic spacing: F, a full $5\times4\times3$ box with an offset origin (scan axis x); S, PR 1's voxelized sphere on a $10\times12\times11$ grid (scan axis y); T, a masked $4\times5\times6$ grid (scan axis z) whose mask has a dropped node in a halo layer, an inactive cell next to an active one across a slab boundary and a corner-only contact, in three label variants (two materials, one orthotropic material in two orientations, both mixed: P = 4); R, a T variant after `rcm`. Random $s_K$, $s_M$ with one zero, nodal masses with zeros, slab ∈ {1, 4 (padded layers on F and T), None}:
   - `apply_K`, `apply_M` (m = 1, 5), `diag_K`, `diag_M` equal the scaled `assemble` to 1e-12 for both masses and every slab, and PR 5's `unstructured` to 1e-12; measured errors are about 1e-16.
   - **Gradients** (T, P = 4): with respect to $s_K$, $s_M$ (both masses), $\rho$ and $C$ equal central differences along a random direction to 1e-8, and the $s_K$ gradient equals the per-element $w_e^\top K_e v_e$ to 1e-12; with respect to `spacing` equal central differences of `assemble` on the rescaled mesh to 1e-7.

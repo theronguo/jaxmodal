@@ -86,6 +86,21 @@ The measured setup peak per corner DOF grows about 0.65 kB per decade of $n_c$ (
 - **`amg_memory` at other `max_coarse`:** the coarse term is floored at the calibration value 1000 (an upper bound at 100–3000, loose above 1000: 4.3× at 3000); `AMG_STEP` stays calibrated at 1000, so above it the step term is not a bound (+1.3 blocks of temporaries at 4000).
 - **Chebyshev loop terms:** degree > 2 adds `AMG_LOOP_K` = 120k DOF-equivalents to `AMG_STEP`'s $K$ (fixed loop buffers, +77k–103k measured) and `GMG_LOOP` = 1.2 / 0.7 fp64 blocks (fp64 / fp32 V-cycle) to `gmg_memory` (+1.07 / 0.60 measured), calibrated on boxes like the other constants. `GMG_STEP` re-fitted after the loop lowered the default fp64 steps (4.3 / 9.0, was 5.1 / 9.9); `GMG_WORK` kept (now 7–39% above the measured temporaries at $32^3$–$64^3$).
 
+### PR 14a decisions without user input
+
+- **PR 14 split:** 14a ships the counting estimator (`count`); 14b ships the $[0, f_{max}]$ driver, the budget logic and `verify`. The roadmap tests are tagged [14a]/[14b]; no criterion is dropped.
+- **Shift $\sigma = \lambda_c$:** the spectral map $X = 2\lambda_c T - I$ puts the cut at $x = 0$ and needs no new operator; the preconditioner is built at $\lambda_c$ like any `solve_modes` shift.
+- **Probes from quadrature factors:** $M_e = B_e B_e^T$ with $B_e = N^T \operatorname{diag}\sqrt{w \det J}$ (exact, no Cholesky); lumped mass uses $\sqrt{\operatorname{diag} M}$. Constrained DOFs carry diagonal 1 in $A_P$ and are projected out of every probe.
+- **Weyl exponent $a = 3/2$ fixed** in the tail-bias bound (3D); a 2D or 1D-like body (slender beam, thin plate) has a slower-growing count, so the bound stays conservative.
+- **Degree search:** doubling then bisection on the exact $q(x_l)^2 \ge 0.95$ and tail-bias $\le 0.05$ tests; `MAX_DEGREE` = 100 000 (beyond it `count_degree` returns `(None, nan)` and `count` is not run: the estimate is NaN, `verifiable` False; 14b must then move the cut or solve more modes).
+- **Jacobi default inner preconditioner** for `count`'s `precond=None` (robust, no setup); `solve_modes` users pass the AMG/GMG built at $\lambda_c$ for speed.
+- **Inner tolerance rule $\tau_c = 0.01/(d\sqrt{n_{free}})$:** derived from $|\Delta s| \lesssim 0.02\sqrt{\kappa(M)\,s}$ and checked against the counting study (`benchmarks/counting_study.py`); revisit if a mesh with a much larger scaled $\kappa(M)$ (≈ 145 on the meshes measured) appears.
+- **Early stop and NaN:** a block whose PCG solve fails (`maxit`) stops the recurrence; the estimate is NaN and `verifiable` is False, so 14b never trusts a partial count.
+- **Probe grouping:** probes are computed in blocks sized by `probe_block` (memory budget); each probe comes from its own `fold_in` key, so results do not depend on the block size.
+- **Orthonormality check:** $W^T M W = I$ is checked by a streamed random sketch (3 vectors) at `ORTHO_TOL` (1e-6 fp64, 1e-4 fp32), not a full Gram matrix.
+- **Memory constants:** `COUNT_STEP`, `GMG_COUNT`, `AMG_COUNT` are fitted on box meshes (hex20 $12^3$–$28^3$, voxel $16^3$–$56^3$); the hex20 $8^3$ case (one chunk holds the mesh) is outside the fit.
+- **No thin-plate counting test:** AMG is weak on flat elements (see "Thin plates and slender beams"); the slender hex20 cantilever (κ 2.2e9) covers the high-κ case.
+
 ### GMG restriction on the GPU (PR 11 deferred GPU checks)
 
 Restriction is the transpose of gathers, i.e. scatter-adds (6× the prolongation time on CPU at $87^3$). Default: keep; listed in the deferred GPU checks with "rewrite as gathers if it dominates".

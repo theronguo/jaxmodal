@@ -103,11 +103,11 @@ Status: final. Review rounds 1–30 incorporated (round 30: all 5 reviewers sati
     - Estimate s = ‖Π_V q(T) Π_V y‖²_M, with:
       - T = (K + σM)⁻¹M with σ ≈ λ_c ([0, f_max]) or σ at the band's upper edge (interior band);
       - Π_V = I − VVᵀM, where V includes the computed modes and R.
-    - Probes are processed in blocks whose size the PR 14 memory model sets and counts (recurrence, PCG and preconditioner workspace per probe). y = M_P⁻¹g with g ~ N(0, M) masked. g comes from element-wise Cholesky factors of Me plus √m_i·ξ_i for nodal masses, followed by one Jacobi-PCG solve per probe with the masked M_P (scaled diagonal on constrained DOFs), to the same tolerance τ_c as below.
+    - Probes are processed in blocks whose size the PR 14 memory model sets and counts (recurrence, PCG and preconditioner workspace per probe). y = M_P⁻¹g with g ~ N(0, M) masked. g comes from element-wise quadrature factors of Me (B_e = Nᵀ·diag(√(w det J)), exact: B_e B_eᵀ = m_e; PR 14a) plus √m_i·ξ_i for nodal masses (lumped mass: √(diag M)·ξ), followed by one Jacobi-PCG solve per probe with the masked M_P (unit diagonal on constrained DOFs, where g vanishes), to the same tolerance τ_c as below.
     - q is a Chebyshev–Jackson step polynomial ([0, λ_c]) or band-pass polynomial (interior band, deflated by the modes found in the band and the converged out-of-band neighbours within the polynomial's transition width of each band edge).
     - The degree d is chosen numerically so that:
-      - q² ≥ 0.95 on the in-band interval up to the last returned mode, [0, λ_c(1 − g/2)] (up to the band edge (2πf)² when none is returned); this sets d ≈ 25/g;
-      - the Jackson-tail bias Σ q(λ_i)² over the out-of-band spectrum is ≤ 0.05, estimated with a Weyl-type density N(λ) ∝ λ^a, with a fitted to the computed modes (3/2 for bulky solids, smaller for thin structures). (Bounding n_dof·max q² instead would need d ≈ 75/g or more.)
+      - q² ≥ 0.95 on the in-band interval up to the last returned mode, [0, λ_c(1 − g/2)] (up to the band edge (2πf)² when none is returned); this sets d ≈ 25/g (measured in PR 14a: d ≈ 23/g);
+      - the Jackson-tail bias Σ q(λ_i)² over the out-of-band spectrum is ≤ 0.05, estimated with a Weyl-type density N(λ) ∝ λ^a with a = 3/2 fixed (PR 14a: the 3D exponent is an upper bound on fits to computed modes, bulky 1.1, plates 0.4–0.5, beams 0.3–1.3, so it is stricter than a fitted a). (Bounding n_dof·max q² instead would need d ≈ 75/g or more.)
     - A missed mode inside the gap next to the cutoff is detected with lower probability.
     - Inner PCG tolerance τ_c ≲ 0.01/(d·√n_dof). PR 14 measures how solve errors actually propagate through the recurrence (worst case O(d²), not O(d)). Counting solves use the fp64 V-cycle. If τ_c is below the attainable PCG accuracy, `info` marks the count as unverifiable instead of passing it. At 10M DOFs near index 1000 (τ_c ≈ 1e-10) this is expected to happen often.
     - One missing mode makes the estimate behave like χ²ₙ/n. With 50 probes, P(missed mode undetected) ≈ 0.2%.
@@ -214,8 +214,8 @@ src/jaxmodal/
   memory.py    memory estimators
   mesh/        data model, io, voxel and box generators, reordering, partition
   materials/   anisotropic C, Bond rotations, orientations
-  elements/    registry, quadrature, shape functions, hex8/20/27, solid-shell, element-wise Me Cholesky (for probes)
-  operators/   dofmap, assembled (oracle), matrix-free, voxel stencil, constraints (masking, A_P, rigid modes, deflation)
+  elements/    registry, quadrature, shape functions, hex8/20/27, solid-shell
+  operators/   dofmap, assembled (oracle), matrix-free, voxel stencil, constraints (masking, A_P, rigid modes, deflation), sampling (probes with covariance M from quadrature factors of Me)
   linalg/      pcg, minres, block-ELL spmv, dense inertia
   precond/     block jacobi, chebyshev, gmg, pmg, amg
   eigen/       lobpcg, counting, shift-invert lanczos, api (solve_modes), reference (scipy)
@@ -512,9 +512,10 @@ Split into three parts with unchanged acceptance criteria: **8a** the reference 
 ## M3b: Frequency bands
 
 ### PR 14: Eigenvalue counting and [0, f_max]
+- Split (PR 14a plan, `docs/plans/pr-14a-counting.md`): **14a** is the count as a building block (`jaxmodal.eigen.count`, probe sampling, step polynomial and degree rule, τ_c and the unverifiable flag, the probe-block memory model `count_memory` / `probe_block`, the counting benchmark); **14b** is `solve_modes(..., band=(0, f_max), verify, count_options)`, the [0, f_max] LOBPCG mode and edge placement, the cost function, the probe block from the solve's estimate and the fp64 multigrid at λ_c. Tests are tagged [14a] / [14b].
 - Contents:
   - Deflated stochastic count with M-weighted probes and a Chebyshev–Jackson step polynomial (50 probes, fixed seed list).
-  - Element-wise Me Cholesky factors for probe sampling.
+  - Element-wise Me quadrature factors for probe sampling (exact factors $B_e = N^\top\mathrm{diag}(\sqrt{w\det J})$ instead of Cholesky; PR 14a).
   - Probe-block memory model (recurrence, PCG and preconditioner workspace and projector temporaries (chunk + block) per probe), used to set the probe block size.
   - `verify=None/True/False`, with the predicted counting cost in `info`.
   - The cost function and LOBPCG-from-0 selection; PR 15 adds the shift-invert branch and slicing.
@@ -522,17 +523,17 @@ Split into three parts with unchanged acceptance criteria: **8a** the reference 
   - `solve_modes(..., band=(0, f_max))`.
 - Docs: `docs/eigensolvers.md` (estimator, variance, degree and cost).
 - Tests:
-  - With one mode deliberately left out of V (not the one next to the cutoff), the count detects it for ≥ 97 of a fixed list of 100 seeds. The test is deterministic.
-  - With V complete, the estimate (including Jackson bias) is < 0.5.
-  - A κ ≥ 1e7 case, sized so the count is verifiable (asserted): with V complete, the estimate is < 0.5.
-  - A case with τ_c forced below the measured PCG floor sets the unverifiable flag; the measured error propagation vs d is recorded.
-  - `verify=True/False` force the count on/off; `verify=None` follows the predicted cost.
-  - Element-wise Me Cholesky: LLᵀ = Me to 1e-12.
-  - The probe-block memory model is within 20% of the measured peak at a size where the estimate is ≥ 2 GB.
-  - Counting cost (polynomial degree, wall time) vs mode index is reported.
-  - No modes are missed compared with the dense inertia at reference sizes.
-  - (0, f_max) with f_max below the first elastic frequency returns 0 modes and a count < 0.5; λ_c set inside a double eigenvalue returns both copies.
-  - The probe covariance Σ_e L_e L_eᵀ assembled (plus nodal masses, masked) equals the masked SciPy M to 1e-12.
+  - [14a] With one mode deliberately left out of V (not the one next to the cutoff), the count detects it for ≥ 97 of a fixed list of 100 seeds. The test is deterministic.
+  - [14a] With V complete, the estimate (including Jackson bias) is < 0.5.
+  - [14a] A κ ≥ 1e7 case, sized so the count is verifiable (asserted): with V complete, the estimate is < 0.5.
+  - [14a] A case with τ_c forced below the measured PCG floor sets the unverifiable flag; the measured error propagation vs d is recorded.
+  - [14b] `verify=True/False` force the count on/off; `verify=None` follows the predicted cost.
+  - [14a] Element-wise Me quadrature factors: LLᵀ = Me to 1e-12.
+  - [14a] The probe-block memory model is within 20% of the measured peak at a size where the estimate is ≥ 2 GB.
+  - [14a] Counting cost (polynomial degree, wall time) vs mode index is reported.
+  - [14b] No modes are missed compared with the dense inertia at reference sizes.
+  - [14b] (0, f_max) with f_max below the first elastic frequency returns 0 modes and a count < 0.5; λ_c set inside a double eigenvalue returns both copies.
+  - [14a] The probe covariance Σ_e L_e L_eᵀ assembled (plus nodal masses, masked) equals the masked SciPy M to 1e-12.
 
 ### PR 15: Interior bands
 - Contents:
@@ -756,7 +757,8 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
 | 12 p-MG | 5, 9, 10 |
 | 13 AMG | 12 |
 | 13c Solver options | 13 |
-| 14 Counting, [0, f_max] | 9, 10, 11 (preconditioned K + σM solves on voxel meshes; 13 optional; without PR 13, unstructured counting uses Jacobi PCG) |
+| 14a Counting | 9, 10, 11 (preconditioned K + σM solves on voxel meshes; 13 optional; without PR 13, unstructured counting uses Jacobi PCG) |
+| 14b [0, f_max], verify | 14a |
 | 15 Interior bands | 14; 13 for unstructured meshes |
 | 16 Solid-shell | 3, 5, 8, 9 |
 | 17 Postprocessor | 9 |
