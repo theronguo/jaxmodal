@@ -630,7 +630,8 @@ def test_form_v_peak():
     e = si_memory(zero, n, cap, k - 2)  # end: host V of k columns and one chunk
     model = OVERHEAD + e["storage"] + e["end"]
     setup = FORM_V.replace("N", str(n)).replace("CAP", str(cap))
-    code = "Q = jax.random.normal(jax.random.key(1), (n, cap)); V = _form_v(Q, 0, Y, 24)"
+    # values do not matter for memory; jax.random.normal alone peaks at 2.5x the basis
+    code = "Q = jnp.ones((n, cap)); V = _form_v(Q, 0, Y, 24)"
     peak = harness.measure(code, setup)["peak_bytes"]
     print(f"_form_v: model {model / 1e9:.2f} GB, peak {peak / 1e9:.2f}")
     assert model >= 2e9 and abs(model - peak) <= 0.2 * peak
