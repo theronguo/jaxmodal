@@ -370,7 +370,7 @@ def _beyond(a, b, nb, W, lam_W):
     neither."""
     out = []
     for side, sel, pick in (("lo", lam_W < a, np.argmax), ("hi", lam_W > b, np.argmin)):
-        p = nb[side]
+        p = nb[side]  # a guard: si_slice's neighbours lie beyond its returned modes
         cand = [p] if p is not None and (p[0] < a if side == "lo" else p[0] > b) else []
         if sel.any():
             i = np.flatnonzero(sel)[pick(lam_W[sel])]
@@ -394,7 +394,8 @@ def si_checked(
     count's preconditioner (default precond, the slice's). count_options: count's options
     (verbose defaults to verbose). slice_options: si_slice's.
 
-    The caller's W modes inside [lo, hi] count as found (deflated in the count, not returned).
+    The caller's W modes inside [lo, hi] or the returned span count as found (deflated in the
+    count, not returned).
 
     Returns lam, V (all in-band modes found, ascending) and info: the last run's si_slice info
     (r_acc, tau_eff the max over runs; residuals, thresholds of the returned pairs) plus runs
@@ -415,12 +416,11 @@ def si_checked(
     b = slice_options.get("block", 6)
     c = _chunk(b)
     up = lambda x: -(-x // c) * c  # noqa: E731
-    inb = (lam_W >= lo) & (lam_W <= hi)  # the caller's in-band modes: found, not returned
-    W_in, lam_in = W[:, inb], lam_W[inb]
     lam_f, V_f, res, thr = np.zeros(0), np.zeros((n, 0)), np.zeros(0), np.zeros(0)
     runs, estimates, ci, est, reason, flagged = [], [], {}, np.nan, None, False
     for j in range(RESTARTS + 1):
         # the restart's Q (n, L0 + capacity) within the first run's (capacity rounded to c)
+        # (the first run takes capacity as given, so si_slice raises on a bad one)
         cap = up(capacity) - (up(len(lam_W) + len(lam_f)) - up(len(lam_W))) if j else capacity
         if j and cap < 2 * b:
             reason = "restart capacity"
@@ -444,8 +444,12 @@ def si_checked(
         if not info["converged"]:
             reason = "slice not converged"
             break
-        lam_c = np.r_[lam_f, lam_in]  # the count's in-band set
-        V_c = (V_f, W_in) if len(lam_in) else V_f
+        # the caller's modes inside [lo, hi] or the returned span (si_slice's edge margins)
+        x0, x1 = min(lo, lam_f.min(initial=lo)), max(hi, lam_f.max(initial=hi))
+        inb = (lam_W >= x0) & (lam_W <= x1)
+        W_in, lam_in = W[:, inb], lam_W[inb]
+        lam_c = np.r_[lam_f, lam_in]  # the count's in-band set: found, not returned
+        V_c = (V_f, W_in)
         a = lam_c.min() if len(lam_c) else lo
         e = lam_c.max() if len(lam_c) else hi
         nb_lo, nb_hi = _beyond(a, e, info["neighbours"], W, lam_W)
@@ -459,8 +463,7 @@ def si_checked(
                                  np.stack([p[1] for p in out], 1),
                                  np.array([p[0] for p in out]), **kw)  # fmt: skip
         else:
-            Vt = V_c if isinstance(V_c, tuple) else (V_c,)
-            est, ci = count(op, free, (*Vt, nb_hi[1][:, None]), np.r_[lam_c, nb_hi[0]], e,
+            est, ci = count(op, free, (*V_c, nb_hi[1][:, None]), np.r_[lam_c, nb_hi[0]], e,
                             nb_hi[0], **kw)  # fmt: skip
         estimates.append(est)
         miss = ci["verifiable"] and est >= 0.5

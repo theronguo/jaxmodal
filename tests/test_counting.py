@@ -863,6 +863,10 @@ def test_band_info_and_errors():
     assert info["gap"] == min(g_hi, g_lo * 2 * np.sqrt(a) / (1 + a))
     top, bot, w = lam[19] / c_hi, lam[12] / c_hi, counting.WEYL_A
     assert info["n_top"] == pytest.approx(7 / (top**w - bot**w) * top**w, rel=1e-14)
+    gamma, n_free = _band_gamma(info), int(band_case()[1].sum())  # the lower tail at given d
+    assert info["bias"] == pytest.approx(tail_bias(gamma, g_hi, top, info["n_top"], n_free)
+                                         + counting._bias(gamma, 0.0, bot, info["n_top"], top),
+                                         rel=1e-12)  # fmt: skip
     # count with a tuple W equals its concatenation
     lc = (lam[5] + lam[6]) / 2
     P = exact_precond(op, free, K, M, lc)

@@ -149,7 +149,7 @@ A slice whose first solve stagnates moves σ once and repeats the solve; when th
 - **Restarts** deflate the found in-band modes, use fresh seeds for the start block and the probes, and stay within the first run's device memory (capacity reduced); at most 2. Unverifiable counts and unconverged slices are not restarted: a rerun would not change them. 15c decides whether a flagged slice splits.
 - **The planted-mode test** scales the mass by $s$ to move one eigenvalue into a gap, instead of editing a mesh.
 - **Progress** comes from a per-step `jax.debug.callback` (scalars only, rate-limited on the host); the verbose loop is a separate compile.
-- **Slow tests.** Three band tests (expected value missing / free, detection) take 21–111 s and are marked slow, above the plan's fast budget; they run in the full suite.
+- **Slow tests.** The band expected-value tests (missing, free) and detection tests (missing, complete) take 21–111 s and are marked slow, above the plan's fast budget; they run in the full suite.
 
 ### End-to-end `jax.grad` and eigenvector sensitivities (user, 2026-10-13)
 

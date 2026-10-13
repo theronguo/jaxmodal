@@ -478,6 +478,12 @@ def test_deflation():
     assert info["converged"] and len(lam) == len(idx[1::2])
     assert np.abs(W.T @ (M @ V)).max() <= 1e-10
     assert np.abs(lam - lr[idx[1::2]]).max() <= 1e-8 * lr[idx[-1]]
+    # W over two chunks (block 2: c = 8; modes 0-6 + half the slice; 7 stays the neighbour)
+    W = Vr[:, np.r_[np.arange(7), idx[::2]]]
+    lam, V, info = solve("short", lo, hi, W=W, block=2)
+    assert info["converged"] and len(lam) == len(idx[1::2])
+    assert np.abs(W.T @ (M @ V)).max() <= 1e-10
+    assert np.abs(lam - lr[idx[1::2]]).max() <= 1e-8 * lr[idx[-1]]
 
 
 def test_refill(monkeypatch):
@@ -749,10 +755,14 @@ def test_restart(monkeypatch, capsys):
     c = info["count"]
     assert len(calls) == 2 and c["restarts"] == 1 and c["flagged"] and c["passed"]
     assert c["estimates"][0] >= 0.5 and c["estimate"] < 0.5 and c["reason"] is None
-    assert calls[1]["W"].shape[1] == 5 and calls[1]["capacity"] == 312 - 24  # 300 rounds up to 13 chunks
+    assert (
+        calls[1]["W"].shape[1] == 5 and calls[1]["capacity"] == 312 - 24
+    )  # 300 rounds up to 13 chunks
     assert [k["seed"] for k in calls] == [0, 1] and seeds == [0, 1]
     check_cb(lam, info)
     assert np.abs(V.T @ (M @ V) - np.eye(6)).max() <= 1e-10
+    K = prob("short")[3]  # the merged columns match their eigenvalues
+    assert np.abs(np.einsum("ij,ij->j", V, K @ V) - lam).max() <= 1e-10 * lam.max()
     out = capsys.readouterr().out
     assert "si_checked: count" in out and out.count("si_checked: count") == 2
     assert "restart 1" in out and out.rstrip().endswith("pass")
@@ -785,12 +795,40 @@ def test_checked_edges():
     check_cb(lam, info)
     assert info["neighbours"]["hi"][0] == pytest.approx(lr[20], rel=1e-8)  # 19 is in W
     assert c["passed"] and c["edges"][1] == pytest.approx((lr[18] + lr[19]) / 2, rel=1e-10)
+    # a W mode inside a band from 0 (the step count) counts as found
+    hi0 = (lr[3] + lr[4]) / 2
+    lam, V, info = checked(0.0, hi0, hi0, W=Vr[:, [1]], lam_W=lr[[1]])
+    c = info["count"]
+    assert len(lam) == 3 and c["passed"] and c["restarts"] == 0
     # a W mode inside the band (an adjacent slice's) counts as found and is not returned
     lam, V, info = checked(lo, hi, (lr[18] + lr[19]) / 2, W=Vr[:, [13]], lam_W=lr[[13]])
     c = info["count"]
     assert len(lam) == 5 and np.abs(lam - lr[14:19]).max() <= 1e-8 * lr[19]
     assert c["passed"] and c["restarts"] == 0 and c["edges"][0] == pytest.approx(
         (lr[12] + lr[13]) / 2, rel=1e-10)  # fmt: skip
+
+
+def test_checked_w_margin(monkeypatch):
+    """15b: a caller's W mode below lo but above a returned mode (si_slice returns modes within
+    its edge margin) counts as found: W = mode 14, lo just above it, the slice returns 13 and
+    15-18 (fake); the count passes without a restart."""
+    lr, Vr = prob("short")[6:]
+    _, free, op = prob("short")[:3]
+    lo, hi = lr[14] * (1 + 1e-9), cb_edges()[1]
+    c_hi = (lr[18] + lr[19]) / 2
+
+    def fake(*a, **kw):
+        i = [13, 15, 16, 17, 18]
+        z = np.zeros(5)
+        nb = {"lo": (lr[12], Vr[:, 12]), "hi": (lr[19], Vr[:, 19])}
+        return lr[i], Vr[:, i], dict(converged=True, neighbours=nb, residuals=z,
+                                     thresholds=z + TOL, r_acc=TOL, tau_eff=TAU)  # fmt: skip
+
+    monkeypatch.setattr(si, "si_slice", fake)
+    lam, V, info = si.si_checked(op, free, lo, hi, None, capacity=300, W=Vr[:, [14]],
+                                 lam_W=lr[[14]], count_precond=exact("short", c_hi))  # fmt: skip
+    c = info["count"]
+    assert len(lam) == 5 and c["passed"] and c["restarts"] == 0
 
 
 def test_restart_capacity(monkeypatch):
@@ -877,3 +915,5 @@ def test_checked_flags(monkeypatch, capsys):
         run(capacity=300, W=Vr[:, [19]])
     with pytest.raises(ValueError, match="W must have shape"):
         run(capacity=300, W=Vr[:, [19]], lam_W=lr[[19, 20]])
+    with pytest.raises(ValueError, match="capacity must be"):  # si_slice's, not "restart capacity"
+        run(capacity=6)
