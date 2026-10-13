@@ -11,6 +11,13 @@ T cannot reach r_acc), the roadmap's per-pair thresholds with r_acc over pairs a
 residuals, two memory test regimes, the benchmark to depth 1000 with SciPy references and a real
 1M slice, roadmap tolerances on every accuracy test, a τ_eff seam test.
 
+Revision 3 (round 2): the per-step order of candidates, thresholds and r_acc; the inner cap based
+on the first step after a σ move; the final stage as the last step's Rayleigh–Ritz recomputed
+explicitly (no second `eigh`); a build phase and a host term in `si_memory`, with test 15(a)
+sized so MINRES dominates the build; a real slice on the voxel 2M mesh too, the run time
+re-estimated, per-part time estimates; tests for the inner cap, an unreached lower edge, a
+neighbour raising r_acc, a robust σ-on-eigenvalue trigger; the per-pair floor term logged.
+
 ## Split of PR 15
 
 PR 15 is three PRs, in dependency order; every PR 15 roadmap test is assigned to one of them
@@ -100,8 +107,10 @@ resource limit: there is no default allocation and no step cap besides it; 15c s
   the result and deflates it. The constrained diagonal is `ap_operator`'s default at −σ: mean
   diag K + σ mean diag M over the free DOFs (the roadmap's rule). Inner cap: `maxit` =
   `maxit_inner` for the first step, then min(`maxit_inner`, 10 × the first step's iterations)
-  (the depth of σ, which sets the iterations, does not change within a slice); a capped column
-  counts as stagnated for τ_eff and sets `info["inner_maxit"]`.
+  (the depth of σ, which sets the iterations, does not change within a slice). The first step
+  is the one at the σ actually used: after a σ move the stagnated solve at the old σ is
+  discarded and the base is the repeated start's count. A capped column counts as stagnated for
+  τ_eff and sets `info["inner_maxit"]`; `info["inner_cap"]` is the cap used.
 - **Basis.** A preallocated fp64 device array `Q` of `len(W) + capacity` columns holds
   $[W \mid Q_1 \mid Q_2 \mid \dots]$; the count of filled columns is a traced int (one compiled
   step, as LOBPCG's locked basis); the start block is deflated against R and W.
@@ -118,14 +127,21 @@ resource limit: there is no default allocation and no step cap besides it; 15c s
   by τ (correctness review: θ of the inexact projected T gave residuals above $10\tau\delta$ that
   grew with the basis; Rayleigh–Ritz on (K, M) over the same basis gave 5e-10 at τ = 1e-8).
   Candidates: the Ritz values in $[\lambda_{lo}(1 - 100 r), \lambda_{hi}(1 + 100 r)]$ plus the
-  nearest one beyond each edge (r = the running $r_{acc}$). Their residuals are computed in
+  nearest one beyond each edge, with r = the previous step's $r_{acc}$ (tol at the first step).
+  Their residuals are computed in
   chunks of c candidate columns at one compiled width (zero-padded, masked): $X_c = Q_L Y_c$, one
   K and one M apply, `lobpcg._resid`, discarded. Spurious interior Ritz values of the Rayleigh–
   Ritz carry large residuals and simply stay unconverged until the subspace resolves them.
 - **Thresholds and r_acc (the roadmap's per-pair rule).** Pair i is accepted at $r_i \le t_i =
   \max(tol,\ 10\,\tau_\text{eff}\,\delta_i,\ \text{its \_resid floor})$ with $\delta_i = |\mu_i -
-  \sigma|/|\mu_i|$. $r_{acc} = \max t_i$ over the in-slice pairs and the neighbours used by the
-  stop rule (`info["r_acc"]`; 15b/15c take the band-wide max). $\tau_\text{eff} = \max(\tau,$ the
+  \sigma|/|\mu_i|$. The floor term is LOBPCG's round-off threshold, added to the roadmap's
+  $\max(tol, 10\tau_\text{eff}\delta)$ (logged). Order per step: $t_i$ for every candidate,
+  $r_{acc} = \max t_i$ over the candidates, then `_slice_stop` once with it; if the returned
+  `inside` and neighbours are a strict subset of the candidates, $r_{acc}$ is recomputed over
+  them and `_slice_stop` runs once more (no further iteration: the set can only shrink).
+  The reported $r_{acc}$ is the max over the in-slice pairs and the neighbours (`info["r_acc"]`;
+  the roadmap's δ_max over the slice plus the neighbours, which the stop rule also accepts, so it
+  is never below the roadmap's value; 15b/15c take the band-wide max). $\tau_\text{eff} = \max(\tau,$ the
   running max over all steps of `minres`'s final relative residual for columns that stagnated or
   hit the cap$)$, `info["tau_raised"]`. If τ_eff exceeds $10^{-4}$ (an inner solve that failed,
   e.g. σ on an eigenvalue after the move), the slice stops with `converged` False and
@@ -143,14 +159,15 @@ resource limit: there is no default allocation and no step cap besides it; 15c s
   `info["edge_unreached"]` = "lo", "hi", "both" or None (no converged Ritz value ever appeared
   beyond that edge: λ_lo below λ₁ or λ_hi above the spectrum, which 15c handles by its [0, f₂]
   rule or the above-spectrum error instead of splitting).
-- **Final Rayleigh–Ritz.** The compact X of the converged `inside` pairs and neighbours is
-  formed in chunks, Q is released, then $X^\top K X$ (chunked), a small `eigh`, the rotated
-  vectors, explicit K and M products and the residuals and thresholds recomputed (the roadmap's
-  "final Rayleigh–Ritz with true residuals on (K, M)"). A pair above its $t_i$ there sets
-  `converged` False.
+- **Final stage.** The step's Rayleigh–Ritz already is the roadmap's "final Rayleigh–Ritz on
+  (K, M)" (a second `eigh` on X would be a no-op). At the end, the compact X of the accepted
+  `inside` pairs and neighbours is formed from the last step's Y in chunks, Q is released, and
+  the true residuals and thresholds are recomputed once from explicit K and M products of X; a
+  pair above its $t_i$ there sets `converged` False.
 - **Returns** `lam` (ascending, `inside`), `V` (host fp64, n × k, compact) and `info`:
   `converged`, `reason`, `sigma`, `sigma_moved`, `steps`, `basis` (Lanczos columns used),
   `minres_iterations` (per step, max over columns), `tau_eff`, `tau_raised`, `inner_maxit`,
+  `inner_cap`,
   `r_acc`, `delta_max`, `residuals`, `thresholds` (the $t_i$), `neighbours` =
   `{"lo": (lam, V) or None, "hi": (lam, V) or None}` (None at a λ = 0 edge or when unreached;
   15b deflates them, 15c uses them at slice edges), `capacity_full`, `edge_unreached`, `time`
@@ -173,19 +190,23 @@ References from SciPy `reference_modes` / `eigsh(sigma=...)` on the assembled fr
 - **Largest Mac sizes:** hex20 1M DOF with AMG (the PR 13b acceptance mesh) and voxel 2M DOF
   with fp64 GMG (the PR 11b acceptance mesh): the floor near mode 100 (one 6-column τ = 1e-14
   solve each, σ from the same geometry's $12^3$ / $32^3$ eigenvalues scaled, depth confirmed by
-  the slice), and one real short slice on the hex20 1M mesh holding about 3 modes near mode 100
-  (edges from the coarse mesh's eigenvalues; the stop rule extends clusters), recording its
-  `r_acc`, `tau_eff`, `delta_max`, steps and seconds.
+  the slice), and one real short slice on each mesh holding about 3 modes near mode 100 (edges
+  from the coarse mesh's eigenvalues; the stop rule extends clusters; capacity 10 blocks, a
+  `capacity_full` result is recorded as data), recording `r_acc`, `tau_eff`, `delta_max`, steps
+  and seconds.
 - **A full slice vs LOBPCG from 0:** hex20 $12^3$, modes 51–70 at tol 1e-8: steps, Lanczos
   columns per mode, MINRES iterations per step, seconds; the same band by `solve_modes(band=...)`
   (a first data point for 15c's crossover).
-- **Run time:** about 1.5–2 h in total (grid about 45 min, 1M and 2M floors about 50 min, the 1M
-  slice about 30 min); the JSON records each part's wall time.
+- **Run time:** about 3–4 h in total (measured 0.77 µs/DOF per MINRES iteration with AMG at
+  b = 6: grid about 45 min, 1M and 2M floors about 40 min, the 1M slice 40–70 min, the 2M slice
+  about as long); before each heavy part the script times 10 MINRES iterations and prints the
+  part's estimate, and the JSON records each part's wall time.
 
 ### 3. Slice memory model (`memory.si_memory`)
 
 ```python
-si_memory(op_memory, n_dof, capacity, block=6, precond_memory=None, n_rigid=0, n_deflate=0)
+si_memory(op_memory, n_dof, capacity, block=6, precond_memory=None, n_rigid=0, n_deflate=0,
+          n_return=None)
 ```
 
 storage = operator + preconditioner storage (fp64) + basis $8\,n\,(n_\text{deflate} +
@@ -195,8 +216,12 @@ x, r1, r2, y, w, w2, b, the A apply and the explicit check: a per-column constan
 over b = 6 and 12, plus the operator and V-cycle workspace at width b), reortho (the chunked
 projector at width b, as `lobpcg_memory`'s projector term), Ritz (one chunk of c candidates:
 X, KX, MX, plus the operator workspace at width c); the final Rayleigh–Ritz holds the compact X
-after Q is released (at most the basis); total = overhead + storage + max(phases). The phase
-split is returned. 15c composes it into `solve_modes_memory`.
+after Q is released (at most the basis); build = max(operator build, preconditioner build), as
+in `lobpcg_memory` (the basis is allocated after the caller's build, so the build phase holds
+only the operator and preconditioner storage); host = $8\,n\,(n_\text{deflate} + n_\text{return}
++ 2)$ (W's host copy, the compact V, the two neighbours; unified memory on macOS), with
+`n_return` defaulting to capacity / b; total = overhead + host + max(build, storage +
+max(phases)). The phase split is returned. 15c composes it into `solve_modes_memory`.
 
 ## Tests (`tests/test_shift_invert.py`)
 
@@ -226,13 +251,17 @@ from `lobpcg._norms`.
    both neighbours.
 6. **Edge cluster:** a slice edge between the two copies of a double eigenvalue: both copies
    returned (cluster extension).
-7. **σ on an eigenvalue:** `sigma` passed exactly at a reference eigenvalue: `sigma_moved` True,
-   `info["sigma"]` ≠ the passed σ, and the slice matches `eigsh`. With the move patched to 0: the
-   slice stops with `converged` False and reason "inner solves failed" (no modes at a huge
-   r_acc).
+7. **σ on an eigenvalue:** `sigma` passed at a double reference eigenvalue (where the prototype
+   stagnated at 0.1); a pre-check MINRES at that σ must stagnate above $10^3\tau$, else
+   `pytest.skip` with a message. Then `sigma_moved` True, `info["sigma"]` ≠ the passed σ,
+   `inner_cap` based on the moved start's count (spy), and the slice matches `eigsh`. With the
+   move patched to 0: the slice stops with `converged` False and reason "inner solves failed".
 8. **τ_eff from the solves (spy on `minres`):** τ = 1e-16: `tau_raised`, τ_eff > 1e-16 and equal
    to the running max of the captured stagnated columns' final residuals, `r_acc` = max $t_i$ as
-   reported, the slice converges.
+   reported, the slice converges. Inner cap: the spy's captured `maxit` is `maxit_inner` at the
+   first step and min(`maxit_inner`, 10 × its iterations) after (`info["inner_cap"]`); with
+   `maxit_inner` = 20: `inner_maxit`, `tau_raised`, τ_eff equal to the captured capped
+   residual, and (residual above 1e-4) the "inner solves failed" stop.
 9. **τ_eff carried into r_acc (seam):** `minres` wrapped to stop at relative residual 1e-6 and
    report `stagnated` (as 15c's τ_eff = 1e-6 case): τ_eff = 1e-6 (to the captured value),
    `tau_raised`, $r_{acc} = 10\,\tau_\text{eff}\,\delta_{max}$ (above tol), every $t_i$ =
@@ -241,11 +270,14 @@ from `lobpcg._norms`.
 10. **Stop rule (`_slice_stop`, synthetic arrays):** a neighbour within 100 r_acc of the extended
     set does not count; a cluster chain across each edge extends `inside`; an unconverged
     neighbour does not count; λ_lo = 0 needs no lower neighbour; an empty slice; an unconverged
-    inside pair blocks `done`.
+    inside pair blocks `done`. On a real slice (test 1's mesh), a neighbour with large δ raises
+    `r_acc` above every in-slice $t_i$ and the reported `r_acc` equals the max over inside pairs
+    and neighbours.
 11. **Capacity full and unreached edges:** capacity of 2 blocks on test 1's slice: `converged`
     False, `capacity_full`, `edge_unreached` None or the edge lacking a neighbour, and the
     converged pairs returned match `eigsh`; on the tiny mesh, `hi` above the spectrum with a
-    small capacity: `edge_unreached` = "hi".
+    small capacity: `edge_unreached` = "hi"; on a clamped mesh, $0 < \lambda_{lo} < \lambda_1/2$
+    with a small capacity: `edge_unreached` = "lo".
 12. **Deflation W:** test 1's slice (on a short 10-mode slice) with half its modes as W: the other
     half returned, W never returned ($\max|W^\top M V| \le 10^{-10}$), returned ∪ W = the `eigsh`
     set.
@@ -254,10 +286,11 @@ from `lobpcg._norms`.
 14. **Errors:** lo < 0, lo ≥ hi, a precond with fp32 levels, bad `block` or `capacity`,
     mismatched W / R shapes, a non-orthonormal W.
 15. **Memory model:** `si_memory` storage equals the leaf bytes of the operator, preconditioner
-    and basis. Slow (macOS), two cases with estimates ≥ 2 GB, each within 20% of the measured
-    peak, the phase split printed: (a) MINRES-dominated: voxel about 1.5M DOF, fp64 GMG,
-    capacity 4 blocks, σ near mode 5 (short solves); (b) basis-dominated: a large capacity, a
-    few steps.
+    and basis; the host term and the build phase as their formulas. Slow (macOS), two cases with
+    estimates ≥ 2 GB, each within 20% of the measured peak, the phase split printed: (a)
+    MINRES-dominated: fp64 GMG voxel, capacity 4 blocks, σ near mode 5 (short solves), sized so
+    the MINRES phase plus storage is ≥ 1.25× the build phase (asserted on the model); (b)
+    basis-dominated: a large capacity, a few steps.
 16. **Benchmark smoke:** `shift_invert_study` at a tiny size runs (marked slow).
 
 Tests 9, 11–13 run on short slices (about 10 modes); if the fast suite exceeds about 60 s, the
@@ -268,8 +301,9 @@ modes 31–45 slices are marked slow.
 - `docs/eigensolvers.md`: a "Shift-invert slices" section (the operator and the constrained
   diagonal, MINRES with the SPD preconditioner, τ, τ_eff and the inner cap, the per-pair
   thresholds and r_acc, Rayleigh–Ritz on (K, M), the stop rule, capacity and unreached edges,
-  the final Rayleigh–Ritz, `info` keys), the measured MINRES cost vs depth and δ, the floor and
-  the 1M slice's r_acc (hex20 AMG and voxel GMG), the slice memory model; the validation list
+  the final stage, `info` keys), the measured MINRES cost vs depth and δ, the floor and the
+  real slices' r_acc at both largest Mac sizes (hex20 1M AMG and voxel 2M GMG), the slice memory
+  model (phases, build, host); the validation list
   for `tests/test_shift_invert.py`.
 - README: status line (15a). The `solve_modes` example comes with 15c.
 - ROADMAP: the PR 15 split note, the [15a]/[15b]/[15c] tags, Dependencies rows ("15a
@@ -282,11 +316,15 @@ modes 31–45 slices are marked slow.
 
 - PR 15 split into 15a/15b/15c, all roadmap tests assigned.
 - Ritz pairs by Rayleigh–Ritz on (K, M) over the shift-invert Krylov basis (not the inexact
-  projected T), confirmed by a final Rayleigh–Ritz; no implicit restarts (15c splits a full
-  slice).
+  projected T); the roadmap's "final Rayleigh–Ritz" is the last step's Rayleigh–Ritz, with true
+  residuals recomputed on the compact X; no implicit restarts (15c splits a full slice).
+- Per-pair thresholds $t_i = \max(tol, 10\tau_\text{eff}\delta_i, \text{round-off floor})$ with
+  $r_{acc} = \max t_i$ over in-slice pairs and neighbours (the roadmap's r_acc plus LOBPCG's
+  floor term, and the neighbours).
 - σ at the slice midpoint (or given), moved once by 1% when the first solve stagnates; τ_eff >
   1e-4 ends the slice as failed.
 - τ_eff = the running max of stagnated or capped columns' final residuals; later steps capped at
-  10× the first step's iterations.
+  10× the first step's iterations (the first step at the σ used).
+- `si_memory` counts a build phase and a host term as `lobpcg_memory` does.
 - `capacity` required (no default allocation); 15c sets it from `si_memory`.
 - The measured cost driver: depth, not δ (roadmap note; 15c's cost model on depth).
