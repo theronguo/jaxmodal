@@ -119,7 +119,7 @@ info["count"]["passed"]  # when the count ran: no mode below the cut is missing
 
 `info["count"]` is `count`'s info (when it ran) plus `ran`, `reason`, `estimate`, `lam_c`, `gap`, `degree`, `block`, `predicted_steps`, `predicted_s`, `predicted_kind` ("bound", "calibrated" or "unknown"), `solve_s`, `build_s`, `calibration_s` (and `calibrated_step`, `calibrated_block`). PR 14a's measurements apply: a typical cut costs 10²–10³ solves, so `verify=None` counts mainly when the band edge sits in a large gap ($g \gtrsim 0.6$) or the band is small.
 
-No strategy selection yet: LOBPCG from 0 is the only band strategy, and a band whose basis outgrows the device fails with an out-of-memory error (PR 15 adds shift-invert slices and the choice). `solve_modes_memory(mesh, bcs, k, band=(0, f_max))` estimates a band solve expecting $k$ modes.
+No strategy selection yet: LOBPCG from 0 is the only band strategy, and a band whose basis outgrows the device fails with an out-of-memory error (PR 15 adds shift-invert slices and the choice). `solve_modes_memory(mesh, bcs, k, band=(0, f_max))` estimates a band solve expecting $k$ modes. `memory.band_probe_block(mesh, bcs, n_modes, n_probes, host_bytes, *, n_rigid, **options)` is the count's budget rule: the largest probe block within that estimate minus `host_bytes`, with the λ_c multigrid at fp64; it raises below one probe.
 
 ### Mac acceptance budgets
 
