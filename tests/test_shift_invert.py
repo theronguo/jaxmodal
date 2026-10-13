@@ -755,9 +755,8 @@ def test_restart(monkeypatch, capsys):
     c = info["count"]
     assert len(calls) == 2 and c["restarts"] == 1 and c["flagged"] and c["passed"]
     assert c["estimates"][0] >= 0.5 and c["estimate"] < 0.5 and c["reason"] is None
-    assert (
-        calls[1]["W"].shape[1] == 5 and calls[1]["capacity"] == 312 - 24
-    )  # 300 rounds up to 13 chunks
+    # 300 rounds up to 13 chunks of 24, minus one for the 5 found modes
+    assert calls[1]["W"].shape[1] == 5 and calls[1]["capacity"] == 312 - 24
     assert [k["seed"] for k in calls] == [0, 1] and seeds == [0, 1]
     check_cb(lam, info)
     assert np.abs(V.T @ (M @ V) - np.eye(6)).max() <= 1e-10

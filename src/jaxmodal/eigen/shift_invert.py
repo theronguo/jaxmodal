@@ -445,7 +445,7 @@ def si_checked(
             reason = "slice not converged"
             break
         # the caller's modes inside [lo, hi] or the returned span (si_slice's edge margins)
-        x0, x1 = min(lo, lam_f.min(initial=lo)), max(hi, lam_f.max(initial=hi))
+        x0, x1 = lam_f.min(initial=lo), lam_f.max(initial=hi)
         inb = (lam_W >= x0) & (lam_W <= x1)
         W_in, lam_in = W[:, inb], lam_W[inb]
         lam_c = np.r_[lam_f, lam_in]  # the count's in-band set: found, not returned
