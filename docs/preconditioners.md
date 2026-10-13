@@ -418,7 +418,7 @@ The V-cycle is symmetric and positive definite on the free DOFs: the same Chebys
 - The AMG cycle (everything below the p-level) costs 1.25 $t_A$; the first-level transfers cost 0.19 $t_A$ ($P$) and 0.18 $t_A$ ($P^\top$) per apply. Operator complexity 1.15.
 - The whole V-cycle costs 5.4 $t_A$ ($2d$ = 4 fine applies, the p-level transfers and the AMG cycle).
 - V-cycle temporaries: 11.7 fine blocks (`memory_analysis`).
-- Setup 5.1 s: the hex8 Galerkin matrix 1.3 s, the SA loop 2.0 s, the rest the device export and the fine level.
+- Setup 5.0 s: the hex8 Galerkin matrix 1.3 s, the SA loop 2.0 s, the rest the device export and the fine level.
 - Device storage of the AMG levels and transfers: 0.48 GB (levels 0.24, transfers 0.24, coarsest factor 4.5 MB), int32 columns included. Padding: levels 1.05 / 1.24, $P$ 1.34 / 1.37, $P^\top$ 1.21 / 1.41.
 
 **Limitations** ([`open_items.md`](open_items.md)).

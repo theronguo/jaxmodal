@@ -68,6 +68,8 @@ $B$ has the rows of constrained corner DOFs zeroed, as the roadmap says. Unmaske
 
 Measured at 1M hex20: AMG device storage 0.48 GB (the table says ≈ 0.4 GB; about 5 GB at 10M hex20) and V-cycle temporaries of 11.7 fine blocks (the table budgets ≈ 4 blocks: about 2.6 GB at 1M, $m = 25$, and about 29 GB at 10M, $m = 30$). With those, "80 GB GPU: 10M fits" becomes about 84 GB with the 9-block step and about 72 GB with the low-memory step; both are upper bounds, since inside the LOBPCG step the preconditioner's extra is smaller (GMG: `GMG_STEP` = 5.1 blocks against about 12 standalone). PR 13b's estimator models p-MG + AMG as a step extra and re-derives the three rows; 13b decides between the low-memory step and a smaller $m$ for the 10M GPU solve.
 
+Also for 13b's memory ordering: during setup `amg` holds two host copies of the hex8 Galerkin matrix (the caller's and `_sa_levels`' zero-free copy, about 0.25 GB each at 1M hex20), and all-hex8 meshes build an unused identity `NodalTransfer`; both are transient and small next to the 2.4 GB Galerkin peak.
+
 ### GMG restriction on the GPU (PR 11 deferred GPU checks)
 
 Restriction is the transpose of gathers, i.e. scatter-adds (6× the prolongation time on CPU at $87^3$). Default: keep; listed in the deferred GPU checks with "rewrite as gathers if it dominates".
