@@ -111,10 +111,15 @@ def _passes(d, gap, lam_top, n_top, n_free, lower):
     th, q = _grid(gamma)
     if (q[(th > t0) & (th < t1)] ** 2).min(initial=1.0) < Q_MIN:  # ripples inside the band
         return False, np.nan
+    bias = _total_bias(gamma, gap, lam_top, n_top, n_free, lower)
+    return bias <= BIAS, bias
+
+
+def _total_bias(gamma, gap, lam_top, n_top, n_free, lower):
     bias = tail_bias(gamma, gap, lam_top, n_top, n_free)
     if lower is not None:  # the lower tail, from 0 (rigid modes deflated: N(0) = 0)
         bias += _bias(gamma, 0.0, lower[1], n_top, lam_top)
-    return bias <= BIAS, bias
+    return bias
 
 
 def count_degree(gap, lam_top, n_top, n_free, lower=None):
@@ -368,20 +373,17 @@ def _run(op, free, m, Ws, R, MR, info, lower, gap, lam_top, n_top, lam_c, *, pre
     n_free = int(free.sum())
     block = n_probes if block is None else min(block, n_probes)
     info.update(lam_c=lam_c, gap=_g_eff(gap, lower), block=block, steps=0, n_top=n_top,
-                pcg_iterations=(np.nan, 0), verifiable=False, passed=False,
+                capped=False, pcg_iterations=(np.nan, 0), verifiable=False, passed=False,
                 probes=np.full(n_probes, np.nan), std=np.nan)  # fmt: skip
     if degree is None:
         d, bias = count_degree(gap, lam_top, n_top, n_free, lower)
         if d is None:  # cost cap: not run
-            info.update(degree=math.ceil(D_RULE / info["gap"]), tau=tau, bias=np.nan,
+            info.update(degree=math.ceil(D_RULE / info["gap"]), tau=tau, bias=np.nan, capped=True,
                         time=dict(total=time.perf_counter() - t0))  # fmt: skip
             return np.nan, info
     else:
         d = degree
-        gamma = _gamma(d, lower)
-        bias = tail_bias(gamma, gap, lam_top, n_top, n_free)
-        if lower is not None:
-            bias += _bias(gamma, 0.0, lower[1], n_top, lam_top)
+        bias = _total_bias(_gamma(d, lower), gap, lam_top, n_top, n_free, lower)
     tau = 0.01 / (d * math.sqrt(n_free)) if tau is None else float(tau)
     info.update(degree=d, tau=tau, bias=bias)
     precond = jacobi(op, free, lam_c) if precond is None else precond
@@ -437,12 +439,9 @@ def count(
                 _steps=_steps, t0=t0)  # fmt: skip
 
 
-def band_edges(lam, lo, hi, lam_out):
-    """(c_lo, c_hi, g_lo, g_hi): the counting edges of the band [lo, hi] with in-band modes lam
-    (possibly none) and known out-of-band eigenvalues lam_out, each midway between the outermost
-    in-band eigenvalue (the band edge when lam is empty) and the nearest lam_out beyond it, and
-    the edge gaps relative to them. Raises when lam_out has no value on a side or one inside the
-    in-band interval."""
+def _edges(lam, lo, hi, lam_out):
+    """(a, b, nb_lo, nb_hi): the outermost in-band eigenvalues (the band edges when lam is
+    empty) and the nearest lam_out beyond them."""
     lam, lam_out = np.asarray(lam, float), np.asarray(lam_out, float)
     a = lam.min() if len(lam) else lo
     b = lam.max() if len(lam) else hi
@@ -451,7 +450,16 @@ def band_edges(lam, lo, hi, lam_out):
     below, above = lam_out[lam_out < a], lam_out[lam_out > b]
     if not len(below) or not len(above):
         raise ValueError("lam_out needs a value below and above the band (the edge neighbours)")
-    nb_lo, nb_hi = below.max(), above.min()
+    return a, b, below.max(), above.min()
+
+
+def band_edges(lam, lo, hi, lam_out):
+    """(c_lo, c_hi, g_lo, g_hi): the counting edges of the band [lo, hi] with in-band modes lam
+    (possibly none) and known out-of-band eigenvalues lam_out, each midway between the outermost
+    in-band eigenvalue (the band edge when lam is empty) and the nearest lam_out beyond it, and
+    the edge gaps relative to them. Raises when lam_out has no value on a side or one inside the
+    in-band interval."""
+    a, b, nb_lo, nb_hi = _edges(lam, lo, hi, lam_out)
     c_lo, c_hi = (nb_lo + a) / 2, (nb_hi + b) / 2
     return c_lo, c_hi, (a - nb_lo) / c_lo, (nb_hi - b) / c_hi
 
@@ -464,14 +472,14 @@ def band_count(
     from V, by a Jackson band-pass polynomial of T = (K + c_hi M)^-1 M between the counting
     edges of band_edges. Returns (estimate, info); passed = verifiable and estimate < 0.5.
 
-    V (n, k >= 0), lam (k,): the in-band modes found (the out-of-band pairs are added here, not
-    passed in V). V_out (n, j), lam_out (j,): known converged out-of-band pairs, at least the
-    nearest one on each side (si_slice's neighbours); all are deflated with V. All M-orthonormal
-    together. precond: SPD preconditioner for K + c_hi M (default jacobi(op, free, c_hi)). The
-    Weyl tail model (no mode index in a band) is fitted to the in-band modes and the nearest
-    out-of-band pair on each side. Other options and info as count's, plus edges (c_lo, c_hi)
-    and gaps (g_lo, g_hi); lam_c = c_hi, gap = the governing gap, n_top the fitted model count
-    at the upper neighbour.
+    V (n, k >= 0; or a tuple of arrays, as count's W), lam (k,): the in-band modes found (the
+    out-of-band pairs are added here, not passed in V). V_out (n, j), lam_out (j,): known
+    converged out-of-band pairs, at least the nearest one on each side (si_slice's neighbours);
+    all are deflated with V. All M-orthonormal together. precond: SPD preconditioner for
+    K + c_hi M (default jacobi(op, free, c_hi)). The Weyl tail model (no mode index in a band)
+    is fitted to the in-band modes and the nearest out-of-band pair on each side. Other options
+    and info as count's, plus edges (c_lo, c_hi) and gaps (g_lo, g_hi); lam_c = c_hi, gap = the
+    governing gap, n_top the fitted model count at the upper neighbour.
     """
     check_x64("band_count")
     t0 = time.perf_counter()
@@ -479,14 +487,14 @@ def band_count(
     if not 0 < lo < hi:
         raise ValueError(f"need 0 < lo < hi (a band from 0: count), got {lo}, {hi}")
     lam, lam_out = np.atleast_1d(np.asarray(lam, float)), np.asarray(lam_out, float)
-    for name, X, n in (("V", V, len(lam)), ("V_out", V_out, len(lam_out))):
-        if X.ndim != 2 or X.shape != (op.n_dof, n):
-            raise ValueError(f"{name} must have shape ({op.n_dof}, {n}), got {X.shape}")
+    Vs, k = _columns(op, V, "V")
+    if k != len(lam):
+        raise ValueError(f"V must have shape ({op.n_dof}, {len(lam)}), got {k} columns")
+    if V_out.ndim != 2 or V_out.shape != (op.n_dof, len(lam_out)):
+        raise ValueError(f"V_out must have shape ({op.n_dof}, {len(lam_out)}), got {V_out.shape}")
     c_lo, c_hi, g_lo, g_hi = band_edges(lam, lo, hi, lam_out)
-    a = lam.min() if len(lam) else lo
-    nb_lo = lam_out[lam_out < a].max()
-    nb_hi = lam_out[lam_out > (lam.max() if len(lam) else hi)].min()
-    Ws = (V, V_out)
+    a, _, nb_lo, nb_hi = _edges(lam, lo, hi, lam_out)
+    Ws = (*Vs, V_out)
     _check_ortho(op, m, Ws, seed)
     top, bot = nb_hi / c_hi, nb_lo / c_hi
     n_top = (len(lam) + 1) / (top**WEYL_A - bot**WEYL_A) * top**WEYL_A  # n - 1 intervals

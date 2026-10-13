@@ -226,8 +226,10 @@ def si_slice(
             _check_ortho(op, m, W, seed)
     L0 = -(-nw // c) * c  # the Lanczos columns start at a chunk boundary
     Q = jnp.zeros((n, L0 + capacity))
-    if nw:
-        Q = _insert(Q, jnp.asarray(W), jnp.asarray(0, jnp.int32))
+    for i in range(0, nw, c):  # c columns at a time (zero-padded): no n x nW device copy
+        Wc = np.zeros((n, c))
+        Wc[:, : min(c, nw - i)] = W[:, i : i + c]
+        Q = _insert(Q, jnp.asarray(Wc), jnp.asarray(i, jnp.int32))
     key, sub = jax.random.split(jax.random.key(seed))
     nK, nM = map(float, _norms(op, m, m * jax.random.normal(sub, (n, 1))))
     consts = jnp.array([nK, nM, tol, C_FLOOR])
@@ -368,7 +370,8 @@ def _beyond(a, b, nb, W, lam_W):
     neither."""
     out = []
     for side, sel, pick in (("lo", lam_W < a, np.argmax), ("hi", lam_W > b, np.argmin)):
-        cand = [nb[side]] if nb[side] is not None else []
+        p = nb[side]
+        cand = [p] if p is not None and (p[0] < a if side == "lo" else p[0] > b) else []
         if sel.any():
             i = np.flatnonzero(sel)[pick(lam_W[sel])]
             cand.append((float(lam_W[i]), W[:, i]))
@@ -391,11 +394,15 @@ def si_checked(
     count's preconditioner (default precond, the slice's). count_options: count's options
     (verbose defaults to verbose). slice_options: si_slice's.
 
+    The caller's W modes inside [lo, hi] count as found (deflated in the count, not returned).
+
     Returns lam, V (all in-band modes found, ascending) and info: the last run's si_slice info
     (r_acc, tau_eff the max over runs; residuals, thresholds of the returned pairs) plus runs
-    (each run's info) and count: the last count's info plus ran, reason, estimate, estimates,
-    flagged (some verifiable count >= 0.5) and restarts. A failed check is flagged and not
-    passed."""
+    (each run's info) and count: the last count's info (passed and verifiable False when none
+    ran) plus ran, reason, estimate, estimates, flagged (some verifiable count >= 0.5) and
+    restarts. reason: None (passed), "slice not converged", "restart capacity", "degree above
+    MAX_DEGREE: the gap is too small to count", "count unverifiable: an inner solve failed" or
+    "count >= 0.5 after RESTARTS restarts". A failed check is flagged and not passed."""
     n = op.n_dof
     if (W is None) != (lam_W is None):
         raise ValueError("W and lam_W must be given together")
@@ -407,12 +414,15 @@ def si_checked(
     c0 = opts.pop("seed", 0)
     b = slice_options.get("block", 6)
     c = _chunk(b)
+    up = lambda x: -(-x // c) * c  # noqa: E731
+    inb = (lam_W >= lo) & (lam_W <= hi)  # the caller's in-band modes: found, not returned
+    W_in, lam_in = W[:, inb], lam_W[inb]
     lam_f, V_f, res, thr = np.zeros(0), np.zeros((n, 0)), np.zeros(0), np.zeros(0)
     runs, estimates, ci, est, reason, flagged = [], [], {}, np.nan, None, False
     for j in range(RESTARTS + 1):
-        cap = capacity  # the restart's Q (n, L0 + capacity) within the first run's
-        cap -= -(-(len(lam_W) + len(lam_f)) // c) * c - -(-len(lam_W) // c) * c
-        if cap < 2 * b:
+        # the restart's Q (n, L0 + capacity) within the first run's (capacity rounded to c)
+        cap = up(capacity) - (up(len(lam_W) + len(lam_f)) - up(len(lam_W))) if j else capacity
+        if j and cap < 2 * b:
             reason = "restart capacity"
             break
         Wj = np.hstack([W, V_f]) if len(lam_f) else W
@@ -420,15 +430,24 @@ def si_checked(
                                 W=Wj if Wj.shape[1] else None, seed=seed + j, verbose=verbose,
                                 **slice_options)  # fmt: skip
         runs.append(info)
-        lam_f, V_f = np.r_[lam_f, lam], np.hstack([V_f, V])
-        res, thr = np.r_[res, info["residuals"]], np.r_[thr, info["thresholds"]]
-        order = np.argsort(lam_f, kind="stable")
-        lam_f, V_f, res, thr = lam_f[order], V_f[:, order], res[order], thr[order]
+        if j == 0:  # si_slice returns them sorted: no copy
+            lam_f, V_f, res, thr = lam, V, info["residuals"], info["thresholds"]
+        else:  # one host copy, the columns written into place
+            k1 = len(lam_f)
+            lam_f, res = np.r_[lam_f, lam], np.r_[res, info["residuals"]]
+            thr = np.r_[thr, info["thresholds"]]
+            order = np.argsort(lam_f, kind="stable")
+            pos = np.argsort(order)  # the sorted position of each column
+            Vn = np.empty((n, len(lam_f)))
+            Vn[:, pos[:k1]], Vn[:, pos[k1:]] = V_f, V
+            lam_f, V_f, res, thr = lam_f[order], Vn, res[order], thr[order]
         if not info["converged"]:
             reason = "slice not converged"
             break
-        a = lam_f.min() if len(lam_f) else lo
-        e = lam_f.max() if len(lam_f) else hi
+        lam_c = np.r_[lam_f, lam_in]  # the count's in-band set
+        V_c = (V_f, W_in) if len(lam_in) else V_f
+        a = lam_c.min() if len(lam_c) else lo
+        e = lam_c.max() if len(lam_c) else hi
         nb_lo, nb_hi = _beyond(a, e, info["neighbours"], W, lam_W)
         if nb_hi is None or (lo > 0 and nb_lo is None):
             raise RuntimeError("si_checked: no converged neighbour to place a counting edge")
@@ -436,11 +455,12 @@ def si_checked(
         kw = dict(R=slice_options.get("R"), precond=P, seed=c0 + j, **opts)
         if lo > 0:
             out = [nb_lo, nb_hi]
-            est, ci = band_count(op, free, V_f, lam_f, lo, hi,
+            est, ci = band_count(op, free, V_c, lam_c, lo, hi,
                                  np.stack([p[1] for p in out], 1),
                                  np.array([p[0] for p in out]), **kw)  # fmt: skip
         else:
-            est, ci = count(op, free, (V_f, nb_hi[1][:, None]), np.r_[lam_f, nb_hi[0]], e,
+            Vt = V_c if isinstance(V_c, tuple) else (V_c,)
+            est, ci = count(op, free, (*Vt, nb_hi[1][:, None]), np.r_[lam_c, nb_hi[0]], e,
                             nb_hi[0], **kw)  # fmt: skip
         estimates.append(est)
         miss = ci["verifiable"] and est >= 0.5
@@ -453,7 +473,7 @@ def si_checked(
         if not miss:
             if not ci["verifiable"]:
                 reason = ("degree above MAX_DEGREE: the gap is too small to count"
-                          if ci["steps"] == 0 and np.isnan(ci["bias"]) else
+                          if ci["capped"] else
                           "count unverifiable: an inner solve failed")  # fmt: skip
             break
         if j == RESTARTS:
@@ -465,7 +485,8 @@ def si_checked(
         residuals=res,
         thresholds=thr,
         runs=runs,
-        count={**ci, "ran": bool(ci), "reason": reason, "estimate": est,
-               "estimates": estimates, "flagged": flagged, "restarts": len(runs) - 1},
+        count={"passed": False, "verifiable": False, **ci, "ran": bool(ci), "reason": reason,
+               "estimate": est, "estimates": estimates, "flagged": flagged,
+               "restarts": len(runs) - 1},
     )  # fmt: skip
     return lam_f, V_f, out

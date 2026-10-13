@@ -231,6 +231,7 @@ def test_degree_cap():
     g = (lam_next - lam[5]) / ((lam_next + lam[5]) / 2)
     assert np.isnan(est) and not info["verifiable"] and not info["passed"]
     assert info["degree"] == int(np.ceil(23 / g)) > MAX_DEGREE and info["steps"] == 0
+    assert info["capped"]
     assert np.isnan(info["probes"]).all()
 
 
@@ -669,9 +670,8 @@ def band_expected(lam, deflated, info):
 
 def _band_gamma(info):
     c_lo, c_hi = info["edges"]
-    g_lo = info["gaps"][0]
-    lower = (c_lo * (1 + g_lo / 2) / c_hi, c_lo * (1 - g_lo / 2) / c_hi)
-    return counting._gamma(info["degree"], lower)
+    a, d = c_lo / c_hi, info["degree"]
+    return jackson_step(d) - jackson_step(d, (1 - a) / (1 + a))  # independent of _gamma
 
 
 def band_run(miss=(), bcs="clamped", band=BAND, R=None, **kw):
@@ -730,6 +730,10 @@ def test_band_degree(a):
     d, bias = count_degree(0.1, 1.05, 500_000, 10**7, lower)  # the tail bias sets d
     assert d > d_in and bias <= 0.05
     assert not counting._passes(d - 1, 0.1, 1.05, 500_000, 10**7, lower)[0]
+    gamma = jackson_step(d) - jackson_step(d, (1 - a) / (1 + a))
+    lo_tail = counting._bias(gamma, 0.0, lower[1], 500_000, 1.05)
+    assert lo_tail > 0 and bias == pytest.approx(  # the lower tail is part of the bias
+        tail_bias(gamma, 0.1, 1.05, 500_000, 10**7) + lo_tail, rel=1e-12)  # fmt: skip
 
 
 def test_band_lower_tail():
@@ -855,7 +859,7 @@ def test_band_info_and_errors():
     est, info, _ = band_run(n_probes=4, degree=30)
     assert info["edges"] == (c_lo, c_hi) and info["gaps"] == (g_lo, g_hi)
     a = c_lo / c_hi
-    assert info["lam_c"] == c_hi and info["degree"] == 30
+    assert info["lam_c"] == c_hi and info["degree"] == 30 and not info["capped"]
     assert info["gap"] == min(g_hi, g_lo * 2 * np.sqrt(a) / (1 + a))
     top, bot, w = lam[19] / c_hi, lam[12] / c_hi, counting.WEYL_A
     assert info["n_top"] == pytest.approx(7 / (top**w - bot**w) * top**w, rel=1e-14)

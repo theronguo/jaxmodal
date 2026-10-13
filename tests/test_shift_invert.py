@@ -741,26 +741,32 @@ def test_restart(monkeypatch, capsys):
     c_hi = band_edges(lr[CB[0] : CB[1]], lo, hi, lr[[CB[0] - 1, CB[1]]])[1]
     real = si.si_slice
     calls = spy_slice(monkeypatch, real, lambda j, out: _drop(out, lr[MID]) if j == 1 else out)
+    seeds, real_bc = [], si.band_count  # the recounts use fresh probes: count seed + j
+    monkeypatch.setattr(
+        si, "band_count", lambda *a, **kw: seeds.append(kw["seed"]) or real_bc(*a, **kw)
+    )
     lam, V, info = checked(lo, hi, c_hi, verbose=True)
     c = info["count"]
     assert len(calls) == 2 and c["restarts"] == 1 and c["flagged"] and c["passed"]
     assert c["estimates"][0] >= 0.5 and c["estimate"] < 0.5 and c["reason"] is None
-    assert calls[1]["W"].shape[1] == 5 and calls[1]["capacity"] == 300 - 24
-    assert [k["seed"] for k in calls] == [0, 1]
+    assert calls[1]["W"].shape[1] == 5 and calls[1]["capacity"] == 312 - 24  # 300 rounds up to 13 chunks
+    assert [k["seed"] for k in calls] == [0, 1] and seeds == [0, 1]
     check_cb(lam, info)
     assert np.abs(V.T @ (M @ V) - np.eye(6)).max() <= 1e-10
     out = capsys.readouterr().out
     assert "si_checked: count" in out and out.count("si_checked: count") == 2
     assert "restart 1" in out and out.rstrip().endswith("pass")
+    assert out.count("count: block") == 2  # verbose reaches the count (one block per count)
 
     monkeypatch.setattr(si, "si_slice", real)
     calls = spy_slice(monkeypatch, real, lambda j, out: _drop(out, lr[MID]))
+    seeds.clear()
     lam, V, info = checked(lo, hi, c_hi)
     c = info["count"]
     assert len(calls) == 3 and c["restarts"] == 2 and c["flagged"] and not c["passed"]
     assert all(e >= 0.5 for e in c["estimates"]) and len(c["estimates"]) == 3
     assert c["reason"] == "count >= 0.5 after 2 restarts" and len(lam) == 5
-    assert [k["seed"] for k in calls] == [0, 1, 2]
+    assert [k["seed"] for k in calls] == [0, 1, 2] and seeds == [0, 1, 2]
     assert [k["W"].shape[1] for k in calls[1:]] == [5, 5]
 
 
@@ -779,6 +785,37 @@ def test_checked_edges():
     check_cb(lam, info)
     assert info["neighbours"]["hi"][0] == pytest.approx(lr[20], rel=1e-8)  # 19 is in W
     assert c["passed"] and c["edges"][1] == pytest.approx((lr[18] + lr[19]) / 2, rel=1e-10)
+    # a W mode inside the band (an adjacent slice's) counts as found and is not returned
+    lam, V, info = checked(lo, hi, (lr[18] + lr[19]) / 2, W=Vr[:, [13]], lam_W=lr[[13]])
+    c = info["count"]
+    assert len(lam) == 5 and np.abs(lam - lr[14:19]).max() <= 1e-8 * lr[19]
+    assert c["passed"] and c["restarts"] == 0 and c["edges"][0] == pytest.approx(
+        (lr[12] + lr[13]) / 2, rel=1e-10)  # fmt: skip
+
+
+def test_restart_capacity(monkeypatch):
+    """15b: the restart capacity is L0(capacity) - (L0(nW + k) - L0(nW)), L0 rounding up to
+    the chunk c = 24: with 10 caller W modes and 5 found, L0 stays 24 and the capacity 312 (a
+    rounding of k alone would give 288)."""
+    lr, Vr = prob("short")[6:]
+    _, free, op = prob("short")[:3]
+    lo, hi = cb_edges()
+    c_hi = (lr[18] + lr[19]) / 2
+
+    def rule(j, out):
+        lam, V, info = out
+        keep = np.abs(lam - lr[MID]) > 1e-6 * lr[MID]
+        keep = keep if j == 1 else ~keep  # the first run misses MID, the restart finds it
+        return lam[keep], V[:, keep], dict(info, residuals=info["residuals"][keep],
+                                           thresholds=info["thresholds"][keep])  # fmt: skip
+
+    calls = spy_slice(monkeypatch, ref_slice, rule)
+    w = np.arange(20, 30)
+    lam, V, info = si.si_checked(op, free, lo, hi, None, capacity=300, W=Vr[:, w],
+                                 lam_W=lr[w], count_precond=exact("short", c_hi))  # fmt: skip
+    c = info["count"]
+    assert [k["capacity"] for k in calls] == [300, 312] and calls[1]["W"].shape[1] == 15
+    assert c["restarts"] == 1 and c["flagged"] and c["passed"] and len(lam) == 6
 
 
 def test_checked_flags(monkeypatch, capsys):
@@ -797,7 +834,7 @@ def test_checked_flags(monkeypatch, capsys):
 
     spy_slice(monkeypatch, ref_slice, ident)
     monkeypatch.setattr(si, "band_count", lambda *a, **kw: (np.nan, dict(
-        verifiable=False, passed=False, degree=10**6, steps=0, bias=np.nan,
+        verifiable=False, passed=False, degree=10**6, steps=0, bias=np.nan, capped=True,
         time=dict(total=0.0))))  # fmt: skip
     lam, V, info = run(capacity=300)
     c = info["count"]
@@ -814,11 +851,12 @@ def test_checked_flags(monkeypatch, capsys):
     lam, V, info = run(capacity=300)
     c = info["count"]
     assert not info["converged"] and not c["ran"] and c["reason"] == "slice not converged"
+    assert not c["passed"] and not c["verifiable"]
     assert c["restarts"] == 0 and len(lam) == 2 and np.isnan(c["estimate"])
     monkeypatch.undo()
 
     calls = spy_slice(monkeypatch, ref_slice, lambda j, out: _drop(out, lr[MID]))
-    lam, V, info = run(capacity=30, verbose=True)  # the restart would get 30 - 24 < 12 columns
+    lam, V, info = run(capacity=24, verbose=True)  # the restart would get 24 - 24 < 12 columns
     c = info["count"]
     assert len(calls) == 1 and c["reason"] == "restart capacity" and c["flagged"]
     assert c["restarts"] == 0 and c["estimate"] >= 0.5 and len(lam) == 5

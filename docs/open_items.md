@@ -140,6 +140,17 @@ With σ near mode 1000 (hex20 $16^3$, AMG), a mid-gap MINRES solve takes about 1
 
 A slice whose first solve stagnates moves σ once and repeats the solve; when the stagnation is depth-driven, the retry costs a second full solve before the slice stops. 15c's strategy should not place slices where the cost model predicts stagnation, so the retry only handles σ on an eigenvalue.
 
+### Band-pass count and slice restarts (PR 15b, decisions without user input)
+
+- **Tail model fitted to the band.** No mode index is known inside a band, so the Weyl count $N \propto \lambda^{3/2}$ is fitted to the in-band modes and the nearest pair on each side, with $N(0) = 0$ (rigid modes deflated). A band with few modes gives a rough fit; the 3/2 exponent stays the upper bound, and the tail binds only with very many modes below.
+- **Only the nearest out-of-band pair per side is deflated.** Further modes add at most $q^2 \approx 7\cdot10^{-4}$ (at $g/2$ past an edge), inside the 0.05 bias. Adjacent slices' modes are not all deflated (memory and transfer cost).
+- **σ = $c_{hi}$, the upper counting edge.** One recurrence; the lower edge costs $(1 + a)/(2\sqrt a)$ more degree (2× at $a = 0.07$). A σ between the edges would balance the edges but was not needed for 15c's narrow slices.
+- **The slice's preconditioner is reused for the count** (built at the slice's σ, SPD): no second multigrid in memory; it costs PCG iterations when σ is far from $c_{hi}$ (wide slices). 15c may pass `count_precond`.
+- **Restarts** deflate the found in-band modes, use fresh seeds for the start block and the probes, and stay within the first run's device memory (capacity reduced); at most 2. Unverifiable counts and unconverged slices are not restarted: a rerun would not change them. 15c decides whether a flagged slice splits.
+- **The planted-mode test** scales the mass by $s$ to move one eigenvalue into a gap, instead of editing a mesh.
+- **Progress** comes from a per-step `jax.debug.callback` (scalars only, rate-limited on the host); the verbose loop is a separate compile.
+- **Slow tests.** Three band tests (expected value missing / free, detection) take 21–111 s and are marked slow, above the plan's fast budget; they run in the full suite.
+
 ### End-to-end `jax.grad` and eigenvector sensitivities (user, 2026-10-13)
 
 Asked whether `solve_modes` should support `jax.grad` end to end (a custom VJP wrapping PR 21's sensitivities) or eigenvector sensitivities. User: "No idea. Just follow the roadmap". Default: the roadmap as written (principle 5: eigenvalue sensitivities by a separate element-kernel pass in PR 21; solvers and preconditioners never differentiated; no eigenvector gradients). Revisit if an optimization use case needs mode-shape objectives.

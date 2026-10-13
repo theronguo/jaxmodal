@@ -307,3 +307,7 @@ including tight lower edges, goes into the docs for 15c's cost model (seconds, n
   probes (seed + j for slice and count).
 - Unverifiable counts and unconverged slices are not restarted.
 - Test 7 plants the mode by scaling the density.
+
+## Amendments (implementation)
+
+- The 2000-probe expected-value tests (missing, free band) and the 5000-probe detection tests take 21–111 s and are marked slow instead of fitting the fast budget; they run in the full suite before merge (logged in `docs/open_items.md`).
