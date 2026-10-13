@@ -185,9 +185,10 @@ def si_slice(
 
     Returns lam (ascending: the converged pairs in [lo, hi] widened by 100 r_acc and over
     clusters straddling an edge), V (host fp64, M-orthonormal) and info:
-    converged, reason, sigma, sigma_moved, steps, basis, minres_iterations, inner_cap,
-    inner_maxit, tau_eff, tau_raised, r_acc, delta_max, residuals, thresholds, neighbours
-    ({"lo": (lam, v) or None, "hi": ...}), capacity_full, edge_unreached, time."""
+    converged, reason, sigma, sigma_moved, move_iterations (of the discarded solve, or None),
+    steps, basis, minres_iterations, inner_cap, inner_maxit, tau_eff, tau_raised, r_acc,
+    delta_max, residuals, thresholds, neighbours ({"lo": (lam, v) or None, "hi": ...}),
+    capacity_full, edge_unreached, time."""
     check_x64("si_slice")
     t0 = time.perf_counter()
     n = op.n_dof
@@ -256,7 +257,7 @@ def si_slice(
     key = add(_random_block(sub, n, b), key)
     A = ap_operator(op, free, -sigma)
     tau_eff, r = tau, tol
-    iters, cap, moved, inner_maxit, reason = [], maxit_inner, False, False, None
+    iters, cap, moved, inner_maxit, reason = [], maxit_inner, None, False, None
     seen = {"lo": lo == 0, "hi": False}
     times = dict(setup=time.perf_counter() - t0, minres=0.0, ortho=0.0, ritz=0.0)
     done, last = False, None
@@ -276,9 +277,9 @@ def si_slice(
             reason = "inner solves failed"
             break
         stag = STAGNATION * max(tau, TAU_MIN)
-        if not iters and not moved and bad.any() and res[bad].max() > stag:
+        if not iters and moved is None and bad.any() and res[bad].max() > stag:
             sigma += SIGMA_MOVE * (hi - lo)  # sigma on an eigenvalue: move once, repeat
-            A, moved = ap_operator(op, free, -sigma), True
+            A, moved = ap_operator(op, free, -sigma), its  # the discarded solve's iterations
             continue
         iters.append(its)
         if len(iters) == 1:
@@ -331,7 +332,8 @@ def si_slice(
         converged=converged,
         reason=reason,
         sigma=sigma,
-        sigma_moved=moved,
+        sigma_moved=moved is not None,
+        move_iterations=moved,
         steps=len(iters),
         basis=k,
         minres_iterations=iters,

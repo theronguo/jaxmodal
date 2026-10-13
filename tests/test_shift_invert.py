@@ -276,6 +276,7 @@ def test_sigma_on_eigenvalue(monkeypatch):
     check(name, lo, hi, lam, V, info)
     assert info["sigma_moved"] and info["sigma"] != sigma
     first = int(spy.calls[1][1]["iterations"].max())  # the repeated start
+    assert info["move_iterations"] == int(spy.calls[0][1]["iterations"].max())
     assert spy.calls[0][0] == spy.calls[1][0] == 20000
     assert info["inner_cap"] == spy.calls[2][0] == min(20000, 10 * first)
     monkeypatch.setattr(si, "SIGMA_MOVE", 0.0)
@@ -294,7 +295,7 @@ def test_tau_eff(monkeypatch):
     monkeypatch.setattr(si, "minres", spy)
     lam, V, info = solve("short", lo, hi, tau=1e-16)
     check("short", lo, hi, lam, V, info, steps=False)
-    assert not info["sigma_moved"]  # the floor stays below 1e3 TAU_MIN
+    assert not info["sigma_moved"] and info["move_iterations"] is None  # floor < 1e3 TAU_MIN
     bad = [c[1]["residuals"][c[1]["stagnated"] | ~c[1]["converged"]] for c in spy.calls]
     assert info["tau_raised"] and info["tau_eff"] == max(x.max(initial=0) for x in bad) > 1e-16
     its = int(spy.calls[0][1]["iterations"].max())
