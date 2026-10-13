@@ -240,9 +240,9 @@ over b = 6 and 12, plus the operator and V-cycle workspace at width b), reortho 
 projector at width b, as `lobpcg_memory`'s projector term), Ritz (one chunk of c candidates:
 X, KX, MX, plus the operator workspace at width c); host = $8\,n\,n_\text{deflate}$ (W's host copy, the only host
 array alive during the steps; unified memory on macOS). End (forming V while Q is alive): host V of
-the `n_modes` + 2 returned columns plus one Ritz chunk, $8n(n_\text{modes} + 2)$ + the Ritz
-phase, one more phase in the max (it grows with the slice, so it is the one phase that is not a
-constant). `n_modes` is the expected slice count, which 15c's slicing already estimates and the
+the `n_modes` + 2 returned columns plus one device chunk of c columns, $8n(n_\text{modes} + 2 +
+c)$, one more phase in the max (it grows with the slice, so it is the one phase that is not a
+constant; the residual pass after Q is released is below the basis phase). `n_modes` is the expected slice count, which 15c's slicing already estimates and the
 tests take from the reference; the estimate assumes the slice returns at most `n_modes` modes
 (said in the docstring and the docs; 15c keeps its margin for it); total = overhead + storage + host + max(operator build,
 preconditioner build, phases), `lobpcg_memory`'s conservative form (the estimators' `build`
@@ -322,8 +322,8 @@ from `lobpcg._norms`.
     the MINRES phase is ≥ 1.25× the build (asserted on the model); (b)
     basis-dominated: a large capacity, a few steps; (c) the end phase alone: `_form_v` on a
     preallocated random fp64 Q of a large capacity (estimate ≥ 2 GB) and a random Y selecting
-    150 columns, no MINRES (seconds), the measured peak within 20% of the model's end-phase
-    total.
+    150 columns, no MINRES (seconds), the measured peak within 20% of the like-for-like model: basis +
+    host V + one c-column chunk (no operator, preconditioner or K/M workspace in that run).
 16. **Benchmark smoke:** `shift_invert_study` at a tiny size runs (marked slow).
 
 Tests 9, 11–13 run on short slices (about 10 modes); if the fast suite exceeds about 60 s, the
