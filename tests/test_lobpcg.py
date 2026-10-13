@@ -20,6 +20,7 @@ from jaxmodal.eigen import jacobi, lobpcg, reference_modes, sigma_estimate
 from jaxmodal.linalg import count_below
 from jaxmodal.materials import Material, isotropic
 from jaxmodal.memory import (
+    amg_memory,
     gmg_memory,
     lobpcg_memory,
     solve_modes_memory,
@@ -900,4 +901,9 @@ def test_precond_composition():
             assert got == lobpcg_memory(op_mem, n, 10, n_rigid=nr, precond_memory=pc)
     box = box_mesh((3, 3, 3), type="hex20")
     um = functools.partial(unstructured_memory, box)
-    assert solve_modes_memory(box, {}, 4) == lobpcg_memory(um, 3 * len(box.points), 4, n_rigid=6)
+    n_box, amg_pc = 3 * len(box.points), functools.partial(amg_memory, box)
+    assert solve_modes_memory(box, {}, 4) == lobpcg_memory(
+        um, n_box, 4, n_rigid=6, precond_memory=amg_pc
+    )
+    got = solve_modes_memory(box, {}, 4, precond="jacobi")
+    assert got == lobpcg_memory(um, n_box, 4, n_rigid=6)

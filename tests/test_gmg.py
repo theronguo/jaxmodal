@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from helpers import dense
+from helpers import dense, step_bytes
 
 from jaxmodal.eigen import lobpcg, reference_modes, sigma_estimate
 from jaxmodal.linalg import pcg
@@ -665,18 +665,6 @@ def test_gmg_workspace(n):
         est = gmg_memory(m, 15, dtype)["workspace"]
         print(f"{n}^3 {dtype}: {got / (8 * op.n_dof * 15):.2f} blocks, estimate {est / got:.3f}x")
         assert got <= est and (n < 32 or est <= 1.25 * got)
-
-
-def step_bytes(op, P, low, k=15):
-    """Temporaries + aliased bytes of the compiled LOBPCG step (block k) with precond P."""
-    from test_lobpcg import step_args
-
-    c, _ = lob._capacity(100, 1, k, low)
-    f = lob.lobpcg_step_low if low else lob.lobpcg_step
-    args = list(step_args(op, op.n_dof, k, low, 0))
-    args[1], args[3] = op, P
-    mem = f.lower(*args, c=c).compile().memory_analysis()
-    return mem.temp_size_in_bytes + mem.alias_size_in_bytes
 
 
 @pytest.mark.parametrize("low", [False, True], ids=["9-block", "low"])

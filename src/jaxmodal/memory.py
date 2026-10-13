@@ -12,6 +12,7 @@ from .operators import dof_mask, rigid_modes
 from .operators.matfree import layout
 from .operators.voxel import grid_layout
 from .precond.gmg import _ell_rows, _islands
+from .precond.pmg import _w8
 
 # XLA temporaries of the build kernel per element (memory_analysis, exactly linear in chunk).
 BUILD_BYTES = {
@@ -235,6 +236,60 @@ def gmg_memory(mesh, m, dtype="float64", s_K=None):
     return {k: int(v) for k, v in out.items()}
 
 
+# AMG (docs/preconditioners.md), calibrated on box meshes at the default max_coarse = 1000.
+# Family "hex8": all-hex8 meshes (no p-level); "p": the rest. AMG levels, smoothers and
+# transfers below the p-level per corner DOF: upper envelope (+2-4%) of hex20 8^3-44^3, hex27
+# 6^3-24^3, hex8 12^3-68^3 without the coarsest factor (874-2344 B measured).
+AMG_STORAGE = {"hex8": 1200, "p": 2450}
+# Extra LOBPCG step bytes over Jacobi: 8 n (a m + c) + 8 m K (n DOF, block m), the minimal
+# envelope (linear programming) of memory_analysis at the sizes above, m = 15 and 25, plus
+# 1.5 in c (0.06-0.1 blocks) against rounding.
+AMG_STEP = {
+    ("hex8", "9-block"): (4.94, 115.4, 71_400),
+    ("hex8", "low"): (9.17, 107.2, 384_682),
+    ("p", "9-block"): (4.80, 42.0, 163_889),
+    ("p", "low"): (9.57, 28.5, 227_703),
+}
+# Setup host peak: a fixed part plus bytes per corner DOF by element type (the largest present),
+# measured on hex20 12^3-44^3, hex27 12^3-24^3, hex8 24^3-68^3: 3.1-4.8 kB beyond the fixed
+# part, growing about 0.65 kB per decade of n_c; the constants extrapolate that trend to 10M DOF
+# (hex27: two points only, steeper; see docs/open_items.md).
+AMG_BUILD = (45e6, {"hex8": 4.6e3, "hex20": 5.5e3, "hex27": 6.0e3})
+
+
+def amg_memory(mesh, m):
+    """Estimated bytes of amg(unstructured(mesh, ...), free, sigma, mesh.points) at the default
+    max_coarse applied to (n_dof, m) blocks: storage (the p-level exact from the mesh, the AMG
+    levels per corner DOF, the coarsest factor), build (the setup host peak), step and
+    step_low (extra LOBPCG step bytes over Jacobi). Calibrated on box meshes."""
+    n_nodes = len(mesh.points)
+    blocks = [c for c in mesh.blocks.values() if len(c)]
+    corner = np.unique(np.concatenate([c[:, :8].ravel() for c in blocks]))
+    n_c, n_dof = 3 * len(corner), 3 * n_nodes
+    fam = "hex8" if mesh.blocks.keys() == {"hex8"} else "p"
+    storage = 120 * n_nodes  # free mask, node-block Jacobi inverses and mask (fp64)
+    if fam == "p":  # NodalTransfer: (int32, fp64) parent / child tables
+        # w: parents per fine node; child.max(): fine nodes interpolating from one corner
+        w = max(int((_w8(c.shape[1]) > 0).sum(1).max()) for c in blocks)
+        pairs = []
+        for c in blocks:
+            a, j = np.nonzero(_w8(c.shape[1]) > 0)
+            pairs.append(c[:, a].astype(np.int64).ravel() * n_nodes + c[:, j].ravel())
+        child = np.unique(np.unique(np.concatenate(pairs)) % n_nodes, return_counts=True)[1]
+        storage += 12 * (w * n_nodes + child.max() * len(corner))
+    storage += AMG_STORAGE[fam] * n_c + 8 * min(n_c, 1000) ** 2
+    beta, alpha = AMG_BUILD
+    a9, c9, K9 = AMG_STEP[(fam, "9-block")]
+    al, cl, Kl = AMG_STEP[(fam, "low")]
+    out = dict(
+        storage=storage,
+        build=beta + max(alpha[t] for t in mesh.blocks) * n_c,
+        step=8 * n_dof * (a9 * m + c9) + 8 * m * K9,
+        step_low=8 * n_dof * (al * m + cl) + 8 * m * Kl,
+    )
+    return {k: int(v) for k, v in out.items()}
+
+
 def solve_modes_memory(
     mesh, bcs, n_modes, *, mass="consistent", chunk=None, guards=None, basis_dtype="float64",
     low_memory=False, precond="auto", precond_dtype="float64", n_rigid=None,
@@ -244,8 +299,11 @@ def solve_modes_memory(
     n_rigid=None counts the rigid modes left by bcs on the host (builds the dense rigid modes:
     about 20 GB at 100M DOF; pass n_rigid for large meshes)."""
     pc = None
-    if resolve_precond(mesh, precond, precond_dtype) == "gmg":
+    name = resolve_precond(mesh, precond, precond_dtype)
+    if name == "gmg":
         pc = functools.partial(gmg_memory, mesh, dtype=precond_dtype)
+    elif name == "amg":
+        pc = functools.partial(amg_memory, mesh)
     if mesh.voxel is not None:
         op_memory = functools.partial(stencil_memory, mesh, mass=mass)
     else:

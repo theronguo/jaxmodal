@@ -1,6 +1,6 @@
 """Unstructured p-MG study: PCG iterations per case (h-sequences, robustness, Chebyshev ratio and
 degree, element aspect), LOBPCG against Jacobi, the V-cycle cost in t_A and the build time at
-hex20 24^3, and _hex8_galerkin alone at hex20 44^3 (about 1M DOF).
+hex20 24^3 (the hex8 Galerkin setup cost: amg_study.setup).
 
 Unit-length steel boxes (spacing 1 / max(shape)), xmin clamped unless "free". sigma = lam_1 of the
 case from reference_modes (SciPy), or of the named case (h-sequences use their 6^3 box). 4 random
@@ -125,37 +125,6 @@ def cost(n=24, m=25):
     return out
 
 
-GAL_SETUP = """
-from jaxmodal import config
-config.enable_x64()
-import jax
-from jaxmodal.materials import Material, isotropic
-from jaxmodal.mesh import box_mesh
-from jaxmodal.operators import ap_operator, dof_mask, unstructured
-from jaxmodal.precond.pmg import _hex8_galerkin
-mesh = box_mesh(({n},) * 3, (1 / {n},) * 3, type="hex20")
-op = unstructured(mesh, {{0: Material(isotropic(210e9, 0.3), 7850.0)}}, mode="{mode}")
-A = ap_operator(op, dof_mask(mesh, {{"xmin": "xyz"}}), 1e7)
-jax.block_until_ready(A)
-"""
-
-GAL_RUN = """
-import json, time
-t = time.perf_counter()
-Ac = _hex8_galerkin(A)[0]
-json.dump(dict(n_dof=op.n_dof, time_s=time.perf_counter() - t, nnz=int(Ac.nnz)), open("{out}", "w"))
-"""
-
-
-def galerkin_1m(n=44):
-    """_hex8_galerkin alone (no splu) at hex20 n^3, stored and otf, with compilation, each in a
-    fresh subprocess: peak_bytes is the process peak above the built operator (harness)."""
-    return {
-        mode: harness.measure_json(GAL_RUN, GAL_SETUP.format(n=n, mode=mode))
-        for mode in ("stored", "otf")
-    }
-
-
 def lobpcg_runs(cases=LOBPCG, k=10, tol=1e-6):
     runs = []
     for t, shape in cases:
@@ -194,9 +163,6 @@ def main(cases=CASES, lobpcg_cases=LOBPCG, large=True, out=harness.RESULTS, writ
     if large:
         result["cost"] = cost()
         print(json.dumps(result["cost"]), flush=True)
-        jax.clear_caches()
-        result["galerkin_1m"] = galerkin_1m()
-        print(json.dumps(result["galerkin_1m"]), flush=True)
     if write:
         harness.write_result("pmg_study", result, out)
     return result

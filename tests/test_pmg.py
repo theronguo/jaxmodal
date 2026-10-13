@@ -182,6 +182,37 @@ def test_galerkin_hex8():
     assert rel(PM._hex8_galerkin(ap_operator(op, free, 0.37))[0].toarray(), A.toarray()) <= 1e-12
 
 
+@pytest.mark.parametrize("name", ["chunked", "hex27", "mixed", "hex8"])
+def test_galerkin_bsr(name):
+    """13b test 1: the production assembler's BSR output (int32 indices, 3 x 3 blocks, sorted),
+    padded positions past the end, and pattern reuse at another sigma equal to a fresh build;
+    the mixed mesh has nodal masses and constraints on nodes shared by both blocks."""
+    if name == "hex8":
+        mesh = box_mesh((5,) * 3)
+        free = dof_mask(mesh, {"xmin": "xyz", "ymin": "y"})
+        op = unstructured(mesh, MATERIALS, chunk=16)
+    else:
+        mesh, op, free, *_ = galerkin_case(name, chunk=7 if name == "chunked" else None)
+    if name == "mixed":
+        shared = np.intersect1d(mesh.blocks["hex8"], mesh.blocks["hex20"])
+        nodal = np.asarray(op.nodal).reshape(-1, 3)[shared, 0]
+        assert (nodal > 0).any() and (~free.reshape(-1, 3)[shared]).any()
+    Ab, pat = PM._hex8_galerkin(ap_operator(op, free, 0.37))
+    assert Ab.format == "bsr" and Ab.blocksize == (3, 3) and Ab.has_sorted_indices
+    assert Ab.indices.dtype == Ab.indptr.dtype == np.int32
+    for b, pos in zip(op.blocks, pat.pos, strict=True):
+        assert (pos[b.n_el :] == len(pat.indices)).all() and (
+            pos[: b.n_el] < len(pat.indices)
+        ).all()
+    fresh = PM._hex8_galerkin(ap_operator(op, free, 1.1))[0].toarray()
+    reused, same = PM._hex8_galerkin(ap_operator(op, free, 1.1), pat)
+    assert same is pat and rel(reused.toarray(), fresh) <= 1e-15
+    if name == "hex8":
+        K, M = assemble(mesh, MATERIALS)
+        A = a_p(K + 1.1 * M, free, float(ap_operator(op, free, 1.1).s))
+        assert rel(fresh, A.toarray()) <= 1e-12
+
+
 # ---------------------------------------------------------------- 3-4: the cycle
 
 

@@ -10,7 +10,8 @@ At a SIMP field's own $\lambda_1$ ($s_K = \rho^3$, $s_M = \rho$, $\rho_\min = 10
 
 - **Default:** ship as is (user, 2026-10-12: "As long as it should work for general problems now it's good").
 - **Candidate fix:** operator-dependent transfers. A SciPy prototype with Jacobi-smoothed, phase-aware prolongation plus deflation reached 34 (checked-in field) and 55 (seed 4), but needs coarse stencils wider than 27 points, which algebraic multigrid has.
-- **Revisit:** PR 13b's study runs `amg` on the checked-in field as an unstructured hex8 mesh and reports the count against GMG's (decision without user input, PR 13a); any fix beyond that moves to PRs 21–23 (modified mass interpolation removes the spurious modes; PR 23 re-runs the contrast test on a real design).
+- **PR 13b's AMG study** (`amg_study.simp`, the fields as unstructured hex8 meshes): AMG is worse than GMG on the filtered fields at θ = 0 (checked-in field at its own λ₁: 789–911 against 87; at the solid's λ₁ 70–75 against 33; seeds 4 / 5: 646–761 / 136–152 against 133–135 / 107–109) and level on the binary field (446–451 against 413–450; `benchmarks/results/amg_study.json`). AMG's near-null space is the global rigid modes and θ = 0 aggregates across void and solid, while GMG deflates the islands. A strength threshold θ = 0.02 brings the checked-in field at its own λ₁ to 49–51, but at the solid's λ₁ its coarse levels turn dense (1804 nonzeros per row) and coarsening stalls at 1152 rows (build plus PCG unfinished after 16 min); it also raises AMG storage 34–56% on the 13a cases. **Decision without user input (PR 13b):** keep θ = 0 and no `theta` keyword (it would expose a setting with a pathological setup).
+- **Revisit:** PRs 21–23: modified mass interpolation removes the spurious modes; a per-island near-null space (as GMG's deflation) or a safe strength threshold for AMG; PR 23 re-runs the contrast test on a real design.
 
 ### Thin plates and slender beams (PR 11a → M4 / PR 18)
 
@@ -26,7 +27,7 @@ Coarsening is by element count, not spacing: $h_z = h/10$ needs 106 iterations. 
 
 ### Binary-field λ₁ miss of the σ pre-estimate (PR 11b)
 
-On an unfiltered binary SIMP field ($32^3$) the GMG-refined pre-estimate lands at 390 λ₁: λ₁ is a void-region mode that 20 iterations from a random start miss (100 find it), and 10-mode LOBPCG does not converge on that field at any σ either. Default: documented limitation (filtered fields and every other tested case are within 1.05 λ₁). Revisit with PR 13b's SIMP study (`amg` on the field) and PRs 21–23's modified mass interpolation, which removes the void modes.
+On an unfiltered binary SIMP field ($32^3$) the GMG-refined pre-estimate lands at 390 λ₁: λ₁ is a void-region mode that 20 iterations from a random start miss (100 find it), and 10-mode LOBPCG does not converge on that field at any σ either. Default: documented limitation (filtered fields and every other tested case are within 1.05 λ₁). PR 13b's SIMP study gives no help: AMG is level with GMG on that field (446–451 against 413–450 PCG iterations). Revisit with PRs 21–23's modified mass interpolation, which removes the void modes.
 
 ### SIMP LOBPCG stagnation at tol $10^{-6}$ (PR 11b)
 
@@ -44,10 +45,6 @@ With GMG the LOBPCG process peak is bimodal: in some runs, from about iteration 
 
 The chunked 300k-DOF diagonal-pencil peak (`test_estimate_chunks`) varies between identical runs too: 0.95–1.07× `lobpcg_memory` (fp64 basis, 1.24–1.39 against 1.30 GB; fp32 up to 1.04×), and peaks above the estimate, which earlier runs did not show, became the common case on 2026-10-13 with no package change (it fails on `main` as well). Unchunked (30 modes, $m = 36$) it is 1.00–1.16×. Synchronous CPU dispatch makes the excursions smaller but does not remove them, as for GMG. All inside the roadmap's ±20% band. Default, as for GMG: keep the estimator and test against 0.8–1.1× the estimate instead of a strict bound (3% headroom over the worst run; if it trips again and repeated runs show the base level unchanged at about 0.95×, with only the intermittent excursion larger, widen to the roadmap's 1.2×; otherwise investigate the estimator or the step, since an extra fp64 basis copy lands at about 1.17–1.22×). Revisit with the GMG item (PR 24) or if a size falls outside the band.
 
-### p-MG refuses σ = 0 (PR 12, decision without user input)
-
-`pmg` raises `SingularShiftError` at σ = 0 because it has no mesh to prove $A_P$ nonsingular. Cost: a σ pre-estimate started at σ = 0 needs fewer rounds and iterations on clamped bodies (cube: 1 round / 4 iterations against 2 / 10; plate $a = 4$: 1 / 20 against 3 / 60). Default: σ > 0 required. `amg` (PR 13a) follows the same rule. Revisit in PR 13b, which owns the pre-estimate: accept σ = 0 when `solve_modes` has found no rigid modes and every `s_K > 0`.
-
 ### `splu` ordering for the test-only coarse solve (PR 12, decision without user input)
 
 Geometric nested dissection on the corner coordinates factors 4–8× faster than COLAMD (hex20 $24^3$: 3.5 s / 0.69 GB against 14 s / 1.5 GB), but `Unstructured` carries no coordinates. Default: keep COLAMD instead of adding a `points` argument to a test-only path. `amg` (PR 13a) needs no host direct solve (device Cholesky of a coarsest matrix ≤ 4·`max_coarse`), so this stays as is unless `pmg` leaves the tests.
@@ -64,17 +61,32 @@ The roadmap says "pyamg smoothed-aggregation setup". `amg` runs its own short lo
 
 $B$ has the rows of constrained corner DOFs zeroed, as the roadmap says. Unmasked $B$ gave the same iteration counts but makes the constrained rows of the all-hex8 $P_0$ nonzero (0.19 on hex8 $8^3$ with sliding faces), so the fine mask would no longer be the only mask needed. Default: masked.
 
-### AMG memory figures in the ROADMAP table (PR 13a → PR 13b)
+### AMG memory constants calibrated on box meshes (PR 13b, decision without user input)
 
-Measured at 1M hex20: AMG device storage 0.48 GB (the table says ≈ 0.4 GB; about 5 GB at 10M hex20) and V-cycle temporaries of 11.7 fine blocks (the table budgets ≈ 4 blocks: about 2.6 GB at 1M, $m = 25$, and about 29 GB at 10M, $m = 30$). With those, "80 GB GPU: 10M fits" becomes about 84 GB with the 9-block step and about 72 GB with the low-memory step; both are upper bounds, since inside the LOBPCG step the preconditioner's extra is smaller (GMG: `GMG_STEP` = 5.1 blocks against about 12 standalone). PR 13b's estimator models p-MG + AMG as a step extra and re-derives the three rows; 13b decides between the low-memory step and a smaller $m$ for the 10M GPU solve.
+`amg_memory`'s per-corner-DOF storage constant, its step constants `AMG_STEP` and its setup term are fitted on box meshes (hex20 $8^3$–$44^3$, hex27 $6^3$–$24^3$, hex8 $12^3$–$68^3$; a distorted hex20 box stays inside the bound). Other geometries aggregate differently. Default: document; revisit if a real mesh falls outside the roadmap's ±20% band.
 
-Also for 13b's memory ordering: during setup `amg` holds two host copies of the hex8 Galerkin matrix (the caller's and `_sa_levels`' zero-free copy, about 0.25 GB each at 1M hex20), and all-hex8 meshes build an unused identity `NodalTransfer`; both are transient and small next to the 2.4 GB Galerkin peak.
+### AMG build peak above 1M DOF (PR 13b, decision without user input)
+
+The measured setup peak per corner DOF grows about 0.65 kB per decade of $n_c$ (hex20 3.7 / 4.3 / 4.8 kB at $12^3$ / $24^3$ / $44^3$); `AMG_BUILD` extrapolates that trend to 10M DOF (14.6 GB hex20, 46.6 GB hex8). hex27 has two points ($12^3$, $24^3$) that grow about 1.3 kB per decade; its 6.0 kB lies between the hex20 slope (about 5.75 kB at 10M DOF) and its own (about 6.6 kB). Check it with the first 10M setup (the deferred GPU check runs it on the host).
+
+### PR 13b decisions without user input
+
+- **10M GPU configuration:** the memory table assumed $m = 30$ for 10M; with AMG 30 modes do not fit the 76 GB pool (about 89–94 GB device), so the deferred GPU check runs 20 modes ($m = 25$, stored Ke, 9-block step; 71.5 GB by the shipped `solve_modes_memory`, fits thinly; 30 modes: 92.6 GB), with on-the-fly Ke (about 60 GB) as fallback. The roadmap check names no mode count, so no criterion is relaxed.
+- **Mac 10M run:** 10 modes, stored Ke, 9-block step; `amg_study.large` stops above 52 GB; the shipped model gives 52.2 GB, so the run was skipped (the 10M acceptance is the deferred GPU check).
+- **`nonsingular=True` trusts the caller** apart from `s_K > 0`; `solve_modes` derives it from `rigid_modes` (no rigid modes left, no `s_K` passed). `pmg` keeps refusing σ = 0 (test-only).
+- **`"amg"` on voxel meshes raises:** GMG is better on every voxel case measured (SIMP study above).
+- **The COO assembler is gone:** `pmg`'s Galerkin matrix now comes from the production assembler (same values to rounding, BSR instead of CSR).
+- **Aggregate reuse with moved points approximates:** it keeps the old near-null space; only connectivity and `free` are checked.
 
 ### GMG restriction on the GPU (PR 11 deferred GPU checks)
 
 Restriction is the transpose of gathers, i.e. scatter-adds (6× the prolongation time on CPU at $87^3$). Default: keep; listed in the deferred GPU checks with "rewrite as gathers if it dominates".
 
 ## Resolved
+
+- **p-MG refuses σ = 0 (PR 12 → PR 13b, decision without user input).** `amg(..., nonsingular=True)` accepts σ = 0 when the caller states that $A_P(0)$ is nonsingular (it checks `s_K > 0` itself); `solve_modes` passes it when no rigid modes are left, so clamped bodies start the σ pre-estimate at σ = 0. `pmg` keeps refusing σ = 0 (test-only).
+
+- **AMG memory figures in the ROADMAP table (PR 13a → PR 13b).** `amg_memory` models the AMG as device storage plus a LOBPCG step extra (about 6 blocks at $m = 25$ with the 9-block step; about 11 with the low-memory step, which therefore gains nothing); the Multigrid row, the Preconditioner workspace row and the 10M line are re-derived from it (`docs/ROADMAP.md`). The two host copies of the hex8 matrix are gone with the COO assembler.
 
 - **p-MG on curved elements: approximate rigid rotations (PR 12 → PR 13a, decision without user input).** PR 12 asked PR 13's near-null space to restrict the fine rigid modes. `amg` evaluates the rigid modes at the corner coordinates instead: the curved $6^3$ case converges in 14, the same as the straight one, and restriction would need a fine rigid-mode build plus a per-corner least-squares fit.
 
