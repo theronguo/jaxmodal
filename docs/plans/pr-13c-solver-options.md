@@ -1,12 +1,12 @@
 # PR 13c plan: every solver option reachable from `solve_modes`
 
-Status: draft (plan review round 1 pending).
+Status: draft (plan review round 2 pending; round 1 log at the end).
 
-User request (2026-10-13, after PR 13b): "Generally make the default settings a robust choice for most problems. But also expose all solver options to the user in some way." PR 13c is inserted before PR 14 so that PRs 14–15 follow the same pattern from the start. It is an API and docs PR: no numerics change at the defaults.
+User request (2026-10-13, after PR 13b): "Generally make the default settings a robust choice for most problems. But also expose all solver options to the user in some way." PR 13c is inserted before PR 14 so that PRs 14–15 follow the same pattern from the start. It is an API, validation and docs PR; the only numerics change is the Chebyshev loop form (Design 4), which leaves results equal to rounding.
 
 ## Facts
 
-`solve_modes(mesh, materials, bcs, n_modes, orientations=None, *, mass, nodal_mass, tol, maxit, seed, chunk, guards, basis_dtype, low_memory, precond, sigma, precond_dtype)` already exposes every `lobpcg` option except `X0`, and the operator's `mass`/`nodal_mass`. Options that are reachable today only by composing `unstructured`/`stencil` + `gmg`/`amg` + `lobpcg` by hand:
+`solve_modes(mesh, materials, bcs, n_modes, orientations=None, *, mass, nodal_mass, tol, maxit, seed, chunk, guards, basis_dtype, low_memory, precond, sigma, precond_dtype)` already exposes every `lobpcg` option except `X0`, and the operator's `mass`/`nodal_mass`/`orientations`. Options reachable today only by composing the building blocks by hand:
 
 | component | options not reachable from `solve_modes` | default |
 |---|---|---|
@@ -15,58 +15,83 @@ User request (2026-10-13, after PR 13b): "Generally make the default settings a 
 | `gmg` | `degree`, `coarse_degree`, `ratio` | 2, 4, 30 |
 | `amg` | `degree`, `ratio`, `max_coarse` | 2, 30, 1000 |
 | `jacobi` | — | — |
-| σ pre-estimate (`_precond_sigma`) | LOBPCG tol per round, iterations per round, rounds, the drop factor that triggers a rebuild, `sigma_estimate`'s `maxit` for the fallback start | 0.1, 20, 4, 3, 10 |
-| `lobpcg` | `X0` (initial block; a warm start for optimization loops) | random (seeded) |
+| σ pre-estimate (`_precond_sigma`) | LOBPCG tol per round, iterations per round, rounds, the drop factor that triggers a rebuild, `sigma_estimate`'s `maxit` for the fallback start; its LOBPCG `seed` is fixed at 0 | 0.1, 20, 4, 3, 10 |
+| `lobpcg` | `X0`: up to the block size $k$ = chunk + guards columns, seeds the first chunk only (other columns random), deflated against the rigid modes at the start (`_start`) | random (seeded) |
 
-`unstructured`'s `chunk` and `lobpcg`'s `chunk` share a name, so the operator options cannot simply become more top-level keywords.
+Unexposed on purpose (stated in the docs and `open_items.md`): `lobpcg`'s `R` and `precond` (set by `solve_modes`); `amg`'s `nonsingular` (a proof, derived from the rigid-mode count), `aggregates` / `return_aggregates` (state, building blocks); `gmg`'s `dtype` (the top-level `precond_dtype`; the pre-estimate builds stay fp64 for robustness); `pmg` (test-scale, superseded by `amg`); `block_jacobi` / `chebyshev` alone (dev building blocks: without a coarse level they gain nothing, PR 10 h-study).
 
-`solve_modes_memory` composes `unstructured_memory(mesh, m, mode, mass, path, chunk, range_nodes)` or `stencil_memory(mesh, m, mass, slab)` with `gmg_memory(mesh, m, dtype)` / `amg_memory(mesh, m)`; neither preconditioner estimator models non-default smoother degrees or `max_coarse`.
+Value checks today (correctness probe): `degree`, `coarse_degree`, `chunk`, `path`, `range_nodes`, `slab` raise on bad values; `ratio ≤ 1` (gmg, amg), `max_coarse` non-integer or ≤ 0 do not (the latter fails later as "coarsening stalled"), and the σ pre-estimate values have no builder at all (`rounds=0` returns `None` → `TypeError`).
+
+Memory (performance probe, `memory_analysis`, fp64 blocks of $8nm$, $m = 15$): `_chebyshev` unrolls its loop in Python, and XLA keeps each step's temporaries: AMG V-cycle on hex20 $16^3$ 19.1 / 28.6 / 38.0 blocks at degree 2 / 4 / 6 (+4.7 per extra step; the fine level is the matrix-free $A_P$), GMG voxel $32^3$ +2.0 at degree 4. A `lax.fori_loop` over the `degree − 1` steps gives 19.1 / 18.2 / 18.2 with outputs equal to 12 digits. `max_coarse` enters `amg_memory` only through its hard-coded coarsest term $8\min(n_c, 1000)^2$ (0.13 GB at 4000, 3.2 GB at 20 000; +1.3 blocks of temporaries at 4000). `mode="otf"`: the AMG step extra over Jacobi is 8.6 blocks, as in stored mode, so `AMG_STEP` holds.
 
 ## Design
 
-### 1. Option dicts in `solve_modes`
+### 1. Option dicts and `X0` in `solve_modes`
 
-New keywords, all `None` by default (= today's behaviour):
-- `operator_options`: forwarded to the operator builder. Allowed keys: `mode`, `path`, `chunk`, `range_nodes` (unstructured meshes); `slab` (voxel meshes).
-- `precond_options`: forwarded to the preconditioner builder, both for the pre-estimate builds and the final build. Allowed keys: `degree`, `coarse_degree`, `ratio` (gmg); `degree`, `ratio`, `max_coarse` (amg); none (jacobi). `dtype` stays the top-level `precond_dtype`, and `amg`'s `nonsingular` stays derived from the rigid-mode count (it is a proof, not a preference); `aggregates`/`return_aggregates` are state, not settings, and stay with the building blocks (docs show the composition).
-- `sigma_options`: the pre-estimate's tuning, keys `tol`, `maxit`, `rounds`, `drop`, `estimate_maxit` with the defaults above. Ignored (and rejected if given) when `sigma` is passed or `precond="jacobi"`, which run no pre-estimate.
-- `X0`: forwarded to `lobpcg`.
+New keywords, all `None` by default (= today's behaviour, pinned by test 1):
+- `operator_options`: forwarded to the operator builder. Allowed keys: `mode`, `path`, `chunk`, `range_nodes` (unstructured meshes); `slab` (voxel meshes). The docs state that `operator_options["chunk"]` (elements per scan step) is unrelated to the top-level `chunk` (modes per locking chunk).
+- `precond_options`: forwarded to the preconditioner builder for the pre-estimate builds and the final build. Allowed keys: `degree`, `coarse_degree`, `ratio` (gmg); `degree`, `ratio`, `max_coarse` (amg); none (jacobi).
+- `sigma_options`: the pre-estimate's tuning, keys `tol`, `maxit`, `rounds`, `drop`, `estimate_maxit`. `_precond_sigma` gets them as keyword parameters with the current constants as defaults (`tol=0.1, maxit=20, rounds=4, drop=3.0, estimate_maxit=10`) and is called with `**sigma_options`; they are Python constants, so the compiled LOBPCG variants are unchanged. Rejected (`ValueError`) when `sigma` is passed or `precond="jacobi"`, which run no pre-estimate.
+- `X0`: forwarded to the final `lobpcg` (shape and semantics as in Facts; with the default single chunk, the previous `V` is a valid warm start).
+- `seed` now also seeds the pre-estimate LOBPCG (default 0 = today's value, so defaults are unchanged).
 
-One helper validates a dict against the allowed key set of the resolved component and raises `ValueError` naming the component, the unknown keys and the allowed ones (a typo must not be silently ignored). Values are validated by the builders themselves (they already raise on bad values). `_precond_sigma` takes the merged `sigma_options` instead of its constants.
+Keys are checked after `resolve_precond` (so `"auto"` takes the gmg keys on voxel meshes and the amg keys otherwise) and before any build (a typo fails before a long operator build). One helper `_check_options(name, opts, allowed)` raises `ValueError` naming the component, the unknown keys and the allowed ones; keys that exist as top-level keywords (`mass`, `nodal_mass`, `orientations`, `materials`, `dtype`, `nonsingular`, …) get "use the solve_modes keyword" / "set by solve_modes" in the message. The allowed sets are module constants; a test pins them against the builder signatures (test 6), so a later builder option fails CI until it is exposed or deliberately reserved.
 
-### 2. `solve_modes_memory`
+### 2. Value validation
 
-Takes `operator_options` and `precond_options` with the same validation:
-- `operator_options` are forwarded to `unstructured_memory` / `stencil_memory`, which already take exactly those keys (so `mode="otf"` gives the on-the-fly estimate, the 10M fallback in the ROADMAP).
-- `precond_options` are validated but the estimators model only the defaults; non-default values are documented as "estimated at the default smoother degrees and `max_coarse`" (logged in `docs/open_items.md`). Rationale: a degree changes the V-cycle temporaries by a fraction of a block and `max_coarse` only the coarsest factor ($8\,n_\text{coarse}^2$, which `amg_memory` could take later), not worth new calibrations now.
+- `chebyshev`: `ratio > 1` (a concrete float; shared by gmg, amg, pmg), else `ValueError`.
+- `amg`: `max_coarse` an int ≥ 1.
+- `solve_modes`: `sigma_options` values: `tol > 0`; `maxit`, `rounds`, `estimate_maxit` ints ≥ 1; `drop > 1`.
+- Other values stay with the builders (already checked).
 
-### 3. Defaults audit
+### 3. `solve_modes_memory`
 
-The docs get one table (`docs/eigensolvers.md`, "Options") listing every option of `solve_modes` with its default and the reason it is the robust choice, citing the measurements behind it (e.g. GMG/AMG over Jacobi: 14 against 300+ PCG iterations; σ pre-estimate within 1.05 λ₁ on every tested case but one; `degree` 2: least workspace at equal cost; `coarse_degree` 4: SIMP 116 → 87; `max_coarse` 1000; `mode="stored"`: fastest, `"otf"` for memory; tol $10^{-6}$; 9-block step; fp64 basis). No default changes: every current default is already the robust option measured in PRs 9–13. Where a default trades robustness for speed, the table says so.
+Takes `operator_options` and `precond_options`, validated with the same helper and key sets:
+- `operator_options` go to `unstructured_memory` / `stencil_memory`, which take exactly those keys (`mode="otf"` gives the on-the-fly estimate, the ROADMAP's 10M fallback).
+- `precond_options`: `max_coarse` goes to `amg_memory(mesh, m, max_coarse=1000)`, whose coarsest term becomes $8\min(n_c, \texttt{max\_coarse})^2$. With Design 4, `degree` and `coarse_degree` no longer change the V-cycle temporaries, so the default-calibrated constants bound them; `ratio` changes no memory. Remaining approximation, logged: `AMG_STEP` is calibrated at `max_coarse` 1000 (+1.3 blocks of temporaries measured at 4000).
+- No `sigma_options` or `X0`: the pre-estimate peaks below the solve, and `X0` is the caller's array (one extra $(n, j)$ block, stated in the docs).
+
+### 4. Chebyshev as a loop (`precond/chebyshev.py`)
+
+`_chebyshev` runs its `degree − 1` steps in `lax.fori_loop` (carry `r, d, x, rho`; same body). Degree 1 skips the loop. Results equal the unrolled form to rounding (test 7); temporaries no longer grow with the degree, which makes `degree` / `coarse_degree` safe to expose against the memory estimate. `amg_study.cost` re-measures the V-cycle cost at 1M hex20 (expected unchanged; reported in the plan's implementation note and `preconditioners.md` if it moves).
+
+### 5. Defaults audit (docs)
+
+`docs/eigensolvers.md` gets an "Options" section: one table with every option of `solve_modes` (top-level keywords and dict keys), its component, default, and why it is the robust choice, citing the measurement (e.g. GMG/AMG over Jacobi: 14 against 330 PCG iterations; final pre-estimate σ within 1.001 λ₁ on every tabulated case except the unfiltered binary SIMP field, 390 λ₁; `degree` 2: least work at equal iterations; `coarse_degree` 4: SIMP 116 → 87, plate 186 → 136; `max_coarse` 1000; `mode="stored"`: 0.196 s against 0.555 s per apply, `"otf"` for memory; tol $10^{-6}$; 9-block step; fp64 basis). Where a non-default is measured better for a class of problems, the table says so (`max_coarse` 2000 on single-layer plates: 15 against 19 iterations; `mode="otf"` at 10M on one GPU; fp32 V-cycle on voxel meshes: 51 s against 61 s). No default changes: every current default is the robust option measured in PRs 9–13.
 
 ## Files
 
-- `src/jaxmodal/eigen/api.py`: the keywords, the validation helper, `_precond_sigma(op, free, R, build, opts)`.
-- `src/jaxmodal/memory.py`: `solve_modes_memory` options.
-- `tests/test_api.py`, `tests/test_lobpcg.py` (memory composition).
-- `docs/eigensolvers.md` (options table and the defaults audit), `README.md` (one example with options), `docs/ROADMAP.md` (PR 13c row and status), `docs/open_items.md` (decisions below).
+- `src/jaxmodal/eigen/api.py`: the keywords, key sets, `_check_options`, value checks, `_precond_sigma(op, free, R, build, *, seed=0, tol=0.1, maxit=20, rounds=4, drop=3.0, estimate_maxit=10)`.
+- `src/jaxmodal/precond/chebyshev.py`: `fori_loop`, `ratio > 1`.
+- `src/jaxmodal/precond/amg.py`: `max_coarse` check.
+- `src/jaxmodal/memory.py`: `amg_memory(..., max_coarse=1000)`, `solve_modes_memory` options.
+- Tests: `tests/test_api.py`, `tests/test_lobpcg.py` (memory composition), `tests/test_amg.py` (`amg_memory` with `max_coarse`), `tests/test_precond.py` (Chebyshev loop).
 
 ## Tests
 
-1. Forwarding, by spies on the builders (`unstructured`, `stencil`, `gmg`, `amg`, `lobpcg`): every allowed key reaches the right builder with its value, for every pre-estimate build and the final one; defaults unchanged when the dicts are `None` (the spy sees exactly today's arguments).
-2. Effect, against references: `operator_options={"mode": "otf"}` gives the same λ as the default to $10^{-10}$ relative and MAC ≥ $1 - 10^{-8}$ against `reference_modes` (hex20 box, clamped); `precond_options={"max_coarse": 100}` builds more AMG levels than the default (the spy records the returned hierarchy's level count) and gives the same modes; `{"degree": 3}` on GMG converges with the same modes; `X0` equal to the converged `V` converges in ≤ 2 iterations.
-3. `sigma_options`: `{"rounds": 1}` stops after one round (spy count); `{"tol": 1e-3, "maxit": 50}` gives σ within $10^{-3}$ relative of λ₁ (SciPy) on the clamped box; given with `sigma=` or `precond="jacobi"` it raises.
-4. Validation: an unknown key in each dict raises `ValueError` naming the key and listing the allowed ones; a voxel-only key (`slab`) on an unstructured mesh, an amg-only key (`max_coarse`) with gmg, any key with jacobi raise; values outside the builders' range raise from the builder.
-5. `solve_modes_memory`: `operator_options={"mode": "otf"}` equals the composition with `unstructured_memory(..., mode="otf")`; `slab` on a voxel mesh likewise; unknown keys raise.
+1. **Defaults and forwarding** (spies on `unstructured`, `stencil`, `gmg`, `amg`, `lobpcg`, `sigma_estimate`): with all options `None`, the recorded args/kwargs of every call equal a snapshot of today's calls (equality, not containment); parametrized over every allowed key of every dict (one non-default value each), the spy shows that key with that value in every pre-estimate build and the final build (precond), the operator build (operator), or the final `lobpcg` (`X0`); `seed=3` reaches the pre-estimate LOBPCG.
+2. **Effects against references** (hex20 box $6\times5\times4$, `xmin` clamped, against `reference_modes`, λ to $10^{-8}$, MAC ≥ $1 - 10^{-8}$): `operator_options={"mode": "otf"}`; `precond_options={"max_coarse": 100}` on hex20 $8^3$ ($n_c$ = 2187: `len(P.levels)` of the spied return is 2 at the default, 3 at 100; measured) with the same modes; GMG `{"degree": 3, "coarse_degree": 2}` on a voxel box; `X0` = the converged `V` converges in ≤ 2 iterations (default start: about 15), clamped and free (k = 6); an `X0` wider than the block size raises.
+3. **`sigma_options` effects**, on PR 11b's scripted harness (`test_sigma_rounds`: monkeypatched `sigma_estimate`/`lobpcg`, a build that refuses σ = 0): probes `[30, 9, 2, 0.5]` with `{"rounds": 2}` build `[100, 30]` and return 9; the same probes with `{"drop": 10}` stop after the first probe (30 > 100/10); `{"drop": 2}` on `[40, 15]` rebuilds once where the default stops; the harness records `tol` and `maxit` of every LOBPCG round and `maxit` of `sigma_estimate` (`estimate_maxit`). On a real mesh: `{"maxit": 1}` gives `sigma_iterations == 1` on the clamped box (default 4); a free hex20 box with `{"estimate_maxit": 3}` passes `maxit=3` to `sigma_estimate` (spy).
+4. **Validation**: an unknown key in each dict raises `ValueError` naming it and listing the allowed keys; `slab` on an unstructured mesh, `max_coarse` with gmg, any key with jacobi, `mass` in `operator_options` (message points to the keyword), `sigma_options` with `sigma=` or `precond="jacobi"` raise; bad values: `ratio` 1 and −1 (gmg, amg), `max_coarse` 0 and 2.5, each `sigma_options` key at its invalid boundary (`tol` 0, `maxit`/`rounds`/`estimate_maxit` 0, `drop` 1) raise `ValueError` matching the key.
+5. **`solve_modes_memory`**: `operator_options={"mode": "otf"}` equals the composition with `unstructured_memory(..., mode="otf")`, and the measured AMG step with otf (hex20 $8^3$) is within it; `slab` on a voxel mesh likewise; `amg_memory`'s storage ≥ the owned device bytes at `max_coarse` 100 and 3000 (hex20 $12^3$), and its coarse term follows `max_coarse`; `{"degree": 4}` is accepted, leaves the estimate unchanged, and the measured AMG step at degree 4 (hex20 $8^3$) is within it; unknown keys raise.
+6. **Option sets pinned to signatures**: for `unstructured`, `stencil`, `gmg`, `amg`, `jacobi`, `lobpcg`, `_precond_sigma`: the keyword parameters of `inspect.signature` minus an explicit reserved set (positional inputs, top-level keywords, `dtype`, `nonsingular`, `aggregates`, `return_aggregates`, the `lobpcg` keywords `solve_modes` forwards) equal the allowed set.
+7. **Chebyshev loop**: the `fori_loop` form equals an unrolled NumPy reference to $10^{-14}$ relative (degrees 1–5, block Jacobi on hex20 $4^3$); V-cycle temporaries (`memory_analysis`) at degree 4 ≤ those at degree 2 (AMG hex20 $8^3$, GMG voxel $16^3$); `chebyshev(..., ratio=1.0)` raises.
 
 ## Docs
 
-- `docs/eigensolvers.md`: "Options" section with the full table (option, component, default, why robust, measured basis), the option dicts, an example; the tests list.
-- `README.md`: the solve example gains one line with `operator_options` / `precond_options`.
-- `docs/ROADMAP.md`: PR 13c row (user request, inserted before PR 14) and status line.
-- `docs/open_items.md`, decisions without user input: option dicts rather than flat keywords (name clash of `chunk`, keeps the signature stable as components gain options); `nonsingular`, `dtype` and aggregate reuse not in the dicts; memory estimates at default precond settings.
+- `docs/eigensolvers.md`: the "Options" section (Design 5) with an example; the "Public API" signature and the `solve_modes_memory` signature updated; X0 semantics; the tests list.
+- `docs/operators.md` (`mode`, `path`, `chunk`, `range_nodes`, `slab`) and `docs/preconditioners.md` (`degree`, `coarse_degree`, `ratio`, `max_coarse`; the Chebyshev loop note and memory consequence): one line each pointing to `eigensolvers.md#options`.
+- `README.md`: one small, fast example (a $4^3$ box; `tests/test_readme.py` runs it) with `operator_options` / `precond_options`.
+- `docs/ROADMAP.md`: a `### PR 13c` section (user request, inserted before PR 14), a row in the dependency table (13c depends on 13b), a sentence in PRs 14–15 that their new options follow the same pattern, the 13b deferred GPU item's otf fallback written as `operator_options={"mode": "otf"}`, and the status line.
+- `docs/open_items.md`, decisions without user input: option dicts rather than flat keywords (the `chunk` clash; a stable signature); the unexposed options and why (Facts); `AMG_STEP` calibrated at `max_coarse` 1000; the 13b otf fallback wording.
+- The `solve_modes` and `solve_modes_memory` docstrings.
 
 ## Not covered
 
-- Passing a pre-built operator or preconditioner object to `solve_modes` (the building blocks already compose; revisit if a user needs it).
+- Passing a pre-built operator or preconditioner object to `solve_modes` (the building blocks compose; revisit if a user needs it).
 - New defaults: none change.
+- `solve_modes_memory` with `sigma_options` / `X0` (Design 3).
+
+## Review log
+
+Round 1 (5 reviewers, none satisfied; blocking from tests: two `sigma_options` tests could not fail): `rounds`/`drop`/`tol`/`maxit`/`estimate_maxit` now tested on the scripted harness plus real-mesh effects; option sets pinned to builder signatures; value validation added (`ratio`, `max_coarse`, `sigma_options`; the claim that builders validate everything was false); Chebyshev as `fori_loop` so the degree no longer grows memory (measured +4.7 blocks per step unrolled); `max_coarse` modelled in `amg_memory`; `X0` semantics stated and tested (first chunk, ≤ block size, deflated); `seed` forwarded to the pre-estimate; docs list completed (operators.md, preconditioners.md, both signatures, ROADMAP section and dependency row); defaults table cites final σ values and the measured better non-defaults.
