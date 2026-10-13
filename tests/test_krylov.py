@@ -12,6 +12,7 @@ from helpers import box, rhs
 from jax.tree_util import Partial
 
 from jaxmodal.linalg import minres, pcg
+from jaxmodal.linalg.krylov import CHECK, STALL_C
 from jaxmodal.operators import a_p, ap_operator, restrict
 from jaxmodal.precond import block_jacobi, chebyshev, jacobi, lmax_estimate
 
@@ -127,6 +128,22 @@ def test_minres_stall_count():
     x, info = minres(A, b, None, 1e-300, 1000)
     assert info["stagnated"].all() and (np.asarray(info["iterations"]) == 60).all()
     assert np.abs(np.asarray(x) - b / A.args[0][:, None]).max() <= 1e-15
+
+
+def test_minres_best():
+    """With sigma on an eigenvalue MINRES stagnates and its explicit 2-norm residual drifts up
+    after the minimum: the best iterate is returned, no worse than a run stopped at that
+    minimum (one column: the same iterates for any maxit)."""
+    op, free, K, M, lam = box()
+    A, P = ap_operator(op, free, -lam[2]), jacobi(op, free, lam[2])
+    b = rhs(free, 1)
+    x, info = run(minres, A, b, P, 1e-8, maxit=20000)
+    its = int(info["iterations"][0])
+    assert info["stagnated"].all() and info["residuals"][0] > 1e-3
+    r = np.linalg.norm(b - np.asarray(A(jnp.asarray(x)))) / np.linalg.norm(b)
+    assert r == pytest.approx(info["residuals"][0], rel=1e-12)
+    _, early = run(minres, A, b, P, 1e-8, maxit=its - (1 + STALL_C) * CHECK + CHECK)
+    assert info["residuals"][0] <= early["residuals"][0]
 
 
 def test_minres_exits():

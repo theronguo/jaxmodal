@@ -450,13 +450,14 @@ def band_probe_block(mesh, bcs, n_modes, n_probes, host_bytes, *, n_rigid, **opt
 
 
 # Shift-invert slice (docs/eigensolvers.md#shift-invert-slices), memory_analysis fits (b = 6
-# and 12, c = 24): MINRES with Jacobi: workspace + 14.5 blocks of width b (12.9-14.4 at hex20
-# 20^3-32^3 and voxel 48^3-80^3; up to 17.3 on small voxel grids, 15k-108k DOF), plus its
-# right-hand side and solution; a multigrid adds at most its `count` term (0.5-0.96 of it).
+# and 12, c = 24): MINRES with Jacobi: workspace + 15.5 blocks of width b (13.9-15.4 at hex20
+# 20^3-32^3 and voxel 48^3-80^3; up to 18.3 on small voxel grids, 15k-108k DOF; including the
+# best iterate), plus its right-hand side and solution; a multigrid adds at most its `count` term
+# (0.5-0.96 of it).
 # Reorthogonalization: workspace + 4 blocks. Ritz residuals (width b, the basis read in chunks of
 # c): workspace + 6 blocks + 1 chunk (4.0-5.3 blocks at 107k-1.6M DOF; 11 on the voxel 32^3
 # grid, where the slab workspace appears twice).
-SI_MINRES = 16.5
+SI_MINRES = 17.5
 SI_REORTHO = 4.0
 SI_RITZ = 6.0
 
