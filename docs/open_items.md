@@ -119,6 +119,18 @@ The measured setup peak per corner DOF grows about 0.65 kB per decade of $n_c$ (
 - **The final chunk's re-orthonormalization is defensive:** at test sizes $\max|W^\top M W - I|$ is the same with and without it (3.8e-15 vs 4.2e-15 fp64, 7.5e-9 vs 7.7e-9 fp32, 3 chunks); it guards against the drift PR 9b measured after about 20 chunks.
 - **$\tau_c$ still open (carried over from PR 14a, needs your input):** the band count uses the roadmap's $\tau_c$; loosening it would cut about a third of the counting cost.
 
+### PR 15a decisions without user input
+
+- **PR 15 split into 15a / 15b / 15c** (the one-slice solver; the band-pass count and restarts; slicing, strategy choice and `band=(f1, f2)`), every roadmap PR 15 test assigned to one part (`docs/plans/pr-15a-shift-invert.md`).
+- **Ritz pairs by Rayleigh–Ritz on (K, M)** over the shift-invert Krylov basis, not from the inexact projected $T$ (whose residuals exceeded $10\tau\delta$ and grew with the basis); the roadmap's "final Rayleigh–Ritz" is the last step's, with true residuals recomputed on the compact V. No implicit restarts: 15c splits a full slice.
+- **Per-pair thresholds** $t_i = \max(tol, 10\tau_\text{eff}\delta_i, \text{round-off floor})$ and $r_{acc} = \max t_i$ over the in-slice pairs and the neighbours (the roadmap's $r_{acc}$ plus LOBPCG's floor term and the neighbours, so never below the roadmap's value).
+- **σ at the slice midpoint** (or given), moved once by 1% of the width when the first solve stagnates above $10^3\max(\tau, 10^{-10})$ (the plan said $10^3\tau$; the floor term keeps a τ below the fp64 MINRES floor from moving σ); $\tau_\text{eff} > 10^{-4}$ or a non-finite MINRES residual ends the slice as "inner solves failed".
+- **τ_eff** = the running max of the stagnated or capped columns' final residuals; later inner solves capped at 10× the first step's iterations (the first step at the σ used).
+- **`capacity` is required** (no default allocation); 15c sets it from `si_memory` and the budget. The basis also stops at the free space left by R and W (beyond it new columns are round-off noise).
+- **`lam` holds the converged `inside` set**, which extends 100 $r_{acc}$ past each edge and over clusters straddling one (the plan's "in $[\lambda_{lo}, \lambda_{hi}]$" read with its own 100 r window); 15c's duplicate removal handles the overlap.
+- **`si_memory`** counts the build on top of the full storage plus a host term (as `lobpcg_memory`), and takes the expected slice count `n_modes` for its end phase.
+- **Cost driver:** the depth of σ in the spectrum, not δ, sets the MINRES iterations (measured); 15c fits its cost model on depth (roadmap note on the two cost-model bullets).
+
 ### GMG restriction on the GPU (PR 11 deferred GPU checks)
 
 Restriction is the transpose of gathers, i.e. scatter-adds (6× the prolongation time on CPU at $87^3$). Default: keep; listed in the deferred GPU checks with "rewrite as gathers if it dominates".

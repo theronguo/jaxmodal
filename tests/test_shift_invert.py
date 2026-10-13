@@ -138,6 +138,10 @@ def check(name, lo, hi, lam, V, info, *, steps=True):
     assert (info["thresholds"] <= info["r_acc"]).all()
     nb = [info["neighbours"][e] for e in ("lo", "hi") if info["neighbours"][e] is not None]
     assert len(nb) == (1 if lo == 0 else 2)
+    f = np.flatnonzero(free)
+    for x, v in nb:  # converged: the true residual within r_acc
+        Mv = (M @ v)[f]
+        assert np.linalg.norm((K @ v)[f] - x * Mv) <= 1.01 * info["r_acc"] * x * np.linalg.norm(Mv)
     t_nb = [10 * info["tau_eff"] * abs(x - info["sigma"]) / x for x, _ in nb]
     # Test 10 (real slice): the neighbours' larger delta sets r_acc above every inside t_i
     assert info["r_acc"] == pytest.approx(max(info["thresholds"].max(initial=0), *t_nb), rel=1e-6)
@@ -181,6 +185,9 @@ def test_free_body():
     check("free", lo, hi, lam, V, info)
     M, R = prob("free")[4], np.asarray(prob("free")[5])
     assert np.abs(V.T @ (M @ R)).max() <= 1e-10
+    lo, hi = edges(lr, 0, 3)  # from 0: undeflated rigid Ritz values would land inside
+    lam, V, info = solve("free", lo, hi)
+    check("free", lo, hi, lam, V, info)
 
 
 def clusters(lam, rtol=1e-8):
@@ -221,8 +228,8 @@ def test_edge_cluster():
     lr = prob("cube")[6]
     g = next(g for g in clusters(lr) if len(g) == 2 and g[0] > 0)
     lo = (lr[g[0] - 1] + lr[g[0]]) / 2
-    hi = lr[g[0]] * (1 + 1e-12)  # between the copies (relative gap < 1e-8)
-    assert lr[g[0]] <= hi < lr[g[1]] or lr[g[1]] - lr[g[0]] < 1e-12 * lr[g[0]]
+    hi = (lr[g[0]] + lr[g[1]]) / 2  # between the copies (relative gap about 1e-15)
+    assert lr[g[0]] < hi < lr[g[1]]
     lam, V, info = solve("cube", lo, hi)
     assert info["converged"] and len(lam) == 2
     assert np.abs(lam - lr[g]).max() <= 1e-8 * lr[g[0]]
@@ -286,12 +293,11 @@ def test_tau_eff(monkeypatch):
     monkeypatch.setattr(si, "minres", spy)
     lam, V, info = solve("short", lo, hi, tau=1e-16)
     check("short", lo, hi, lam, V, info, steps=False)
-    calls = spy.calls[info["sigma_moved"] :]  # a move (stagnation above 1e3 tau) repeats step 1
-    bad = [c[1]["residuals"][c[1]["stagnated"] | ~c[1]["converged"]] for c in calls]
+    assert not info["sigma_moved"]  # the floor stays below 1e3 TAU_MIN
+    bad = [c[1]["residuals"][c[1]["stagnated"] | ~c[1]["converged"]] for c in spy.calls]
     assert info["tau_raised"] and info["tau_eff"] == max(x.max(initial=0) for x in bad) > 1e-16
-    its = int(calls[0][1]["iterations"].max())
-    assert {c[0] for c in spy.calls[: len(spy.calls) - len(calls) + 1]} == {20000}
-    assert {c[0] for c in calls[1:]} == {min(20000, 10 * its)}
+    its = int(spy.calls[0][1]["iterations"].max())
+    assert spy.calls[0][0] == 20000 and {c[0] for c in spy.calls[1:]} == {min(20000, 10 * its)}
     assert info["inner_cap"] == min(20000, 10 * its) and not info["inner_maxit"]
     spy = Spy()
     monkeypatch.setattr(si, "minres", spy)
@@ -336,11 +342,12 @@ def test_slice_sets():
     """Test 10: chains across both edges (one past hi (1 + 100 r)), the neighbours beyond them
     with gaps >= 100 r, lo = 0, a missing neighbour, an empty slice."""
     r = 1e-6
+    mu = np.array([1.0, 1.9, 1.9997, 1.99985, 3.0, 4.0003, 4.0006, 5.0])
+    inside, below, above = si._slice_sets(mu, 2.0, 4.0, r)
+    # 1.99985 and 4.0003 are inside only through the 100 r margins; 1.9997 and 4.0006 (past
+    # hi (1 + 100 r)) only through chains
+    assert list(inside) == [2, 3, 4, 5, 6] and below == 1 and above == 7
     mu = np.array([1.0, 1.9, 2.0, 2.0001, 3.0, 4.0, 4.0001, 4.0002, 5.0])
-    inside, below, above = si._slice_sets(mu, 2.00005, 4.00005, r)
-    # 2.0 is within 100 r of 2.0001 (chain), 4.0002 past hi (1 + 100 r) but chained
-    assert list(inside) == [2, 3, 4, 5, 6, 7] and below == 1 and above == 8
-    assert mu[2] - mu[1] >= 100 * r * mu[1] and mu[8] - mu[7] >= 100 * r * mu[7]
     inside, below, above = si._slice_sets(mu, 0.0, 2.5, r)
     assert list(inside) == [0, 1, 2, 3] and below is None and above == 4
     inside, below, above = si._slice_sets(mu, 4.5, 6.0, r)
@@ -363,14 +370,15 @@ def test_slice_check():
     t = {i: 1e-8 for i in range(5)}
     ok = {i: 1e-9 for i in range(6)}
     asked = []
-    done, inside, below, above, r_acc = si._slice_check(mu, 1.5, 3.5, 1e-8, fake(ok, t, asked))
+    done, inside, below, above, r_acc, res = si._slice_check(mu, 1.5, 3.5, 1e-8, fake(ok, t, asked))
+    assert sorted(res) == [0, 1, 2, 3] and res[3] == (1e-9, 1e-8)
     assert done and list(inside) == [1, 2] and (below, above) == (0, 3) and r_acc == 1e-8
     assert sorted(asked[0]) == [0, 1, 2, 3]
     for i, args in ((1, (1.5, 3.5)), (3, (1.5, 3.5))):  # unconverged inside pair / neighbour
         r = ok | {i: 1e-7}
         assert not si._slice_check(mu, *args, 1e-8, fake(r, t, []))[0]
     assert not si._slice_check(mu, 4.5, 6.0, 1e-8, fake(ok, t, []))[0]  # no upper neighbour
-    done, _, below, _, _ = si._slice_check(mu, 0.0, 2.5, 1e-8, fake(ok, t, []))
+    done, _, below, *_ = si._slice_check(mu, 0.0, 2.5, 1e-8, fake(ok, t, []))
     assert done and below is None  # lo = 0
     done, inside, *_ = si._slice_check(mu, 2.2, 2.8, 1e-8, fake(ok, t, []))
     assert done and len(inside) == 0  # empty slice
@@ -379,14 +387,16 @@ def test_slice_check():
     mu = np.array([1.0, 2.0, 3.0, 3.1, 5.0])
     t = {0: 1e-8, 1: 1e-8, 2: 1e-8, 3: 1e-3, 4: 1e-8}
     asked = []
-    done, inside, below, above, r_acc = si._slice_check(mu, 1.5, 3.05, 1e-8, fake(ok, t, asked))
+    done, inside, below, above, r_acc, _ = si._slice_check(mu, 1.5, 3.05, 1e-8, fake(ok, t, asked))
     assert done and list(inside) == [1, 2, 3] and above == 4 and r_acc == 1e-3
     assert asked == [[1, 2, 0, 3], [4]]
-    # a chain of re-forms: each merge brings a larger threshold until the set stops growing
-    mu = np.array([1.0, 2.0, 3.0, 3.001, 3.05, 10.0])
-    t = {0: 1e-8, 1: 1e-8, 2: 1e-8, 3: 1e-4, 4: 1e-3, 5: 1e-8}
-    done, inside, _, above, r_acc = si._slice_check(mu, 1.5, 3.0005, 1e-8, fake(ok, t, []))
-    assert list(inside) == [1, 2, 3, 4] and above == 5 and r_acc == 1e-3 and done
+    # a chain of re-forms: each merge brings a larger threshold until the set stops growing;
+    # at r = 1e-3 the window ends at 3.30055 and 3.32 joins only through the chain from 3.3
+    mu = np.array([1.0, 2.0, 3.0, 3.001, 3.05, 3.3, 3.32, 10.0])
+    t = {i: 1e-8 for i in range(8)} | {3: 1e-4, 4: 1e-3}
+    ok = {i: 1e-9 for i in range(8)}
+    done, inside, _, above, r_acc, _ = si._slice_check(mu, 1.5, 3.0005, 1e-8, fake(ok, t, []))
+    assert list(inside) == [1, 2, 3, 4, 5, 6] and above == 7 and r_acc == 1e-3 and done
 
 
 # ---------------------------------------------------------------- 11-14
@@ -398,11 +408,14 @@ def test_capacity_full():
     lambda_1 / 2: edge_unreached "lo"."""
     lr = prob("short")[6]
     lo, hi = edges(lr, 8, 20)
-    lam, V, info = solve("short", lo, hi, capacity=24)
-    assert not info["converged"] and info["capacity_full"] and info["reason"] == "capacity full"
-    assert info["edge_unreached"] in (None, "lo", "hi", "both")
-    for x in lam:
-        assert np.abs(lr - x).min() <= 10 * info["r_acc"] * x
+    for cap, n_conv in ((48, 2), (72, 11)):  # 12 modes; capacity rounds up to the chunk 24
+        lam, V, info = solve("short", lo, hi, capacity=cap)
+        assert not info["converged"] and info["capacity_full"]
+        assert info["reason"] == "capacity full" and info["basis"] == cap
+        assert len(lam) == n_conv and info["edge_unreached"] == "both"
+        assert info["neighbours"] == {"lo": None, "hi": None}
+        for x in lam:
+            assert np.abs(lr - x).min() <= 10 * info["r_acc"] * x
     lt = prob("tiny")[6]
     lo, hi = (lt[-2] + lt[-1]) / 2, lt[-1] * 2
     lam, V, info = solve("tiny", lo, hi, sigma=lt[-1] * 1.02, capacity=48)
@@ -410,6 +423,32 @@ def test_capacity_full():
     assert len(lam) == 1 and abs(lam[0] - lt[-1]) <= 1e-8 * lt[-1]
     lam, V, info = solve("short", lr[0] / 4, (lr[1] + lr[2]) / 2, capacity=60)
     assert info["capacity_full"] and info["edge_unreached"] == "lo"
+    assert info["neighbours"]["lo"] is None and info["neighbours"]["hi"] is not None
+    # a capacity above the free space (54 DOFs): the basis stops at the full space, where the
+    # Rayleigh-Ritz is exact
+    lo, hi = (lt[-5] + lt[-4]) / 2, lt[-1] * 2
+    lam, V, info = solve("tiny", lo, hi, capacity=72)
+    assert info["capacity_full"] and info["basis"] == 54 and info["edge_unreached"] == "hi"
+    assert np.abs(lam - lt[-4:]).max() <= 1e-8 * lt[-1]
+
+
+def test_failed_solves(monkeypatch):
+    """A non-finite MINRES residual stops the slice ("inner solves failed"); a final residual
+    pass above the thresholds makes it unconverged."""
+
+    def nan(A, b, P, tol, maxit, x, info):
+        return x, info | dict(residuals=info["residuals"].at[0].set(jnp.nan))
+
+    lr = prob("short")[6]
+    lo, hi = edges(lr, 8, 12)
+    monkeypatch.setattr(si, "minres", Spy(nan))
+    lam, V, info = solve("short", lo, hi)
+    assert not info["converged"] and info["reason"] == "inner solves failed" and len(lam) == 0
+    monkeypatch.setattr(si, "minres", minres)
+    real = si._v_chunk
+    monkeypatch.setattr(si, "_v_chunk", lambda *a: (lambda r, t: (1e3 * r, t))(*real(*a)))
+    lam, V, info = solve("short", lo, hi)
+    assert not info["converged"] and info["reason"] is None
 
 
 def test_deflation():
@@ -545,18 +584,11 @@ def test_peak(case):
     if case == "minres":
         assert e["minres"] >= max(e["ritz"], e["end"], 1.25 * gmg_memory(mesh, 6)["build"])
     else:
-        assert v_basis(n, cap) >= 0.6 * e["total"]
-    sub = {"LO8": repr(lo), "HI8": repr(hi), "CAP": str(cap)}
-    setup = PEAK_SETUP
-    for a, v in sub.items():
-        setup = setup.replace(a, v)
+        assert 8 * n * cap >= 0.6 * e["total"]
+    setup = PEAK_SETUP.replace("LO8", repr(lo)).replace("HI8", repr(hi)).replace("CAP", str(cap))
     peak = harness.measure(f"run({s}, {lo!r}, {hi!r}, {cap})", setup)["peak_bytes"]
     print(f"si {case} {s}^3 cap {cap}: estimate {e['total'] / 1e9:.2f} GB, peak {peak / 1e9:.2f}")
     assert e["total"] >= 2e9 and abs(e["total"] - peak) <= 0.2 * peak
-
-
-def v_basis(n, cap):
-    return 8 * n * cap
 
 
 FORM_V = """
@@ -578,8 +610,10 @@ def test_form_v_peak():
     columns, within 20% of basis + host V + one chunk."""
     from benchmarks import harness
 
-    n, cap, k = 1_500_000, 120, 150
-    model = OVERHEAD + 8 * n * (cap + k + 24)
+    n, cap, k = 800_000, 240, 150
+    zero = lambda m: dict(storage=0, workspace=0, build=0, overhead=OVERHEAD)  # noqa: E731
+    e = si_memory(zero, n, cap, k - 2)  # end: host V of k columns and one chunk
+    model = OVERHEAD + e["storage"] + e["end"]
     setup = FORM_V.replace("N", str(n)).replace("CAP", str(cap))
     code = "Q = jax.random.normal(jax.random.key(1), (n, cap)); V = _form_v(Q, 0, Y, 24)"
     peak = harness.measure(code, setup)["peak_bytes"]

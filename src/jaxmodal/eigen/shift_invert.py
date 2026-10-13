@@ -16,7 +16,8 @@ from .counting import _check_ortho
 from .lobpcg import _K, _M, C_FLOOR, _deflate, _insert, _norms, _resid, _svqb_t
 
 SIGMA_MOVE = 0.01  # sigma moves by this fraction of the slice width when it hits an eigenvalue
-STAGNATION = 1e3  # first-solve residual (relative to tau) above which sigma moves
+STAGNATION = 1e3  # first-solve residual (relative to max(tau, TAU_MIN)) above which sigma moves
+TAU_MIN = 1e-10  # above the fp64 MINRES floor (about 1e-13), so a tiny tau does not move sigma
 INNER_GROWTH = 10  # later inner solves are capped at this multiple of the first one
 TAU_FAIL = 1e-4  # tau_eff above this ends the slice ("inner solves failed")
 REFILLS = 3  # random refills of dropped columns before a breakdown error
@@ -71,8 +72,7 @@ def _combine(Q, L0, k, Yc, c):
 @functools.partial(jax.jit, static_argnames="c")
 def _ritz(Q, L0, k, Yc, lam, op, m, consts, c):
     """Residuals and round-off thresholds of the Ritz vectors Q_L Yc (lobpcg._resid)."""
-    X = _combine(Q, L0, k, Yc, c)
-    return _resid(X, _K(op, m, X), _M(op, m, X), lam, consts)
+    return _explicit(_combine(Q, L0, k, Yc, c), lam, op, m, consts)
 
 
 @jax.jit
@@ -123,11 +123,9 @@ def _v_chunk(V, op, m, consts, cols, lam):
     return _explicit(jnp.asarray(X), lam, op, m, consts)
 
 
-def _cands(f, mu, b, sigma, tau_eff, cache, idx):
-    """_slice_check's resid: (r, t) of the Ritz pairs idx, also stored in cache."""
-    rr, tt = _chunked(f, idx, mu[idx], b, sigma, tau_eff)
-    cache.update(zip(idx.tolist(), zip(rr, tt, strict=True), strict=True))
-    return rr, tt
+def _cands(f, mu, b, sigma, tau_eff, idx):
+    """_slice_check's resid: (r, t) of the Ritz pairs idx."""
+    return _chunked(f, idx, mu[idx], b, sigma, tau_eff)
 
 
 def _slice_sets(mu, lo, hi, r):
@@ -148,10 +146,11 @@ def _slice_sets(mu, lo, hi, r):
 
 
 def _slice_check(mu, lo, hi, r, resid):
-    """(done, inside, below, above, r_acc): the sets of mu at r, re-formed with r = r_acc while
+    """(done, inside, below, above, r_acc, res): the sets of mu at r, re-formed with r = r_acc while
     r_acc (the largest threshold over the candidates, inside plus the neighbours) exceeds r.
     resid(idx) returns (residuals, thresholds) of the new candidate indices idx. done: every
-    candidate converged, every needed neighbour present and r_acc <= r."""
+    candidate converged, every needed neighbour present and r_acc <= r. res: {index: (r, t)}
+    of every candidate evaluated."""
     res = {}
     while True:
         inside, below, above = _slice_sets(mu, lo, hi, r)
@@ -164,7 +163,7 @@ def _slice_check(mu, lo, hi, r, resid):
         if r_acc <= r:
             ok = all(res[i][0] <= res[i][1] for i in cand)
             need = above is not None and (lo == 0 or below is not None)
-            return ok and need, inside, below, above, r_acc
+            return ok and need, inside, below, above, r_acc, res
         r = r_acc
 
 
@@ -183,7 +182,8 @@ def si_slice(
     Lanczos columns (rounded up to a multiple of the chunk width), the only resource limit.
     Pair i is accepted at r_i <= t_i = max(tol, 10 tau_eff delta_i, round-off floor).
 
-    Returns lam (ascending, the slice's modes), V (host fp64, M-orthonormal) and info:
+    Returns lam (ascending: the converged pairs in [lo, hi] widened by 100 r_acc and over
+    clusters straddling an edge), V (host fp64, M-orthonormal) and info:
     converged, reason, sigma, sigma_moved, steps, basis, minres_iterations, inner_cap,
     inner_maxit, tau_eff, tau_raised, r_acc, delta_max, residuals, thresholds, neighbours
     ({"lo": (lam, v) or None, "hi": ...}), capacity_full, edge_unreached, time."""
@@ -227,32 +227,38 @@ def si_slice(
     nK, nM = map(float, _norms(op, m, m * jax.random.normal(sub, (n, 1))))
     consts = jnp.array([nK, nM, tol, C_FLOOR])
 
-    def extend(Y, key):  # orthonormal new block, dropped columns refilled with random ones
+    n_avail = int(free.sum()) - R.shape[1] - nw  # the Krylov space cannot grow beyond it
+    limit = min(capacity, n_avail)
+
+    def add(Y, key):  # append the new block, dropped columns refilled with random ones
+        nonlocal Q, k
         filled = jnp.asarray(L0 + k, jnp.int32)
         for i in range(REFILLS + 1):
             Y, keep = _extend(m * Y, op, m, R, MR, Q, filled, c=c)
             if keep.all():
-                return Y, key
+                break
             if i == REFILLS:
                 raise RuntimeError(f"Lanczos block still rank-deficient after {REFILLS} refills")
             key, sub = jax.random.split(key)
             Y = jnp.where(keep, Y, _random_block(sub, n, b))
+        Q, g = _append(Q, Y, op, m, jnp.asarray(L0, jnp.int32), jnp.asarray(k, jnp.int32), c=c)
+        G[: k + b, k : k + b] = np.asarray(g[: k + b])
+        G[k : k + b, :k] = G[:k, k : k + b].T
+        k += b
+        return key
 
     k = 0  # Lanczos columns
     G = np.zeros((capacity, capacity))
     key, sub = jax.random.split(key)
-    Y, key = extend(_random_block(sub, n, b), key)
-    Q, g = _append(Q, Y, op, m, jnp.asarray(L0, jnp.int32), jnp.asarray(k, jnp.int32), c=c)
-    G[: k + b, k : k + b] = np.asarray(g[: k + b])
-    k += b
+    key = add(_random_block(sub, n, b), key)
     A = ap_operator(op, free, -sigma)
     tau_eff, r = tau, tol
     iters, cap, moved, inner_maxit, reason = [], maxit_inner, False, False, None
     seen = {"lo": lo == 0, "hi": False}
     times = dict(setup=time.perf_counter() - t0, minres=0.0, ortho=0.0, ritz=0.0)
-    done, sets, last = False, None, None
+    done, last = False, None
     while True:
-        if k + b > capacity:
+        if k + b > limit:
             reason = "capacity full"
             break
         t = time.perf_counter()
@@ -263,7 +269,11 @@ def si_slice(
         capped = ~np.asarray(inf["converged"]) & ~np.asarray(inf["stagnated"])
         bad = np.asarray(inf["stagnated"]) | capped
         times["minres"] += time.perf_counter() - t
-        if not iters and not moved and bad.any() and res[bad].max() > STAGNATION * tau:
+        if not np.isfinite(res).all():
+            reason = "inner solves failed"
+            break
+        stag = STAGNATION * max(tau, TAU_MIN)
+        if not iters and not moved and bad.any() and res[bad].max() > stag:
             sigma += SIGMA_MOVE * (hi - lo)  # sigma on an eigenvalue: move once, repeat
             A, moved = ap_operator(op, free, -sigma), True
             continue
@@ -277,22 +287,22 @@ def si_slice(
             reason = "inner solves failed"
             break
         t = time.perf_counter()
-        Y, key = extend(X, key)
-        Q, g = _append(Q, Y, op, m, jnp.asarray(L0, jnp.int32), jnp.asarray(k, jnp.int32), c=c)
-        G[: k + b, k : k + b] = np.asarray(g[: k + b])
-        G[k : k + b, :k] = G[:k, k : k + b].T
-        k += b
+        key = add(X, key)
         times["ortho"] += time.perf_counter() - t
         t = time.perf_counter()
         mu, Yr = np.linalg.eigh((G[:k, :k] + G[:k, :k].T) / 2)
-        cache = {}
         f = functools.partial(_ritz_chunk, Q, L0, k, Yr, op, m, consts, c)
-        resid = functools.partial(_cands, f, mu, b, sigma, tau_eff, cache)
-        done, inside, below, above, r = _slice_check(mu, lo, hi, r, resid)
-        for name, i in (("lo", below), ("hi", above)):
-            if i is not None and cache[i][0] <= cache[i][1]:
-                seen[name] = True
-        sets, last = (inside, below, above), (mu, Yr, cache)
+        resid = functools.partial(_cands, f, mu, b, sigma, tau_eff)
+        done, inside, below, above, r, cres = _slice_check(mu, lo, hi, r, resid)
+        ok = [i for i in (*inside, below, above) if i is not None and cres[i][0] <= cres[i][1]]
+        seen["lo"] |= below in ok
+        seen["hi"] |= above in ok
+        last = (
+            mu,
+            Yr,
+            [i for i in inside if i in ok],
+            [(e, i) for e, i in (("lo", below), ("hi", above)) if i in ok],
+        )
         times["ritz"] += time.perf_counter() - t
         if done:
             break
@@ -301,25 +311,17 @@ def si_slice(
     nb = {"lo": None, "hi": None}
     converged = done
     if last is not None:
-        mu, Yr, cache = last
-        inside, below, above = sets
-        acc = [i for i in inside if cache[i][0] <= cache[i][1]]
-        nbs = [
-            (name, i)
-            for name, i in (("lo", below), ("hi", above))
-            if i is not None and cache[i][0] <= cache[i][1]
-        ]
+        mu, Yr, acc, nbs = last
         sel = acc + [i for _, i in nbs]
         Vs = _form_v(Q, L0, Yr[:, sel], c) if sel else np.zeros((n, 0))
-        Q = None
-        f = functools.partial(_v_chunk, Vs, op, m, consts)
-        rr, tt = _chunked(f, np.arange(len(sel)), mu[sel], b, sigma, tau_eff)
+        del f, resid, Q  # release the basis before the residual pass
+        g = functools.partial(_v_chunk, Vs, op, m, consts)
+        rr, tt = _chunked(g, np.arange(len(sel)), mu[sel], b, sigma, tau_eff)
         na = len(acc)
         converged = done and bool((rr[:na] <= tt[:na]).all())
-        lam_out, V, res_out, thr_out = mu[acc], Vs[:, :na], rr[:na], tt[:na]
+        lam_out, V, res_out, thr_out = mu[acc], Vs[:, :na].copy(), rr[:na], tt[:na]
         for j, (name, i) in enumerate(nbs):
-            nb[name] = (float(mu[i]), Vs[:, na + j])
-    Q = None
+            nb[name] = (float(mu[i]), Vs[:, na + j].copy())
     unreached = [e for e in ("lo", "hi") if not seen[e]]
     delta = np.abs(lam_out - sigma) / np.abs(lam_out) if len(lam_out) else np.zeros(0)
     info = dict(
@@ -340,7 +342,7 @@ def si_slice(
         thresholds=thr_out,
         neighbours=nb,
         capacity_full=reason == "capacity full",
-        edge_unreached=(unreached or [None])[0] if len(unreached) < 2 else "both",
+        edge_unreached="both" if len(unreached) == 2 else (unreached + [None])[0],
         time=times,
     )
     return lam_out, V, info

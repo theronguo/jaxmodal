@@ -466,7 +466,8 @@ def si_memory(
 ):
     """Estimated peak bytes of si_slice(...) with `capacity` Lanczos columns, expecting at most
     n_modes modes in the slice (the end phase assumes it). op_memory, precond_memory: m -> the
-    operator / preconditioner estimate (as lobpcg_memory); n_deflate: columns of W.
+    operator / preconditioner estimate (as lobpcg_memory); n_rigid: columns of R (R and M R are
+    stored); n_deflate: columns of W.
 
     Returns storage (operator, preconditioner, basis, R and M R), host (W's host copy and the
     projected matrix), the phases minres, reortho, ritz, end, and

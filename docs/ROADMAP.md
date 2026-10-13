@@ -536,6 +536,7 @@ Split into three parts with unchanged acceptance criteria: **8a** the reference 
   - [14a] The probe covariance Σ_e F_e F_eᵀ assembled (plus nodal masses, masked) equals the masked SciPy M to 1e-12.
 
 ### PR 15: Interior bands
+- Split (PR 15a plan, `docs/plans/pr-15a-shift-invert.md`): **15a** is the block shift-invert Lanczos solver for one slice (`eigen/shift_invert.py`: inner MINRES rules, τ_eff, r_acc, the slice stop rule), the measured MINRES cost and floor (`benchmarks/shift_invert_study.py`) and the slice memory model `si_memory`; **15b** is the band-pass count (two-edge polynomial, neighbour deflation) and the slice restarts; **15c** is slicing with the cost model (widths, edge snapping, capacity splits, edge re-check, duplicate removal, slice collapse), the strategy choice and `solve_modes(..., band=(f1, f2))`. Tests are tagged [15a] / [15b] / [15c]; none is dropped.
 - Contents:
   - Lanczos basis capacity per slice from the PR 15 memory model; a slice that fills it before the stop rule holds is split at its largest gap; a full slice without a gap ≥ 100·r_acc raises (test: a forced small capacity splits the slice and still matches `eigsh`).
   - Block shift-invert Lanczos (b = 6) with MINRES inner solves, also used for [0, f_max] when the LOBPCG-from-0 basis does not fit.
@@ -546,22 +547,22 @@ Split into three parts with unchanged acceptance criteria: **8a** the reference 
   - `band=(f1, f2)`.
 - Docs: `docs/eigensolvers.md` (memory model for many modes, cost-model calibration, measured MINRES floor).
 - Tests:
-  - Matches SciPy `eigsh(sigma=...)` to relative error ≤ max(1e-8, 10·ε·λ̂_max/λ) for clusters with relative gap ≥ 1e-2 (others within 10·r_acc, multiplicities equal).
-  - An interior band strictly between two well-separated modes returns 0 modes with count < 0.5; with a mode planted in that band and left out of V, the count is ≥ 0.5.
-  - A clamped model with band (0, f_max) forced onto shift-invert stops and matches `eigsh` (the λ = 0 edge needs no neighbour).
-  - A band with f₁ below λ₁ is solved as [0, f₂], filtered, and matches `eigsh`.
-  - A slice with one in-band mode removed after convergence gives a count ≥ 0.5, sets the `info` flag and recovers the mode on restart; a slice whose count stays ≥ 0.5 (mode forcibly withheld) stops after 2 restarts with the count flagged.
-  - A forced edge failing the final r_acc re-check is widened or merged, and the result still matches `eigsh`; τ_eff forced to 1e-6 near a dense cluster sets the slice-collapse flag.
-  - Each slice's count estimate is < 0.5.
-  - With one in-band mode (not next to a band edge) left out of V, the band-pass count detects it for ≥ 97 of a fixed list of 100 seeds. With V complete, with τ_c = 1e-12, switching off neighbour deflation raises the estimate (same probes y_j) by the probe mean of Σ_i q(μ_i)²(v_iᵀM y_j)² over the converged out-of-band neighbours v_i, to 1e-8 relative; with it, the estimate is < 0.5.
-  - On a model with known repeated interior eigenvalues (voxel cube double/triple modes), each cluster is found with its exact multiplicity.
-  - With a memory budget too small for the LOBPCG-from-0 basis, the cost model switches to shift-invert.
-  - On the voxel cube, a band forced across ≥ 2 slices with a cluster near a slice edge, at the default tol = 1e-6: no duplicates, same count and multiplicities as `eigsh`, and λ within max(1e-8, 10·ε·λ̂_max/λ) for clusters with relative gap ≥ 1e-2, otherwise within 10·tol.
-  - A band edge set exactly on a double eigenvalue returns both copies, and d stays ≈ 25/g.
-  - MINRES iterations vs δ are measured and the cost-model constants fitted; the fp64 V-cycle MINRES true-residual floor is measured; both are recorded in `docs/eigensolvers.md`.
-  - A case with τ forced below the measured floor raises τ_eff to the floor, carries it into r_acc and sets the `info` flag.
-  - r_acc and the measured floor at the largest Mac size are recorded in `docs/eigensolvers.md`.
-  - The memory model (deflation basis plus Lanczos and MINRES workspace) is within 20% of the measured peak at a size where the estimate is ≥ 2 GB.
+  - [15a, 15c] Matches SciPy `eigsh(sigma=...)` to relative error ≤ max(1e-8, 10·ε·λ̂_max/λ) for clusters with relative gap ≥ 1e-2 (others within 10·r_acc, multiplicities equal).
+  - [15b, 15c] An interior band strictly between two well-separated modes returns 0 modes with count < 0.5; with a mode planted in that band and left out of V, the count is ≥ 0.5.
+  - [15a, 15c] A clamped model with band (0, f_max) forced onto shift-invert stops and matches `eigsh` (the λ = 0 edge needs no neighbour).
+  - [15c] A band with f₁ below λ₁ is solved as [0, f₂], filtered, and matches `eigsh`.
+  - [15b] A slice with one in-band mode removed after convergence gives a count ≥ 0.5, sets the `info` flag and recovers the mode on restart; a slice whose count stays ≥ 0.5 (mode forcibly withheld) stops after 2 restarts with the count flagged.
+  - [15c] A forced edge failing the final r_acc re-check is widened or merged, and the result still matches `eigsh`; τ_eff forced to 1e-6 near a dense cluster sets the slice-collapse flag.
+  - [15c] Each slice's count estimate is < 0.5.
+  - [15b] With one in-band mode (not next to a band edge) left out of V, the band-pass count detects it for ≥ 97 of a fixed list of 100 seeds. With V complete, with τ_c = 1e-12, switching off neighbour deflation raises the estimate (same probes y_j) by the probe mean of Σ_i q(μ_i)²(v_iᵀM y_j)² over the converged out-of-band neighbours v_i, to 1e-8 relative; with it, the estimate is < 0.5.
+  - [15a] On a model with known repeated interior eigenvalues (voxel cube double/triple modes), each cluster is found with its exact multiplicity.
+  - [15c] With a memory budget too small for the LOBPCG-from-0 basis, the cost model switches to shift-invert.
+  - [15c] On the voxel cube, a band forced across ≥ 2 slices with a cluster near a slice edge, at the default tol = 1e-6: no duplicates, same count and multiplicities as `eigsh`, and λ within max(1e-8, 10·ε·λ̂_max/λ) for clusters with relative gap ≥ 1e-2, otherwise within 10·tol.
+  - [15c] A band edge set exactly on a double eigenvalue returns both copies, and d stays ≈ 25/g.
+  - [15a, 15c] MINRES iterations vs δ are measured and the cost-model constants fitted; the fp64 V-cycle MINRES true-residual floor is measured; both are recorded in `docs/eigensolvers.md`.
+  - [15a] A case with τ forced below the measured floor raises τ_eff to the floor, carries it into r_acc and sets the `info` flag.
+  - [15a] r_acc and the measured floor at the largest Mac size are recorded in `docs/eigensolvers.md`.
+  - [15a] The memory model (deflation basis plus Lanczos and MINRES workspace) is within 20% of the measured peak at a size where the estimate is ≥ 2 GB.
 
 ## M4: Solid-shell element
 
@@ -759,7 +760,9 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
 | 13c Solver options | 13 |
 | 14a Counting | 9, 10, 11 (preconditioned K + σM solves on voxel meshes; 13 optional; without PR 13, unstructured counting uses Jacobi PCG) |
 | 14b [0, f_max], verify | 14a |
-| 15 Interior bands | 14; 13 for unstructured meshes |
+| 15a Shift-invert slice | 10, 13 |
+| 15b Band-pass count | 14a, 15a |
+| 15c Slicing, bands, strategy | 14b, 15a, 15b |
 | 16 Solid-shell | 3, 5, 8, 9 |
 | 17 Postprocessor | 9 |
 | 18 Performance | 11, 13, 16 |
