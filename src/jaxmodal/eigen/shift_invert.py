@@ -806,7 +806,7 @@ def si_band(
                   f" {why or 'converged'}, {n_new} new, count"
                   f" {inf['count']['reason'] or 'passed'}", flush=True)  # fmt: skip
         i += 1
-        bad = bool((inf["residuals"] > inf["thresholds"]).any())  # si_slice's final check
+        bad = not (inf["residuals"] <= inf["thresholds"]).all()  # si_slice's final check
         if why != "capacity full" or bad:
             leaves.append(((a, e), inf["count"], bool(inf["converged"])))
             if not inf["converged"]:  # the band stops with the pairs found
@@ -872,10 +872,13 @@ def si_band(
             tt = np.maximum(tt, thr_s[idx].max())
             if (rr <= tt).all() or attempt:
                 break
+            n_g = len(g)
             if parts and parts[-1][1].ndim == 1:  # the window below joins if kept as is
                 g = [w - 1] + g
                 parts.pop()
             g = g + ([g[-1] + 1] if g[-1] + 1 < len(windows) else [])
+            if len(g) == n_g:  # nothing to widen by: the same result again
+                break
         rr_failed |= not (rr <= tt).all()
         dup += d
         parts.append((th, X, rr, tt))
