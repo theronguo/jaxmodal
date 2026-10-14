@@ -338,11 +338,30 @@ def test_tau_eff_seam(monkeypatch):
     assert 1e-7 < info["tau_eff"] <= 1e-6
     delta = np.abs(lam - info["sigma"]) / lam
     assert info["thresholds"] == pytest.approx(10 * info["tau_eff"] * delta, rel=1e-12)
+    assert info["delta_max"] == pytest.approx(delta.max(), rel=1e-12)
     assert info["r_acc"] >= 10 * info["tau_eff"] * info["delta_max"] > TOL
     r = info["residuals"]
     assert (r > TOL).any() and (r <= info["thresholds"]).all()
     ref = lr[(lr >= lo) & (lr <= hi)]
     assert len(lam) == len(ref) and (np.abs(lam - ref) <= 10 * info["r_acc"] * ref).all()
+
+
+def test_sigma_moves_first_step_only(monkeypatch):
+    """Only the first solve can move sigma: a later stagnation above 1e3 tau (below TAU_FAIL)
+    raises tau_eff and keeps sigma."""
+
+    def late(A, b, P, tol, maxit, x, info):
+        if not spy.calls:  # the first solve as is
+            return x, info
+        return x, info | dict(residuals=jnp.full_like(info["residuals"], 5e-5),
+                              stagnated=jnp.ones_like(info["stagnated"]))  # fmt: skip
+
+    lr = prob("short")[6]
+    lo, hi = edges(lr, 8, 12)
+    spy = Spy(late)
+    monkeypatch.setattr(si, "minres", spy)
+    _, _, info = solve("short", lo, hi)
+    assert not info["sigma_moved"] and info["tau_eff"] == 5e-5
 
 
 # ---------------------------------------------------------------- 10: sets and stop (synthetic)
