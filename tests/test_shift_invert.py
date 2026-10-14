@@ -1277,8 +1277,10 @@ def check_band(name, lo, hi, lam, V, info, *, counted=True):
     """The roadmap's checks: the modes in [lo, hi] as the reference (count, lam to max(1e-8,
     10 eps lam_hat / lam) for clusters at relative gaps >= 1e-2, else 10 r_acc, so
     multiplicities), every returned pair a reference eigenvalue (the leaves' margins), V
-    M-orthonormal (no duplicates), residuals within thresholds, every counted leaf < 0.5."""
-    M, lr = prob(name)[4], prob(name)[6]
+    M-orthonormal (no duplicates) to 1e-10 within chains of relative gaps < 100 r_acc and to
+    residual level across them (the exact |x_i^T M x_j| = |x_j^T r_i - x_i^T r_j| /
+    |lam_i - lam_j|), residuals within thresholds, every counted leaf < 0.5."""
+    free, K, M, lr = prob(name)[1], prob(name)[3], prob(name)[4], prob(name)[6]
     ref = lr[(lr >= lo) & (lr <= hi)]
     assert info["converged"] and info["reason"] is None
     assert ((lam >= lo) & (lam <= hi)).sum() == len(ref)
@@ -1288,7 +1290,15 @@ def check_band(name, lo, hi, lam, V, info, *, counted=True):
         alone = (i == 0 or gap[i - 1] >= 1e-2) and (i == len(gap) or gap[i] >= 1e-2)
         bound = max(1e-8, 10 * EPS * lam_hat(name) / x) if alone else 10 * info["r_acc"]
         assert abs(x - lr[i]) <= bound * lr[i], (x, lr[i], bound)
-    assert np.abs(V.T @ np.asarray(M @ V) - np.eye(V.shape[1])).max(initial=0) <= 1e-10
+    MV = np.asarray(M @ V)
+    err = np.abs(V.T @ MV - np.eye(V.shape[1]))
+    nr = np.linalg.norm((np.asarray(K @ V) - MV * lam)[free], axis=0)
+    nx = np.linalg.norm(V, axis=0)
+    dl = np.abs(lam[:, None] - lam[None, :])
+    near = dl < 100 * info["r_acc"] * np.abs(lam)[:, None]
+    pair = nx[None, :] * nr[:, None] + nx[:, None] * nr[None, :]
+    bound = np.where(near, 0, pair / np.where(near, 1, dl))
+    assert (err <= 1e-10 + bound).all(), err.max()
     assert (info["residuals"] <= info["thresholds"]).all()
     if counted:
         c = info["count"]
@@ -1374,6 +1384,7 @@ def test_band_split_sweep(case, seed):
         check_band("short", lo, hi, lam, V, info)
 
 
+@pytest.mark.slow
 def test_band_capacity_raises():
     """15c test 2c: modes 8-21 at block 6, capacity 72: the capacity error."""
     lr = prob("short")[6]
@@ -1441,6 +1452,28 @@ def test_band_voxel_cube():
     ]
 
 
+def loosen(monkeypatch, a0, tol):
+    """Inner solves of the slices starting at a0 stopped at tol (flagged stagnated, so tau_eff =
+    tol); returns the list of every slice's lam_W."""
+    real, n = si.si_checked, []
+
+    def loose(A, b, P, tol_, maxit, x, info):
+        x, info = minres(A, b, P, tol=tol, maxit=maxit)
+        return x, info | dict(stagnated=jnp.ones_like(info["stagnated"]))
+
+    def wrapped(*a, **kw):
+        n.append(kw["lam_W"])
+        if a[2] == a0:
+            monkeypatch.setattr(si, "minres", Spy(loose))
+        try:
+            return real(*a, **kw)
+        finally:
+            monkeypatch.setattr(si, "minres", minres)
+
+    monkeypatch.setattr(si, "si_checked", wrapped)
+    return n
+
+
 def test_band_collapse(monkeypatch):
     """15c test 5a (roadmap): modes 23-24 of "short" (relative gap 4.6e-4) with the interior
     edge s at their midpoint; slice 2 [s, 50] with inner solves stopped at 1e-6 (tau_eff 1e-6,
@@ -1452,22 +1485,7 @@ def test_band_collapse(monkeypatch):
     lr = prob("short")[6]
     lo, s, hi = (lr[21] + lr[22]) / 2, (lr[23] + lr[24]) / 2, 50.0
 
-    def loose(A, b, P, tol, maxit, x, info):
-        x, info = minres(A, b, P, tol=1e-6, maxit=maxit)
-        return x, info | dict(stagnated=jnp.ones_like(info["stagnated"]))
-
-    real, n = si.si_checked, []
-
-    def second_loose(*a, **kw):
-        n.append(kw["lam_W"])
-        if len(n) == 2:
-            monkeypatch.setattr(si, "minres", Spy(loose))
-        try:
-            return real(*a, **kw)
-        finally:
-            monkeypatch.setattr(si, "minres", minres)
-
-    monkeypatch.setattr(si, "si_checked", second_loose)
+    n = loosen(monkeypatch, s, 1e-6)
     lam, V, info = rband("short", lo, hi, capacity=300, edges=[s], verify=False)
     r2 = info["slices"][1]
     assert 1e-7 < r2["tau_eff"] <= 1e-6 and 100 * r2["r_acc"] > (lr[24] - lr[23]) / lr[24]
@@ -1475,6 +1493,22 @@ def test_band_collapse(monkeypatch):
     assert info["merged_edges"] == [s] and info["collapsed"]
     check_band("short", lo, hi, lam, V, info, counted=False)
     assert not info["edge_rr_failed"]
+
+
+@pytest.mark.slow
+def test_band_rerun(monkeypatch):
+    """Review round 1: cube modes from (lr57 + lr58) / 2 to 56 with edges 51.29, 54.9; slice 2's
+    inner solves stopped at 2e-5 raise its r_acc, so its window grows over run 1's triple at
+    51.254 (3.3e-4 below the double at 51.272): slice 2 is rerun with the triple deflated,
+    nothing is stored twice and slice 3's deflation basis stays M-orthonormal (the first version
+    found the triple again and slice 3 raised on its W)."""
+    lr = prob("cube")[6]
+    lo = (lr[57] + lr[58]) / 2
+    n = loosen(monkeypatch, 51.29, 2e-5)
+    lam, V, info = rband("cube", lo, 56.0, capacity=300, edges=[51.29, 54.9], verify=False)
+    assert [s["reruns"] for s in info["slices"]] == [0, 1, 0] and info["duplicates"] == 0
+    assert len(n) == 4 and len(n[2]) > len(n[1])
+    check_band("cube", lo, 56.0, lam, V, info, counted=False)
 
 
 def test_band_from_zero():
@@ -1531,3 +1565,156 @@ def test_band_above_spectrum():
     with pytest.raises(ValueError, match=r"nothing converged.*hi above the spectrum"):
         si.si_band(op, free, top[-3], 2 * top[-1], functools.partial(exact, "tiny"),
                    capacity=48, tol=TOL)  # fmt: skip
+
+
+def test_merge_widen(monkeypatch):
+    """Code review round 1: a merged window whose Ritz residual fails because run 2's vector leans
+    on the adjacent window's mode is fixed by the widening (edge_rr_failed False); a direction with
+    projected M-norm 0.6 (between 0.5 and 0.707) is kept."""
+    _, free, op, K, M, R, lr, Vr = prob("cube")
+    g = next(g for g in clusters(lr) if len(g) == 2 and g[0] > 3)
+    i, j = g
+    lo, hi = edges(lr, i - 1, j + 2)
+    s = (lr[i] + lr[j]) / 2
+    v1, v2, v3 = Vr[:, i], Vr[:, j], Vr[:, j + 1]
+    eps = 1e-4
+    w = (v2 + eps * v3) / np.sqrt(1 + eps**2)
+    u = (v3 - eps * v2) / np.sqrt(1 + eps**2)
+
+    def two(first, second):
+        def script(k, a, e, kw):
+            lam, V = first if k == 1 else second
+            return (np.asarray(lam), np.stack(V, 1)), None, None, None
+
+        return script
+
+    fake_band(
+        monkeypatch,
+        two(([lr[i - 1], lr[i]], [Vr[:, i - 1], v1]), ([lr[j], lr[j + 1]], [w, u])),
+        name="cube",
+    )
+    lam, V, info = fband("cube", lo, hi, edges=[s], R=R)
+    assert not info["edge_rr_failed"] and len(lam) == 4
+    assert np.abs(lam - lr[i - 1 : j + 2]).max() <= 1e-10 * lr[j + 1]
+    # a direction 0.8 v1 + 0.6 v2: projected norm 0.6 against v1, kept (rule 0.5)
+    x = 0.8 * v1 + 0.6 * v2
+    fake_band(
+        monkeypatch, two(([lr[i - 1], lr[i]], [Vr[:, i - 1], v1]), ([lr[i]], [x])), name="cube"
+    )
+    lam, V, info = fband("cube", lo, hi, edges=[s], R=R)
+    assert info["duplicates"] == 0 and len(lam) == 3
+    assert np.abs(lam - lr[i - 1 : j + 1]).max() <= 1e-10 * lr[j]
+
+
+def test_band_inner_failure_first(monkeypatch):
+    """Code review round 1: an inner failure in the first of two slices stops the band there."""
+    lr = prob("short")[6]
+    lo, hi = edges(lr, 3, 16)
+    s = (lr[7] + lr[8]) / 2
+
+    def fails(j, a, e, kw):
+        return [3, 4], "inner solves failed", None, NO_COUNT
+
+    calls, _ = fake_band(monkeypatch, fails)
+    lam, V, info = fband("short", lo, hi, edges=[s])
+    assert len(calls) == 1 and not info["converged"]
+    assert info["reason"] == f"[{lo:.6g}, {s:.6g}]: inner solves failed"
+
+
+def test_split_more():
+    """Code review round 1: _split at a = 0 with the bottom value unconverged is not complete; a gap
+    below 100 r (inside a chain) is never a cut; one unconverged copy of a chain stops the run (the
+    lower values would otherwise give a cut)."""
+    T, F = True, False
+    v = np.array([1.0, 2.0, 3.0, 4.0])
+    assert si._split(v, np.array([F, T, T, F]), 2.5, 0.0, 3.5, 1e-10) == (2.5, None, False, False)
+    v = np.array([1.0, 2.0, 2.0 + 1e-9, 3.0, 4.0])
+    assert si._split(v, np.array([F, T, T, T, F]), 2.5, 1.5, 3.5, 1e-10) == (
+        None, (5.0 + 1e-9) / 2, False, False)  # fmt: skip
+    v = np.array([1.0, 2.0, 3.0, 3.0 + 1e-9, 4.0, 5.0])
+    assert si._split(v, np.array([F, T, T, F, T, T]), 4.5, 1.5, 4.8, 1e-10) == (
+        None, None, False, True)  # fmt: skip
+
+
+def test_window():
+    """Code review round 1: _window takes the margins, the chains from the in-window values and the
+    nearest value beyond each end."""
+    v = np.array([1.0, 2.0, 2.499, 3.0, 4.0, 4.003, 6.0, 7.0])
+    assert list(si._window(v, 2.5, 4.0, 1e-3, 1e-4)) == [1, 2, 3, 4, 5, 6]
+    v = np.array([1.0, 2.0, 3.0, 4.0, 4.002, 6.0])
+    assert list(si._window(v, 2.5, 4.0, 0.0, 1e-3)) == [1, 2, 3, 4, 5]
+
+
+def test_band_progress_inside(monkeypatch):
+    """Code review round 1: a rerun returning only pairs outside its interval makes no progress; the
+    band estimate is the max over leaves; verify=False predicts the span count (_predict)."""
+    lr = prob("short")[6]
+    lo, hi = edges(lr, 3, 16)
+    first = ([3], "capacity full", rz([2, 3], [4, 5]), None)
+    fake_band(
+        monkeypatch,
+        lambda j, *_: first if j == 1 else ([2], "capacity full", rz([2, 3], [4, 5]), None),
+    )
+    with pytest.raises(ValueError, match=r"\(no progress\)"):
+        fband("short", lo, hi)
+
+    def script(j, a, e, kw):
+        if j == 1:
+            return [7, 8, 9, 10, 11], "capacity full", FULL_RZ(), None
+        return new_modes(a, e, kw), None, None, None
+
+    fake_band(monkeypatch, script, count=(0.3, True, False))
+    _, _, info = fband("short", lo, hi)
+    assert info["count"]["estimate"] == 0.3 and info["count"]["estimates"] == [0.3, 0.1, 0.1]
+    _, counts = fake_band(monkeypatch, script)
+    fband("short", lo, hi, verify=False)
+    assert counts[0][1]["_predict"] is True
+
+
+def test_merge_threshold(monkeypatch):
+    """Code review round 1: a direction with projected M-norm 0.3 (< 0.5) is a duplicate and
+    dropped."""
+    _, free, op, K, M, R, lr, Vr = prob("cube")
+    g = next(g for g in clusters(lr) if len(g) == 2 and g[0] > 3)
+    i, j = g
+    lo, hi = edges(lr, i - 1, j + 2)
+    s = (lr[i] + lr[j]) / 2
+    v1, v2 = Vr[:, i], Vr[:, j]
+    x = np.sqrt(1 - 0.09) * v1 + 0.3 * v2
+
+    def script(k, a, e, kw):
+        lam, V = ([lr[i - 1], lr[i]], [Vr[:, i - 1], v1]) if k == 1 else ([lr[i]], [x])
+        return (np.asarray(lam), np.stack(V, 1)), None, None, None
+
+    fake_band(monkeypatch, script, name="cube")
+    lam, V, info = fband("cube", lo, hi, edges=[s], R=R)
+    assert info["duplicates"] == 1 and len(lam) == 2
+
+
+def test_merge_widen_back(monkeypatch):
+    """Code review round 1: run 2's vector leaning on the mode below (kept from run 1's window) is
+    fixed by widening down."""
+    _, free, op, K, M, R, lr, Vr = prob("cube")
+    g = next(g for g in clusters(lr) if len(g) == 2 and g[0] > 3)
+    i, j = g
+    lo, hi = edges(lr, i - 1, j + 2)
+    s = (lr[i] + lr[j]) / 2
+    eps = 1e-4
+    w = (Vr[:, j] + eps * Vr[:, i - 1]) / np.sqrt(1 + eps**2)
+
+    def script(k, a, e, kw):
+        lam, V = ([lr[i - 1], lr[i]], [Vr[:, i - 1], Vr[:, i]]) if k == 1 else ([lr[j]], [w])
+        return (np.asarray(lam), np.stack(V, 1)), None, None, None
+
+    fake_band(monkeypatch, script, name="cube")
+    lam, V, info = fband("cube", lo, hi, edges=[s], R=R)
+    assert not info["edge_rr_failed"] and len(lam) == 3
+    assert np.abs(lam - lr[i - 1 : j + 1]).max() <= 1e-10 * lr[j]
+
+
+def test_band_verify_false_runs_nothing():
+    """Code review round 1: verify=False runs no count (estimate NaN, no steps)."""
+    lo, hi = cb_edges()
+    _, _, off = rband("short", lo, hi, capacity=300, verify=False)
+    b = off["slices"][0]["count"]
+    assert np.isnan(b["estimate"]) and b["steps"] == 0

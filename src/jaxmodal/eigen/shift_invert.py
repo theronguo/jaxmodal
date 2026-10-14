@@ -132,6 +132,16 @@ def _cands(f, mu, b, sigma, tau_eff, idx):
     return _chunked(f, idx, mu[idx], b, sigma, tau_eff)
 
 
+def _extend_chain(v, i0, i1, chain):
+    """[i0, i1) of the ascending v extended over relative gaps < chain."""
+    if i1 > i0:
+        while i0 > 0 and v[i0] - v[i0 - 1] < chain * abs(v[i0 - 1]):
+            i0 -= 1
+        while i1 < len(v) and v[i1] - v[i1 - 1] < chain * abs(v[i1 - 1]):
+            i1 += 1
+    return i0, i1
+
+
 def _slice_sets(mu, lo, hi, r):
     """(inside, below, above) of the ascending Ritz values mu for the slice [lo, hi]: inside =
     the values in [lo (1 - 100 r), hi (1 + 100 r)] extended over chains with relative gaps
@@ -139,11 +149,7 @@ def _slice_sets(mu, lo, hi, r):
     there is none, or for below when lo = 0)."""
     i0 = int(np.searchsorted(mu, lo * (1 - 100 * r), side="left"))
     i1 = int(np.searchsorted(mu, hi * (1 + 100 * r), side="right"))
-    if i1 > i0:
-        while i0 > 0 and mu[i0] - mu[i0 - 1] < 100 * r * abs(mu[i0 - 1]):
-            i0 -= 1
-        while i1 < len(mu) and mu[i1] - mu[i1 - 1] < 100 * r * abs(mu[i1 - 1]):
-            i1 += 1
+    i0, i1 = _extend_chain(mu, i0, i1, 100 * r)
     below = i0 - 1 if i0 > 0 and lo > 0 else None
     above = i1 if i1 < len(mu) else None
     return np.arange(i0, i1), below, above
@@ -413,6 +419,13 @@ def _count_slice(op, free, V_c, lam_c, lo, hi, nb_lo, nb_hi, **kw):
     return count(op, free, (*V_c, nb_hi[1][:, None]), np.r_[lam_c, nb_hi[0]], e, nb_hi[0], **kw)
 
 
+def _unverified(ci):
+    """The reason of an unverifiable count."""
+    if ci["capped"]:
+        return "degree above MAX_DEGREE: the gap is too small to count"
+    return "count unverifiable: an inner solve failed"
+
+
 def _count_out(ci, ran, reason, est, estimates, flagged, restarts):
     """si_checked's info["count"]: the count's info plus the outcome."""
     return {"passed": False, "verifiable": False, **ci, "ran": ran, "reason": reason,
@@ -515,9 +528,7 @@ def si_checked(
                   f" {ci['time']['total']:.0f} s): {action}", flush=True)  # fmt: skip
         if not miss:
             if not ci["verifiable"]:
-                reason = ("degree above MAX_DEGREE: the gap is too small to count"
-                          if ci["capped"] else
-                          "count unverifiable: an inner solve failed")  # fmt: skip
+                reason = _unverified(ci)
             break
         if j == RESTARTS:
             reason = f"count >= 0.5 after {RESTARTS} restarts"
@@ -545,14 +556,9 @@ def _cap_error(a, b, capacity, why):
     )
 
 
-def _extend_chain(v, i0, i1, chain):
-    """[i0, i1) of the ascending v extended over relative gaps < chain."""
-    if i1 > i0:
-        while i0 > 0 and v[i0] - v[i0 - 1] < chain * abs(v[i0 - 1]):
-            i0 -= 1
-        while i1 < len(v) and v[i1] - v[i1 - 1] < chain * abs(v[i1 - 1]):
-            i1 += 1
-    return i0, i1
+def _starts(v, chain):
+    """Chain starts of the ascending v: True where the relative gap below is >= chain."""
+    return np.r_[True, np.diff(v) >= chain * np.abs(v[:-1])]
 
 
 def _window(v, a, b, margin, chain):
@@ -572,10 +578,12 @@ def _split(v, conv, sigma, a, b, r):
     below); otherwise it is cut at the largest gap >= 100 r between run values inside (a, b), in
     its half of them (gaps g <= (k - 2) // 2 below, the rest above). Returns None (nothing
     converged) or (s_lo, s_hi, done_lo, done_hi), a cut or None per side."""
-    start = np.r_[True, np.diff(v) >= 100 * r * np.abs(v[:-1])]
+    if not len(v):
+        return None
+    start = _starts(v, 100 * r)
     cid = np.cumsum(start) - 1
-    ok = np.array([conv[cid == q].all() for q in range(cid[-1] + 1)]) if len(v) else []
-    cand = np.flatnonzero(np.asarray(ok, bool)[cid]) if len(v) else []
+    ok = np.logical_and.reduceat(conv, np.flatnonzero(start))  # whole chains converged
+    cand = np.flatnonzero(ok[cid])
     if not len(cand):
         return None
     q0 = q1 = cid[cand[np.argmin(np.abs(v[cand] - sigma))]]
@@ -621,7 +629,7 @@ def _merge(op, m, groups, consts, c):
     directions with ||p||_M >= 0.5 (eigenvalues >= 0.25 of P^T M P) kept, the rest are
     duplicates; then Rayleigh-Ritz of (K, M) on the kept basis. K and M are applied in device
     chunks of c columns. Returns (theta, X, r, t, dropped): the Ritz pairs with their explicit
-    lambda-scaled residuals and round-off thresholds."""
+    lambda-scaled residuals and round-off thresholds (also in device chunks)."""
     Q = groups[0]
     KQ, MQ = _apply_km(op, m, Q, c)
     drop = 0
@@ -633,13 +641,19 @@ def _merge(op, m, groups, consts, c):
         keep = w >= 0.25
         drop += int((~keep).sum())
         S = Y[:, keep] / np.sqrt(w[keep])
+        del KU, MU
         Q, KQ, MQ = np.hstack([Q, P @ S]), np.hstack([KQ, KP @ S]), np.hstack([MQ, MP @ S])
+        del P, KP, MP
     GK, GM = Q.T @ KQ, Q.T @ MQ
     theta, Z = sla.eigh((GK + GK.T) / 2, (GM + GM.T) / 2)
     X = Q @ Z
-    r, t = _resid(jnp.asarray(X), jnp.asarray(KQ @ Z), jnp.asarray(MQ @ Z), jnp.asarray(theta),
-                  consts)  # fmt: skip
-    return theta, X, np.asarray(r), np.asarray(t), drop
+    r, t = np.empty(len(theta)), np.empty(len(theta))
+    for j in range(0, len(theta), c):  # explicit residuals, one device chunk at a time
+        z, x = Z[:, j : j + c], X[:, j : j + c]
+        r[j : j + c], t[j : j + c] = _resid(jnp.asarray(x), jnp.asarray(KQ @ z),
+                                            jnp.asarray(MQ @ z), jnp.asarray(theta[j : j + c]),
+                                            consts)  # fmt: skip
+    return theta, X, r, t, drop
 
 
 def _span_count(op, free, P, lam_s, cols, x0, x1, nbs, R, verify, opts):
@@ -661,8 +675,7 @@ def _span_count(op, free, P, lam_s, cols, x0, x1, nbs, R, verify, opts):
         return _count_out(ci, False, "not requested", est, [], False, 0)
     miss = bool(ci["verifiable"] and est >= 0.5)
     reason = (None if ci["passed"] else "count >= 0.5: the span is rerun" if miss
-              else "degree above MAX_DEGREE: the gap is too small to count" if ci["capped"]
-              else "count unverifiable: an inner solve failed")  # fmt: skip
+              else _unverified(ci))  # fmt: skip
     return _count_out(ci, True, reason, est, [est], miss, 0)
 
 
@@ -686,26 +699,29 @@ def si_band(
     op, free, lo, hi, make, *, capacity, R=None, verify=True, edges=None, count_options=None,
     tol=1e-6, block=6, seed=0, verbose=False, max_slices=64, **slice_options,
 ):  # fmt: skip
-    """Eigenpairs of the masked pencil (K_m, M_m) in the band [lo, hi] (0 <= lo < hi) by
-    si_checked slices, each within a device basis of capacity columns, deflation included.
-    make(sigma): the SPD preconditioner at sigma (one alive at a time). Slices are processed
+    """Eigenpairs of the masked pencil (K_m, M_m) in the band [lo, hi] (0 <= lo < hi) by si_checked
+    slices, each within a device basis of capacity columns, deflation included. make(sigma): the SPD
+    preconditioner at sigma (one alive at a time; the slices' and the counts'). Slices are processed
     lowest first, each deflating the stored modes of its window and the nearest known pair beyond
-    each end (which can close its sides). A slice that fills its capacity keeps the span verified
-    by si_slice's stop rule on its last Ritz values (a leaf without a run, counted with the
-    parent's preconditioner, rerun if its count flags) and requeues its remainders: each side cut
-    at the largest gap >= 100 r_acc in its half of the converged run, a side without a cut as one
-    remainder (a binary split); no progress, or no side done or cut, raises. Clusters held by two
-    runs are merged: duplicates (projected M-norm < 0.5) dropped, Rayleigh-Ritz, the window
-    widened once if a Ritz residual fails (then edge_rr_failed). edges: provisional interior
-    edges, used as given (default one slice). verify: count every leaf (False: none, the predicted
-    degree and gap recorded). Slice i uses seed + (RESTARTS + 1) i, the count's seed likewise.
-    slice_options: si_checked's and si_slice's (tau, maxit_inner, ...).
+    each end (which can close its sides); a slice whose r_acc widens its window over more stored
+    modes is rerun with them deflated. A slice that fills its capacity keeps the span verified by
+    si_slice's stop rule on its last Ritz values (a leaf without a run, counted with the parent's
+    preconditioner, rerun if its count flags) and requeues its remainders: each side cut at the
+    largest gap >= 100 r_acc in its half of the converged run, a side without a cut as one remainder
+    (a binary split); no progress, or no side done or cut, raises. Clusters held by two runs are
+    merged: duplicates (projected M-norm < 0.5) dropped, Rayleigh-Ritz, the window widened once if a
+    Ritz residual fails (edge_rr_failed if it still fails). edges: provisional interior edges, used
+    as given (default one slice). verify: count every leaf (False: none, the predicted degree and
+    gap recorded). Slice i uses seed + (RESTARTS + 1) i, the count's seed likewise. slice_options:
+    si_checked's and si_slice's (tau, maxit_inner, ...; not sigma or count_precond).
 
-    Returns lam (ascending), V (host fp64, M-orthonormal) and info: converged, reason, r_acc,
-    tau_eff, residuals, thresholds, slices (per processed slice: a run's si_checked info without
-    vectors plus interval, kind "run", leaf, n_new; a span {interval, kind "span", leaf, parent,
-    count}), merged_edges, collapsed, edge_rr_failed, duplicates, count (si_checked's shape over
-    the leaves) and time (total, slices, merge). See docs/eigensolvers.md#slicing-a-band."""
+    Returns lam (ascending), V (host fp64; M-orthonormal within a window, to residual level across
+    runs that deflate neither the other: |x_i^T M x_j| <= (||x_j|| ||r_i|| + ||x_i|| ||r_j||) /
+    |lam_i - lam_j|) and info: converged, reason, r_acc, tau_eff, residuals, thresholds, slices (per
+    processed slice: a run's si_checked info without vectors plus interval, kind "run", leaf,
+    n_new, reruns; a span {interval, kind "span", leaf, parent, count}), merged_edges, collapsed,
+    edge_rr_failed, duplicates, count (si_checked's shape over the leaves) and time (total,
+    slices, merge). See docs/eigensolvers.md#slicing-a-band."""
     check_x64("si_band")
     t0 = time.perf_counter()
     n = op.n_dof
@@ -720,12 +736,14 @@ def si_band(
         raise ValueError(f"capacity must be an int >= 2 block = {2 * block}, got {capacity!r}")
     if not isinstance(verify, bool):
         raise ValueError(f"verify must be True or False, got {verify!r}")
+    if bad := sorted({"sigma", "count_precond"} & set(slice_options)):
+        raise ValueError(f"si_band sets {bad} per slice (sigma the midpoint, make(sigma))")
     b, c = block, _chunk(block)
     up = lambda x: -(-x // c) * c  # noqa: E731
     opts = {"verbose": verbose, **(count_options or {})}
     c0 = opts.pop("seed", 0)
     m = jnp.asarray(np.asarray(free), jnp.float64)[:, None]
-    n_free = int(np.asarray(free).sum()) - (0 if R is None else R.shape[1])
+    n_free = int(m.sum()) - (0 if R is None else R.shape[1])
     lam_s, run_s, res_s, thr_s, vecs = np.zeros(0), np.zeros(0, int), np.zeros(0), np.zeros(0), []
     work = [(x0, x1, {}) for x0, x1 in zip([lo, *cuts], [*cuts, hi], strict=True)]
     slices, leaves = [], []  # leaves: (interval, count info, converged)
@@ -737,23 +755,30 @@ def si_band(
     while work:
         if i >= max_slices:
             raise RuntimeError(f"si_band: more than max_slices = {max_slices} slices")
-        a, e, prev = work.pop(min(range(len(work)), key=lambda q: work[q][0]))
+        work.sort(key=lambda x: x[0])
+        a, e, prev = work.pop(0)
         order = np.argsort(lam_s, kind="stable")
-        rw = max(r_s, tol)
-        win = order[_window(lam_s[order], a, e, min(1000 * rw, 1e-2), 100 * rw)]
-        cap = up(capacity) - up(len(win))
-        if cap < 2 * b:
-            raise _cap_error(a, e, capacity, f"{len(win)} deflated modes leave {cap} columns")
-        if n_free - len(win) < 2 * b:
-            raise _cap_error(a, e, capacity, f"{len(win)} deflated modes fill the free space")
-        P = make((a + e) / 2)
-        sd = (RESTARTS + 1) * i
-        lam, V, inf = si_checked(
-            op, free, a, e, P, capacity=cap, W=cols(win) if len(win) else None,
-            lam_W=lam_s[win] if len(win) else None, count_options={**opts, "seed": c0 + sd},
-            verify=verify, seed=seed + sd, verbose=verbose, R=R, tol=tol, block=block,
-            **slice_options,
-        )  # fmt: skip
+        rw, win, sd, P = max(r_s, tol), None, (RESTARTS + 1) * i, make((a + e) / 2)
+        reruns = -1
+        while True:  # rerun while the run's r_acc widens its window over more stored modes
+            wide = order[_window(lam_s[order], a, e, min(1000 * rw, 1e-2), 100 * rw)]
+            if win is not None and np.isin(wide, win).all():
+                break
+            if win is not None and verbose:
+                print(f"si_band: slice {i} rerun, r_acc {rw:.3g} widens its window", flush=True)
+            win, cap, reruns = wide, up(capacity) - up(len(wide)), reruns + 1
+            if cap < 2 * b:
+                raise _cap_error(a, e, capacity, f"{len(win)} deflated modes leave {cap} columns")
+            if n_free - len(win) < 2 * b:
+                raise _cap_error(a, e, capacity, f"{len(win)} deflated modes fill the free space")
+            V = inf = None  # a rerun's discarded block
+            lam, V, inf = si_checked(
+                op, free, a, e, P, capacity=cap, W=cols(win) if len(win) else None,
+                lam_W=lam_s[win] if len(win) else None, count_options={**opts, "seed": c0 + sd},
+                verify=verify, seed=seed + sd, verbose=verbose, R=R, tol=tol, block=block,
+                **slice_options,
+            )  # fmt: skip
+            rw = max(rw, inf["r_acc"])
         lam_s, run_s = np.r_[lam_s, lam], np.r_[run_s, np.full(len(lam), i)]
         res_s, thr_s = np.r_[res_s, inf["residuals"]], np.r_[thr_s, inf["thresholds"]]
         vecs.extend(V[:, q] for q in range(V.shape[1]))
@@ -762,7 +787,8 @@ def si_band(
         strip = ("neighbours", "ritz", "runs")
         entry = {k: x for k, x in inf.items() if k not in strip}
         entry.update(runs=[{k: x for k, x in r.items() if k not in strip} for r in inf["runs"]],
-                     interval=(a, e), kind="run", leaf=True, n_new=n_new)  # fmt: skip
+                     interval=(a, e), kind="run", leaf=True, n_new=n_new,
+                     reruns=reruns)  # fmt: skip
         slices.append(entry)
         why = inf["reason"]
         if verbose:
@@ -772,9 +798,9 @@ def si_band(
                   f" {inf['count']['reason'] or 'passed'}", flush=True)  # fmt: skip
         i += 1
         if why != "capacity full":
-            leaves.append(((a, e), inf["count"], why is None))
-            if why is not None:  # inner solves failed: the band stops with the pairs found
-                converged, reason = False, f"[{a:.6g}, {e:.6g}]: {why}"
+            leaves.append(((a, e), inf["count"], bool(inf["converged"])))
+            if not inf["converged"]:  # the band stops with the pairs found
+                converged, reason = False, f"[{a:.6g}, {e:.6g}]: {why or 'slice not converged'}"
                 break
             P = None
             continue
@@ -812,17 +838,19 @@ def si_band(
     # clusters held by two runs: duplicates, Rayleigh-Ritz, the re-check at the band's r_acc
     order = np.argsort(lam_s, kind="stable")
     ls = lam_s[order]
-    start = np.flatnonzero(np.r_[True, np.diff(ls) >= 100 * r_s * np.abs(ls[:-1])])
-    windows = np.split(order, start[1:]) if len(ls) else []
-    key = jax.random.key(seed)
-    nK, nM = map(float, _norms(op, m, m * jax.random.normal(key, (n, 1))))
-    consts = jnp.array([nK, nM, tol, C_FLOOR])
-    out, ranges, dup, rr_failed, w = {}, [], 0, False, 0
+    windows = np.split(order, np.flatnonzero(_starts(ls, 100 * r_s))[1:]) if len(ls) else []
+    consts, V = None, None  # V: the last run's block, freed with the store
+    parts, ranges, dup, rr_failed, w = [], [], 0, False, 0  # parts: (lam, V or store idx, r, t)
     while w < len(windows):
-        if len(set(run_s[windows[w]])) < 2:
-            out[w] = ("keep", windows[w])
+        idx = windows[w]
+        if len(set(run_s[idx])) < 2:
+            parts.append((lam_s[idx], idx, res_s[idx], thr_s[idx]))
             w += 1
             continue
+        if consts is None:
+            key = jax.random.key(seed)
+            nK, nM = map(float, _norms(op, m, m * jax.random.normal(key, (n, 1))))
+            consts = jnp.array([nK, nM, tol, C_FLOOR])
         g = [w]
         for attempt in range(2):
             idx = np.concatenate([windows[q] for q in g])
@@ -832,31 +860,30 @@ def si_band(
             tt = np.maximum(tt, thr_s[idx].max())
             if (rr <= tt).all() or attempt:
                 break
-            back = [g[0] - 1] if g[0] > 0 and out.get(g[0] - 1, ("",))[0] == "keep" else []
-            g = back + g + ([g[-1] + 1] if g[-1] + 1 < len(windows) else [])
+            if parts and parts[-1][1].ndim == 1:  # the window below joins if kept as is
+                g = [w - 1] + g
+                parts.pop()
+            g = g + ([g[-1] + 1] if g[-1] + 1 < len(windows) else [])
         rr_failed |= not (rr <= tt).all()
         dup += d
-        for q in g:
-            out.pop(q, None)
-        out[g[0]] = ("merged", th, X, rr, tt)
+        parts.append((th, X, rr, tt))
+        for q in idx:
+            vecs[q] = None
         ranges.append((lam_s[idx].min(), lam_s[idx].max()))
         w = g[-1] + 1
-    N = sum(len(x[1]) for x in out.values())
-    lam_f, V_f, res_f, thr_f, k = np.empty(N), np.empty((n, N)), np.empty(N), np.empty(N), 0
-    for q in sorted(out):
-        x = out[q]
-        if x[0] == "keep":
-            j = len(x[1])
-            lam_f[k : k + j], res_f[k : k + j], thr_f[k : k + j] = (
-                lam_s[x[1]], res_s[x[1]], thr_s[x[1]])  # fmt: skip
-            for p, s in enumerate(x[1]):
-                V_f[:, k + p] = vecs[s]
+    # windows are ascending and separated by gaps >= 100 r_acc: the parts are in order; each
+    # stored column is freed as it is copied, so the store and V_f together stay about 1x
+    lam_f, res_f, thr_f = (np.concatenate([p[q] for p in parts] + [np.zeros(0)]) for q in (0, 2, 3))
+    V_f, k = np.empty((n, len(lam_f))), 0
+    while parts:
+        X = parts.pop(0)[1]
+        if X.ndim == 1:
+            for s in X:
+                V_f[:, k], vecs[s] = vecs[s], None
+                k += 1
         else:
-            j = len(x[1])
-            lam_f[k : k + j], V_f[:, k : k + j], res_f[k : k + j], thr_f[k : k + j] = x[1:]
-        k += j
-    vecs.clear()
-    srt = np.argsort(lam_f, kind="stable")
+            V_f[:, k : k + X.shape[1]] = X
+            k += X.shape[1]
     bounds = sorted({x for (x0, x1), _, _ in leaves for x in (x0, x1)} - {lo, hi})
     near = lambda s: any(v0 * (1 - 100 * r_s) <= s <= v1 * (1 + 100 * r_s) for v0, v1 in ranges)  # noqa: E731
     merged = [s for s in bounds if near(s)]
@@ -865,8 +892,8 @@ def si_band(
         reason=reason,
         r_acc=r_s,
         tau_eff=tau_eff,
-        residuals=res_f[srt],
-        thresholds=thr_f[srt],
+        residuals=res_f,
+        thresholds=thr_f,
         slices=slices,
         merged_edges=merged,
         collapsed=bool(bounds) and len(merged) == len(bounds),
@@ -879,4 +906,4 @@ def si_band(
             merge=time.perf_counter() - t0 - t_slices,
         ),  # fmt: skip
     )
-    return lam_f[srt], V_f[:, srt], info
+    return lam_f, V_f, info
