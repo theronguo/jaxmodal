@@ -705,8 +705,8 @@ def _span_count(op, free, P, lam_s, cols, x0, x1, r, nbs, R, verify, opts):
     """info["count"] of a span leaf [x0, x1]: its pairs are the stored ones inside, extended over
     chains (relative gaps < 100 r, as si_checked's widened set), the nearest stored pair (or the
     parent's last run's Ritz neighbour nbs, beyond the chain gap) beyond each end its out-of-band
-    pairs; P the parent's preconditioner. A verifiable count >= 0.5 is flagged (the span is
-    rerun)."""
+    pairs; P the parent's preconditioner. A verifiable count >= 0.5 is flagged (si_band reruns
+    the span at most RESTARTS times in its lineage)."""
     o = np.argsort(lam_s, kind="stable")
     ls = lam_s[o]
     i0, i1 = _extend_chain(ls, np.searchsorted(ls, x0), np.searchsorted(ls, x1, "right"), 100 * r)
@@ -751,22 +751,22 @@ def si_band(
     each end (which can close its sides); a slice whose r_acc widens its window over more stored
     modes is rerun with them deflated. A slice that fills its capacity keeps the span verified by
     si_slice's stop rule on its last Ritz values (a leaf without a run, counted with the parent's
-    preconditioner, rerun if its count flags, at most RESTARTS times) and requeues its remainders:
-    each side cut at the largest gap >= 100 r_acc (the last run's) in its half of the converged run,
-    a side without a cut as one remainder (a binary split); nothing converged, no progress, or no
-    side done or cut raises. Clusters held by two or more runs are merged: duplicates (projected
-    M-norm < 0.5) dropped, Rayleigh-Ritz, the window widened once if a Ritz residual fails
-    (edge_rr_failed if it still fails). edges: provisional interior edges, used as given (default
-    one slice). verify: count every leaf (False: none, the predicted degree and gap recorded). Slice
-    i uses seed + (RESTARTS + 1) i, the count's seed likewise. slice_options: si_checked's and
-    si_slice's (tau, maxit_inner, ...; not sigma or count_precond).
+    preconditioner, rerun if its count flags, at most RESTARTS times in its lineage, then a flagged
+    leaf) and requeues its remainders: each side cut at the largest gap >= 100 r_acc (the last
+    run's) in its half of the converged run, a side without a cut as one remainder (a binary split);
+    nothing converged, no progress, or no side done or cut raises. Clusters held by two or more runs
+    are merged: duplicates (projected M-norm < 0.5) dropped, Rayleigh-Ritz, the window widened once
+    if a Ritz residual fails (edge_rr_failed if it still fails). edges: provisional interior edges,
+    used as given (default one slice). verify: count every leaf (False: none, the predicted degree
+    and gap recorded). Slice i uses seed + (RESTARTS + 1) i, the count's seed likewise.
+    slice_options: si_checked's and si_slice's (tau, maxit_inner, ...; not sigma or count_precond).
 
     Returns lam (ascending), V (host fp64; M-orthonormal within a window, to residual level across
     runs that deflate neither the other: |x_i^T M x_j| <= (||x_j|| ||r_i|| + ||x_i|| ||r_j||) /
     |lam_i - lam_j|, r_i = K x_i - lam_i M x_i) and info: converged, reason, r_acc, tau_eff,
     residuals, thresholds, slices (per processed slice: a run's si_checked info without
     neighbours and ritz plus interval, kind "run", leaf, n_new, reruns; a span {interval, kind
-    "span", leaf, parent (the parent's index among the runs), count}),
+    "span", leaf (False if rerun), parent (the parent's index among the runs), count}),
     merged_edges, collapsed, edge_rr_failed, duplicates, count (a summary over the leaves)
     and time (total, slices, merge). See docs/eigensolvers.md#slicing-a-band."""
     check_x64("si_band")
@@ -869,7 +869,8 @@ def si_band(
         if not (done_lo or s_lo) and not (done_hi or s_hi):
             raise _cap_error(a, e, capacity, "neither side done or cut")
         # a remainder's outer edge was not done; its inner edge is: stored modes lie beyond (the
-        # parent's done edges kept: an interval requeued whole never counts a side twice)
+        # parent's done edges kept: a remainder requeued whole never counts a side twice; a span
+        # rerun starts with none, bounded by k)
         if not done_lo:
             x = s_lo or s_hi or e
             work.append((a, x, done | {x}, k))
@@ -881,6 +882,8 @@ def si_band(
             cnt = _span_count(op, free, P, lam_s, cols, x0, x1, r_l, inf["neighbours"], R,
                               verify, {**opts, "seed": c0 + sd})  # fmt: skip
             rerun = cnt["flagged"] and k < RESTARTS  # at most RESTARTS, as si_checked
+            if cnt["flagged"] and not rerun:
+                cnt["reason"] = f"count >= 0.5 after {RESTARTS} span reruns"
             slices.append(dict(interval=(x0, x1), kind="span", leaf=not rerun, parent=i - 1,
                                count=cnt))  # fmt: skip
             if rerun:  # a missed mode: the span is rerun, its pairs deflated
@@ -888,7 +891,8 @@ def si_band(
             else:
                 leaves.append(((x0, x1), cnt))
             if verbose:
-                print(f"si_band: span [{x0:.6g}, {x1:.6g}], count {cnt['reason'] or 'passed'}",
+                print(f"si_band: span [{x0:.6g}, {x1:.6g}], count {cnt['reason'] or 'passed'}"
+                      f"{', flagged leaf' if cnt['flagged'] and not rerun else ''}",
                       flush=True)  # fmt: skip
     P = None
     t_slices = time.perf_counter() - t0

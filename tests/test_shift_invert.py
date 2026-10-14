@@ -1477,6 +1477,17 @@ def test_band_progress_side(monkeypatch):
     assert len(calls) == len(counts) == si.RESTARTS + 1 and info["count"]["flagged"]
     leafs = [s["leaf"] for s in info["slices"] if s["kind"] == "span"]
     assert leafs == [False] * si.RESTARTS + [True]
+    assert info["count"]["reason"].endswith(f"count >= 0.5 after {si.RESTARTS} span reruns")
+    # the lineage's reruns: run 2 (the span's rerun) cuts, its remainder [lo, mcut] inherits one
+    # rerun, so its flagged span is rerun once more (run 4), then kept (not a third rerun)
+    calls, counts = fake_band(
+        monkeypatch,
+        lambda j, *_: r1b if j == 1 else m3 if j == 2 else r2,
+        count=lambda k: (0.1 if k == 2 else 0.9, True, False),
+    )
+    _, _, info = fband("short", lo, hi, max_slices=10)
+    assert [c["interval"] for c in calls] == [(lo, hi), (lo, hi), (lo, mcut), (lo, mcut)]
+    assert len(counts) == 4 and info["count"]["flagged"]
     # the same interval requeued with alternating sides done: a side done before is not progress
     lo4, hi4 = edges(lr, 4, 5)
     alt = [rz([3, 4], [5]), rz([4, 5], [3])]
