@@ -15,8 +15,8 @@ Revision 3 (plan review round 2): the span of a full slice is decided by si_slic
 completeness rule on the run's final Ritz values (every Ritz value in it and a neighbour beyond
 each cut converged), not by gaps among converged values, which lost modes in the round-2
 prototypes; a side whose edge is not reached and has no cut becomes a remainder holding the
-converged pairs (binary split on that side); a flagged span leaf is requeued as a run (at most `RESTARTS` times); the span
-leaf's count reuses the parent's preconditioner through a helper factored out of `si_checked`;
+converged pairs (binary split on that side); a flagged span leaf is requeued as a run (at most
+`RESTARTS` times); the span leaf's count reuses the parent's preconditioner through a helper factored out of `si_checked`;
 `verify` is a bool in 15c (the callable moves to 15d with its only user); an edge above the
 spectrum has a defined error path; deflation chains at the slice scale; seed stride; a chunked
 merge; test 2 on configurations measured under these rules; corrected Facts.
@@ -237,8 +237,8 @@ accepted pair (λ, v, its run, residual, threshold). For slice $[a, b]$ with σ:
      its pairs (15b's restarts then apply), at most `RESTARTS` times in its lineage, then a
      flagged leaf (implemented after code review round 14: a span flagged on every rerun looped
      to `max_slices`); an unverifiable one stays a leaf, not passed.
-     - **Raise** when the run made no progress, checked for a slice requeued whole (no cut and not
-       both sides complete; implemented after code review round 15) (no new pair inside $[a, b]$,
+     - **Raise** "no progress" for a slice requeued whole (no cut and not both sides complete;
+       implemented after code review round 15) that has no new pair inside $[a, b]$,
        which W deflates so it cannot be a stored one, and no side complete that was not complete in
        the runs of the slices it came from (a remainder keeps its parent's complete edges, a span
        rerun starts with none, bounded by `RESTARTS`; implemented after code review round 14: with
@@ -514,7 +514,8 @@ timed first.
   assign a straddling cluster whole).
 - Edges come from full slices: the span si_slice's completeness rule verifies on the run's final
   Ritz values, cut at the largest gap ≥ 100 r_acc within each half of its converged run (the
-  roadmap's snapping rule), a binary split on a side without a cut; a flagged span leaf is rerun (at most `RESTARTS` times).
+  roadmap's snapping rule), a binary split on a side without a cut; a flagged span leaf is rerun
+  (at most `RESTARTS` times).
 - The cut is the largest qualifying gap within the half of the converged run on its side, not
   the run's overall largest (the roadmap says "largest gap"): a cut deep in the run would move
   up to half the run into the remainder's W, lowering its capacity_j (one chunk per $c$ pairs;

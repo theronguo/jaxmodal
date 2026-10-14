@@ -1417,10 +1417,10 @@ def test_band_progress_inside(monkeypatch):
 
 
 def test_band_progress_side(monkeypatch):
-    """A requeue with no new pair is progress only if it newly completes a side, one its lineage
-    had not done (run 1 stores modes 3-5 with the lower side complete and a cut at 4|5, run 2 on
-    the remainder [cut, hi] completes both its sides: its span counted); a remainder of a
-    remainder closing both sides is finished."""
+    """Both sides completed with no new pair finish a remainder (no progress check: run 1 stores
+    modes 3-5 with the lower side complete and a cut at 4|5, run 2 on the remainder [cut, hi]
+    completes both its sides, its span counted); a side newly complete is progress only for a
+    slice requeued whole, one its lineage had not done."""
     lr = prob("short")[6]
     lo, hi = edges(lr, 3, 5)
     r1 = ([3, 4, 5], "capacity full", rz([2, 3, 4, 5], [6]), None)
@@ -1493,7 +1493,7 @@ def test_band_span_rerun(monkeypatch):
     r2 = ([], "capacity full", rz([2, 3, 4, 5, 6]), None)
     c45 = (lr[4] + lr[5]) / 2
     # a flagged span covering its whole parent (both sides done) is rerun with no side
-    # marked done; the rerun completing both sides is progress, its span counted
+    # marked done; the rerun completing both sides is finished (not checked), its span counted
     r1b = ([3, 4, 5], "capacity full", rz([2, 3, 4, 5, 6]), None)
     calls, counts = fake_band(
         monkeypatch,
@@ -1517,8 +1517,9 @@ def test_band_span_rerun(monkeypatch):
                               count=(0.9, True, False))  # fmt: skip
     _, _, info = fband("short", lo, hi, max_slices=10)
     assert len(calls) == len(counts) == si.RESTARTS + 1 and info["count"]["flagged"]
-    leafs = [s["leaf"] for s in info["slices"] if s["kind"] == "span"]
-    assert leafs == [False] * si.RESTARTS + [True]
+    spans = [s for s in info["slices"] if s["kind"] == "span"]
+    assert [s["leaf"] for s in spans] == [False] * si.RESTARTS + [True]
+    assert [s["count"]["restarts"] for s in spans] == list(range(si.RESTARTS + 1))
     assert info["count"]["reason"].endswith(f"count >= 0.5 after {si.RESTARTS} span reruns")
     # span reruns are counted per lineage, through remainders: a flagged span rerun that splits
     # (either side) leaves remainders whose own flagged spans rerun RESTARTS - 1 times

@@ -754,12 +754,13 @@ def si_band(
     preconditioner, rerun if its count flags, at most RESTARTS times in its lineage, then a flagged
     leaf) and requeues its remainders: each side cut at the largest gap >= 100 r_acc (the last
     run's) in its half of the converged run, a side without a cut as one remainder (a binary split);
-    nothing converged, no progress, or no side done or cut raises. Clusters held by two or more runs
-    are merged: duplicates (projected M-norm < 0.5) dropped, Rayleigh-Ritz, the window widened once
-    if a Ritz residual fails (edge_rr_failed if it still fails). edges: provisional interior edges,
-    used as given (default one slice). verify: count every leaf (False: none, the predicted degree
-    and gap recorded). Slice i uses seed + (RESTARTS + 1) i, the count's seed likewise.
-    slice_options: si_checked's and si_slice's (tau, maxit_inner, ...; not sigma or count_precond).
+    nothing converged, no progress (a slice requeued whole), or no side done or cut raises. Clusters
+    held by two or more runs are merged: duplicates (projected M-norm < 0.5) dropped, Rayleigh-Ritz,
+    the window widened once if a Ritz residual fails (edge_rr_failed if it still fails). edges:
+    provisional interior edges, used as given (default one slice). verify: count every leaf (False:
+    none, the predicted degree and gap recorded). Slice i uses seed + (RESTARTS + 1) i, the count's
+    seed likewise. slice_options: si_checked's and si_slice's (tau, maxit_inner, ...; not sigma or
+    count_precond).
 
     Returns lam (ascending), V (host fp64; M-orthonormal within a window, to residual level across
     runs that deflate neither the other: |x_i^T M x_j| <= (||x_j|| ||r_i|| + ||x_i|| ||r_j||) /
@@ -883,8 +884,9 @@ def si_band(
             cnt = _span_count(op, free, P, lam_s, cols, x0, x1, r_l, inf["neighbours"], R,
                               verify, {**opts, "seed": c0 + sd})  # fmt: skip
             rerun = cnt["flagged"] and k < RESTARTS  # at most RESTARTS, as si_checked
+            cnt["restarts"] = k  # the span reruns in its lineage
             if cnt["flagged"] and not rerun:
-                cnt.update(reason=f"count >= 0.5 after {RESTARTS} span reruns", restarts=k)
+                cnt["reason"] = f"count >= 0.5 after {RESTARTS} span reruns"
             slices.append(dict(interval=(x0, x1), kind="span", leaf=not rerun, parent=i - 1,
                                count=cnt))  # fmt: skip
             if rerun:  # a missed mode: the span is rerun, its pairs deflated
