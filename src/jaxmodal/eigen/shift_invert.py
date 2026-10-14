@@ -892,8 +892,7 @@ def si_band(
             else:
                 leaves.append(((x0, x1), cnt))
             if verbose:
-                print(f"si_band: span [{x0:.6g}, {x1:.6g}], count {cnt['reason'] or 'passed'}"
-                      f"{', flagged leaf' if cnt['flagged'] and not rerun else ''}",
+                print(f"si_band: span [{x0:.6g}, {x1:.6g}], count {cnt['reason'] or 'passed'}",
                       flush=True)  # fmt: skip
     P = None
     t_slices = time.perf_counter() - t0

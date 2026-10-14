@@ -1417,9 +1417,10 @@ def test_band_progress_inside(monkeypatch):
 
 
 def test_band_progress_side(monkeypatch):
-    """A rerun with no new pair that newly completes a side is progress: run 1
-    stores modes 3-5 with the lower side complete and a cut at 4|5, run 2 on the remainder [cut, hi]
-    (all deflated) completes both its sides; its span is counted, no error."""
+    """A requeue with no new pair is progress only if it newly completes a side, one its lineage
+    had not done (run 1 stores modes 3-5 with the lower side complete and a cut at 4|5, run 2 on
+    the remainder [cut, hi] completes both its sides: its span counted); a remainder of a
+    remainder closing both sides is finished."""
     lr = prob("short")[6]
     lo, hi = edges(lr, 3, 5)
     r1 = ([3, 4, 5], "capacity full", rz([2, 3, 4, 5], [6]), None)
@@ -1450,6 +1451,47 @@ def test_band_progress_side(monkeypatch):
     with pytest.raises(ValueError, match=r"\(no progress\)"):
         fband("short", lo, hi)
     assert [c["interval"] for c in calls] == [(lo, hi), (lo, mcut)]
+    # the same interval requeued with alternating sides done: a side done before is not progress
+    lo4, hi4 = edges(lr, 4, 5)
+    alt = [rz([3, 4], [5]), rz([4, 5], [3])]
+    calls, _ = fake_band(monkeypatch, lambda j, *_: ([4] if j == 1 else [], "capacity full",
+                                                     alt[j % 2], None))  # fmt: skip
+    with pytest.raises(ValueError, match=r"\(no progress\)"):
+        fband("short", lo4, hi4, max_slices=10)
+    assert len(calls) == 3
+    # the mirror on an upper remainder [c45, hi] (its lower edge done before): a lower-side
+    # requeue keeps the parent's done edges, so completing c45 again is not progress
+    c45 = (lr[4] + lr[5]) / 2
+    alt = [rz([4, 5], [6]), rz([5, 6], [4])]
+    calls, _ = fake_band(monkeypatch, lambda j, a, e, kw: found(j, a, e, kw) if a == lo and j > 1
+                         else ([3, 4, 5] if j == 1 else [], "capacity full",
+                               rz([3, 4, 5], [2, 6]) if j == 1 else alt[j % 2], None))  # fmt: skip
+    with pytest.raises(ValueError, match=r"\(no progress\)"):
+        fband("short", lo, hi, max_slices=10)
+    assert [c["interval"] for c in calls][1:] == [(lo, (lr[3] + lr[4]) / 2)] + [(c45, hi)] * 2
+    # a remainder of a remainder (both edges done before) closing both sides with nothing new is
+    # finished, not "no progress": runs cut at 4|5 and 5|6, then 7|8 on [c56, hi]
+    c56, c78 = (lr[5] + lr[6]) / 2, (lr[7] + lr[8]) / 2
+    lo9, hi9 = edges(lr, 3, 9)
+    rit = {1: ([4, 5, 6], rz([4, 5, 6], [3, 7, 8])), 3: ([7, 8], rz([7, 8, 9], [6])),
+           4: ([], rz([5, 6, 7, 8]))}  # fmt: skip
+
+    def script(j, a, e, kw):
+        return found(j, a, e, kw) if j == 2 else (rit[j][0], "capacity full", rit[j][1], None)
+
+    calls, _ = fake_band(monkeypatch, script)
+    lam, _, info = fband("short", lo9, hi9)
+    assert [c["interval"] for c in calls][2:] == [(c56, hi9), (c56, c78)]
+    assert np.array_equal(lam, lr[3:9]) and info["converged"]
+
+
+def test_band_span_rerun(monkeypatch):
+    """A flagged span is rerun fresh (no side done), at most RESTARTS times per lineage (through
+    remainders), then kept as a flagged leaf."""
+    lr = prob("short")[6]
+    lo, hi = edges(lr, 3, 5)
+    r2 = ([], "capacity full", rz([2, 3, 4, 5, 6]), None)
+    c45 = (lr[4] + lr[5]) / 2
     # a flagged span covering its whole parent (both sides done) is rerun with no side
     # marked done; the rerun completing both sides is progress, its span counted
     r1b = ([3, 4, 5], "capacity full", rz([2, 3, 4, 5, 6]), None)
@@ -1478,24 +1520,6 @@ def test_band_progress_side(monkeypatch):
     leafs = [s["leaf"] for s in info["slices"] if s["kind"] == "span"]
     assert leafs == [False] * si.RESTARTS + [True]
     assert info["count"]["reason"].endswith(f"count >= 0.5 after {si.RESTARTS} span reruns")
-    # the same interval requeued with alternating sides done: a side done before is not progress
-    lo4, hi4 = edges(lr, 4, 5)
-    alt = [rz([3, 4], [5]), rz([4, 5], [3])]
-    calls, _ = fake_band(monkeypatch, lambda j, *_: ([4] if j == 1 else [], "capacity full",
-                                                     alt[j % 2], None))  # fmt: skip
-    with pytest.raises(ValueError, match=r"\(no progress\)"):
-        fband("short", lo4, hi4, max_slices=10)
-    assert len(calls) == 3
-    # the mirror on an upper remainder [c45, hi] (its lower edge done before): a lower-side
-    # requeue keeps the parent's done edges, so completing c45 again is not progress
-    c45 = (lr[4] + lr[5]) / 2
-    alt = [rz([4, 5], [6]), rz([5, 6], [4])]
-    calls, _ = fake_band(monkeypatch, lambda j, a, e, kw: found(j, a, e, kw) if a == lo and j > 1
-                         else ([3, 4, 5] if j == 1 else [], "capacity full",
-                               rz([3, 4, 5], [2, 6]) if j == 1 else alt[j % 2], None))  # fmt: skip
-    with pytest.raises(ValueError, match=r"\(no progress\)"):
-        fband("short", lo, hi, max_slices=10)
-    assert [c["interval"] for c in calls][1:] == [(lo, (lr[3] + lr[4]) / 2)] + [(c45, hi)] * 2
     # span reruns are counted per lineage, through remainders: a flagged span rerun that splits
     # (either side) leaves remainders whose own flagged spans rerun RESTARTS - 1 times
     for side in (rz([2, 3, 4, 5], [6]), rz([3, 4, 5, 6], [2])):
@@ -1513,20 +1537,6 @@ def test_band_progress_side(monkeypatch):
     _, _, info = fband("short", lo, hi)
     assert [c["interval"] for c in calls] == [(lo, hi)] + [(c45, hi)] * 3
     assert info["count"]["passed"]
-    # a remainder of a remainder (both edges done before) closing both sides with nothing new is
-    # finished, not "no progress": runs cut at 4|5 and 5|6, then 7|8 on [c56, hi]
-    c56, c78 = (lr[5] + lr[6]) / 2, (lr[7] + lr[8]) / 2
-    lo9, hi9 = edges(lr, 3, 9)
-    rit = {1: ([4, 5, 6], rz([4, 5, 6], [3, 7, 8])), 3: ([7, 8], rz([7, 8, 9], [6])),
-           4: ([], rz([5, 6, 7, 8]))}  # fmt: skip
-
-    def script(j, a, e, kw):
-        return found(j, a, e, kw) if j == 2 else (rit[j][0], "capacity full", rit[j][1], None)
-
-    calls, _ = fake_band(monkeypatch, script)
-    lam, _, info = fband("short", lo9, hi9)
-    assert [c["interval"] for c in calls][2:] == [(c56, hi9), (c56, c78)]
-    assert np.array_equal(lam, lr[3:9]) and info["converged"]
 
 
 def test_n_new(monkeypatch):
