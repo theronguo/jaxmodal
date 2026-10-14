@@ -1104,6 +1104,8 @@ def test_beyond_guard():
     assert lo[0] == 0.9 and hi[0] == 2.1
     p = 1.0 / (1 + 1e-4 * (1 + 1e-5))  # beyond the gap 1e-4 relative to itself, not to a = 1
     assert si._beyond(1.0, 2.0, {"lo": [(p, v)], "hi": [None]}, W, lam_W, 1e-4)[0][0] == p
+    q = 2.0 * (1 + 1e-4 * (1 + 1e-5))  # above: beyond the gap relative to b = 2, not to itself
+    assert si._beyond(1.0, 2.0, {"lo": [None], "hi": [(q, v)]}, W, lam_W, 1e-4)[1][0] == q
 
 
 # ---------------------------------------------------------------- PR 15c: si_band, fakes
@@ -1562,15 +1564,16 @@ def test_span_chain_edge(monkeypatch):
 
 def test_span_chain_r(monkeypatch):
     """The span count chains at its parent's last run's r_acc (1e-4: modes 10 and 11, relative
-    gap 1.4e-3, one chain), not at tol or the max over runs: the band edge between them leaves
-    mode 11 in the span's set."""
+    gap 1.4e-3, one chain), not at tol, the first run's or the min/max over runs: the band edge
+    between them leaves mode 11 in the span's set."""
     lr, Vr = prob("short")[6:]
     lo, hi = edges(lr, 3, 11)[0], (lr[10] + lr[11]) / 2
     full = (list(range(3, 12)), "capacity full", rz(range(2, 13)), None)
 
     def post(j, inf):  # si_slice's upper neighbour lies beyond the chain
         nb = dict(inf["neighbours"], hi=(lr[12], Vr[:, 12]))
-        return dict(inf, r_acc=1e-2, runs=[dict(inf["runs"][0], r_acc=1e-4)], neighbours=nb)
+        runs = [dict(inf["runs"][0], r_acc=r) for r in (1e-2, 1e-6, 1e-4)]  # restarts: the last
+        return dict(inf, r_acc=1e-2, runs=runs, neighbours=nb)
 
     _, counts = fake_band(monkeypatch, lambda *_: full, post=post)
     fband("short", lo, hi)
