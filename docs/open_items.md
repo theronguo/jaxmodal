@@ -117,36 +117,61 @@ The measured setup peak per corner DOF grows about 0.65 kB per decade of $n_c$ (
 - **Host `V` holds `n_modes` + chunk columns** in band mode (one more block than a plain solve); `lobpcg_memory(band=True)` adds one block.
 - **Band peak test:** voxel $48^3$, `n_modes=10` (chunk 15, block 20, inside the memory model's 15–48 fit) measured 2.83 GB against the 2.62 GB estimate, 7% under (within the 20% criterion).
 - **The final chunk's re-orthonormalization is defensive:** at test sizes $\max|W^\top M W - I|$ is the same with and without it (3.8e-15 vs 4.2e-15 fp64, 7.5e-9 vs 7.7e-9 fp32, 3 chunks); it guards against the drift PR 9b measured after about 20 chunks.
-- **$\tau_c$ still open (carried over from PR 14a, needs your input):** the band count uses the roadmap's $\tau_c$; loosening it would cut about a third of the counting cost.
+- **$\tau_c$:** the band count uses the roadmap's $\tau_c$; decided in PR 15c (below).
 
 ### PR 15a decisions without user input
 
-- **PR 15 split into 15a / 15b / 15c** (the one-slice solver; the band-pass count and restarts; slicing, strategy choice and `band=(f1, f2)`), every roadmap PR 15 test assigned to one part (`docs/plans/pr-15a-shift-invert.md`).
+- **PR 15 split into 15a / 15b / 15c** (the one-slice solver; the band-pass count and restarts; slicing, strategy choice and `band=(f1, f2)`; PR 15c split again into 15c, the slicing engine, and 15d, the strategy and API), every roadmap PR 15 test assigned to one part (`docs/plans/pr-15a-shift-invert.md`).
 - **Ritz pairs by Rayleigh–Ritz on (K, M)** over the shift-invert Krylov basis, not from the inexact projected $T$ (whose residuals exceeded $10\tau\delta$ and grew with the basis); the roadmap's "final Rayleigh–Ritz" is the last step's, with true residuals recomputed on the compact V. No implicit restarts: 15c splits a full slice.
 - **Per-pair thresholds** $t_i = \max(tol, 10\tau_\text{eff}\delta_i, \text{round-off floor})$ and $r_{acc} = \max t_i$ over the in-slice pairs and the neighbours (the roadmap's $r_{acc}$ plus LOBPCG's floor term and the neighbours, so never below the roadmap's value).
 - **σ at the slice midpoint** (or given), moved once by 1% of the width when the first solve stagnates above $10^3\max(\tau, 10^{-10})$ (the plan said $10^3\tau$; the floor term keeps a τ below the fp64 MINRES floor from moving σ); $\tau_\text{eff} > 10^{-4}$ or a non-finite MINRES residual ends the slice as "inner solves failed".
 - **τ_eff** = the running max of the stagnated or capped columns' final residuals; later inner solves capped at 10× the first step's iterations (the first step at the σ used).
-- **`capacity` is required** (no default allocation); 15c sets it from `si_memory` and the budget. The basis also stops at the free space left by R and W (beyond it new columns are round-off noise).
+- **`capacity` is required** (no default allocation); 15d sets it from `si_memory` and the budget. The basis also stops at the free space left by R and W (beyond it new columns are round-off noise).
 - **`lam` holds the converged `inside` set**, which extends 100 $r_{acc}$ past each edge and over clusters straddling one (the plan's "in $[\lambda_{lo}, \lambda_{hi}]$" read with its own 100 r window); 15c's duplicate removal handles the overlap.
 - **`si_memory`** counts the build on top of the full storage plus a host term (as `lobpcg_memory`), and takes the expected slice count `n_modes` for its end phase.
-- **Cost driver:** the depth of σ in the spectrum, not δ, sets the MINRES iterations (measured); 15c fits its cost model on depth (roadmap note on the two cost-model bullets).
+- **Cost driver:** the depth of σ in the spectrum, not δ, sets the MINRES iterations (measured); 15d fits its cost model on depth (roadmap note on the two cost-model bullets).
 - **Largest-size benchmark cut (user: "Run something more reasonable", 2026-10-13).** The plan's 1M and 2M τ = 1e-14 floor solves run near mode 6, not 100 (about 2 min each), and the 2M voxel slice sits near mode 6 too. The 1M hex20 slice near mode 100 was measured before the cut (converged, 9 steps of about 780 MINRES iterations, 1.7 h). `shift_invert_study.py --parts` runs one part at a time and every slice prints a progress line per step.
 
-### Shift-invert cost near mode 1000 (PR 15a → PR 15c)
+### PR 15c decisions without user input
 
-With σ near mode 1000 (hex20 $16^3$, AMG), a mid-gap MINRES solve takes about 14k iterations (4970–5260 at depth 500); at 1M DOF on the Mac that is about 4 h per slice step. Of two runs at the same settings one had a column stagnate (last iterate $6.8 \times 10^{-3}$) and one converged ($9.8 \times 10^{-9}$), the difference most likely from round-off (the recompiled loop) (the best-iterate fix leaves the iterates and exits unchanged): at that depth the inner solve is marginal, and σ near an eigenvalue stagnated there too. So the limit is both cost and possible failure. This matters for the 10M GPU goal, where LOBPCG's basis runs out near modes 700–1000 and the roadmap sends those bands to shift-invert. 15c's cost model must price it; options if it is too slow: deflate the converged modes below σ from MINRES, a stronger (higher-degree or σ-aware) multigrid, or a memory-lean LOBPCG fallback. May need the user's input if no option meets the roadmap's 10M band criteria.
+- **Counting tolerance $\tau_c$ kept at the roadmap rule** $0.01/(d\sqrt{n_{free}})$ (user, 2026-10-14: "Just decide for yourself"). Loosening it to $10^{-4}$ would save about a third of the PCG iterations of a count (PR 14a's study) but leave counts at 100× or more the solve at typical gaps, so it would not change which counts run, while the strict rule keeps the error about $10^{-6}$, far below the 0.5 threshold. `count_options["tau"]` sets it per call; 15d's cost model prices counts at the τ in use.
+- **PR 15c split into 15c (slicing engine `si_band`) and 15d (cost model, memory budget, strategy, `verify=None`, `band=(f1, f2)`)**, every roadmap PR 15 test assigned ([15c] / [15d] tags in the roadmap).
+- **No provisional interior edges from a cost model:** the measured slice cost (about 1.8 Lanczos columns per mode plus 50–85 per slice) makes the widest slice that fits the cheapest; slices come from full slices reduced to their span and remainders, the converged span kept as a leaf without a second run. `edges` is an internal option, used as given.
+- **Edges come from full slices:** the span si_slice's completeness rule verifies on the run's final Ritz values, cut at the largest gap ≥ 100 r_acc within each half of its converged run (the roadmap's snapping rule), a binary split on a side without a cut; a flagged span is rerun. The cut is the largest gap within the half on its side, not the run's overall largest (the roadmap says "largest gap"): a cut deep in the run moves up to half the run into the remainder's W, lowering its capacity, while the outermost gap can be tiny and the count's degree is ∝ 1/g.
+- **si_slice counts deflated W modes as converged candidates** (a W mode can close a side), and deflation windows include the nearest stored pair beyond each edge. Consequence: a mode across a boundary is deflated by the next slice instead of found twice, so the roadmap's collapse test sees a merged window without a duplicate (the plan expected one); duplicate removal is tested on fakes.
+- **Remainders run at their midpoint** (si_slice's default σ).
+- **Leaves keep si_slice's widened inside sets** (margins, straddling chains) rather than only the pairs inside their interval; deflation windows and the merge handle the overlap, so `lam` can hold pairs just outside the band.
+- **Deflation windows:** margins $\min(1000 r_w, 10^{-2})$, chains at $100 r_w$, $r_w = \max(r_s, \texttt{tol})$; `capacity` is the total basis per slice, deflation included.
+- **MINRES does not stagnate before its best explicit residual drops below $\|b\|$** (a plateau, not a stall), fixed where it surfaced (PR 15c); an inner failure stops the band without a seed retry.
+- **`edge_unreached` is not evidence of an edge outside the spectrum:** no fallback in 15c; 15d applies the f₁ < λ₁ rule and the λ_hi bound up front; an edge in (λ_max, λ̂_max] raises the capacity error, which names both causes.
+- **The merge** applies the roadmap's 0.5 projected-norm rule per direction of a run's window subspace, then Rayleigh–Ritz; a failing window is widened once (by the neighbouring windows), then flagged (`edge_rr_failed`).
+- **Counts reuse the preconditioner of their slice** (a span leaf: its parent's, before it is released; built at the slice's σ, not at $c_{hi}$; only PCG iterations depend on it).
+- **A flagged or unverifiable run leaf is not split or rerun** beyond 15b's restarts.
+- **`verify` is a bool in 15c**; the per-leaf callable comes with 15d's `verify=None`.
 
-### σ-move retries (PR 15a → PR 15c)
+### MINRES plateaus below ‖b‖ (PR 15c)
 
-A slice whose first solve stagnates moves σ once and repeats the solve; when the stagnation is depth-driven, the retry costs a second full solve before the slice stops. 15c's strategy should not place slices where the cost model predicts stagnation, so the retry only handles σ on an eigenvalue.
+PR 15c's stagnation rule skips plateaus only while the best explicit residual is ≥ ‖b‖. A plateau below ‖b‖ in the 2-norm (another norm ratio, a better preconditioner) would still stop the slice as "inner solves failed", and the band with it. Not measured so far. A later fallback: continue a stagnated column once from its best iterate. While a column plateaus above ‖b‖, `minres` returns its best *checked* iterate, which can be worse than $x = 0$ (1.22 ‖b‖ in the test case); a capped column counts as bad for si_slice's σ-move and τ_eff rules either way. Revisit if a band stops with "inner solves failed".
+
+### Span counts at small capacities (PR 15c → PR 15d)
+
+A small capacity converges few modes per slice, so a span's cut can only fall in a small gap, and the count's degree grows as 1/g: modes 8–21 of hex20 $6\times5\times4$ at block 2 and capacity 24 needed a degree of about 18 000 for the first span (about 6 min, against seconds for the slices). Default: the count runs (`verify=True`); 15d's per-leaf `verify=None` decides on the predicted cost (`degree` is recorded with `verify=False`), and its capacity choice should avoid such slices.
+
+### Shift-invert cost near mode 1000 (PR 15a → PR 15d)
+
+With σ near mode 1000 (hex20 $16^3$, AMG), a mid-gap MINRES solve takes about 14k iterations (4970–5260 at depth 500); at 1M DOF on the Mac that is about 4 h per slice step. Of two runs at the same settings one had a column stagnate (last iterate $6.8 \times 10^{-3}$) and one converged ($9.8 \times 10^{-9}$), the difference most likely from round-off (the recompiled loop) (the best-iterate fix leaves the iterates and exits unchanged): at that depth the inner solve is marginal, and σ near an eigenvalue stagnated there too. So the limit is both cost and possible failure. This matters for the 10M GPU goal, where LOBPCG's basis runs out near modes 700–1000 and the roadmap sends those bands to shift-invert. 15d's cost model must price it; options if it is too slow: deflate the converged modes below σ from MINRES, a stronger (higher-degree or σ-aware) multigrid, or a memory-lean LOBPCG fallback. May need the user's input if no option meets the roadmap's 10M band criteria.
+
+### σ-move retries (PR 15a → PR 15d)
+
+A slice whose first solve stagnates moves σ once and repeats the solve; when the stagnation is depth-driven, the retry costs a second full solve before the slice stops. 15d's strategy should not place slices where the cost model predicts stagnation, so the retry only handles σ on an eigenvalue.
 
 ### Band-pass count and slice restarts (PR 15b, decisions without user input)
 
 - **Tail model fitted to the band.** No mode index is known inside a band, so the Weyl count $N \propto \lambda^{3/2}$ is fitted to the in-band modes and the nearest pair on each side, with $N(0) = 0$ (rigid modes deflated). A band with few modes gives a rough fit; the 3/2 exponent stays the upper bound, and the tail binds only with very many modes below.
 - **Only the nearest out-of-band pair per side is deflated.** Further modes add at most $q^2 \approx 7\cdot10^{-4}$ (at $g/2$ past an edge), inside the 0.05 bias. Adjacent slices' modes are not all deflated (memory and transfer cost).
-- **σ = $c_{hi}$, the upper counting edge.** One recurrence; the lower edge costs $(1 + a)/(2\sqrt a)$ more degree (2× at $a = 0.07$). A σ between the edges would balance the edges but was not needed for 15c's narrow slices.
-- **The slice's preconditioner is reused for the count** (built at the slice's σ, SPD): no second multigrid in memory; it costs PCG iterations when σ is far from $c_{hi}$ (wide slices). 15c may pass `count_precond`.
-- **Restarts** deflate the found in-band modes, use fresh seeds for the start block and the probes, and stay within the first run's device memory (capacity reduced); at most 2. Unverifiable counts and unconverged slices are not restarted: a rerun would not change them. 15c decides whether a flagged slice splits.
+- **σ = $c_{hi}$, the upper counting edge.** One recurrence; the lower edge costs $(1 + a)/(2\sqrt a)$ more degree (2× at $a = 0.07$). A σ between the edges would balance the edges. 15c's slices are as wide as memory allows, so wide leaves pay the lower edge's factor; it is recorded per leaf (`degree`, `gap`) and is an item for 15d's cost model.
+- **The slice's preconditioner is reused for the count** (built at the slice's σ, SPD): no second multigrid in memory; it costs PCG iterations when σ is far from $c_{hi}$ (wide slices). PR 15c: counts reuse the slice's preconditioner (decision below).
+- **Restarts** deflate the found in-band modes, use fresh seeds for the start block and the probes, and stay within the first run's device memory (capacity reduced); at most 2. Unverifiable counts and unconverged slices are not restarted: a rerun would not change them. PR 15c: a flagged slice is not split (decision below).
 - **The planted-mode test** scales the mass by $s$ to move one eigenvalue into a gap, instead of editing a mesh.
 - **Progress** comes from a per-step `jax.debug.callback` (scalars only, rate-limited on the host); the verbose loop is a separate compile.
 - **Slow tests.** The band expected-value tests (missing, free) and detection tests (missing, complete) take 21–111 s and are marked slow, above the plan's fast budget; they run in the full suite.

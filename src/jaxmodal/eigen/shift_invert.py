@@ -725,6 +725,7 @@ def si_band(
     opts = {"verbose": verbose, **(count_options or {})}
     c0 = opts.pop("seed", 0)
     m = jnp.asarray(np.asarray(free), jnp.float64)[:, None]
+    n_free = int(np.asarray(free).sum()) - (0 if R is None else R.shape[1])
     lam_s, run_s, res_s, thr_s, vecs = np.zeros(0), np.zeros(0, int), np.zeros(0), np.zeros(0), []
     work = [(x0, x1, {}) for x0, x1 in zip([lo, *cuts], [*cuts, hi], strict=True)]
     slices, leaves = [], []  # leaves: (interval, count info, converged)
@@ -743,6 +744,8 @@ def si_band(
         cap = up(capacity) - up(len(win))
         if cap < 2 * b:
             raise _cap_error(a, e, capacity, f"{len(win)} deflated modes leave {cap} columns")
+        if n_free - len(win) < 2 * b:
+            raise _cap_error(a, e, capacity, f"{len(win)} deflated modes fill the free space")
         P = make((a + e) / 2)
         sd = (RESTARTS + 1) * i
         lam, V, inf = si_checked(
@@ -763,7 +766,8 @@ def si_band(
         slices.append(entry)
         why = inf["reason"]
         if verbose:
-            print(f"si_band: slice {i} [{a:.6g}, {e:.6g}], capacity {cap}, W {len(win)}:"
+            print(f"si_band: slice {i} [{a:.6g}, {e:.6g}], sigma {inf['sigma']:.6g},"
+                  f" capacity {cap}, W {len(win)}:"
                   f" {why or 'converged'}, {n_new} new, count"
                   f" {inf['count']['reason'] or 'passed'}", flush=True)  # fmt: skip
         i += 1
