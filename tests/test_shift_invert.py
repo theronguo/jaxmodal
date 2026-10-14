@@ -1218,17 +1218,19 @@ SPLIT_CASES = [  # (values, converged, sigma, a, b, expected); T/F per value
     # an unconverged value between two converged ones below sigma stops the run
     ([1, 2, 2.5, 3, 4, 5, 6, 9], "TTFTTTTF", 4.5, 1.5, 7.5, (3.5, 5.5, False, False)),
     # an unconverged value nearest sigma: the run grows from the converged value nearest it
-    ([1, 2, 3, 4, 5, 6], "TTTFTT", 4.0, 1.5, 5.5, (None, None, True, False)),
+    ([1, 2, 3, 4, 5, 6], "TTTFTT", 4.0, 1.5, 5.5, (None, 2.5, True, False)),
     # static halves, each cut its half's largest gap (lower 2|3), not the overall one (3.2|6)
     ([1, 2, 3, 3.1, 3.2, 6, 6.1, 9], "FTTTTTTF", 4.0, 1.5, 8.0, (2.5, 4.6, False, False)),
     # the largest gap of its half, not the first >= 100 r (2.1|4 and 4.2|4.5)
     ([1, 2, 2.1, 4, 4.1, 4.2, 4.5, 9], "FTTTTTTF", 4.0, 1.5, 8.0, (3.05, 4.35, False, False)),
     # k = 2: the gap is the lower side's; the W neighbour 4 converged: upper side complete
     ([1, 2, 3, 4], "FTTT", 2.5, 1.5, 3.5, (2.5, None, False, True)),
+    # ... but the upper side's when the lower side is complete (code review round 19)
+    ([1, 2, 3, 4], "TTTF", 2.0, 1.5, 3.5, (None, 2.5, True, False)),
     # gaps touching the edges' neighbours are no cuts
     ([1, 2, 3], "TTT", 2.0, 1.5, 2.5, (None, None, True, True)),
     # a = 0 complete when the run reaches the bottom, not when the bottom is unconverged
-    ([1, 2, 3, 4], "TTFF", 1.0, 0.0, 3.5, (None, None, True, False)),
+    ([1, 2, 3, 4], "TTFF", 1.0, 0.0, 3.5, (None, 1.5, True, False)),
     ([1, 2, 3, 4], "FTTF", 2.5, 0.0, 3.5, (2.5, None, False, False)),
     # no value below a > 0: the lower side is not complete
     ([2, 3, 4], "TTT", 3.0, 1.5, 3.5, (2.5, None, False, True)),

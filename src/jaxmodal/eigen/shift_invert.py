@@ -609,7 +609,8 @@ def _split(v, conv, sigma, a, b, r):
     converged chains (relative gaps < 100 r) holding the converged value nearest sigma. A side
     is done when the run holds the value beyond the edge and goes on past it (si_slice's rule;
     at a = 0 every value below); otherwise it is cut at the largest gap >= 100 r between run
-    values inside (a, b), in its half of them (gaps g <= (k - 2) // 2 below, the rest above).
+    values inside (a, b), in its half of them (gaps g < k // 2 below, the rest above; the middle
+    one, k even, above when the lower side is done).
     Returns None (nothing converged) or (s_lo, s_hi, done_lo, done_hi), a cut or None per side."""
     if not len(v):
         return None
@@ -630,7 +631,7 @@ def _split(v, conv, sigma, a, b, r):
     done_hi = above is not None and run[0] < above <= run[-1]
     idx = run[(v[run] > a) & (v[run] < b)]
     gaps = (v[idx[1:]] - v[idx[:-1]]) / np.abs(v[idx[1:]])
-    lower = np.arange(len(gaps)) <= (len(idx) - 2) // 2
+    lower = np.arange(len(gaps)) < ((len(idx) - 1) // 2 if done_lo else len(idx) // 2)
     cuts = []
     for done, sel in ((done_lo, lower), (done_hi, ~lower)):
         g = np.flatnonzero(sel & (gaps >= 100 * r))
@@ -869,7 +870,7 @@ def si_band(
         whole = s_lo is None and s_hi is None and not (done_lo and done_hi)  # requeued whole
         if whole and not n_new and not ((done_lo and a not in done) or (done_hi and e not in done)):
             raise _cap_error(a, e, capacity, "no progress")
-        if not (done_lo or s_lo or done_hi or s_hi):  # new pairs only: rerun [a, e], them deflated
+        if not (done_lo or s_lo or done_hi or s_hi):  # new pairs only: requeued, them deflated
             work.append((a, e, done, k))
             continue
         # a remainder's outer edge was not done; its inner edge is: stored modes lie beyond (the

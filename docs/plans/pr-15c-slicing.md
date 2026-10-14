@@ -213,7 +213,9 @@ accepted pair (λ, v, its run, residual, threshold). For slice $[a, b]$ with σ:
      code review round 12); the cut candidates are the gaps between consecutive run values
      both inside $(a, b)$, $m_0 < \dots < m_{k-1}$, gap $i$ between $m_i$ and $m_{i+1}$; gaps
      $i \le \lfloor (k - 2)/2 \rfloor$ are the lower half, the others the upper half (static; for
-     $k = 2$ the single gap is the lower side's). A gap touching a W neighbour beyond an edge is
+     $k = 2$ the single gap is the lower side's; for $k$ even the middle gap is the upper side's
+     when the lower side is complete, code review round 19: a complete lower side with $k = 2$
+     never cut, its mirror did). A gap touching a W neighbour beyond an edge is
      never a cut (that side is complete), so a cut lies strictly inside $(a, b)$ with values on
      both sides of it. On each side:
      - **complete:** the run reaches a converged value beyond the slice's edge (si_slice's own
