@@ -1270,6 +1270,51 @@ def test_merge_chunks():
         assert np.abs(X.T @ (M @ X) - np.eye(9)).max() <= 1e-10 and (r <= 1e-10).all()
 
 
+def test_merge_explicit():
+    """Code review round 4: _merge's returned X checked against SciPy K, M with inputs that are
+    not Ritz vectors (group 2 perturbed by 1e-3 of modes 9-14): r equals the SciPy residuals of
+    X, X^T K X = diag(theta), for c = 1 and 64; a third group repeating a direction kept from the
+    second (projected norm 0.6 there) is dropped (the kept columns are M-normalized)."""
+    _, free, op, K, M, R, lr, Vr = prob("cube")
+    m = jnp.asarray(free, jnp.float64)[:, None]
+    consts = si._consts(op, m, jax.random.key(0), 1e-10)
+    rng = np.random.default_rng(2)
+    Q1 = Vr[:, :5] @ np.linalg.qr(rng.standard_normal((5, 5)))[0]
+    Y = Vr[:, 3:9] @ np.linalg.qr(rng.standard_normal((6, 6)))[0]
+    Y = Y + 1e-3 * Vr[:, 9:15] @ rng.standard_normal((6, 6))
+    ev, U = np.linalg.eigh(Y.T @ (M @ Y))
+    Q2 = Y @ U / np.sqrt(ev)  # M-orthonormal
+    for c in (1, 64):
+        th, X, r, t, drop = si._merge(op, m, [Q1.copy(), Q2.copy()], consts, c)
+        KX, MX = K @ X, M @ X
+        assert drop == 2 and len(th) == 9
+        assert np.abs(X.T @ MX - np.eye(9)).max() <= 1e-10
+        assert np.abs(X.T @ KX - np.diag(th)).max() <= 1e-10 * lr[14]
+        ref = np.linalg.norm(KX - MX * th, axis=0) / (th * np.linalg.norm(MX, axis=0))
+        assert np.allclose(r, ref, rtol=1e-6) and ref.max() > 1e-6
+    v0, v5 = Vr[:, :1], Vr[:, 5:6]
+    th, X, r, t, drop = si._merge(op, m, [v0.copy(), 0.8 * v0 + 0.6 * v5, v5.copy()], consts, 64)
+    assert drop == 1 and np.abs(th - lr[[0, 5]]).max() <= 1e-10 * lr[5]
+
+
+def test_merge_two_windows(monkeypatch):
+    """Code review round 4: two merged windows with a duplicate each (cube triple 2-4 across runs
+    1-2, double 8-9 across runs 2-3) add up (duplicates 2); the first fails its re-check (run 2's
+    mode 4 perturbed), the later passing window does not clear edge_rr_failed."""
+    _, free, op, K, M, R, lr, Vr = prob("cube")
+    lo, hi = edges(lr, 2, 10)
+    s = [(lr[2] + lr[3]) / 2, (lr[8] + lr[9]) / 2]
+    rng = np.random.default_rng(0)
+    w = Vr[:, 4] + 1e-3 * np.where(free, rng.standard_normal(len(free)), 0)
+    w /= np.sqrt(w @ (M @ w))
+    two_runs(monkeypatch, (lr[[2, 3]], [Vr[:, 2], Vr[:, 3]]),
+             (lr[3:10], [Vr[:, 3], w] + [Vr[:, q] for q in range(5, 10)]),
+             (lr[[9]], [Vr[:, 9]]))  # fmt: skip
+    lam, V, info = fband("cube", lo, hi, edges=s, R=R)
+    assert info["duplicates"] == 2 and len(lam) == 8
+    assert info["edge_rr_failed"] and not info["converged"]
+
+
 # ---------------------------------------------------------------- PR 15c: si_band, real runs
 
 
