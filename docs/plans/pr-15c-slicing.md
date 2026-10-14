@@ -237,21 +237,22 @@ accepted pair (λ, v, its run, residual, threshold). For slice $[a, b]$ with σ:
      its pairs (15b's restarts then apply), at most `RESTARTS` times in its lineage, then a
      flagged leaf (implemented after code review round 14: a span flagged on every rerun looped
      to `max_slices`); an unverifiable one stays a leaf, not passed.
-     - **Raise** when the run made no progress (no new pair inside $[a, b]$, which W deflates so
-       it cannot be a stored one, and no side complete that was not complete in the runs of the
-       slices it came from (a remainder keeps its parent's complete edges, a span rerun starts
-       with none, bounded by `RESTARTS`; implemented after code review round 14: with only the
-       parent's, an interval completing its sides in turn looped to `max_slices`); a first slice has no side complete; a remainder has its inner
-       edge (a cut, or the other side's cut or complete edge) complete), or neither side is
-       complete or cut:
+     - **Raise** when the run made no progress, checked for a slice requeued whole (no cut and not
+       both sides complete; implemented after code review round 15) (no new pair inside $[a, b]$,
+       which W deflates so it cannot be a stored one, and no side complete that was not complete in
+       the runs of the slices it came from (a remainder keeps its parent's complete edges, a span
+       rerun starts with none, bounded by `RESTARTS`; implemented after code review round 14: with
+       only the parent's, an interval completing its sides in turn looped to `max_slices`); a first
+       slice has no side complete; a remainder has its inner edge (a cut, or the other side's cut or
+       complete edge) complete), or neither side is complete or cut:
        `ValueError("slice [a, b] fills capacity C without converging a gap >= 100 r_acc on
        either side: raise capacity (measured: a slice needs about 50-85 columns before it
        converges anything); lo may be below lambda_1 or hi above the spectrum")`. (Implemented:
        $\texttt{capacity}_j < 2b$ raises its own "raise capacity" message, and si_slice's
        free-space error, naming "hi may be above the spectrum", passes through.) Each requeue is
        a strict sub-interval of its parent (cuts lie strictly inside) or the same interval with
-       more stored pairs or a side newly complete, so the list terminates; `max_slices` is the
-       backstop.
+       more stored pairs or a side newly complete, and a span is rerun at most `RESTARTS` times
+       in its lineage, so the list terminates; `max_slices` is the backstop.
    - **Count flagged** (after 15b's restarts) or **unverifiable**: a leaf; its pairs join the store
      and the band count is not passed; no split.
    - **Inner solves failed:** the band stops with the pairs found (`converged` False, `reason`

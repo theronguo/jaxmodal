@@ -864,7 +864,8 @@ def si_band(
         if sp is None:
             raise _cap_error(a, e, capacity, "nothing converged")
         s_lo, s_hi, done_lo, done_hi = sp
-        if not n_new and not ((done_lo and a not in done) or (done_hi and e not in done)):
+        whole = s_lo is None and s_hi is None and not (done_lo and done_hi)  # requeued whole
+        if whole and not n_new and not ((done_lo and a not in done) or (done_hi and e not in done)):
             raise _cap_error(a, e, capacity, "no progress")
         if not (done_lo or s_lo) and not (done_hi or s_hi):
             raise _cap_error(a, e, capacity, "neither side done or cut")
@@ -883,7 +884,7 @@ def si_band(
                               verify, {**opts, "seed": c0 + sd})  # fmt: skip
             rerun = cnt["flagged"] and k < RESTARTS  # at most RESTARTS, as si_checked
             if cnt["flagged"] and not rerun:
-                cnt["reason"] = f"count >= 0.5 after {RESTARTS} span reruns"
+                cnt.update(reason=f"count >= 0.5 after {RESTARTS} span reruns", restarts=k)
             slices.append(dict(interval=(x0, x1), kind="span", leaf=not rerun, parent=i - 1,
                                count=cnt))  # fmt: skip
             if rerun:  # a missed mode: the span is rerun, its pairs deflated

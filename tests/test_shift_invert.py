@@ -1478,16 +1478,6 @@ def test_band_progress_side(monkeypatch):
     leafs = [s["leaf"] for s in info["slices"] if s["kind"] == "span"]
     assert leafs == [False] * si.RESTARTS + [True]
     assert info["count"]["reason"].endswith(f"count >= 0.5 after {si.RESTARTS} span reruns")
-    # the lineage's reruns: run 2 (the span's rerun) cuts, its remainder [lo, mcut] inherits one
-    # rerun, so its flagged span is rerun once more (run 4), then kept (not a third rerun)
-    calls, counts = fake_band(
-        monkeypatch,
-        lambda j, *_: r1b if j == 1 else m3 if j == 2 else r2,
-        count=lambda k: (0.1 if k == 2 else 0.9, True, False),
-    )
-    _, _, info = fband("short", lo, hi, max_slices=10)
-    assert [c["interval"] for c in calls] == [(lo, hi), (lo, hi), (lo, mcut), (lo, mcut)]
-    assert len(counts) == 4 and info["count"]["flagged"]
     # the same interval requeued with alternating sides done: a side done before is not progress
     lo4, hi4 = edges(lr, 4, 5)
     alt = [rz([3, 4], [5]), rz([4, 5], [3])]
@@ -1496,6 +1486,47 @@ def test_band_progress_side(monkeypatch):
     with pytest.raises(ValueError, match=r"\(no progress\)"):
         fband("short", lo4, hi4, max_slices=10)
     assert len(calls) == 3
+    # the mirror on an upper remainder [c45, hi] (its lower edge done before): a lower-side
+    # requeue keeps the parent's done edges, so completing c45 again is not progress
+    c45 = (lr[4] + lr[5]) / 2
+    alt = [rz([4, 5], [6]), rz([5, 6], [4])]
+    calls, _ = fake_band(monkeypatch, lambda j, a, e, kw: found(j, a, e, kw) if a == lo and j > 1
+                         else ([3, 4, 5] if j == 1 else [], "capacity full",
+                               rz([3, 4, 5], [2, 6]) if j == 1 else alt[j % 2], None))  # fmt: skip
+    with pytest.raises(ValueError, match=r"\(no progress\)"):
+        fband("short", lo, hi, max_slices=10)
+    assert [c["interval"] for c in calls][1:] == [(lo, (lr[3] + lr[4]) / 2)] + [(c45, hi)] * 2
+    # span reruns are counted per lineage, through remainders: a flagged span rerun that splits
+    # (either side) leaves remainders whose own flagged spans rerun RESTARTS - 1 times
+    for side in (rz([2, 3, 4, 5], [6]), rz([3, 4, 5, 6], [2])):
+        runs = [r1b, ([], "capacity full", side, None), ([], "capacity full", r1b[2], None)]
+        calls, _ = fake_band(monkeypatch, lambda j, *_, runs=runs: runs[min(j, 3) - 1],
+                             count=(0.9, True, False))  # fmt: skip
+        _, _, info = fband("short", lo, hi, max_slices=10)
+        assert len(calls) == 5 and sum(s["leaf"] for s in info["slices"]) == 2
+    # a flagged span from a remainder is rerun fresh: its rerun completing only the remainder's
+    # done edge c45 again, with nothing new, is progress (as the whole-parent rerun above)
+    rit = [rz([2, 3, 4, 5], [6]), rz([2, 3, 4, 5, 6]), rz([4, 5], [6]), rz([2, 3, 4, 5, 6])]
+    calls, _ = fake_band(monkeypatch, lambda j, *_: ([3, 4, 5] if j == 1 else [],
+                                                     "capacity full", rit[j - 1], None),
+                         count=lambda k: (0.9 if k == 2 else 0.1, True, False))  # fmt: skip
+    _, _, info = fband("short", lo, hi)
+    assert [c["interval"] for c in calls] == [(lo, hi)] + [(c45, hi)] * 3
+    assert info["count"]["passed"]
+    # a remainder of a remainder (both edges done before) closing both sides with nothing new is
+    # finished, not "no progress": runs cut at 4|5 and 5|6, then 7|8 on [c56, hi]
+    c56, c78 = (lr[5] + lr[6]) / 2, (lr[7] + lr[8]) / 2
+    lo9, hi9 = edges(lr, 3, 9)
+    rit = {1: ([4, 5, 6], rz([4, 5, 6], [3, 7, 8])), 3: ([7, 8], rz([7, 8, 9], [6])),
+           4: ([], rz([5, 6, 7, 8]))}  # fmt: skip
+
+    def script(j, a, e, kw):
+        return found(j, a, e, kw) if j == 2 else (rit[j][0], "capacity full", rit[j][1], None)
+
+    calls, _ = fake_band(monkeypatch, script)
+    lam, _, info = fband("short", lo9, hi9)
+    assert [c["interval"] for c in calls][2:] == [(c56, hi9), (c56, c78)]
+    assert np.array_equal(lam, lr[3:9]) and info["converged"]
 
 
 def test_n_new(monkeypatch):
