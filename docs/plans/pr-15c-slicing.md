@@ -36,8 +36,7 @@ reference docs of `si_slice`/`si_checked` and the roadmap note in the docs list.
 Revision 5 (plan review round 4): a MINRES false-stagnation fix (a seed-dependent "inner solves
 failed" of plain si_slice, measured, diagnosed and prototyped below); cuts only between run
 values inside the slice (a cut on the edge gave zero-width spans and identical reruns); progress
-defined
-against the parent; static run halves; a W neighbour sets si_slice's `seen`; a capped deflation
+defined against the parent; static run halves; a W neighbour sets si_slice's `seen`; a capped deflation
 margin; test 2's robustness property restated (match or raise, never a short result) with the
 measured candidates; the roadmap stop-rule text and si_checked's neighbour sentence in the docs
 list.
@@ -326,14 +325,17 @@ one line per slice (interval, σ, capacity_j, outcome, new modes, span and cuts,
   does not separate the cases: the recursive residual plateaus with the explicit one (0.95 →
   0.87 over 100 iterations). The existing stagnation tests (σ on an eigenvalue, the
   3-eigenvalue freeze, stagnation before maxit) pass unchanged; si_slice's σ-move rule is
-  unchanged.
+  unchanged. `minres`'s docstring and the `STALL_C` comment state the new condition.
 - `si_checked(..., verify=True)`: False runs the slice alone (no count, no restarts);
   `info["count"]` then holds `ran` False, reason "not requested" and the predicted `degree`,
   `gap`. Its count block (band_count with the nearest out-of-band pair on each side, or `count`
   at λ_lo = 0) moves into `_count_slice(op, free, V_c, lam_c, lo, hi, nb_lo, nb_hi, **kw)`, used
   by `si_checked` and by `si_band`'s span leaves.
 - Nothing else in 15a/15b changes. An inner failure still stops the band (no seed retry): its
-  measured cause is fixed at the source.
+  measured cause is fixed at the source, for plateaus above $\|b\|$ only; a plateau below
+  $\|b\|$ in the 2-norm (another norm ratio, a better preconditioner) would still stop the
+  slice, logged as an open item (a later fallback: continue a stagnated column once from its
+  best iterate). The implementation carries no prototype state beyond the condition.
 
 ## Tests (`tests/test_shift_invert.py`; mesh "short" = hex20 6×5×4 unless noted; references from
 the cached dense `eigh`, extended to 60 modes for "short" (2 s); tol $10^{-10}$, τ $= 10^{-8}$
@@ -345,12 +347,13 @@ constants.)
 1. **One slice:** `si_band` on modes 13–18's band (15b's) with a large capacity equals
    `si_checked`'s result; one leaf, no split, count passed.
 2. **Capacity split (roadmap), real runs:** (a) a block-6 configuration (candidate: the band of
-   modes 5–28, capacity 96: 2–3 runs, seed-stable in the round-4 emulations); (b) a block-2
-   configuration (candidate: modes 8–21, capacity 48, 3 runs, seed-stable; 40, which lost modes 20
-   and 21 under revision 2's rule, splits with 4–6 runs by seed). The configurations are chosen
+   modes 5–28, capacity 96: 2–3 runs by seed in the round-5 emulations); (b) a block-2
+   configuration (candidate: modes 8–21, capacity 48, 2–3 runs by seed; 40, which lost modes 20
+   and 21 under revision 2's rule, passes or raises by seed in the round-5 emulations). The configurations are chosen
    on the implementation. Robustness: at ± one chunk of capacity and with a second seed the band
    matches the reference (splits allowed) or raises the capacity error, never a short or wrong
-   result (a chunk is about a quarter of a slice's need here, so −1 chunk may raise). At the
+   result (a chunk is about a quarter of a slice's need here, so −1 chunk may raise); this sweep
+   is marked slow, the chosen configurations stay fast. At the
    chosen capacity and seed: at least one full slice replaced by a span and
    remainders, every leaf converged (span leaves included), the result matches the reference
    (count, λ to max(1e-8, 10 ε λ̂_max/λ) for gaps ≥ 1e-2, else 10 r_acc), $\|V^\top M V - I\|
@@ -358,14 +361,19 @@ constants.)
    the recorded number of runs (per seed); a spy checks $\lceil \texttt{capacity}_j/c\rceil c +
    \lceil n_{W,j}/c\rceil c \le \lceil \texttt{capacity}/c\rceil c$, that a remainder's W holds
    the stored modes of its window and its known neighbours, and records the smallest remainder
-   capacity_j (measured 0.75–0.83 of the capacity; asserted ≥ half for the chosen
-   configurations only, not a design bound). (c) modes 8–21 at block 6, capacity 72: raises the
+   capacity_j (measured 0.75–0.83 of the capacity; recorded, not asserted). (c) modes 8–21 at block 6, capacity 72: raises the
    capacity error (5–12 runs by seed; only the raise is asserted, the time recorded). (d) The
    MINRES regression: plain `si_slice` on [32.120, 39.101], capacity 72, seed 0 converges (it
    stopped with "inner solves failed" before the fix); plus a `tests/test_krylov.py` case: an
-   indefinite system with an initial plateau above $\|b\|$ longer than STALL_C checks (a
-   constructed diagonal spectrum, or the slice's step-2 column rebuilt from the run) converges
-   and is not flagged.
+   indefinite system with an initial 2-norm plateau above $\|b\|$ longer than STALL_C checks
+   converges and is not flagged. A plateau above $\|b\|$ needs a norm mismatch (with P = I the
+   2-norm residual is monotone): a diagonal indefinite A with a diagonal SPD P of widely spread
+   entries, chosen (and asserted) so the early explicit residual exceeds $\|b\|$ for more than
+   STALL_C checks, or the slice's step-2 column rebuilt from the run; and a column for which
+   $x = 0$ stays the best iterate (e.g. A = diag(1, −1, 0, …) with b on the null direction)
+   exits at `maxit`, neither converged nor stagnated, in the expected iterations. (e) Slow:
+   modes 5–40 at block 6, capacity 96 (6–7 runs, 38 modes, about 45 s; it stopped with "inner
+   solves failed" before the fix) matches the reference.
 3. **Fakes for the outcome rules** (a fake `si_checked` returning chosen pairs, Ritz values and
    converged flags): an unconverged Ritz value between two converged values below σ puts the cut
    above it (no mode claimed past it); an unconverged value nearest σ with new converged pairs
@@ -450,14 +458,19 @@ timed first.
   si_checked's signature gaining `verify`, its `count` info gaining the predicted `degree`/`gap`
   and reason "not requested", one line on `_count_slice` as the shared count step, si_checked's
   "no converged neighbour … raises" sentence (si_slice's or a W mode); the MINRES stagnation
-  rule in docs/preconditioners.md and the "Inner tolerance" bullet of eigensolvers.md; the
+  rule in docs/preconditioners.md and the "Inner tolerance" bullet of eigensolvers.md (with its
+  worst case: a column that never gets below ‖b‖ runs to its cap, `maxit_inner` on the first step,
+  $10 n_1$ after; σ on an eigenvalue still stagnates as before, measured: the same
+  move_iterations at modes 10, 15, 22); the
   Validation list (the new si_slice W-neighbour and si_checked verify tests and the si_band
   tests); the stale "15c" pointers that now mean 15d
   (strategy choice, `band=(f1, f2)`, capacity from `si_memory`, the cost model on depth, "the
   choice 15c makes": lines near 122, 589, 607, 614, 643, 663, 666, 676).
 - `docs/ROADMAP.md`: the Interior-bands stop bullet amended ("PR 15c: a known deflated mode
   beyond the edge, at a gap ≥ 100 r_acc, also serves as the neighbour; an unknown mode between
-  still appears as a nearer Ritz value that must converge"); the PR 15 split sentence rewritten
+  still appears as a nearer Ritz value that must converge"); the Interior-bands MINRES bullet
+  amended ("PR 15c: no stagnation while the best explicit residual is ≥ ‖b‖, a plateau before
+  any progress; measured on a slice step"); the PR 15 split sentence rewritten
   for 15c/15d; the [15c] tags split into
   [15c]/[15d]; the "Slice widths come from the cost model …" bullet and the Contents bullet
   "Slicing with the cost model" amended with a note (widths limited by the capacity; edges come
@@ -501,6 +514,7 @@ timed first.
   \max(r_s, \texttt{tol})$; `capacity` is the total basis per slice.
 - MINRES does not stagnate before its explicit residual drops below $\|b\|$ (a plateau, not a
   stall), fixed in 15c where it surfaced; an inner failure stops the band without a seed retry.
+  Plateaus below $\|b\|$ are not covered (open item, with the continue-once fallback).
 - `edge_unreached` is not evidence of an edge outside the spectrum: no fallback in 15c; 15d
   applies the f₁ < λ₁ rule and the λ_hi bound up front; an edge in (λ_max, λ̂_max] raises here,
   and the capacity error names both causes.
