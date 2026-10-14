@@ -856,13 +856,13 @@ def si_band(
             raise _cap_error(a, e, capacity, "no progress")
         if not (done_lo or s_lo) and not (done_hi or s_hi):
             raise _cap_error(a, e, capacity, "neither side done or cut")
-        here = {a: done_lo, e: done_hi}  # a remainder's inner edge is done: stored modes beyond
+        # a remainder's outer edge was not done; its inner edge is: stored modes lie beyond
         if not done_lo:
             x = s_lo or s_hi or e
-            work.append((a, x, {**here, x: True}))
+            work.append((a, x, {x: True}))
         if not done_hi:
             x = s_hi or s_lo or a
-            work.append((x, e, {**here, x: True}))
+            work.append((x, e, {x: True}))
         if (done_lo or s_lo) and (done_hi or s_hi):
             x0, x1 = a if done_lo else s_lo, e if done_hi else s_hi
             cnt = _span_count(op, free, P, lam_s, cols, x0, x1, inf["r_acc"], inf["neighbours"], R,

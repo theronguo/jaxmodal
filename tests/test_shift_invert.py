@@ -1172,6 +1172,8 @@ SPLIT_CASES = [  # (values, converged, sigma, a, b, expected); T/F per value
     ([1, 2, 2 + 1.5e-8, 3, 4], "FFTTF", 3.0, 1.5, 3.5, (None, None, False, False)),
     # a run of values below a only (W) does not complete the side: it must go on past `below`
     ([1, 1.5, 2, 2.5, 3, 3.5], "TFFFFF", 2.5, 1.8, 3.2, (None, None, False, False)),
+    # likewise above b: a run holding only the value above b does not complete the upper side
+    ([1, 1.5, 2, 2.5, 3, 3.5], "FFFFFT", 2.5, 1.8, 3.2, (None, None, False, False)),
     # nothing converged, or no values: None
     ([1, 2, 3, 4], "FFFF", 1.0, 0.5, 3.5, None),
     ([], "", 1.0, 0.5, 3.5, None),
@@ -1513,6 +1515,21 @@ def test_span_chain_edge(monkeypatch):
     si._span_count(op, free, None, lam_s, cols, 2.0 * (1 - 5e-10), 3.0, 1e-8, nbs, None, True, {})
     args = counts[0][0]
     assert np.array_equal(args[3], lam_s[[3, 2, 0]]) and args[6][0] == 1.0 and args[7][0] == 5.0
+
+
+def test_span_chain_r(monkeypatch):
+    """The span count chains at its parent's r_acc (1e-4: modes 10 and 11, relative gap 1.4e-3,
+    one chain), not at tol: the band edge between them leaves mode 11 in the span's set."""
+    lr, Vr = prob("short")[6:]
+    lo, hi = edges(lr, 3, 11)[0], (lr[10] + lr[11]) / 2
+    full = (list(range(3, 12)), "capacity full", rz(range(2, 13)), None)
+
+    def post(j, inf):  # si_slice's upper neighbour lies beyond the chain
+        return dict(inf, r_acc=1e-4, neighbours=dict(inf["neighbours"], hi=(lr[12], Vr[:, 12])))
+
+    _, counts = fake_band(monkeypatch, lambda *_: full, post=post)
+    fband("short", lo, hi)
+    assert np.array_equal(np.sort(counts[0][0][3]), lr[3:12])
 
 
 def test_span_no_neighbour(monkeypatch):
