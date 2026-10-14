@@ -741,7 +741,8 @@ def si_band(
     runs that deflate neither the other: |x_i^T M x_j| <= (||x_j|| ||r_i|| + ||x_i|| ||r_j||) /
     |lam_i - lam_j|, r_i = K x_i - lam_i M x_i) and info: converged, reason, r_acc, tau_eff,
     residuals, thresholds, slices (per processed slice: a run's si_checked info without vectors plus
-    interval, kind "run", leaf, n_new, reruns; a span {interval, kind "span", leaf, parent, count}),
+    interval, kind "run", leaf, n_new, reruns; a span {interval, kind "span", leaf, parent (the
+    parent's index among the runs), count}),
     merged_edges, collapsed, edge_rr_failed, duplicates, count (si_checked's shape over the leaves)
     and time (total, slices, merge). See docs/eigensolvers.md#slicing-a-band."""
     check_x64("si_band")
@@ -764,7 +765,6 @@ def si_band(
     opts = {"verbose": verbose, **(count_options or {})}
     c0 = opts.pop("seed", 0)
     m = jnp.asarray(np.asarray(free), jnp.float64)[:, None]
-    n_free = int(m.sum()) - (0 if R is None else R.shape[1])
     lam_s, run_s, res_s, thr_s, vecs = np.zeros(0), np.zeros(0, int), np.zeros(0), np.zeros(0), []
     work = [(x0, x1, {}) for x0, x1 in zip([lo, *cuts], [*cuts, hi], strict=True)]
     slices, leaves = [], []  # leaves: (interval, count info)
@@ -783,6 +783,7 @@ def si_band(
         a, e, prev = work.pop(0)
         order = np.argsort(lam_s, kind="stable")
         rw, win, reruns, sd = max(r_s, tol), None, 0, (RESTARTS + 1) * i
+        P = None  # the previous slice's released first: one alive at a time
         P = make((a + e) / 2)
         while True:  # rerun while the run's r_acc widens its window over more stored modes
             wide = order[_window(lam_s[order], a, e, min(1000 * rw, 1e-2), 100 * rw)]
@@ -797,11 +798,6 @@ def si_band(
                 raise ValueError(
                     f"slice [{a:.6g}, {e:.6g}]: {len(win)} deflated modes leave {cap}"
                     f" columns of capacity {capacity} (below 2 block): raise capacity"
-                )
-            if n_free - len(win) < 2 * b:
-                raise ValueError(
-                    f"slice [{a:.6g}, {e:.6g}]: {len(win)} deflated modes leave less"
-                    " than 2 block of the free space: hi may be above the spectrum"
                 )
             lam, V, inf = si_checked(
                 op, free, a, e, P, capacity=cap, W=cols(win) if len(win) else None,
@@ -835,7 +831,6 @@ def si_band(
                 msg = why if why not in (None, "capacity full") else "slice not converged"
                 converged, reason = False, f"[{a:.6g}, {e:.6g}]: {msg}"
                 break
-            P = None
             continue
         # a full slice: its verified span (a leaf without a run) and its remainders
         entry["leaf"] = False
@@ -865,8 +860,7 @@ def si_band(
             if verbose:
                 print(f"si_band: span [{x0:.6g}, {x1:.6g}], count {cnt['reason'] or 'passed'}",
                       flush=True)  # fmt: skip
-        P = None
-    P = None  # also on a break
+    P = None
     t_slices = time.perf_counter() - t0
 
     # clusters held by several runs: duplicates, Rayleigh-Ritz, the re-check at the band's r_acc
@@ -912,9 +906,8 @@ def si_band(
     # block is freed once all its columns are copied, so the store and V_f stay about 1x + a block
     lam_f, res_f, thr_f = (np.concatenate([p[q] for p in parts] + [np.zeros(0)]) for q in (0, 2, 3))
     V_f, k = np.empty((n, len(lam_f)), order="F"), 0  # a column touches only its own pages
-    parts.reverse()
     while parts:  # popped, so a merged window's X is freed once copied
-        X = parts.pop()[1]
+        X = parts.pop(0)[1]
         if X.ndim == 1:
             for s in X:
                 V_f[:, k], vecs[s] = vecs[s], None

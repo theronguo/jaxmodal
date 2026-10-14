@@ -48,7 +48,7 @@ roadmap test assigned, none dropped):
 
 - **15c (this plan): the slicing engine** `si_band`: a band $[\lambda_{lo}, \lambda_{hi}]$ solved by
   `si_checked` slices (15b) within a given basis capacity, full slices reduced to a verified span
-  and remainders, deflation between slices, the merge of clusters held by two runs (duplicates,
+  and remainders, deflation between slices, the merge of clusters held by several runs (duplicates,
   Rayleigh–Ritz, the final re-check against the band-wide $r_{acc}$, the slice-collapse flag),
   per-leaf counts.
 - **15d: strategy and API**: the cost model (the slice model measured below, 15a's MINRES cost
@@ -256,7 +256,7 @@ the λ̂_max bound up front; an edge between λ_max and λ̂_max is caught here,
 top remainders' full runs. A lower edge in $(0, \lambda_1)$ is the mirror case (15d's f₁ < λ₁
 rule guards it up front).
 
-**Merge of clusters held by two runs** (one routine for duplicates, the roadmap's Rayleigh–Ritz
+**Merge of clusters held by several runs** (one routine for duplicates, the roadmap's Rayleigh–Ritz
 on merged clusters and the final re-check). After all slices, with $r_{acc}$ (band) = the maximum
 over slices: the kept pairs are sorted and split into windows, chains of relative gaps
 $< 100 r_{acc}$. A window holding pairs of one run is final. A window holding pairs of two or

@@ -979,9 +979,10 @@ def fake_band(monkeypatch, script, name="short", count=(0.1, True, False), post=
     return calls, counts
 
 
-def FULL_RZ():  # noqa: N802
-    """A full slice's Ritz values: modes 7-11 converged, 2-6 and 12-16 not."""
-    return rz(range(7, 12), [2, 3, 4, 5, 6, 12, 13, 14, 15, 16])
+def full_slice(*_):
+    """fake_band script: a full slice, modes 7-11 converged, 2-6 and 12-16 not."""
+    ritz = rz(range(7, 12), [2, 3, 4, 5, 6, 12, 13, 14, 15, 16])
+    return [7, 8, 9, 10, 11], "capacity full", ritz, None
 
 
 def found(j, a, e, kw):
@@ -990,11 +991,8 @@ def found(j, a, e, kw):
 
 
 def split_once(j, a, e, kw):
-    """fake_band script: run 1 fills its capacity with modes 7-11 converged (FULL_RZ), the
-    later runs converge."""
-    if j == 1:
-        return [7, 8, 9, 10, 11], "capacity full", FULL_RZ(), None
-    return found(j, a, e, kw)
+    """fake_band script: run 1 is full_slice, the later runs converge."""
+    return full_slice() if j == 1 else found(j, a, e, kw)
 
 
 def fband(name, lo, hi, capacity=96, **kw):
@@ -1043,7 +1041,7 @@ def test_band_split(monkeypatch):
 
     calls, counts = fake_band(monkeypatch, split_once)
     lam, V, info = fband("short", lo, hi, capacity=96)
-    s_lo, s_hi, *_ = si._split(*FULL_RZ(), (lo + hi) / 2, lo, hi, TOL)
+    s_lo, s_hi, *_ = si._split(*full_slice()[2], (lo + hi) / 2, lo, hi, TOL)
     assert lr[7] < s_lo < lr[9] and lr[9] < s_hi < lr[11]
     assert [c["interval"] for c in calls] == [(lo, hi), (lo, s_lo), (s_hi, hi)]
     assert [(s["kind"], s["leaf"]) for s in info["slices"]] == [
@@ -1095,10 +1093,7 @@ def test_band_rules(monkeypatch):
     with pytest.raises(ValueError, match="neither side done or cut"):
         fband("short", lo, hi)
 
-    def full(j, a, e, kw):
-        return [7, 8, 9, 10, 11], "capacity full", FULL_RZ(), None
-
-    fake_band(monkeypatch, full)
+    fake_band(monkeypatch, full_slice)
     with pytest.raises(RuntimeError, match="max_slices = 1"):
         fband("short", lo, hi, max_slices=1)
 
@@ -1334,7 +1329,7 @@ def check_band(name, lo, hi, lam, V, info, *, counted=True):
     M-orthonormal (no duplicates) to 1e-10 within chains of relative gaps < 100 r_acc and to
     residual level across them (the exact |x_i^T M x_j| = |x_j^T r_i - x_i^T r_j| /
     |lam_i - lam_j|), residuals within thresholds, every counted leaf < 0.5."""
-    free, K, M, lr = prob(name)[1], prob(name)[3], prob(name)[4], prob(name)[6]
+    _, free, _, K, M, _, lr, _ = prob(name)
     ref = lr[(lr >= lo) & (lr <= hi)]
     assert info["converged"] and info["reason"] is None
     assert ((lam >= lo) & (lam <= hi)).sum() == len(ref)
@@ -1595,9 +1590,7 @@ def test_band_full_slice_one_bad(monkeypatch, r_bad, stops):
     s = (lr[6] + lr[7]) / 2
 
     def script(j, a, e, kw):
-        if j == 2:
-            return [7, 8, 9, 10, 11], "capacity full", FULL_RZ(), None
-        return new_modes(a, e, kw), None, None, None
+        return full_slice() if j == 2 else found(j, a, e, kw)
 
     def post(j, info):
         r = info["residuals"].copy()
