@@ -1023,12 +1023,15 @@ def test_checked_no_neighbour(monkeypatch):
 
 @pytest.mark.parametrize("case", ["own", "w20", "inside", "own_lo"])
 def test_checked_restart_neighbour(monkeypatch, case):
-    """Run 1 misses mode 15, its upper neighbour mode 19 a hair above; the restart finds 15 and 19
-    (in-band at its r_acc) with neighbour 20 (own), or with the caller's W = mode 20 closing its
-    upper side (w20, no neighbour of its own): the count never takes run 1's copy of mode 19 (it
-    would fail the count's orthonormality check). inside: the restart finds 15 only, its
-    neighbour inside the found set: run 1's neighbour (mode 19) is used. own_lo: the mirror below
-    (run 1's lower neighbour mode 12 a hair below, the restart finding 15 and 12, neighbour 11)."""
+    """Run 1 misses mode 15, its upper neighbour mode 19 1e-5 above (within the gap 100 r_acc);
+    the restart finds 15 and 19 (in-band at its r_acc) with neighbour 20 (own), or with the
+    caller's W = mode 20 closing its upper side (w20, no neighbour of its own): the count never
+    takes run 1's copy of mode 19 (it would fail the count's orthonormality check). inside: the
+    restart finds 15 only, its neighbours inside the found set: run 1's (modes 12, 19) are used.
+    own_lo: the mirror below (run 1's lower neighbour mode 12 a hair below, the restart finding
+    15 and 12, neighbour 11).
+    own, own_lo: the restart's r_acc is 2e-3 (100 r_acc above the neighbours' gaps): the gap g
+    takes the smallest r_acc."""
     lr, Vr = prob("short")[6:]
     _, free, op = prob("short")[:3]
     lo, hi = cb_edges()
@@ -1038,19 +1041,20 @@ def test_checked_restart_neighbour(monkeypatch, case):
         calls.append(kw)
         lo_nb = (lr[12], Vr[:, 12])
         if len(calls) == 1:
-            i, h = [13, 14, 16, 17, 18], (lr[19] * (1 + 1e-13), Vr[:, 19])
+            i, h = [13, 14, 16, 17, 18], (lr[19] * (1 + 1e-5), Vr[:, 19])
             if case == "own_lo":
                 h, lo_nb = (lr[19], Vr[:, 19]), (lr[12] * (1 - 1e-13), Vr[:, 12])
         else:
             i, h = {"own": ([15, 19], (lr[20], Vr[:, 20])), "w20": ([15, 19], None),
                     "inside": ([15], (lr[18], Vr[:, 18])),
                     "own_lo": ([12, 15], (lr[19], Vr[:, 19]))}[case]  # fmt: skip
-            if case == "own_lo":
-                lo_nb = (lr[11], Vr[:, 11])
+            if case in ("own_lo", "inside"):
+                lo_nb = (lr[11], Vr[:, 11]) if case == "own_lo" else (lr[14], Vr[:, 14])
         z = np.zeros(len(i))
         nb = {"lo": lo_nb, "hi": h}
+        r = 2e-3 if case in ("own", "own_lo") and len(calls) == 2 else 1e-6
         return lr[i], Vr[:, i], dict(converged=True, neighbours=nb, residuals=z,
-                                     thresholds=z + 1e-6, r_acc=1e-6, tau_eff=1e-8)  # fmt: skip
+                                     thresholds=z + 1e-6, r_acc=r, tau_eff=1e-8)  # fmt: skip
 
     monkeypatch.setattr(si, "si_slice", fake)
     P = exact("short", (lr[18] + lr[19]) / 2)
@@ -1095,8 +1099,8 @@ def test_beyond_guard():
     v = np.ones(3)
     W, lam_W = np.zeros((3, 0)), np.zeros(0)
     assert si._beyond(4.0, 6.0, {"lo": [(5.0, v)], "hi": [(5.5, v)]}, W, lam_W, 0) == [None, None]
-    nb = {"lo": [None, (3.0, v)], "hi": [(6.0 * (1 + 1e-9), v), (7.0, v)]}
-    lo, hi = si._beyond(4.0, 6.0, nb, W, lam_W, 1e-6)  # a copy of 6.0 within the gap: ignored
+    nb = {"lo": [None, (3.0, v), (2.0, v)], "hi": [(6.0 * (1 + 5e-7), v), (7.0, v), (8.0, v)]}
+    lo, hi = si._beyond(4.0, 6.0, nb, W, lam_W, 1e-6)  # a copy of 6.0 within the (relative) gap
     assert lo[0] == 3.0 and hi[0] == 7.0
     assert si._beyond(4.0, 6.0, {"lo": [(4.0, v)], "hi": [(6.0, v)]}, W, lam_W, 0) == [None, None]
     nb = {"lo": [(0.9, v)], "hi": [(2.1, v), (1.95, v)]}  # the restart's 1.95 lies inside
@@ -1548,12 +1552,13 @@ def test_band_leaves(monkeypatch, capsys):
 
 def test_span_chain_edge(monkeypatch):
     """A span's in-band set extends over a chain straddling its edge (relative gap 1e-9 < 100 r),
-    as si_checked's widened set: the count's lower pair is the next one beyond the chain."""
+    as si_checked's widened set: the count's lower pair is the next one beyond the chain (not the
+    parent's Ritz neighbour, a copy of the chain's lowest within 100 r of it)."""
     _, counts = fake_band(monkeypatch, full_slice)
     _, free, op = prob("short")[:3]
     lam_s = np.array([3.0, 1.0, 2.0, 2.0 * (1 - 1e-9), 5.0])
     cols = lambda idx: np.eye(5)[:, idx]  # noqa: E731
-    nbs = {"lo": None, "hi": None}
+    nbs = {"lo": (2.0 * (1 - 1.5e-9), np.ones(5)), "hi": None}
     si._span_count(op, free, None, lam_s, cols, 2.0 * (1 - 5e-10), 3.0, 1e-8, nbs, None, True, {})
     args = counts[0][0]
     assert np.array_equal(args[3], lam_s[[3, 2, 0]]) and args[6][0] == 1.0 and args[7][0] == 5.0
@@ -2089,6 +2094,7 @@ def test_slice_w_neighbours():
     assert (nb[0][0], nb[1][0]) == (lr[12], lr[19])
     lam, V, info = solve("short", lo, hi, W=Vr[:, [20]], lam_W=lr[[20]])
     assert info["converged"] and info["neighbours"]["hi"][0] == pytest.approx(lr[19], rel=1e-8)
+    assert info["neighbours"]["hi"][1].base is None  # a copy: info does not hold the block
 
 
 def test_band_voxel_cube():
