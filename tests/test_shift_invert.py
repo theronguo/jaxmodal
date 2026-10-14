@@ -519,41 +519,37 @@ def test_errors():
         run(1.0, 2.0, block=0)
     with pytest.raises(ValueError, match="capacity"):
         run(1.0, 2.0, capacity=6)
-    tf, top = prob("tiny")[1:3]
-    with pytest.raises(ValueError, match="free space"):  # 54 free DOFs
-        si.si_slice(top, tf, 1.0, 2.0, jacobi(top, tf, 1.0), capacity=72, block=30)
     with pytest.raises(ValueError, match="W must have shape"):
         run(1.0, 2.0, W=np.zeros((5, 2)))
     with pytest.raises(ValueError, match="R must have shape"):
         run(1.0, 2.0, R=np.zeros((5, 2)))
     with pytest.raises(ValueError, match="M-orthonormal"):
         run(1.0, 2.0, W=2 * Vr[:, :3])
+    with pytest.raises(ValueError, match="lam_W must have shape"):
+        run(1.0, 2.0, W=Vr[:, :2], lam_W=lr[:3])
 
 
-@pytest.mark.parametrize("arg", ["R", "W"])
-def test_free_space_rw(arg):
+@pytest.mark.parametrize("arg, hint", [("R", "$"), ("W", ": hi may be above the spectrum$")])
+def test_free_space_rw(arg, hint):
     """Code review round 7: 54 free DOFs minus 31 columns of R or W leave 23 < 2 block = 24 (54
-    alone would not): the free-space error before any work."""
+    alone would not): the free-space error before any work, the spectrum hint only with W."""
     tf, top = prob("tiny")[1:3]
     Vt = prob("tiny")[7]
-    with pytest.raises(ValueError, match=r"free space left by R and W \(23\)"):
+    with pytest.raises(ValueError, match=r"free space left by R and W \(23\)" + hint):
         si.si_slice(top, tf, 1.0, 2.0, jacobi(top, tf, 1.0), capacity=48, block=12,
                     **{arg: Vt[:, :31]})  # fmt: skip
 
 
 def test_checked_zero_predict():
     """Code review round 7: verify=False at lo = 0: the step count's degree predicted, nothing
-    run; a lam_W of the wrong length raises."""
-    _, free, op, *_, lr, Vr = prob("short")
+    run."""
+    _, free, op, *_, lr, _ = prob("short")
     hi = edges(lr, 0, 3)[1]
     _, _, info = si.si_checked(op, free, 0.0, hi, precond("short", hi / 2), capacity=300,
                                verify=False, tol=TOL, tau=TAU)  # fmt: skip
     c = info["count"]
     assert not c["ran"] and c["reason"] == "not requested" and c["degree"] > 0
     assert c["steps"] == 0 and np.isnan(c["estimate"]) and "total" in c["time"]
-    with pytest.raises(ValueError, match="lam_W must have shape"):
-        si.si_slice(op, free, 1.0, 2.0, jacobi(op, free, 1.0), capacity=60, W=Vr[:, :2],
-                    lam_W=lr[:3])  # fmt: skip
 
 
 def gmg_like():
