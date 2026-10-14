@@ -1263,7 +1263,7 @@ def test_merge_chunks():
     Q1 = Vr[:, :5] @ np.linalg.qr(rng.standard_normal((5, 5)))[0]  # rotated, M-orthonormal
     Q2 = Vr[:, 3:9] @ np.linalg.qr(rng.standard_normal((6, 6)))[0]  # overlaps modes 3, 4
     for c in (1, 64):
-        th, X, r, t, drop = si._merge(op, m, [Q1, Q2], consts, c)
+        th, X, r, t, drop = si._merge(op, m, [Q1.copy(), Q2.copy()], consts, c)
         assert drop == 2 and len(th) == 9
         assert np.abs(th - lr[:9]).max() <= 1e-10 * lr[8]
         assert np.abs(X.T @ (M @ X) - np.eye(9)).max() <= 1e-10 and (r <= 1e-10).all()
@@ -1382,7 +1382,7 @@ def test_band_split_sweep(case, seed):
     """15c test 2, robustness: at the chosen capacity and one chunk below and above it, and with
     a second seed, the band matches the reference (splits allowed) or raises the capacity
     error; never a short or wrong result. Counted at the chosen capacity only (an off-nominal
-    cut can land in a small gap, a count of degree ~19k: about 20 min under load)."""
+    cut can land in a small gap: two counts of degree ~19k, about 20 min under load)."""
     i0, i1, cap, block, _ = SPLITS[case]
     lr = prob("short")[6]
     lo, hi = edges(lr, i0, i1)

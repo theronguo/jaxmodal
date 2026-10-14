@@ -624,28 +624,31 @@ def _apply_km(op, m, X, c):
 
 
 def _merge(op, m, groups, consts, c):
-    """One window held by several runs, groups = [V (n, k)] in run order (each M-orthonormal; the
-    list is consumed): each later run's columns are projected against the kept ones, P = U - Q Q^T M
-    U, and the directions with ||p||_M >= 0.5 (eigenvalues >= 0.25 of P^T M P) kept, the rest are
-    duplicates; then Rayleigh-Ritz of (K, M) on the kept basis. K and M are applied in device chunks
-    of c columns. Returns (theta, X, r, t, dropped): the Ritz pairs with their explicit lambda-
-    scaled residuals and round-off thresholds (also in device chunks)."""
+    """One window held by several runs, groups = [V (n, k)] in run order (each M-orthonormal;
+    the list and its arrays are consumed): each later run's columns are projected against the
+    kept ones, P = U - Q Q^T M U, and the directions with ||p||_M >= 0.5 (eigenvalues >= 0.25 of
+    P^T M P) kept, the rest are duplicates; then Rayleigh-Ritz of (K, M) on the kept basis. K
+    and M are applied in device chunks of c columns. Returns (theta, X, r, t, dropped): the Ritz
+    pairs with their explicit lambda-scaled residuals and round-off thresholds (also in device
+    chunks)."""
     n, w = groups[0].shape[0], sum(U.shape[1] for U in groups)
     Q, KQ, MQ = (np.empty((n, w), order="F") for _ in range(3))
     k, drop = 0, 0
-    while groups:  # consumed, so each run's copy is freed once appended
+    while groups:  # consumed (and overwritten), so each run's copy is freed once appended
         U = groups.pop(0)
         KU, MU = _apply_km(op, m, U, c)
-        if k:
+        S = None
+        if k:  # project in place, one temporary at a time
             C = Q[:, :k].T @ MU
-            U, KU, MU = U - Q[:, :k] @ C, KU - KQ[:, :k] @ C, MU - MQ[:, :k] @ C
+            for X, B in ((U, Q), (KU, KQ), (MU, MQ)):
+                X -= B[:, :k] @ C
             ev, Y = np.linalg.eigh((U.T @ MU + MU.T @ U) / 2)
             keep = ev >= 0.25
             drop += int((~keep).sum())
             S = Y[:, keep] / np.sqrt(ev[keep])
-            U, KU, MU = U @ S, KU @ S, MU @ S
-        j = U.shape[1]
-        Q[:, k : k + j], KQ[:, k : k + j], MQ[:, k : k + j] = U, KU, MU
+        j = U.shape[1] if S is None else S.shape[1]
+        for X, B in ((U, Q), (KU, KQ), (MU, MQ)):
+            B[:, k : k + j] = X if S is None else X @ S
         k += j
         del U, KU, MU
     Q, KQ, MQ = Q[:, :k], KQ[:, :k], MQ[:, :k]
