@@ -878,6 +878,7 @@ def test_restart_capacity(monkeypatch):
     c = info["count"]
     assert [k["capacity"] for k in calls] == [300, 312] and calls[1]["W"].shape[1] == 15
     assert np.array_equal(calls[1]["lam_W"][:10], lr[w])  # paired with W's columns
+    assert np.array_equal(calls[1]["W"][:, :10], Vr[:, w])  # W first, then the found modes
     assert c["restarts"] == 1 and c["flagged"] and c["passed"] and len(lam) == 6
     assert info["r_acc"] == 2 * TOL and info["tau_eff"] == 2 * TAU  # the max over the runs
 
@@ -925,6 +926,9 @@ def test_checked_flags(monkeypatch, capsys):
     assert len(calls) == 1 and c["reason"] == "restart capacity" and c["flagged"]
     assert c["restarts"] == 0 and c["estimate"] >= 0.5 and len(lam) == 5
     assert capsys.readouterr().out.count("si_checked: count") == 1
+    calls.clear()  # block 40: c = 64 < 2 block, so the restart's 128 - 64 = 64 columns are too few
+    lam, V, info = run(capacity=128, block=40)
+    assert len(calls) == 1 and info["count"]["reason"] == "restart capacity"
     monkeypatch.undo()
 
     def restart_fails(j, out):
@@ -1063,7 +1067,7 @@ def test_checked_restart_neighbour(monkeypatch, case):
 
 
 def test_checked_merge_order(monkeypatch):
-    """A restart finding two modes (MID, MID + 1): the merged V columns and
+    """A restart finding two modes (MID, MID + 1): the merged V columns, residuals and
     thresholds follow the sorted lam."""
 
     lr = prob("short")[6]
@@ -1077,7 +1081,9 @@ def test_checked_merge_order(monkeypatch):
             lam[keep],
             V[:, keep],
             dict(
-                info, residuals=info["residuals"][keep], thresholds=np.full(keep.sum(), j * 1e-10)
+                info,
+                residuals=np.full(keep.sum(), j * 1e-11),
+                thresholds=np.full(keep.sum(), j * 1e-10),
             ),
         )
 
@@ -1086,6 +1092,7 @@ def test_checked_merge_order(monkeypatch):
     assert len(calls) == 2 and np.array_equal(lam, np.sort(lam)) and len(lam) == 6
     assert np.abs(np.einsum("ij,ij->j", V, K @ V) - lam).max() <= 1e-10 * lam.max()
     assert np.array_equal(info["thresholds"], np.where(np.isin(lam, two), 2e-10, 1e-10))
+    assert np.array_equal(info["residuals"], np.where(np.isin(lam, two), 2e-11, 1e-11))
 
 
 def test_beyond_guard():
