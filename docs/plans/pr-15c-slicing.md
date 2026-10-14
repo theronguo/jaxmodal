@@ -33,6 +33,15 @@ midpoint; one capacity message for all three paths of an edge outside the spectr
 configurations chosen on the implementation and checked at ± one chunk and a second seed; the
 reference docs of `si_slice`/`si_checked` and the roadmap note in the docs list.
 
+Revision 5 (plan review round 4): a MINRES false-stagnation fix (a seed-dependent "inner solves
+failed" of plain si_slice, measured, diagnosed and prototyped below); cuts only between run
+values inside the slice (a cut on the edge gave zero-width spans and identical reruns); progress
+defined
+against the parent; static run halves; a W neighbour sets si_slice's `seen`; a capped deflation
+margin; test 2's robustness property restated (match or raise, never a short result) with the
+measured candidates; the roadmap stop-rule text and si_checked's neighbour sentence in the docs
+list.
+
 ## Split of the remaining PR 15 work
 
 15c as planned in 15a holds two separable parts. This plan splits it (the 15a split's rule: every
@@ -88,6 +97,21 @@ Roadmap PR 15 tests tagged [15c] (or [15a, 15c], [15b, 15c]):
   in the round-2 prototypes a near-degenerate pair (4.697, 4.702) had one copy converged, and a
   cut placed by gaps among converged values alone dropped the other; one run of modes 20–29
   converged only 24.274 and 24.285 above σ while 22.48–22.76 below σ had not converged.
+- **MINRES false stagnation** (round 4, tests prototype; reproduced): plain `si_slice` on
+  "short" [32.120, 39.101], capacity 72, seed 0 (σ = 35.61, nearest eigenvalue 35.561) stops with
+  "inner solves failed": at step 2 one column is flagged stagnated after 90 iterations with
+  explicit residual 1.3 (τ_eff 1.3), while the other five converge in 300–310. With the
+  stagnation exit disabled that column converges in 300 like the others (11 steps, τ_eff 1e-8).
+  Its history (an unrolled MINRES on that column): explicit residual 1.29–1.33 ‖b‖ and the
+  recursive one 0.95–0.87 for the first 100 iterations (a plateau before any progress over
+  x = 0, the Krylov space still resolving the eigenvalues near σ), then 0.64 at 120, 9e-3 at 210,
+  5e-9 at 300. `minres` (`linalg/krylov.py`) declares stagnation after STALL_C = 5 checks (50
+  iterations) without a new explicit minimum, which fires inside the plateau. Seeds 1, 2 or
+  σ = 35.0 run normally. 15c creates many slices at arbitrary midpoints, so the false exit would
+  stop bands. Prototype fix (below): no stagnation while the best explicit residual is still
+  ≥ ‖b‖; the repro then converges (11 steps, τ_eff 1e-8) and all 23 `tests/test_krylov.py`
+  tests pass unchanged (σ-on-an-eigenvalue stagnation, the 3-eigenvalue freeze, stagnation
+  before maxit).
 - `si_checked` (15b) adds the count with up to 2 restarts (seeds `seed + j`); the caller's W modes
   inside $[\lambda_{lo}, \lambda_{hi}]$ or the returned span count as found; its count edges come
   from the found sets (`_beyond`). An unconverged slice gets no count ("slice not converged").
@@ -165,12 +189,18 @@ Internal (module `eigen/shift_invert.py`, as `si_slice` and `si_checked`; 15d ca
 accepted pair (λ, v, its run, residual, threshold). For slice $[a, b]$ with σ:
 
 1. **Deflation window.** With $r_w = \max(r_s, \texttt{tol})$ ($r_s$ the largest $r_{acc}$ so
-   far): W = the stored pairs in $[a(1 - 1000 r_w), b(1 + 1000 r_w)]$ extended over chains of
+   far) and the margin $m_w = \min(1000 r_w, 10^{-2})$ (si_slice's inside set spills by $100 r
+   \le 10^{-2}$ at the τ_eff stop): W = the stored pairs in $[a(1 - m_w), b(1 + m_w)]$ extended
+   over chains of
    relative gaps $< 100 r_w$ (the slice's own scale), plus the nearest stored pair (with its
    chain) beyond each extended end: the modes the slice would otherwise find again, and known
-   neighbours. The margin $1000 r_w$ covers a later slice's larger $r_{acc}$. si_slice counts W
-   modes as converged candidates (change below), so a known neighbour closes a side without being
-   re-converged, and `_beyond` uses W modes as the count's neighbours.
+   neighbours. The margin covers a later slice's larger $r_{acc}$. si_slice counts W modes as
+   converged candidates (change below), so a known neighbour closes a side without being
+   re-converged, and `_beyond` uses W modes as the count's neighbours. Soundness: a W neighbour
+   is no evidence that the slice's own Krylov space reached the edge, but an unknown mode between
+   the edge and it is not deflated and appears as a nearer Ritz value, which must converge before
+   the side closes (si_slice's own rule); a mode the Krylov space has not yet resolved at all is
+   the same risk as in any slice, and the leaf's count is the backstop.
 2. **Run** `si_checked(op, free, a, b, P, capacity=capacity_j, W=W, lam_W=..., R=R,
    verify=verify, seed=..., ...)` at σ = the midpoint of $[a, b]$ (si_slice's default).
 3. **Outcome** (by si_slice's `reason`, not by `converged`, which is False for both failures):
@@ -180,10 +210,12 @@ accepted pair (λ, v, its run, residual, threshold). For slice $[a, b]$ with σ:
      converged flag per value (a small 15a addition, `info["ritz"]` = (μ, converged); W modes
      True, values never evaluated False). The **run** is the maximal sequence of consecutive
      converged values containing the converged value nearest σ (a chain $< 100r$ is taken whole,
-     $r$ = the slice's $r_{acc}$); its values $m_0 < \dots < m_{k-1}$ have the gaps $i = 0, \dots,
-     k - 2$ between $m_i$ and $m_{i+1}$; gaps with $i < (k - 2)/2$ are the lower half, $i > (k -
-     2)/2$ the upper half, and the middle gap (even $k$) serves the side that needs it. On each
-     side:
+     $r$ = the slice's $r_{acc}$); the cut candidates are the gaps between consecutive run values
+     both inside $(a, b)$, $m_0 < \dots < m_{k-1}$, gap $i$ between $m_i$ and $m_{i+1}$; gaps
+     $i \le \lfloor (k - 2)/2 \rfloor$ are the lower half, the others the upper half (static; for
+     $k = 2$ the single gap is the lower side's). A gap touching a W neighbour beyond an edge is
+     never a cut (that side is complete), so a cut lies strictly inside $(a, b)$ with values on
+     both sides of it. On each side:
      - **complete:** the run reaches a converged value beyond the slice's edge (si_slice's own
        neighbour or a W mode; the $a$ side when $a = 0$): no remainder; the span extends to the
        edge, with that value as its out-of-band pair;
@@ -194,21 +226,23 @@ accepted pair (λ, v, its run, residual, threshold). For slice $[a, b]$ with σ:
        now W). The half keeps most of the run in the span (the remainder's capacity_j) while the
        largest gap in it keeps the count's degree ∝ 1/g low;
      - **no cut:** that side's interval up to the other side's cut or edge becomes one remainder
-       (a run with the converged pairs deflated: a binary split; with the other side complete,
-       $[a, b]$ itself is rerun with W).
+       (a run with the converged pairs deflated: a binary split; when the other side is complete
+       that remainder is $[a, b]$ itself).
      The span leaf $[s_{lo}, s_{hi}]$ exists when both sides are complete or cut: no Lanczos run,
      its pairs are the stored ones inside, it counts as converged. When verify, its count runs
      before `P` is released (`_count_slice` below, with the out-of-band pairs above; λ_lo = 0 uses
      `count`). A span leaf whose count is ≥ 0.5 (verifiable) is requeued as a run slice with W =
      its pairs (15b's restarts then apply); an unverifiable one stays a leaf, not passed.
      - **Raise** when the run made no progress (no new pair inside $[a, b]$, which W deflates so
-       it cannot be a stored one, and no side completed), or neither side is complete or cut:
+       it cannot be a stored one, and no side complete that was not complete in the run of the
+       slice it came from; a first slice has none complete), or neither side is complete or cut:
        `ValueError("slice [a, b] fills capacity C without converging a gap >= 100 r_acc on
        either side: raise capacity (measured: a slice needs about 50-85 columns before it
        converges anything); lo may be below lambda_1 or hi above the spectrum")`. The same
-       message covers $\texttt{capacity}_j < 2b$ and si_slice's free-space stop. A remainder holds
-       fewer unknown modes than its parent (the span, or the deflated converged pairs, are done),
-       so the list terminates; `max_slices` is the backstop.
+       message covers $\texttt{capacity}_j < 2b$ and si_slice's free-space stop. Each requeue is
+       a strict sub-interval of its parent (cuts lie strictly inside) or the same interval with
+       more stored pairs or a side newly complete, so the list terminates; `max_slices` is the
+       backstop.
    - **Count flagged** (after 15b's restarts) or **unverifiable**: a leaf; its pairs join the store
      and the band count is not passed; no split.
    - **Inner solves failed:** the band stops with the pairs found (`converged` False, `reason`
@@ -276,16 +310,30 @@ one line per slice (interval, σ, capacity_j, outcome, new modes, span and cuts,
   converged candidates (their residuals are not evaluated), so the inside set and the neighbour
   beyond each edge are formed over Ritz values and W modes; a W neighbour is converged by
   definition, while an unknown mode between the edge and it still appears as a nearer Ritz value
-  that must converge, so the completeness guarantee is unchanged. `info["neighbours"]` keeps
-  only si_slice's own (Ritz) neighbours (`_beyond` already takes the nearer of those and W).
-  `info["ritz"]` = (μ with W merged, converged flags), host arrays already computed in its loop.
-  This also helps 15b's restarts, whose W holds the found in-band modes.
+  that must converge, so the completeness guarantee is unchanged. W candidates add no thresholds
+  to $r_{acc}$ and are never returned; the gap ≥ 100 r_acc condition applies to a W neighbour as
+  to a Ritz one. A side closed by a W neighbour sets `seen` (so `edge_unreached` does not name
+  it). `info["neighbours"]` keeps only si_slice's own (Ritz) neighbours (`_beyond` already takes
+  the nearer of those and W). `info["ritz"]` = (μ with W merged, converged flags), host arrays
+  already computed in its loop. This also helps 15b's restarts, whose W holds the found in-band
+  modes.
+- `minres` (`linalg/krylov.py`): a column stagnates only when its explicit residual has made no
+  new minimum for STALL_C checks **and** its best explicit residual is below $\|b\|$ (some
+  progress over $x = 0$). A plateau before any progress is the indefinite Krylov space still
+  resolving the eigenvalues near σ, not a stall; such a column runs on to its inner cap at worst
+  (si_slice's first-step cap `maxit_inner`, then $10 n_1$), and a capped column still counts as
+  bad for si_slice's σ-move and τ_eff rules. A recursive-residual criterion was tried first and
+  does not separate the cases: the recursive residual plateaus with the explicit one (0.95 →
+  0.87 over 100 iterations). The existing stagnation tests (σ on an eigenvalue, the
+  3-eigenvalue freeze, stagnation before maxit) pass unchanged; si_slice's σ-move rule is
+  unchanged.
 - `si_checked(..., verify=True)`: False runs the slice alone (no count, no restarts);
   `info["count"]` then holds `ran` False, reason "not requested" and the predicted `degree`,
   `gap`. Its count block (band_count with the nearest out-of-band pair on each side, or `count`
   at λ_lo = 0) moves into `_count_slice(op, free, V_c, lam_c, lo, hi, nb_lo, nb_hi, **kw)`, used
   by `si_checked` and by `si_band`'s span leaves.
-- Nothing else in 15a/15b changes.
+- Nothing else in 15a/15b changes. An inner failure still stops the band (no seed retry): its
+  measured cause is fixed at the source.
 
 ## Tests (`tests/test_shift_invert.py`; mesh "short" = hex20 6×5×4 unless noted; references from
 the cached dense `eigh`, extended to 60 modes for "short" (2 s); tol $10^{-10}$, τ $= 10^{-8}$
@@ -297,24 +345,36 @@ constants.)
 1. **One slice:** `si_band` on modes 13–18's band (15b's) with a large capacity equals
    `si_checked`'s result; one leaf, no split, count passed.
 2. **Capacity split (roadmap), real runs:** (a) a block-6 configuration (candidate: the band of
-   modes 5–28, capacity 96); (b) a block-2 configuration (candidate: modes 8–21, capacity 40,
-   which lost modes 20 and 21 under revision 2's rule). The configurations are chosen on the
-   implementation and must also pass at ± one chunk of capacity and with a second seed (no
-   knife-edge behind a recorded constant). Each: at least one full slice replaced by a span and
+   modes 5–28, capacity 96: 2–3 runs, seed-stable in the round-4 emulations); (b) a block-2
+   configuration (candidate: modes 8–21, capacity 48, 3 runs, seed-stable; 40, which lost modes 20
+   and 21 under revision 2's rule, splits with 4–6 runs by seed). The configurations are chosen
+   on the implementation. Robustness: at ± one chunk of capacity and with a second seed the band
+   matches the reference (splits allowed) or raises the capacity error, never a short or wrong
+   result (a chunk is about a quarter of a slice's need here, so −1 chunk may raise). At the
+   chosen capacity and seed: at least one full slice replaced by a span and
    remainders, every leaf converged (span leaves included), the result matches the reference
    (count, λ to max(1e-8, 10 ε λ̂_max/λ) for gaps ≥ 1e-2, else 10 r_acc), $\|V^\top M V - I\|
    \le 10^{-10}$, no duplicates, every counted leaf's count < 0.5 (roadmap "each slice's count"),
-   the recorded number of runs; a spy checks $\lceil \texttt{capacity}_j/c\rceil c + \lceil
-   n_{W,j}/c\rceil c \le \lceil \texttt{capacity}/c\rceil c$, that a remainder's W holds the
-   stored modes of its window and its known neighbours, and that every remainder's capacity_j is
-   at least half of $\lceil \texttt{capacity}/c\rceil c$. (c) modes 8–21 at block 6, capacity 72:
-   raises the capacity error (run count recorded).
+   the recorded number of runs (per seed); a spy checks $\lceil \texttt{capacity}_j/c\rceil c +
+   \lceil n_{W,j}/c\rceil c \le \lceil \texttt{capacity}/c\rceil c$, that a remainder's W holds
+   the stored modes of its window and its known neighbours, and records the smallest remainder
+   capacity_j (measured 0.75–0.83 of the capacity; asserted ≥ half for the chosen
+   configurations only, not a design bound). (c) modes 8–21 at block 6, capacity 72: raises the
+   capacity error (5–12 runs by seed; only the raise is asserted, the time recorded). (d) The
+   MINRES regression: plain `si_slice` on [32.120, 39.101], capacity 72, seed 0 converges (it
+   stopped with "inner solves failed" before the fix); plus a `tests/test_krylov.py` case: an
+   indefinite system with an initial plateau above $\|b\|$ longer than STALL_C checks (a
+   constructed diagonal spectrum, or the slice's step-2 column rebuilt from the run) converges
+   and is not flagged.
 3. **Fakes for the outcome rules** (a fake `si_checked` returning chosen pairs, Ritz values and
    converged flags): an unconverged Ritz value between two converged values below σ puts the cut
    above it (no mode claimed past it); an unconverged value nearest σ with new converged pairs
-   elsewhere grows the run from the converged value nearest σ (no raise); the largest gap of the
-   run straddling the middle is used by one side only; the cut is the largest gap within its
-   half, not the run's overall largest; a complete side (neighbour converged) closes the span at
+   elsewhere grows the run from the converged value nearest σ (no raise); a W mode next to an
+   unconverged Ritz value: the run stops at the unconverged value; the halves are the static
+   split (k = 2: the gap is the lower side's); the cut is the largest gap within its half, not
+   the run's overall largest; a qualifying gap whose midpoint is on the edge (a W neighbour
+   beyond it) is not a cut; a rerun of the same interval with no new pair and no newly complete
+   side raises; a complete side (neighbour converged) closes the span at
    the edge with that neighbour as `lam_out`, likewise with a W mode as the neighbour; an
    unreached side without a cut becomes one remainder holding its converged pairs as W; one side
    complete and the other without a cut reruns $[a, b]$ with W; a remainder holding only W modes
@@ -331,9 +391,9 @@ constants.)
    never closing (lo > 0, nothing below) with "below lambda_1".
    **si_slice with W neighbours** (real, "short"): 15b's modes 13–18 slice with W = modes 11–12
    and 19–20 (the neighbours) converges with the W modes as neighbours (`neighbours` None on both
-   sides, `_beyond` picks W), the same pairs as without W to 1e-10, in no more steps; an unknown
-   mode between the edge and a W neighbour (W = mode 20 only, mode 19 unknown) is still
-   converged as the Ritz neighbour.
+   sides, `_beyond` picks W, `edge_unreached` None), the same pairs as without W to 1e-10, in no
+   more steps; an unknown mode between the edge and a W neighbour (W = mode 20 only, mode 19
+   unknown) is still converged as the Ritz neighbour.
 4. **Voxel cube across slices (roadmap):** the free voxel cube (15a's, with R), a band holding
    its double and triple clusters, `edges` with one interior edge inside a cluster's chain, tol
    $10^{-6}$: the cluster is held whole by the lower slice and deflated by the upper (`collapsed`
@@ -388,12 +448,17 @@ timed first.
   spectrum and its cost, `info`, host memory); the existing reference text: si_slice's
   completeness rule with W modes as converged candidates and its info list gaining `ritz`,
   si_checked's signature gaining `verify`, its `count` info gaining the predicted `degree`/`gap`
-  and reason "not requested", one line on `_count_slice` as the shared count step; the
+  and reason "not requested", one line on `_count_slice` as the shared count step, si_checked's
+  "no converged neighbour … raises" sentence (si_slice's or a W mode); the MINRES stagnation
+  rule in docs/preconditioners.md and the "Inner tolerance" bullet of eigensolvers.md; the
   Validation list (the new si_slice W-neighbour and si_checked verify tests and the si_band
   tests); the stale "15c" pointers that now mean 15d
   (strategy choice, `band=(f1, f2)`, capacity from `si_memory`, the cost model on depth, "the
   choice 15c makes": lines near 122, 589, 607, 614, 643, 663, 666, 676).
-- `docs/ROADMAP.md`: the PR 15 split sentence rewritten for 15c/15d; the [15c] tags split into
+- `docs/ROADMAP.md`: the Interior-bands stop bullet amended ("PR 15c: a known deflated mode
+  beyond the edge, at a gap ≥ 100 r_acc, also serves as the neighbour; an unknown mode between
+  still appears as a nearer Ritz value that must converge"); the PR 15 split sentence rewritten
+  for 15c/15d; the [15c] tags split into
   [15c]/[15d]; the "Slice widths come from the cost model …" bullet and the Contents bullet
   "Slicing with the cost model" amended with a note (widths limited by the capacity; edges come
   from full slices: the span si_slice's completeness rule verifies on the run's final Ritz
@@ -432,8 +497,10 @@ timed first.
   it to an edge in the round-3 prototypes.
 - Leaves keep si_slice's widened inside sets (margins and straddling chains) rather than only the
   pairs inside their own interval; deflation windows and the merge routine handle the overlap.
-- Deflation windows: margins at $1000 r_w$, chains at $100 r_w$, $r_w = \max(r_s,
-  \texttt{tol})$; `capacity` is the total basis per slice.
+- Deflation windows: margins at $\min(1000 r_w, 10^{-2})$, chains at $100 r_w$, $r_w =
+  \max(r_s, \texttt{tol})$; `capacity` is the total basis per slice.
+- MINRES does not stagnate before its explicit residual drops below $\|b\|$ (a plateau, not a
+  stall), fixed in 15c where it surfaced; an inner failure stops the band without a seed retry.
 - `edge_unreached` is not evidence of an edge outside the spectrum: no fallback in 15c; 15d
   applies the f₁ < λ₁ rule and the λ_hi bound up front; an edge in (λ_max, λ̂_max] raises here,
   and the capacity error names both causes.
