@@ -624,26 +624,31 @@ def _apply_km(op, m, X, c):
 
 
 def _merge(op, m, groups, consts, c):
-    """One window held by several runs, groups = [V (n, k)] in run order (each M-orthonormal):
-    each later run's columns are projected against the kept ones, P = U - Q Q^T M U, and the
-    directions with ||p||_M >= 0.5 (eigenvalues >= 0.25 of P^T M P) kept, the rest are
-    duplicates; then Rayleigh-Ritz of (K, M) on the kept basis. K and M are applied in device
-    chunks of c columns. Returns (theta, X, r, t, dropped): the Ritz pairs with their explicit
-    lambda-scaled residuals and round-off thresholds (also in device chunks)."""
-    Q = groups[0]
-    KQ, MQ = _apply_km(op, m, Q, c)
-    drop = 0
-    for U in groups[1:]:
+    """One window held by several runs, groups = [V (n, k)] in run order (each M-orthonormal; the
+    list is consumed): each later run's columns are projected against the kept ones, P = U - Q Q^T M
+    U, and the directions with ||p||_M >= 0.5 (eigenvalues >= 0.25 of P^T M P) kept, the rest are
+    duplicates; then Rayleigh-Ritz of (K, M) on the kept basis. K and M are applied in device chunks
+    of c columns. Returns (theta, X, r, t, dropped): the Ritz pairs with their explicit lambda-
+    scaled residuals and round-off thresholds (also in device chunks)."""
+    n, w = groups[0].shape[0], sum(U.shape[1] for U in groups)
+    Q, KQ, MQ = (np.empty((n, w), order="F") for _ in range(3))
+    k, drop = 0, 0
+    while groups:  # consumed, so each run's copy is freed once appended
+        U = groups.pop(0)
         KU, MU = _apply_km(op, m, U, c)
-        C = Q.T @ MU
-        P, KP, MP = U - Q @ C, KU - KQ @ C, MU - MQ @ C
-        w, Y = np.linalg.eigh((P.T @ MP + MP.T @ P) / 2)
-        keep = w >= 0.25
-        drop += int((~keep).sum())
-        S = Y[:, keep] / np.sqrt(w[keep])
-        del KU, MU
-        Q, KQ, MQ = np.hstack([Q, P @ S]), np.hstack([KQ, KP @ S]), np.hstack([MQ, MP @ S])
-        del P, KP, MP
+        if k:
+            C = Q[:, :k].T @ MU
+            U, KU, MU = U - Q[:, :k] @ C, KU - KQ[:, :k] @ C, MU - MQ[:, :k] @ C
+            ev, Y = np.linalg.eigh((U.T @ MU + MU.T @ U) / 2)
+            keep = ev >= 0.25
+            drop += int((~keep).sum())
+            S = Y[:, keep] / np.sqrt(ev[keep])
+            U, KU, MU = U @ S, KU @ S, MU @ S
+        j = U.shape[1]
+        Q[:, k : k + j], KQ[:, k : k + j], MQ[:, k : k + j] = U, KU, MU
+        k += j
+        del U, KU, MU
+    Q, KQ, MQ = Q[:, :k], KQ[:, :k], MQ[:, :k]
     GK, GM = Q.T @ KQ, Q.T @ MQ
     theta, Z = sla.eigh((GK + GK.T) / 2, (GM + GM.T) / 2)
     X = Q @ Z
@@ -717,11 +722,11 @@ def si_band(
 
     Returns lam (ascending), V (host fp64; M-orthonormal within a window, to residual level across
     runs that deflate neither the other: |x_i^T M x_j| <= (||x_j|| ||r_i|| + ||x_i|| ||r_j||) /
-    |lam_i - lam_j|) and info: converged, reason, r_acc, tau_eff, residuals, thresholds, slices (per
-    processed slice: a run's si_checked info without vectors plus interval, kind "run", leaf,
-    n_new, reruns; a span {interval, kind "span", leaf, parent, count}), merged_edges, collapsed,
-    edge_rr_failed, duplicates, count (si_checked's shape over the leaves) and time (total,
-    slices, merge). See docs/eigensolvers.md#slicing-a-band."""
+    |lam_i - lam_j|, r_i = K x_i - lam_i M x_i) and info: converged, reason, r_acc, tau_eff,
+    residuals, thresholds, slices (per processed slice: a run's si_checked info without vectors plus
+    interval, kind "run", leaf, n_new, reruns; a span {interval, kind "span", leaf, parent, count}),
+    merged_edges, collapsed, edge_rr_failed, duplicates, count (si_checked's shape over the leaves)
+    and time (total, slices, merge). See docs/eigensolvers.md#slicing-a-band."""
     check_x64("si_band")
     t0 = time.perf_counter()
     n = op.n_dof
@@ -758,20 +763,21 @@ def si_band(
         work.sort(key=lambda x: x[0])
         a, e, prev = work.pop(0)
         order = np.argsort(lam_s, kind="stable")
-        rw, win, sd, P = max(r_s, tol), None, (RESTARTS + 1) * i, make((a + e) / 2)
-        reruns = -1
+        rw, win, reruns, sd = max(r_s, tol), None, 0, (RESTARTS + 1) * i
+        P = make((a + e) / 2)
         while True:  # rerun while the run's r_acc widens its window over more stored modes
             wide = order[_window(lam_s[order], a, e, min(1000 * rw, 1e-2), 100 * rw)]
-            if win is not None and np.isin(wide, win).all():
-                break
-            if win is not None and verbose:
-                print(f"si_band: slice {i} rerun, r_acc {rw:.3g} widens its window", flush=True)
-            win, cap, reruns = wide, up(capacity) - up(len(wide)), reruns + 1
+            if win is not None:
+                if np.isin(wide, win).all():
+                    break
+                reruns, V, inf = reruns + 1, None, None  # the rerun's block discarded
+                if verbose:
+                    print(f"si_band: slice {i} rerun, r_acc {rw:.3g} widens its window", flush=True)
+            win, cap = wide, up(capacity) - up(len(wide))
             if cap < 2 * b:
                 raise _cap_error(a, e, capacity, f"{len(win)} deflated modes leave {cap} columns")
             if n_free - len(win) < 2 * b:
                 raise _cap_error(a, e, capacity, f"{len(win)} deflated modes fill the free space")
-            V = inf = None  # a rerun's discarded block
             lam, V, inf = si_checked(
                 op, free, a, e, P, capacity=cap, W=cols(win) if len(win) else None,
                 lam_W=lam_s[win] if len(win) else None, count_options={**opts, "seed": c0 + sd},
@@ -797,10 +803,12 @@ def si_band(
                   f" {why or 'converged'}, {n_new} new, count"
                   f" {inf['count']['reason'] or 'passed'}", flush=True)  # fmt: skip
         i += 1
-        if why != "capacity full":
+        bad = bool((inf["residuals"] > inf["thresholds"]).any())  # si_slice's final check
+        if why != "capacity full" or bad:
             leaves.append(((a, e), inf["count"], bool(inf["converged"])))
             if not inf["converged"]:  # the band stops with the pairs found
-                converged, reason = False, f"[{a:.6g}, {e:.6g}]: {why or 'slice not converged'}"
+                msg = why if why not in (None, "capacity full") else "slice not converged"
+                converged, reason = False, f"[{a:.6g}, {e:.6g}]: {msg}"
                 break
             P = None
             continue
@@ -839,7 +847,8 @@ def si_band(
     order = np.argsort(lam_s, kind="stable")
     ls = lam_s[order]
     windows = np.split(order, np.flatnonzero(_starts(ls, 100 * r_s))[1:]) if len(ls) else []
-    consts, V = None, None  # V: the last run's block, freed with the store
+    V = None  # the last run's block (its columns are in the store)
+    consts = None
     parts, ranges, dup, rr_failed, w = [], [], 0, False, 0  # parts: (lam, V or store idx, r, t)
     while w < len(windows):
         idx = windows[w]
@@ -871,12 +880,13 @@ def si_band(
             vecs[q] = None
         ranges.append((lam_s[idx].min(), lam_s[idx].max()))
         w = g[-1] + 1
-    # windows are ascending and separated by gaps >= 100 r_acc: the parts are in order; each
-    # stored column is freed as it is copied, so the store and V_f together stay about 1x
+    # windows are ascending and separated by gaps >= 100 r_acc: the parts are in order; a run's
+    # block is freed once all its columns are copied, so the store and V_f stay about 1x + a block
     lam_f, res_f, thr_f = (np.concatenate([p[q] for p in parts] + [np.zeros(0)]) for q in (0, 2, 3))
-    V_f, k = np.empty((n, len(lam_f))), 0
-    while parts:
-        X = parts.pop(0)[1]
+    V_f, k = np.empty((n, len(lam_f)), order="F"), 0  # a column touches only its own pages
+    parts.reverse()
+    while parts:  # popped, so a merged window's X is freed once copied
+        X = parts.pop()[1]
         if X.ndim == 1:
             for s in X:
                 V_f[:, k], vecs[s] = vecs[s], None
@@ -888,8 +898,8 @@ def si_band(
     near = lambda s: any(v0 * (1 - 100 * r_s) <= s <= v1 * (1 + 100 * r_s) for v0, v1 in ranges)  # noqa: E731
     merged = [s for s in bounds if near(s)]
     info = dict(
-        converged=converged and all(x[2] for x in leaves),
-        reason=reason,
+        converged=converged and all(x[2] for x in leaves) and not rr_failed,
+        reason=reason or ("a merged window failed its re-check" if rr_failed else None),
         r_acc=r_s,
         tau_eff=tau_eff,
         residuals=res_f,

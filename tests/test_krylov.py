@@ -136,10 +136,11 @@ def _diag(d, x):
 
 def test_minres_plateau():
     """PR 15c: no stagnation before any progress over x = 0. Preconditioned spectrum
-    [-1, -0.1] u [0.1, 0.4] u [0.8, 1] plus one point at 0.62 in the gap carrying most of ||b||
-    with P = 1e12 (almost no weight in MINRES's norm): the explicit 2-norm residual stays above
-    ||b|| for more than STALL_C checks, then converges. A column on A's null space (x = 0 stays
-    the best iterate) runs to maxit, neither converged nor stagnated."""
+    [-1, -0.1] u [0.1, 0.4] u [0.8, 1] plus one point at 0.62 in the gap carrying most of ||b||,
+    A scaled by 1e12 and P by 1e-12 there (almost no weight in MINRES's norm): the explicit
+    2-norm residual stays above ||b|| for more than STALL_C checks, then converges. A column on
+    A's null space (x = 0 stays the best iterate) runs to maxit, neither converged nor
+    stagnated."""
     mu = np.r_[np.linspace(-1, -0.1, 100), np.linspace(0.1, 0.4, 100), np.linspace(0.8, 1, 100)]
     p = np.r_[np.ones(300), 1e12]
     d = np.r_[mu, 0.62] * p

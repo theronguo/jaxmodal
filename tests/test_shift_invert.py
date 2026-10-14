@@ -1178,6 +1178,24 @@ def test_band_options(monkeypatch):
     assert len(calls) == 1
 
 
+def cube_double():
+    """The voxel cube's first double eigenvalue above mode 3 (i, j), the band [lo, hi] over modes
+    i - 1 to j + 1 and the interior edge s between the copies."""
+    lr = prob("cube")[6]
+    i, j = next(g for g in clusters(lr) if len(g) == 2 and g[0] > 3)
+    return i, j, *edges(lr, i - 1, j + 2), (lr[i] + lr[j]) / 2
+
+
+def two_runs(monkeypatch, first, second):
+    """fake_band on the cube: run 1 returns first = (lam, vectors), every later run second."""
+
+    def script(k, a, e, kw):
+        lam, V = first if k == 1 else second
+        return (np.asarray(lam), np.stack(V, 1)), None, None, None
+
+    fake_band(monkeypatch, script, name="cube")
+
+
 def test_merge(monkeypatch):
     """15c tests 5b and 9 (fakes on the voxel cube's double eigenvalue v1, v2 and its
     neighbours): the same mode from two runs is kept once (duplicates 1, the boundary merged,
@@ -1187,18 +1205,8 @@ def test_merge(monkeypatch):
     perturbed vector fails the re-check after widening (edge_rr_failed); two boundaries of which
     one merges: not collapsed."""
     _, free, op, K, M, R, lr, Vr = prob("cube")
-    g = next(g for g in clusters(lr) if len(g) == 2 and g[0] > 3)
-    i, j = g
-    lo, hi = edges(lr, i - 1, j + 2)
-    s = (lr[i] + lr[j]) / 2  # the interior edge between the copies
+    i, j, lo, hi, s = cube_double()
     v1, v2 = Vr[:, i], Vr[:, j]
-
-    def two(first, second):
-        def script(k, a, e, kw):
-            lam, V = first if k == 1 else second
-            return (np.asarray(lam), np.stack(V, 1)), None, None, None
-
-        return script
 
     def check(lam, V, want):
         assert np.abs(lam - want).max() <= 1e-10 * want.max()
@@ -1212,7 +1220,7 @@ def test_merge(monkeypatch):
         (([lr[j], lr[j + 1]], [v2, Vr[:, j + 1]]), 0),
     ]
     for second, dup in cases:
-        fake_band(monkeypatch, two(lo_pairs, second), name="cube")
+        two_runs(monkeypatch, lo_pairs, second)
         lam, V, info = run()
         want = lr[i - 1 : j + 2] if len(second[0]) > 2 or dup == 0 else lr[[i - 1, i, j + 1]]
         check(lam, V, want)
@@ -1220,17 +1228,17 @@ def test_merge(monkeypatch):
         assert not info["edge_rr_failed"]
     t = 1e-3
     near = ([lr[i]], [np.cos(t) * v1 + np.sin(t) * v2])
-    fake_band(monkeypatch, two(([lr[i - 1], lr[i], lr[j]], [Vr[:, i - 1], v1, v2]), near),
-              name="cube")  # fmt: skip
+    two_runs(monkeypatch, ([lr[i - 1], lr[i], lr[j]], [Vr[:, i - 1], v1, v2]), near)
     lam, V, info = run()
     check(lam, V, lr[i - 1 : j + 1])
     assert info["duplicates"] == 1
     rng = np.random.default_rng(0)
     w = v2 + 1e-3 * np.where(free, rng.standard_normal(len(v2)), 0)
     w /= np.sqrt(w @ (M @ w))
-    fake_band(monkeypatch, two(lo_pairs, ([lr[j]], [w])), name="cube")
+    two_runs(monkeypatch, lo_pairs, ([lr[j]], [w]))
     lam, V, info = run()
     assert info["edge_rr_failed"] and info["duplicates"] == 0 and len(lam) == 3
+    assert not info["converged"] and info["reason"] == "a merged window failed its re-check"
     s2 = (lr[j + 1] + lr[j + 2]) / 2 if j + 2 < len(lr) else None
     third = ([lr[j + 2]], [Vr[:, j + 2]])
 
@@ -1290,16 +1298,19 @@ def check_band(name, lo, hi, lam, V, info, *, counted=True):
         alone = (i == 0 or gap[i - 1] >= 1e-2) and (i == len(gap) or gap[i] >= 1e-2)
         bound = max(1e-8, 10 * EPS * lam_hat(name) / x) if alone else 10 * info["r_acc"]
         assert abs(x - lr[i]) <= bound * lr[i], (x, lr[i], bound)
+    assert V.flags.f_contiguous  # the result is filled column by column (host peak)
     MV = np.asarray(M @ V)
     err = np.abs(V.T @ MV - np.eye(V.shape[1]))
     nr = np.linalg.norm((np.asarray(K @ V) - MV * lam)[free], axis=0)
     nx = np.linalg.norm(V, axis=0)
     dl = np.abs(lam[:, None] - lam[None, :])
-    near = dl < 100 * info["r_acc"] * np.abs(lam)[:, None]
+    near = dl < 100 * info["r_acc"] * np.minimum(np.abs(lam)[:, None], np.abs(lam)[None, :])
     pair = nx[None, :] * nr[:, None] + nx[:, None] * nr[None, :]
     bound = np.where(near, 0, pair / np.where(near, 1, dl))
     assert (err <= 1e-10 + bound).all(), err.max()
     assert (info["residuals"] <= info["thresholds"]).all()
+    rel = nr / (np.abs(lam) * np.linalg.norm(MV[free], axis=0))  # recomputed (SciPy K, M)
+    assert (rel <= 1.01 * info["thresholds"]).all(), (rel / info["thresholds"]).max()
     if counted:
         c = info["count"]
         assert c["passed"] and len(c["estimates"]) == sum(s["leaf"] for s in info["slices"])
@@ -1370,18 +1381,21 @@ def test_band_capacity_split(case, monkeypatch):
 def test_band_split_sweep(case, seed):
     """15c test 2, robustness: at the chosen capacity and one chunk below and above it, and with
     a second seed, the band matches the reference (splits allowed) or raises the capacity
-    error; never a short or wrong result."""
+    error; never a short or wrong result. Counted at the chosen capacity only (an off-nominal
+    cut can land in a small gap, a count of degree ~19k: about 20 min under load)."""
     i0, i1, cap, block, _ = SPLITS[case]
     lr = prob("short")[6]
     lo, hi = edges(lr, i0, i1)
     c = si._chunk(block)
     for capacity in (cap - c, cap, cap + c):
+        verify = capacity == cap
         try:
-            lam, V, info = rband("short", lo, hi, capacity=capacity, block=block, seed=seed)
+            lam, V, info = rband("short", lo, hi, capacity=capacity, block=block, seed=seed,
+                                 verify=verify)  # fmt: skip
         except ValueError as e:
             assert "fills capacity" in str(e)
             continue
-        check_band("short", lo, hi, lam, V, info)
+        check_band("short", lo, hi, lam, V, info, counted=verify)
 
 
 @pytest.mark.slow
@@ -1511,6 +1525,24 @@ def test_band_rerun(monkeypatch):
     check_band("cube", lo, 56.0, lam, V, info, counted=False)
 
 
+def test_band_full_slice_fails_check(monkeypatch):
+    """Code review round 2: a full slice whose pairs fail si_slice's final residual pass (patched
+    1e3x larger) stops the band unconverged at that slice instead of storing them and splitting
+    (modes 5-28 at capacity 96 split otherwise)."""
+    lr = prob("short")[6]
+    lo, hi = edges(lr, 5, 29)
+    real = si._v_chunk
+
+    def big(*a):
+        r, t = real(*a)
+        return 1e3 * r, t
+
+    monkeypatch.setattr(si, "_v_chunk", big)
+    lam, V, info = rband("short", lo, hi, capacity=96, verify=False)
+    assert len(info["slices"]) == 1 and info["slices"][0]["reason"] == "capacity full"
+    assert not info["converged"] and info["reason"] == f"[{lo:.6g}, {hi:.6g}]: slice not converged"
+
+
 def test_band_from_zero():
     """15c test 6 (roadmap): the clamped band [0, hi] over modes 0-5 matches the reference; the
     count is the step count (no band edges)."""
@@ -1572,35 +1604,19 @@ def test_merge_widen(monkeypatch):
     on the adjacent window's mode is fixed by the widening (edge_rr_failed False); a direction with
     projected M-norm 0.6 (between 0.5 and 0.707) is kept."""
     _, free, op, K, M, R, lr, Vr = prob("cube")
-    g = next(g for g in clusters(lr) if len(g) == 2 and g[0] > 3)
-    i, j = g
-    lo, hi = edges(lr, i - 1, j + 2)
-    s = (lr[i] + lr[j]) / 2
+    i, j, lo, hi, s = cube_double()
     v1, v2, v3 = Vr[:, i], Vr[:, j], Vr[:, j + 1]
     eps = 1e-4
     w = (v2 + eps * v3) / np.sqrt(1 + eps**2)
     u = (v3 - eps * v2) / np.sqrt(1 + eps**2)
 
-    def two(first, second):
-        def script(k, a, e, kw):
-            lam, V = first if k == 1 else second
-            return (np.asarray(lam), np.stack(V, 1)), None, None, None
-
-        return script
-
-    fake_band(
-        monkeypatch,
-        two(([lr[i - 1], lr[i]], [Vr[:, i - 1], v1]), ([lr[j], lr[j + 1]], [w, u])),
-        name="cube",
-    )
+    two_runs(monkeypatch, ([lr[i - 1], lr[i]], [Vr[:, i - 1], v1]), ([lr[j], lr[j + 1]], [w, u]))
     lam, V, info = fband("cube", lo, hi, edges=[s], R=R)
     assert not info["edge_rr_failed"] and len(lam) == 4
     assert np.abs(lam - lr[i - 1 : j + 2]).max() <= 1e-10 * lr[j + 1]
     # a direction 0.8 v1 + 0.6 v2: projected norm 0.6 against v1, kept (rule 0.5)
     x = 0.8 * v1 + 0.6 * v2
-    fake_band(
-        monkeypatch, two(([lr[i - 1], lr[i]], [Vr[:, i - 1], v1]), ([lr[i]], [x])), name="cube"
-    )
+    two_runs(monkeypatch, ([lr[i - 1], lr[i]], [Vr[:, i - 1], v1]), ([lr[i]], [x]))
     lam, V, info = fband("cube", lo, hi, edges=[s], R=R)
     assert info["duplicates"] == 0 and len(lam) == 3
     assert np.abs(lam - lr[i - 1 : j + 1]).max() <= 1e-10 * lr[j]
@@ -1634,6 +1650,9 @@ def test_split_more():
     v = np.array([1.0, 2.0, 3.0, 3.0 + 1e-9, 4.0, 5.0])
     assert si._split(v, np.array([F, T, T, F, T, T]), 4.5, 1.5, 4.8, 1e-10) == (
         None, None, False, True)  # fmt: skip
+    # a chain's first copy unconverged, its last converged: not whole, no cut at 2|3
+    assert si._split(v, np.array([F, T, F, T, T, F]), 3.5, 1.5, 4.8, 1e-10) == (
+        None, None, False, False)  # fmt: skip
 
 
 def test_window():
@@ -1675,18 +1694,11 @@ def test_merge_threshold(monkeypatch):
     """Code review round 1: a direction with projected M-norm 0.3 (< 0.5) is a duplicate and
     dropped."""
     _, free, op, K, M, R, lr, Vr = prob("cube")
-    g = next(g for g in clusters(lr) if len(g) == 2 and g[0] > 3)
-    i, j = g
-    lo, hi = edges(lr, i - 1, j + 2)
-    s = (lr[i] + lr[j]) / 2
+    i, j, lo, hi, s = cube_double()
     v1, v2 = Vr[:, i], Vr[:, j]
     x = np.sqrt(1 - 0.09) * v1 + 0.3 * v2
 
-    def script(k, a, e, kw):
-        lam, V = ([lr[i - 1], lr[i]], [Vr[:, i - 1], v1]) if k == 1 else ([lr[i]], [x])
-        return (np.asarray(lam), np.stack(V, 1)), None, None, None
-
-    fake_band(monkeypatch, script, name="cube")
+    two_runs(monkeypatch, ([lr[i - 1], lr[i]], [Vr[:, i - 1], v1]), ([lr[i]], [x]))
     lam, V, info = fband("cube", lo, hi, edges=[s], R=R)
     assert info["duplicates"] == 1 and len(lam) == 2
 
@@ -1695,18 +1707,11 @@ def test_merge_widen_back(monkeypatch):
     """Code review round 1: run 2's vector leaning on the mode below (kept from run 1's window) is
     fixed by widening down."""
     _, free, op, K, M, R, lr, Vr = prob("cube")
-    g = next(g for g in clusters(lr) if len(g) == 2 and g[0] > 3)
-    i, j = g
-    lo, hi = edges(lr, i - 1, j + 2)
-    s = (lr[i] + lr[j]) / 2
+    i, j, lo, hi, s = cube_double()
     eps = 1e-4
     w = (Vr[:, j] + eps * Vr[:, i - 1]) / np.sqrt(1 + eps**2)
 
-    def script(k, a, e, kw):
-        lam, V = ([lr[i - 1], lr[i]], [Vr[:, i - 1], Vr[:, i]]) if k == 1 else ([lr[j]], [w])
-        return (np.asarray(lam), np.stack(V, 1)), None, None, None
-
-    fake_band(monkeypatch, script, name="cube")
+    two_runs(monkeypatch, ([lr[i - 1], lr[i]], [Vr[:, i - 1], Vr[:, i]]), ([lr[j]], [w]))
     lam, V, info = fband("cube", lo, hi, edges=[s], R=R)
     assert not info["edge_rr_failed"] and len(lam) == 3
     assert np.abs(lam - lr[i - 1 : j + 1]).max() <= 1e-10 * lr[j]
@@ -1718,3 +1723,90 @@ def test_band_verify_false_runs_nothing():
     _, _, off = rband("short", lo, hi, capacity=300, verify=False)
     b = off["slices"][0]["count"]
     assert np.isnan(b["estimate"]) and b["steps"] == 0
+
+
+def test_band_rerun_fake(monkeypatch):
+    """Code review round 2: a slice whose r_acc widens its window over more stored modes is rerun
+    with them deflated, twice (r_acc 1e-4 then 1e-3), each rerun's capacity from its own window
+    (block 1, c = 4: 92, 92, 88); the discarded runs' pairs (here a stored mode found again) are
+    not kept; the stored entry is the last run's."""
+    lr = prob("short")[6]
+    lo, hi = edges(lr, 3, 16)
+    s = (lr[11] + lr[12]) / 2
+    r_of = {2: 1e-4, 3: 1e-3}
+    again = {2: [10], 3: [8]}  # stored modes the run found again (not in its W)
+
+    def script(j, a, e, kw):
+        return again.get(j, []) + new_modes(a, e, kw), None, None, None
+
+    calls, _ = fake_band(monkeypatch, script)
+    fake = si.si_checked
+
+    def wrapped(*a, **kw):
+        lam, V, info = fake(*a, **kw)
+        return lam, V, dict(info, r_acc=r_of.get(len(calls), TOL),
+                            residuals=np.full(len(lam), len(calls) * 1e-12))  # fmt: skip
+
+    monkeypatch.setattr(si, "si_checked", wrapped)
+    lam, V, info = fband("short", lo, hi, edges=[s], block=1)
+    assert [c["interval"] for c in calls] == [(lo, s)] + [(s, hi)] * 3
+    assert np.allclose(np.sort(calls[1]["lam_W"]), lr[[11]], rtol=1e-12)
+    assert np.allclose(np.sort(calls[2]["lam_W"]), lr[9:12], rtol=1e-12)
+    assert np.allclose(np.sort(calls[3]["lam_W"]), lr[7:12], rtol=1e-12)
+    assert [c["capacity"] for c in calls] == [96, 92, 92, 88]
+    assert [x["reruns"] for x in info["slices"]] == [0, 2]
+    assert np.array_equal(lam, lr[3:16]) and len(info["residuals"]) == len(lam)
+    assert (info["residuals"][-4:] == 4e-12).all() and info["slices"][1]["r_acc"] == TOL
+
+
+def test_band_converged_false(monkeypatch):
+    """Code review round 2: a slice with no reason but converged False (si_slice's final residual
+    check failed) stops the band: not converged, reason "slice not converged", the next slice
+    not run."""
+    lr = prob("short")[6]
+    lo, hi = edges(lr, 3, 16)
+    s = [(lr[7] + lr[8]) / 2, (lr[10] + lr[11]) / 2]
+    calls, _ = fake_band(monkeypatch, lambda j, a, e, kw: (new_modes(a, e, kw), None, None, None))
+    fake = si.si_checked
+
+    def wrapped(*a, **kw):
+        lam, V, info = fake(*a, **kw)
+        return lam, V, dict(info, converged=len(calls) != 2)
+
+    monkeypatch.setattr(si, "si_checked", wrapped)
+    lam, V, info = fband("short", lo, hi, edges=s)
+    assert len(calls) == 2 and not info["converged"]
+    assert info["reason"] == f"[{s[0]:.6g}, {s[1]:.6g}]: slice not converged"
+
+
+def test_merge_widen_after_merged(monkeypatch):
+    """Code review round 2: two adjacent merged windows (cube triples 2-4 and 5-7, each split
+    between runs), the second's Ritz residual failing (run 3's copy leans on mode 8, kept from
+    run 3): it widens forward only (the merged window below stays), every pair exact."""
+    _, free, op, K, M, R, lr, Vr = prob("cube")
+    lo, hi = edges(lr, 2, 10)
+    s = [(lr[2] + lr[3]) / 2, (lr[5] + lr[6]) / 2]
+    eps = 1e-4
+    w = (Vr[:, 6] + eps * Vr[:, 8]) / np.sqrt(1 + eps**2)
+    runs = [([2], [Vr[:, 2]]), ([3, 4, 5], [Vr[:, q] for q in (3, 4, 5)]),
+            ([6, 7, 8, 9], [w] + [Vr[:, q] for q in (7, 8, 9)])]  # fmt: skip
+
+    def script(k, a, e, kw):
+        q, V = runs[k - 1]
+        return (lr[q], np.stack(V, 1)), None, None, None
+
+    fake_band(monkeypatch, script, name="cube")
+    lam, V, info = fband("cube", lo, hi, edges=s, R=R)
+    assert not info["edge_rr_failed"] and len(lam) == 8
+    assert np.abs(lam - lr[2:10]).max() <= 1e-10 * lr[9]
+    assert np.abs(V.T @ (M @ V) - np.eye(8)).max() <= 1e-10
+
+
+def test_band_rejects_sigma(monkeypatch):
+    """Code review round 2: sigma and count_precond are set per slice: rejected."""
+    fake_band(monkeypatch, lambda j, a, e, kw: (new_modes(a, e, kw), None, None, None))
+    lr = prob("short")[6]
+    lo, hi = edges(lr, 3, 16)
+    for kw in (dict(sigma=12.0), dict(count_precond="P")):
+        with pytest.raises(ValueError, match="sets .* per slice"):
+            fband("short", lo, hi, **kw)
