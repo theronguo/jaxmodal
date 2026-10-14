@@ -99,7 +99,7 @@ def check_band(band):
     if not (math.isfinite(f1) and math.isfinite(f2)):
         raise ValueError(f"band must be finite, got {band!r}")
     if f1 > 0:
-        raise NotImplementedError("interior bands (f1 > 0) come with PR 15; pass band=(0, f_max)")
+        raise NotImplementedError("interior bands (f1 > 0) come with PR 15d; pass band=(0, f_max)")
     if f1 != 0 or not f2 > 0:
         raise ValueError(f"band must be (0, f_max) with f_max > 0, got {band!r}")
     return f1, f2

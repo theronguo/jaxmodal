@@ -368,8 +368,9 @@ def _estimate(op, free, m, Ws, R, MR, precond, gamma, d, lam_c, tau, *, n_probes
 
 
 def _run(op, free, m, Ws, R, MR, info, lower, gap, lam_top, n_top, lam_c, *, precond, n_probes,
-         seed, tau, degree, block, maxit, verbose, _steps, t0):  # fmt: skip
-    """Degree, tau and the probe loop for count and band_count; info is filled in place."""
+         seed, tau, degree, block, maxit, verbose, _steps, _predict, t0):  # fmt: skip
+    """Degree, tau and the probe loop for count and band_count; info is filled in place.
+    _predict: stop after the degree (the count's cost prediction, nothing run)."""
     n_free = int(free.sum())
     block = n_probes if block is None else min(block, n_probes)
     info.update(lam_c=lam_c, gap=_g_eff(gap, lower), block=block, steps=0, n_top=n_top,
@@ -386,6 +387,9 @@ def _run(op, free, m, Ws, R, MR, info, lower, gap, lam_top, n_top, lam_c, *, pre
         bias = _total_bias(_gamma(d, lower), gap, lam_top, n_top, n_free, lower)
     tau = 0.01 / (d * math.sqrt(n_free)) if tau is None else float(tau)
     info.update(degree=d, tau=tau, bias=bias)
+    if _predict:
+        info.update(time=dict(total=time.perf_counter() - t0))
+        return np.nan, info
     precond = jacobi(op, free, lam_c) if precond is None else precond
     est, out = _estimate(op, free, m, Ws, R, MR, precond, _gamma(d, lower), d, lam_c, tau,
                          n_probes=n_probes, block=block, seed=seed, maxit=maxit,
@@ -396,7 +400,7 @@ def _run(op, free, m, Ws, R, MR, info, lower, gap, lam_top, n_top, lam_c, *, pre
 
 def count(
     op, free, W, lam, lam_last, lam_next, *, R=None, precond=None, n_probes=50, seed=0,
-    tau=None, degree=None, block=None, maxit=1000, verbose=False, _steps=None,
+    tau=None, degree=None, block=None, maxit=1000, verbose=False, _steps=None, _predict=False,
 ):  # fmt: skip
     """Stochastic count of the eigenvalues below lam_c = (lam_last + lam_next) / 2 that are
     missing from W. Returns (estimate, info); passed = verifiable and estimate < 0.5.
@@ -416,6 +420,7 @@ def count(
     reduction), step (recurrence per step), block ((sampling + projection) per block run) and
     total. _steps (internal, the calibration in solve_modes): run at most this many steps per
     block, with the degree-d polynomial's compiled shape (the estimate is then not the count's).
+    _predict (internal, si_checked without a count): return after the degree, nothing run.
     """
     check_x64("count")
     t0 = time.perf_counter()
@@ -436,7 +441,7 @@ def count(
     return _run(op, free, m, Ws, R, MR, {}, None, gap, lam.max() / lam_c,
                 len(lam) + R.shape[1], lam_c, precond=precond, n_probes=n_probes, seed=seed,
                 tau=tau, degree=degree, block=block, maxit=maxit, verbose=verbose,
-                _steps=_steps, t0=t0)  # fmt: skip
+                _steps=_steps, _predict=_predict, t0=t0)  # fmt: skip
 
 
 def _edges(lam, lo, hi, lam_out):
@@ -466,7 +471,7 @@ def band_edges(lam, lo, hi, lam_out):
 
 def band_count(
     op, free, V, lam, lo, hi, V_out, lam_out, *, R=None, precond=None, n_probes=50, seed=0,
-    tau=None, degree=None, block=None, maxit=1000, verbose=False,
+    tau=None, degree=None, block=None, maxit=1000, verbose=False, _predict=False,
 ):  # fmt: skip
     """Stochastic count of the eigenvalues in the interior band [lo, hi] (0 < lo < hi) missing
     from V, by a Jackson band-pass polynomial of T = (K + c_hi M)^-1 M between the counting
@@ -501,4 +506,5 @@ def band_count(
     info = dict(edges=(c_lo, c_hi), gaps=(g_lo, g_hi))
     return _run(op, free, m, Ws, R, MR, info, (a / c_hi, bot), g_hi, top, n_top, c_hi,
                 precond=precond, n_probes=n_probes, seed=seed, tau=tau, degree=degree,
-                block=block, maxit=maxit, verbose=verbose, _steps=None, t0=t0)  # fmt: skip
+                block=block, maxit=maxit, verbose=verbose, _steps=None, _predict=_predict,
+                t0=t0)  # fmt: skip

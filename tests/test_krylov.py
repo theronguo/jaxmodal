@@ -130,6 +130,34 @@ def test_minres_stall_count():
     assert np.abs(np.asarray(x) - b / A.args[0][:, None]).max() <= 1e-15
 
 
+def _diag(d, x):
+    return d[:, None] * x
+
+
+def test_minres_plateau():
+    """PR 15c: no stagnation before any progress over x = 0. Preconditioned spectrum
+    [-1, -0.1] u [0.1, 0.4] u [0.8, 1] plus one point at 0.62 in the gap carrying most of ||b||,
+    A scaled by 1e12 and P by 1e-12 there (almost no weight in MINRES's norm): the explicit
+    2-norm residual stays above ||b|| for more than STALL_C checks, then converges. A column on
+    A's null space (x = 0 stays the best iterate) runs to maxit, neither converged nor
+    stagnated."""
+    mu = np.r_[np.linspace(-1, -0.1, 100), np.linspace(0.1, 0.4, 100), np.linspace(0.8, 1, 100)]
+    p = np.r_[np.ones(300), 1e12]
+    d = np.r_[mu, 0.62] * p
+    A, P = Partial(_diag, jnp.asarray(d)), Partial(_diag, jnp.asarray(1 / p))
+    b = np.r_[np.ones(300), 30.0][:, None]
+    for k in range(CHECK, (STALL_C + 2) * CHECK, CHECK):
+        x, _ = run(minres, A, b, P, 1e-6, maxit=k)
+        assert np.linalg.norm(b[:, 0] - d * x[:, 0]) > np.linalg.norm(b)
+    _, info = run(minres, A, b, P, 1e-6, maxit=2000)
+    assert info["converged"].all() and not info["stagnated"].any()
+    assert info["iterations"][0] < 300
+    A = Partial(_diag, jnp.array([1.0, -1.0, 0.0]))
+    x, info = run(minres, A, np.array([[0.0], [0.0], [1.0]]), None, 1e-8, maxit=100)
+    assert not info["converged"].any() and not info["stagnated"].any()
+    assert info["iterations"][0] == 100 and info["residuals"][0] == 1.0 and not x.any()
+
+
 def test_minres_best():
     """With sigma on an eigenvalue MINRES stagnates and its explicit 2-norm residual drifts up
     after the minimum: the best iterate is returned, no worse than a run stopped at that

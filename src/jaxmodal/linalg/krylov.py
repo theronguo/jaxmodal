@@ -10,7 +10,7 @@ from ..operators.common import check_x64
 
 STALL_R = 5  # PCG: residual replacements without convergence before the stagnation exit
 CHECK = 10  # MINRES: iterations between explicit residual checks
-STALL_C = 5  # MINRES: checks without a new minimum before the stagnation exit
+STALL_C = 5  # MINRES: checks without a new minimum (after some progress) before stagnation
 
 
 def _norm(a):
@@ -131,7 +131,8 @@ def _minres(A, P, b, tol, maxit):
             return jnp.zeros(k, bool), s["best"], s["since"], jnp.zeros(k), s["xb"]
 
         good, best, since, e, xb = lax.cond(it % CHECK == 0, explicit, skip, None)
-        stag = s["stag"] | (act & ~good & (since >= STALL_C))
+        # no stagnation before any progress over x = 0: an indefinite plateau, not a stall
+        stag = s["stag"] | (act & ~good & (since >= STALL_C) & (best < nb))
         act = act & ~good & ~stag & jnp.isfinite(e)
         return dict(x=x, xb=xb, r1=r1, r2=r2, y=y, w=w, w2=s["w"], oldb=oldb, beta=beta, dbar=dbar,
                     eps=eps, phibar=phibar, cs=cs, sn=sn, it=it, act=act, conv=s["conv"] | good,
@@ -150,8 +151,9 @@ def minres(A, b, precond=None, tol=1e-8, maxit=10000):
     """Preconditioned MINRES for symmetric (possibly indefinite) A with an SPD precond, on
     independent columns of b (n, k): x and info (iterations, residuals, converged, stagnated).
     The explicit 2-norm residual is checked every CHECK iterations; a column converges when it
-    meets tol ||b|| and stagnates after STALL_C checks without a new minimum. Returns the iterate
-    with the smallest explicit residual (the last one or the best check); a non-finite residual is
-    reported as NaN, as in pcg."""
+    meets tol ||b|| and stagnates after STALL_C checks without a new minimum, once its best
+    residual is below ||b|| (before that, a plateau of the indefinite Krylov space runs on to
+    maxit). Returns the iterate with the smallest explicit residual (the last one or the best
+    check); a non-finite residual is reported as NaN, as in pcg."""
     _check("minres", b, maxit)
     return _minres(A, Partial(_identity) if precond is None else precond, b, tol, maxit)
