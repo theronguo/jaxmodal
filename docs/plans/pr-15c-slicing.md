@@ -229,7 +229,8 @@ accepted pair (λ, v, its run, residual, threshold). For slice $[a, b]$ with σ:
        (a run with the converged pairs deflated: a binary split; when the other side is complete
        that remainder is $[a, b]$ itself).
      The span leaf $[s_{lo}, s_{hi}]$ exists when both sides are complete or cut: no Lanczos run,
-     its pairs are the stored ones inside, it counts as converged. When verify, its count runs
+     its pairs are the stored ones inside (extended over chains < 100 r; implemented after code
+     review round 9), it counts as converged. When verify, its count runs
      before `P` is released (`_count_slice` below, with the out-of-band pairs above; λ_lo = 0 uses
      `count`). A span leaf whose count is ≥ 0.5 (verifiable) is requeued as a run slice with W =
      its pairs (15b's restarts then apply); an unverifiable one stays a leaf, not passed.
@@ -289,7 +290,8 @@ roadmap's slice-collapse flag: τ_eff made $100 r_{acc}$ exceed the gaps at all 
 counts stay valid: each leaf's count deflated its W and its returned span, and the merge keeps the
 union span (it drops only directions with $\|p\|_M < 0.5$, copies of kept ones).
 
-**Result.** `lam`, `V`: the kept pairs, ascending, assembled once into a preallocated host fp64
+**Result** (as planned; the implemented `info`, orthogonality measurements and the count's
+neighbour choice are in docs/eigensolvers.md#slicing-a-band). `lam`, `V`: the kept pairs, ascending, assembled once into a preallocated host fp64
 array (per-run blocks freed as copied), M-orthonormal within a run exactly and across runs to
 the merge's Rayleigh–Ritz or to $O(r/g)$ at boundaries with gaps $g \ge 100 r$ (1e-13 measured).
 `info`: `converged` (every leaf converged, no inner failure), `reason`, `r_acc`, `tau_eff`
@@ -334,7 +336,9 @@ one line per slice (interval, σ, capacity_j, outcome, new modes, span and cuts,
   `info["count"]` then holds `ran` False, reason "not requested" and the predicted `degree`,
   `gap`. Its count block (band_count with the nearest out-of-band pair on each side, or `count`
   at λ_lo = 0) moves into `_count_slice(op, free, V_c, lam_c, lo, hi, nb_lo, nb_hi, **kw)`, used
-  by `si_checked` and by `si_band`'s span leaves.
+  by `si_checked` and by `si_band`'s span leaves (implemented: the neighbour choice and its
+  error in `_count_nbs`, shared too; on a restart each side's neighbour is the last run's that
+  has one, since a restart may close a side on a deflated mode of the first run).
 - Nothing else in 15a/15b changes. An inner failure still stops the band (no seed retry): its
   measured cause is fixed at the source, for plateaus above $\|b\|$ only; a plateau below
   $\|b\|$ in the 2-norm (another norm ratio, a better preconditioner) would still stop the

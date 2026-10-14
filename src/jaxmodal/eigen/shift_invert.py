@@ -375,7 +375,7 @@ def si_slice(
         converged = done and bool((rr[:na] <= tt[:na]).all())
         lam_out, V, res_out, thr_out = mu[acc], Vs[:, :na], rr[:na], tt[:na]  # F: a view
         for j, (name, i) in enumerate(nbs):
-            nb[name] = (float(mu[i]), Vs[:, na + j].copy())
+            nb[name] = (float(mu[i]), Vs[:, na + j])  # V keeps Vs alive anyway
     unreached = [e for e in ("lo", "hi") if not seen[e]]
     delta = np.abs(lam_out - sigma) / np.abs(lam_out) if len(lam_out) else np.zeros(0)
     info = dict(
@@ -409,13 +409,14 @@ def _beyond(a, b, nb, W, lam_W):
     neighbours nb (a list per side, e.g. one per run) or the caller's pairs (W, lam_W), whichever
     is nearer; None for a side with neither."""
     out = []
-    for side, sel, pick in (("lo", lam_W < a, np.argmax), ("hi", lam_W > b, np.argmin)):
+    for side, x, sgn, sel, pick in (("lo", a, -1, lam_W < a, np.argmax),
+                                    ("hi", b, 1, lam_W > b, np.argmin)):  # fmt: skip
         # a guard: a neighbour of another run may lie inside [a, b]
-        cand = [p for p in nb[side] if p is not None and (p[0] < a if side == "lo" else p[0] > b)]
+        cand = [p for p in nb[side] if p is not None and sgn * (p[0] - x) > 0]
         if sel.any():
             i = np.flatnonzero(sel)[pick(lam_W[sel])]
             cand.append((float(lam_W[i]), W[:, i]))
-        out.append(min(cand, key=lambda p: abs(p[0] - (a if side == "lo" else b)), default=None))
+        out.append(min(cand, key=lambda p: abs(p[0] - x), default=None))
     return out
 
 
@@ -434,9 +435,8 @@ def _count_slice(op, free, V_c, lam_c, lo, hi, nb_lo, nb_hi, **kw):
     and lam_c, and the nearest known out-of-band pairs nb_lo, nb_hi ((lam, v); nb_lo unused at
     lo = 0): band_count, or at lo = 0 count (the step polynomial below the upper pair)."""
     if lo > 0:
-        out = [nb_lo, nb_hi]
-        return band_count(op, free, V_c, lam_c, lo, hi, np.stack([p[1] for p in out], 1),
-                          np.array([p[0] for p in out]), **kw)  # fmt: skip
+        return band_count(op, free, V_c, lam_c, lo, hi, np.stack([nb_lo[1], nb_hi[1]], 1),
+                          np.array([nb_lo[0], nb_hi[0]]), **kw)  # fmt: skip
     e = lam_c.max() if len(lam_c) else hi
     return count(op, free, (*V_c, nb_hi[1][:, None]), np.r_[lam_c, nb_hi[0]], e, nb_hi[0], **kw)
 
@@ -503,7 +503,8 @@ def si_checked(
         if j and cap < 2 * b:
             reason = "restart capacity"
             break
-        Wj, lj = (np.hstack([W, V_f]), np.r_[lam_W, lam_f]) if len(lam_f) else (W, lam_W)
+        Wj = (np.hstack([W, V_f]) if nw else V_f) if len(lam_f) else W  # no copy without W
+        lj = np.r_[lam_W, lam_f]
         lam, V, info = si_slice(op, free, lo, hi, precond, capacity=cap,
                                 W=Wj if Wj.shape[1] else None, lam_W=lj if len(lj) else None,
                                 seed=seed + j, verbose=verbose, **slice_options)  # fmt: skip
@@ -529,7 +530,10 @@ def si_checked(
         W_in, lam_in = W[:, inb], lam_W[inb]
         lam_c = np.r_[lam_f, lam_in]  # the count's in-band set: found, not returned
         V_c = (V_f, W_in)
-        nbs = {s: [r["neighbours"][s] for r in runs] for s in ("lo", "hi")}  # every run's
+        # each side's neighbour from the last run with one: an earlier run's only when the later
+        # runs closed that side on a deflated mode (its neighbour lies beyond that mode)
+        nbs = {s: [next((r["neighbours"][s] for r in runs[::-1] if r["neighbours"][s]), None)]
+               for s in ("lo", "hi")}  # fmt: skip
         nb_lo, nb_hi = _count_nbs(lam_c, lo, hi, nbs, W, lam_W)
         P = precond if count_precond is None else count_precond
         kw = dict(R=slice_options.get("R"), precond=P, seed=c0 + j, **opts)

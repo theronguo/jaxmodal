@@ -1003,6 +1003,32 @@ def test_checked_no_neighbour(monkeypatch):
     assert len(calls) == 2 and len(lam) == 6 and info["count"]["passed"]
 
 
+def test_checked_restart_neighbour(monkeypatch):
+    """Run 1 misses mode 15, its upper neighbour mode 19 a hair above; the restart finds 15 and 19
+    (in-band at its r_acc), neighbour 20: the count takes the last run's neighbour (an earlier
+    run's would duplicate mode 19 and fail the count's orthonormality check)."""
+    lr, Vr = prob("short")[6:]
+    _, free, op = prob("short")[:3]
+    lo, hi = cb_edges()
+    calls = []
+
+    def fake(*a, **kw):
+        calls.append(kw)
+        i, h = ([13, 14, 16, 17, 18], (lr[19] * (1 + 1e-13), Vr[:, 19])) if len(calls) == 1 else (
+            [15, 19], (lr[20], Vr[:, 20]))  # fmt: skip
+        z = np.zeros(len(i))
+        nb = {"lo": (lr[12], Vr[:, 12]), "hi": h}
+        return lr[i], Vr[:, i], dict(converged=True, neighbours=nb, residuals=z,
+                                     thresholds=z + 1e-6, r_acc=1e-6, tau_eff=1e-8)  # fmt: skip
+
+    monkeypatch.setattr(si, "si_slice", fake)
+    P = exact("short", (lr[18] + lr[19]) / 2)
+    lam, _, info = si.si_checked(op, free, lo, hi, None, capacity=300, count_precond=P)
+    c = info["count"]
+    assert len(calls) == 2 and c["estimates"][0] >= 0.5 and c["passed"]
+    assert np.array_equal(lam, lr[13:20])
+
+
 def test_checked_merge_order(monkeypatch):
     """A restart finding two modes (MID, MID + 1): the merged V columns and
     thresholds follow the sorted lam."""
