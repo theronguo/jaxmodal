@@ -1039,8 +1039,9 @@ def test_band_split(monkeypatch):
     lr = prob("short")[6]
     lo, hi = edges(lr, 3, 16)
 
+    R = np.zeros((prob("short")[2].n_dof, 6))
     calls, counts = fake_band(monkeypatch, split_once)
-    lam, V, info = fband("short", lo, hi, capacity=96)
+    lam, V, info = fband("short", lo, hi, capacity=96, R=R)
     s_lo, s_hi, *_ = si._split(*full_slice()[2], (lo + hi) / 2, lo, hi, TOL)
     assert lr[7] < s_lo < lr[9] and lr[9] < s_hi < lr[11]
     assert [c["interval"] for c in calls] == [(lo, hi), (lo, s_lo), (s_hi, hi)]
@@ -1050,6 +1051,7 @@ def test_band_split(monkeypatch):
     assert np.array_equal(lam, lr[3:16]) and info["converged"] and info["duplicates"] == 0
     ((args, kw),) = counts
     assert kw["precond"] == ("P", (lo + hi) / 2)  # the parent's, before it is released
+    assert kw["R"] is R and all(c["R"] is R for c in calls)
     inb = (lr[7:12] >= s_lo) & (lr[7:12] <= s_hi)
     assert np.array_equal(args[3], lr[7:12][inb]) and args[4:6] == (s_lo, s_hi)
     assert args[6][0] == lr[7:12][~inb & (lr[7:12] < s_lo)].max()  # the out-of-band pairs
@@ -1122,14 +1124,16 @@ def test_band_leaves(monkeypatch, capsys):
                    reason="count >= 0.5 after 2 restarts")  # fmt: skip
     capped = dict(OK_COUNT, passed=False, verifiable=False, estimate=np.nan, estimates=[np.nan],
                   reason="degree above MAX_DEGREE: the gap is too small to count")  # fmt: skip
-    for cnt, flag in ((flagged, True), (capped, False)):
-        calls, _ = fake_band(monkeypatch, lambda j, a, e, kw, c=cnt: (new_modes(a, e, kw), None,
-                                                                      None, c))  # fmt: skip
-        lam, V, info = fband("short", lo, hi)
+    s = (lr[7] + lr[8]) / 2
+    for cnt, flag in ((flagged, True), (capped, False)):  # the second of two leaves
+        calls, _ = fake_band(monkeypatch, lambda j, a, e, kw, c=cnt: (
+            new_modes(a, e, kw), None, None, OK_COUNT if j == 1 else c))  # fmt: skip
+        lam, V, info = fband("short", lo, hi, edges=[s])
         c = info["count"]
-        assert len(calls) == 1 and np.array_equal(lam, lr[3:16]) and info["converged"]
-        assert not c["passed"] and c["flagged"] == flag and c["verifiable"] == flag
-        assert c["reason"] == f"[{lo:.6g}, {hi:.6g}]: {cnt['reason']}"
+        assert len(calls) == 2 and np.array_equal(lam, lr[3:16]) and info["converged"]
+        assert c["ran"] and not c["passed"] and c["flagged"] == flag and c["verifiable"] == flag
+        assert c["estimate"] == (0.8 if flag else 0.1)  # the max over leaves, NaN ignored
+        assert c["reason"] == f"[{s:.6g}, {hi:.6g}]: {cnt['reason']}"
 
     def fails(j, a, e, kw):
         if j == 1:
@@ -1137,16 +1141,16 @@ def test_band_leaves(monkeypatch, capsys):
         return [8], "inner solves failed", None, NO_COUNT
 
     calls, _ = fake_band(monkeypatch, fails)
-    s = (lr[7] + lr[8]) / 2
     lam, V, info = fband("short", lo, hi, edges=[s])
     assert len(calls) == 2 and np.array_equal(lam, lr[3:9]) and not info["converged"]
     assert info["reason"] == f"[{s:.6g}, {hi:.6g}]: inner solves failed"
-    assert not info["count"]["passed"]
+    c = info["count"]  # the first leaf's count ran
+    assert c["ran"] and not c["passed"] and c["verifiable"] and c["estimates"][0] == 0.1
 
 
 def test_band_options(monkeypatch):
     """15c test 10: seeds seed + (RESTARTS + 1) i for slice i (start block and count), verify
-    and the slice options passed through, R passed; argument errors."""
+    and the slice options passed through; argument errors."""
     lr = prob("short")[6]
     lo, hi = edges(lr, 3, 16)
     s = [(lr[7] + lr[8]) / 2, (lr[10] + lr[11]) / 2]
@@ -1163,6 +1167,8 @@ def test_band_options(monkeypatch):
         (dict(lo=hi, hi=lo), "need 0 <= lo < hi"),
         (dict(edges=[s[1], s[0]]), "edges must be sorted"),
         (dict(edges=[hi + 1]), "edges must be sorted"),
+        (dict(edges=[lo]), "edges must be sorted"),
+        (dict(edges=[s[0], s[0]]), "edges must be sorted"),
         (dict(capacity=11), "capacity must be an int >= 2 block"),
         (dict(verify=None), "verify must be True or False"),
         (dict(block=0), "block must be"),
@@ -1861,16 +1867,6 @@ def test_band_rejects_sigma(monkeypatch):
 # ---------------------------------------------------------------- PR 15c: code review round 5
 
 
-def test_band_args():
-    """Code review round 5: edges on lo, repeated edges: rejected."""
-    lr = prob("short")[6]
-    lo, hi = edges(lr, 3, 16)
-    s = (lr[7] + lr[8]) / 2
-    for bad in ([lo], [s, s]):
-        with pytest.raises(ValueError, match="edges must be sorted"):
-            fband("short", lo, hi, edges=bad)
-
-
 def test_band_max_fields(monkeypatch):
     """Code review round 5: info r_acc and tau_eff are the max over slices (the larger first)."""
     lr = prob("short")[6]
@@ -1941,24 +1937,15 @@ def test_split_own_r(monkeypatch):
     def script(j, a, e, kw):
         return full_slice() if j == 2 else found(j, a, e, kw)
 
-    calls, _ = fake_band(
+    calls, counts = fake_band(
         monkeypatch, script, post=lambda j, info: dict(info, r_acc=1e-3 if j == 1 else TOL)
     )
-    _, _, info = fband("short", lo, hi, edges=[s])
+    _, _, info = fband("short", lo, hi, edges=[s], count_options={"seed": 7})
+    assert counts[0][1]["seed"] == 7 + si.RESTARTS + 1  # the span count: its parent's seed
     want = si._split(*full_slice()[2], (s + hi) / 2, s, hi, TOL)
     assert want[0] is not None and want[1] is not None
     span = next(x for x in info["slices"] if x["kind"] == "span")
     assert span["interval"] == want[:2]
-
-
-def test_span_R(monkeypatch):
-    """Code review round 5: R reaches every slice and the span counts."""
-    lr = prob("short")[6]
-    lo, hi = edges(lr, 3, 16)
-    R = np.zeros((prob("short")[2].n_dof, 6))
-    calls, counts = fake_band(monkeypatch, split_once)
-    fband("short", lo, hi, R=R)
-    assert all(c["R"] is R for c in calls) and all(kw["R"] is R for _, kw in counts)
 
 
 def test_span_no_neighbour(monkeypatch):
@@ -1996,75 +1983,6 @@ def test_span_count_rule(monkeypatch, cnt, flagged, reason):
     assert span["count"]["flagged"] == flagged and span["leaf"] == (not flagged)
     assert span["count"]["reason"] == reason and len(calls) == 3 + flagged
     assert info["count"]["passed"] == flagged and np.array_equal(lam, lr[3:16])
-
-
-def test_span_seed(monkeypatch):
-    """Code review round 5: the span count of slice i uses the count seed c0 + (RESTARTS + 1) i."""
-    lr = prob("short")[6]
-    lo, hi = edges(lr, 3, 16)
-    s = (lr[6] + lr[7]) / 2
-
-    def script(j, a, e, kw):
-        return full_slice() if j == 2 else found(j, a, e, kw)
-
-    _, counts = fake_band(monkeypatch, script)
-    fband("short", lo, hi, edges=[s], count_options={"seed": 7})
-    assert counts[0][1]["seed"] == 7 + si.RESTARTS + 1
-
-
-def test_band_count_mixed(monkeypatch):
-    """Code review round 5: the band's count over two leaves, the second flagged or unverifiable:
-    flagged if any leaf is, verifiable only if all are, the estimate the max, the reason the failing
-    leaf's."""
-    lr = prob("short")[6]
-    lo, hi = edges(lr, 3, 16)
-    s = (lr[7] + lr[8]) / 2
-    flagged = dict(
-        OK_COUNT,
-        passed=False,
-        flagged=True,
-        estimate=0.8,
-        estimates=[0.8],
-        reason="count >= 0.5 after 2 restarts",
-    )
-    capped = dict(
-        OK_COUNT,
-        passed=False,
-        verifiable=False,
-        estimate=np.nan,
-        estimates=[np.nan],
-        reason="degree above MAX_DEGREE: the gap is too small to count",
-    )
-    for cnt in (flagged, capped):
-        fake_band(
-            monkeypatch,
-            lambda j, a, e, kw, c=cnt: (new_modes(a, e, kw), None, None, OK_COUNT if j == 1 else c),
-        )
-        _, _, info = fband("short", lo, hi, edges=[s])
-        c = info["count"]
-        assert c["ran"] and not c["passed"] and c["flagged"] == (cnt is flagged)
-        assert c["verifiable"] == (cnt is flagged)
-        assert c["estimate"] == (0.8 if cnt is flagged else 0.1)
-        assert c["reason"] == f"[{s:.6g}, {hi:.6g}]: {cnt['reason']}"
-
-
-def test_band_count_stopped(monkeypatch):
-    """Code review round 5: a band stopped by its second slice (count not run there): the count ran
-    (the first leaf's)."""
-    lr = prob("short")[6]
-    lo, hi = edges(lr, 3, 16)
-    s = (lr[7] + lr[8]) / 2
-    fake_band(
-        monkeypatch,
-        lambda j, a, e, kw: (
-            ([3, 4, 5, 6, 7], None, None, None)
-            if j == 1
-            else ([8], "inner solves failed", None, NO_COUNT)
-        ),
-    )
-    _, _, info = fband("short", lo, hi, edges=[s])
-    c = info["count"]
-    assert c["ran"] and not c["passed"] and c["verifiable"] and c["estimates"][0] == 0.1
 
 
 def test_band_progress_side(monkeypatch):

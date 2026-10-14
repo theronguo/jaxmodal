@@ -256,8 +256,11 @@ def si_slice(
         if W.ndim != 2 or W.shape[0] != n:
             raise ValueError(f"W must have shape ({n}, k), got {W.shape}")
         nw = W.shape[1]
-        if nw:
-            _check_ortho(op, m, W, seed)
+    n_avail = int(free.sum()) - R.shape[1] - nw  # the Krylov space cannot grow beyond it
+    if n_avail < 2 * b:
+        raise ValueError(f"2 block = {2 * b} exceeds the free space left by R and W ({n_avail})")
+    if nw:
+        _check_ortho(op, m, W, seed)
     lam_W = np.zeros(0) if lam_W is None else np.asarray(lam_W, float)
     if len(lam_W) not in (0, nw) or lam_W.ndim != 1:
         raise ValueError(f"lam_W must have shape ({nw},), got {lam_W.shape}")
@@ -270,9 +273,6 @@ def si_slice(
     key, sub = jax.random.split(jax.random.key(seed))
     consts = _consts(op, m, sub, tol)
 
-    n_avail = int(free.sum()) - R.shape[1] - nw  # the Krylov space cannot grow beyond it
-    if n_avail < 2 * b:
-        raise ValueError(f"2 block = {2 * b} exceeds the free space left by R and W ({n_avail})")
     limit = min(capacity, n_avail)
 
     def add(Y, key):  # append the new block, dropped columns refilled with random ones
