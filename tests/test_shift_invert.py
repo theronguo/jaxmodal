@@ -1227,8 +1227,13 @@ SPLIT_CASES = [  # (values, converged, sigma, a, b, expected); T/F per value
     ([1, 2, 3, 4], "FTTT", 2.5, 1.5, 3.5, (2.5, None, False, True)),
     # ... but the upper side's when the lower side is complete (code review round 19)
     ([1, 2, 3, 4], "TTTF", 2.0, 1.5, 3.5, (None, 2.5, True, False)),
+    # a done side is never cut, though its half holds a gap >= 100 r (2|3 below, 3|4 above)
+    ([1, 2, 3, 4, 5], "TTTTF", 2.0, 1.5, 4.5, (None, 3.5, True, False)),
+    ([1, 2, 3, 4, 5], "FTTTT", 4.0, 1.5, 4.5, (2.5, None, False, True)),
     # gaps touching the edges' neighbours are no cuts
     ([1, 2, 3], "TTT", 2.0, 1.5, 2.5, (None, None, True, True)),
+    # a run value on an edge is not inside (a, b): no cut beside it
+    ([1, 2, 3, 4, 5], "FTTTF", 3.0, 2.0, 4.0, (None, None, False, False)),
     # a = 0 complete when the run reaches the bottom, not when the bottom is unconverged
     ([1, 2, 3, 4], "TTFF", 1.0, 0.0, 3.5, (None, 1.5, True, False)),
     ([1, 2, 3, 4], "FTTF", 2.5, 0.0, 3.5, (2.5, None, False, False)),
@@ -1257,6 +1262,13 @@ def test_split_rules(v, conv, sigma, a, b, want):
     """15c test 3, the span rule (_split) on chosen values (r = 1e-10)."""
     conv = np.array([ch == "T" for ch in conv], bool)
     assert si._split(np.array(v, float), conv, sigma, a, b, 1e-10) == want
+
+
+def test_split_gap_upper():
+    """A cut's relative gap is taken to its upper value (the plan's (m_{i+1} - m_i) / m_{i+1}):
+    2 | 2.21 is 0.105 relative to 2 but 0.095 < 100 r = 0.1 relative to 2.21, so no cut."""
+    v, conv = np.array([1, 2, 2.21, 3.5]), np.array([False, True, True, False])
+    assert si._split(v, conv, 2.1, 1.5, 3.0, 1e-3) == (None, None, False, False)
 
 
 def test_split_own_r(monkeypatch):
