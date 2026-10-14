@@ -153,8 +153,7 @@ def minres(A, b, precond=None, tol=1e-8, maxit=10000):
     The explicit 2-norm residual is checked every CHECK iterations; a column converges when it
     meets tol ||b|| and stagnates after STALL_C checks without a new minimum, once its best
     residual is below ||b|| (before that, a plateau of the indefinite Krylov space runs on to
-    maxit). Returns the iterate
-    with the smallest explicit residual (the last one or the best check); a non-finite residual is
-    reported as NaN, as in pcg."""
+    maxit). Returns the iterate with the smallest explicit residual (the last one or the best
+    check); a non-finite residual is reported as NaN, as in pcg."""
     _check("minres", b, maxit)
     return _minres(A, Partial(_identity) if precond is None else precond, b, tol, maxit)

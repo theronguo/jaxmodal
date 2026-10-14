@@ -32,6 +32,17 @@ def _chunk(b):
     return max(b, min(4 * b, 64))
 
 
+def _up(x, c):
+    """x rounded up to a multiple of c."""
+    return -(-x // c) * c
+
+
+def _consts(op, m, key, tol):
+    """lobpcg._resid's constants: the norm estimates of K and M from one random vector."""
+    nK, nM = map(float, _norms(op, m, m * jax.random.normal(key, (op.n_dof, 1))))
+    return jnp.array([nK, nM, tol, C_FLOOR])
+
+
 @functools.partial(jax.jit, static_argnames="c")
 def _extend(Y, op, m, R, MR, Q, count, c):
     """Y masked, M-orthogonalized against R and Q[:, :count] and M-orthonormalized by SVQB, two
@@ -231,7 +242,7 @@ def si_slice(
         raise ValueError("precond must run in fp64 inside MINRES (a GMG with fp32 levels)")
     sigma = float((lo + hi) / 2 if sigma is None else sigma)
     b, c = block, _chunk(block)
-    capacity = -(-capacity // c) * c
+    capacity = _up(capacity, c)
     m = jnp.asarray(free, jnp.float64)[:, None]
     R = jnp.zeros((n, 0)) if R is None else jnp.asarray(R, jnp.float64)
     if R.ndim != 2 or R.shape[0] != n:
@@ -250,15 +261,14 @@ def si_slice(
     lam_W = np.zeros(0) if lam_W is None else np.asarray(lam_W, float)
     if len(lam_W) not in (0, nw) or lam_W.ndim != 1:
         raise ValueError(f"lam_W must have shape ({nw},), got {lam_W.shape}")
-    L0 = -(-nw // c) * c  # the Lanczos columns start at a chunk boundary
+    L0 = _up(nw, c)  # the Lanczos columns start at a chunk boundary
     Q = jnp.zeros((n, L0 + capacity))
     for i in range(0, nw, c):  # c columns at a time (zero-padded): no n x nW device copy
         Wc = np.zeros((n, c))
         Wc[:, : min(c, nw - i)] = W[:, i : i + c]
         Q = _insert(Q, jnp.asarray(Wc), jnp.asarray(i, jnp.int32))
     key, sub = jax.random.split(jax.random.key(seed))
-    nK, nM = map(float, _norms(op, m, m * jax.random.normal(sub, (n, 1))))
-    consts = jnp.array([nK, nM, tol, C_FLOOR])
+    consts = _consts(op, m, sub, tol)
 
     n_avail = int(free.sum()) - R.shape[1] - nw  # the Krylov space cannot grow beyond it
     if n_avail < 2 * b:
@@ -470,14 +480,13 @@ def si_checked(
     opts = {"verbose": verbose, **(count_options or {})}
     c0 = opts.pop("seed", 0)
     b = slice_options.get("block", 6)
-    c = _chunk(b)
-    up = lambda x: -(-x // c) * c  # noqa: E731
+    c, nw = _chunk(b), len(lam_W)
     lam_f, V_f, res, thr = np.zeros(0), np.zeros((n, 0)), np.zeros(0), np.zeros(0)
     runs, estimates, ci, est, reason, flagged = [], [], {}, np.nan, None, False
     for j in range(RESTARTS + 1):
         # the restart's Q (n, L0 + capacity) within the first run's (capacity rounded to c)
         # (the first run takes capacity as given, so si_slice raises on a bad one)
-        cap = up(capacity) - (up(len(lam_W) + len(lam_f)) - up(len(lam_W))) if j else capacity
+        cap = _up(capacity, c) - (_up(nw + len(lam_f), c) - _up(nw, c)) if j else capacity
         if j and cap < 2 * b:
             reason = "restart capacity"
             break
@@ -747,7 +756,6 @@ def si_band(
     if bad := sorted({"sigma", "count_precond"} & set(slice_options)):
         raise ValueError(f"si_band sets {bad} per slice (sigma the midpoint, make(sigma))")
     b, c = block, _chunk(block)
-    up = lambda x: -(-x // c) * c  # noqa: E731
     opts = {"verbose": verbose, **(count_options or {})}
     c0 = opts.pop("seed", 0)
     m = jnp.asarray(np.asarray(free), jnp.float64)[:, None]
@@ -776,11 +784,17 @@ def si_band(
                 reruns, V, inf = reruns + 1, None, None  # the rerun's block discarded
                 if verbose:
                     print(f"si_band: slice {i} rerun, r_acc {rw:.3g} widens its window", flush=True)
-            win, cap = wide, up(capacity) - up(len(wide))
+            win, cap = wide, _up(capacity, c) - _up(len(wide), c)
             if cap < 2 * b:
-                raise _cap_error(a, e, capacity, f"{len(win)} deflated modes leave {cap} columns")
+                raise ValueError(
+                    f"slice [{a:.6g}, {e:.6g}]: {len(win)} deflated modes leave {cap}"
+                    f" columns of capacity {capacity} (below 2 block): raise capacity"
+                )
             if n_free - len(win) < 2 * b:
-                raise _cap_error(a, e, capacity, f"{len(win)} deflated modes fill the free space")
+                raise ValueError(
+                    f"slice [{a:.6g}, {e:.6g}]: {len(win)} deflated modes leave less"
+                    " than 2 block of the free space: hi may be above the spectrum"
+                )
             lam, V, inf = si_checked(
                 op, free, a, e, P, capacity=cap, W=cols(win) if len(win) else None,
                 lam_W=lam_s[win] if len(win) else None, count_options={**opts, "seed": c0 + sd},
@@ -827,9 +841,9 @@ def si_band(
             raise _cap_error(a, e, capacity, "neither side done or cut")
         here = {a: done_lo, e: done_hi}
         if not done_lo:
-            work.append((a, s_lo if s_lo else s_hi if s_hi else e, here))
+            work.append((a, s_lo or s_hi or e, here))
         if not done_hi:
-            work.append((s_hi if s_hi else s_lo if s_lo else a, e, here))
+            work.append((s_hi or s_lo or a, e, here))
         if (done_lo or s_lo) and (done_hi or s_hi):
             x0, x1 = a if done_lo else s_lo, e if done_hi else s_hi
             cnt = _span_count(op, free, P, lam_s, cols, x0, x1, inf["neighbours"], R, verify,
@@ -860,9 +874,7 @@ def si_band(
             w += 1
             continue
         if consts is None:
-            key = jax.random.key(seed)
-            nK, nM = map(float, _norms(op, m, m * jax.random.normal(key, (n, 1))))
-            consts = jnp.array([nK, nM, tol, C_FLOOR])
+            consts = _consts(op, m, jax.random.key(seed), tol)
         g = [w]
         for attempt in range(2):
             idx = np.concatenate([windows[q] for q in g])

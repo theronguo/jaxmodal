@@ -982,6 +982,19 @@ def FULL_RZ():  # noqa: N802
     return rz(range(7, 12), [2, 3, 4, 5, 6, 12, 13, 14, 15, 16])
 
 
+def found(j, a, e, kw):
+    """fake_band script: every run converges the reference modes new to it."""
+    return new_modes(a, e, kw), None, None, None
+
+
+def split_once(j, a, e, kw):
+    """fake_band script: run 1 fills its capacity with modes 7-11 converged (FULL_RZ), the
+    later runs converge."""
+    if j == 1:
+        return [7, 8, 9, 10, 11], "capacity full", FULL_RZ(), None
+    return found(j, a, e, kw)
+
+
 def fband(name, lo, hi, capacity=96, **kw):
     _, free, op = prob(name)[:3]
     return si.si_band(op, free, lo, hi, lambda s: ("P", s), capacity=capacity, tol=TOL, **kw)
@@ -1026,12 +1039,7 @@ def test_band_split(monkeypatch):
     lr = prob("short")[6]
     lo, hi = edges(lr, 3, 16)
 
-    def script(j, a, e, kw):
-        if j == 1:
-            return [7, 8, 9, 10, 11], "capacity full", FULL_RZ(), None
-        return new_modes(a, e, kw), None, None, None
-
-    calls, counts = fake_band(monkeypatch, script)
+    calls, counts = fake_band(monkeypatch, split_once)
     lam, V, info = fband("short", lo, hi, capacity=96)
     s_lo, s_hi, *_ = si._split(*FULL_RZ(), (lo + hi) / 2, lo, hi,
                                TOL)  # fmt: skip
@@ -1065,7 +1073,7 @@ def test_band_rules(monkeypatch):
     first = ([3], "capacity full", rz([2, 3], [4, 5]), None)
 
     def rerun(j, a, e, kw):
-        return first if j == 1 else (new_modes(a, e, kw), None, None, None)
+        return first if j == 1 else found(j, a, e, kw)
 
     calls, _ = fake_band(monkeypatch, rerun)
     lam, V, info = fband("short", lo, hi)
@@ -1102,12 +1110,7 @@ def test_band_leaves(monkeypatch, capsys):
     lr = prob("short")[6]
     lo, hi = edges(lr, 3, 16)
 
-    def script(j, a, e, kw):
-        if j == 1:
-            return [7, 8, 9, 10, 11], "capacity full", FULL_RZ(), None
-        return new_modes(a, e, kw), None, None, None
-
-    calls, counts = fake_band(monkeypatch, script, count=lambda k: (0.9 if k == 1 else 0.1,
+    calls, counts = fake_band(monkeypatch, split_once, count=lambda k: (0.9 if k == 1 else 0.1,
                                                                     True, False))  # fmt: skip
     lam, V, info = fband("short", lo, hi, verbose=True)
     span = info["slices"][1]
@@ -1151,7 +1154,7 @@ def test_band_options(monkeypatch):
     lr = prob("short")[6]
     lo, hi = edges(lr, 3, 16)
     s = [(lr[7] + lr[8]) / 2, (lr[10] + lr[11]) / 2]
-    calls, _ = fake_band(monkeypatch, lambda j, a, e, kw: (new_modes(a, e, kw), None, None, None))
+    calls, _ = fake_band(monkeypatch, found)
     lam, V, info = fband("short", lo, hi, edges=s, seed=5, count_options={"seed": 7},
                          verify=False, tau=1e-7, maxit_inner=99)  # fmt: skip
     step = si.RESTARTS + 1
@@ -1172,7 +1175,7 @@ def test_band_options(monkeypatch):
         with pytest.raises(ValueError, match=match):
             fband("short", kw.pop("lo"), kw.pop("hi"), **kw)
     # capacity_j below 2 block after deflation: the known neighbour takes the only chunk
-    calls, _ = fake_band(monkeypatch, lambda j, a, e, kw: (new_modes(a, e, kw), None, None, None))
+    calls, _ = fake_band(monkeypatch, found)
     with pytest.raises(ValueError, match="deflated modes leave 0 columns"):
         fband("short", lo, hi, capacity=24, edges=s)
     assert len(calls) == 1
@@ -1186,11 +1189,12 @@ def cube_double():
     return i, j, *edges(lr, i - 1, j + 2), (lr[i] + lr[j]) / 2
 
 
-def two_runs(monkeypatch, first, second):
-    """fake_band on the cube: run 1 returns first = (lam, vectors), every later run second."""
+def two_runs(monkeypatch, *runs):
+    """fake_band on the cube: run k returns runs[k - 1] = (lam, vectors), every later run the
+    last."""
 
     def script(k, a, e, kw):
-        lam, V = first if k == 1 else second
+        lam, V = runs[min(k, len(runs)) - 1]
         return (np.asarray(lam), np.stack(V, 1)), None, None, None
 
     fake_band(monkeypatch, script, name="cube")
@@ -1242,11 +1246,7 @@ def test_merge(monkeypatch):
     s2 = (lr[j + 1] + lr[j + 2]) / 2 if j + 2 < len(lr) else None
     third = ([lr[j + 2]], [Vr[:, j + 2]])
 
-    def three(k, a, e, kw):
-        lam, V = (lo_pairs, ([lr[i], lr[j], lr[j + 1]], [v1, v2, Vr[:, j + 1]]), third)[k - 1]
-        return (np.asarray(lam), np.stack(V, 1)), None, None, None
-
-    fake_band(monkeypatch, three, name="cube")
+    two_runs(monkeypatch, lo_pairs, ([lr[i], lr[j], lr[j + 1]], [v1, v2, Vr[:, j + 1]]), third)
     lam, V, info = fband("cube", lo, max(hi, lr[j + 2] * 1.001), edges=[s, s2], R=R)
     check(lam, V, lr[i - 1 : j + 3])
     assert info["merged_edges"] == [s] and not info["collapsed"]
@@ -1393,7 +1393,7 @@ def test_band_split_sweep(case, seed):
             lam, V, info = rband("short", lo, hi, capacity=capacity, block=block, seed=seed,
                                  verify=verify)  # fmt: skip
         except ValueError as e:
-            assert "fills capacity" in str(e)
+            assert "raise capacity" in str(e)
             continue
         check_band("short", lo, hi, lam, V, info, counted=verify)
 
@@ -1577,14 +1577,15 @@ def test_band_empty():
 
 
 def test_band_verify_false():
-    """15c test 10: verify=False runs no count and records the degree and gap the count would
-    use, equal to a counted run's."""
+    """15c test 10: verify=False runs no count (estimate NaN, no steps) and records the degree
+    and gap the count would use, equal to a counted run's."""
     lo, hi = cb_edges()
     _, _, on = rband("short", lo, hi, capacity=300)
     _, _, off = rband("short", lo, hi, capacity=300, verify=False)
     a, b = on["slices"][0]["count"], off["slices"][0]["count"]
     assert not b["ran"] and b["reason"] == "not requested" and not off["count"]["ran"]
     assert (b["degree"], b["gap"]) == (a["degree"], a["gap"]) and a["ran"]
+    assert np.isnan(b["estimate"]) and b["steps"] == 0  # nothing run (review round 1)
 
 
 def test_band_above_spectrum():
@@ -1677,15 +1678,10 @@ def test_band_progress_inside(monkeypatch):
     with pytest.raises(ValueError, match=r"\(no progress\)"):
         fband("short", lo, hi)
 
-    def script(j, a, e, kw):
-        if j == 1:
-            return [7, 8, 9, 10, 11], "capacity full", FULL_RZ(), None
-        return new_modes(a, e, kw), None, None, None
-
-    fake_band(monkeypatch, script, count=(0.3, True, False))
+    fake_band(monkeypatch, split_once, count=(0.3, True, False))
     _, _, info = fband("short", lo, hi)
     assert info["count"]["estimate"] == 0.3 and info["count"]["estimates"] == [0.3, 0.1, 0.1]
-    _, counts = fake_band(monkeypatch, script)
+    _, counts = fake_band(monkeypatch, split_once)
     fband("short", lo, hi, verify=False)
     assert counts[0][1]["_predict"] is True
 
@@ -1717,14 +1713,6 @@ def test_merge_widen_back(monkeypatch):
     assert np.abs(lam - lr[i - 1 : j + 1]).max() <= 1e-10 * lr[j]
 
 
-def test_band_verify_false_runs_nothing():
-    """Code review round 1: verify=False runs no count (estimate NaN, no steps)."""
-    lo, hi = cb_edges()
-    _, _, off = rband("short", lo, hi, capacity=300, verify=False)
-    b = off["slices"][0]["count"]
-    assert np.isnan(b["estimate"]) and b["steps"] == 0
-
-
 def test_band_rerun_fake(monkeypatch):
     """Code review round 2: a slice whose r_acc widens its window over more stored modes is rerun
     with them deflated, twice (r_acc 1e-4 then 1e-3), each rerun's capacity from its own window
@@ -1737,7 +1725,8 @@ def test_band_rerun_fake(monkeypatch):
     again = {2: [10], 3: [8]}  # stored modes the run found again (not in its W)
 
     def script(j, a, e, kw):
-        return again.get(j, []) + new_modes(a, e, kw), None, None, None
+        pairs, *rest = found(j, a, e, kw)
+        return again.get(j, []) + pairs, *rest
 
     calls, _ = fake_band(monkeypatch, script)
     fake = si.si_checked
@@ -1766,7 +1755,7 @@ def test_band_converged_false(monkeypatch):
     lr = prob("short")[6]
     lo, hi = edges(lr, 3, 16)
     s = [(lr[7] + lr[8]) / 2, (lr[10] + lr[11]) / 2]
-    calls, _ = fake_band(monkeypatch, lambda j, a, e, kw: (new_modes(a, e, kw), None, None, None))
+    calls, _ = fake_band(monkeypatch, found)
     fake = si.si_checked
 
     def wrapped(*a, **kw):
@@ -1788,14 +1777,8 @@ def test_merge_widen_after_merged(monkeypatch):
     s = [(lr[2] + lr[3]) / 2, (lr[5] + lr[6]) / 2]
     eps = 1e-4
     w = (Vr[:, 6] + eps * Vr[:, 8]) / np.sqrt(1 + eps**2)
-    runs = [([2], [Vr[:, 2]]), ([3, 4, 5], [Vr[:, q] for q in (3, 4, 5)]),
-            ([6, 7, 8, 9], [w] + [Vr[:, q] for q in (7, 8, 9)])]  # fmt: skip
-
-    def script(k, a, e, kw):
-        q, V = runs[k - 1]
-        return (lr[q], np.stack(V, 1)), None, None, None
-
-    fake_band(monkeypatch, script, name="cube")
+    two_runs(monkeypatch, (lr[[2]], [Vr[:, 2]]), (lr[3:6], [Vr[:, q] for q in (3, 4, 5)]),
+             (lr[6:10], [w] + [Vr[:, q] for q in (7, 8, 9)]))  # fmt: skip
     lam, V, info = fband("cube", lo, hi, edges=s, R=R)
     assert not info["edge_rr_failed"] and len(lam) == 8
     assert np.abs(lam - lr[2:10]).max() <= 1e-10 * lr[9]
@@ -1804,7 +1787,7 @@ def test_merge_widen_after_merged(monkeypatch):
 
 def test_band_rejects_sigma(monkeypatch):
     """Code review round 2: sigma and count_precond are set per slice: rejected."""
-    fake_band(monkeypatch, lambda j, a, e, kw: (new_modes(a, e, kw), None, None, None))
+    fake_band(monkeypatch, found)
     lr = prob("short")[6]
     lo, hi = edges(lr, 3, 16)
     for kw in (dict(sigma=12.0), dict(count_precond="P")):
