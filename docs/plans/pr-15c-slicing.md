@@ -212,9 +212,9 @@ accepted pair (λ, v, its run, residual, threshold). For slice $[a, b]$ with σ:
      $r$ = the $r_{acc}$ of the slice's last run, whose Ritz values these are; implemented after
      code review round 12); the cut candidates are the gaps between consecutive run values
      both inside $(a, b)$, $m_0 < \dots < m_{k-1}$, gap $i$ between $m_i$ and $m_{i+1}$; gaps
-     $i \le \lfloor (k - 2)/2 \rfloor$ are the lower half, the others the upper half (static; for
-     $k = 2$ the single gap is the lower side's; for $k$ even the middle gap is the upper side's
-     when the lower side is complete, code review round 19: a complete lower side with $k = 2$
+     $i \le \lfloor (k - 2)/2 \rfloor$ are the lower half, the others the upper half (for $k$
+     even the middle gap is the upper half's when the lower side is complete, so for $k = 2$ the
+     single gap is the lower side's unless that side is complete; code review round 19: a complete lower side with $k = 2$
      never cut, its mirror did). A gap touching a W neighbour beyond an edge is
      never a cut (that side is complete), so a cut lies strictly inside $(a, b)$ with values on
      both sides of it. On each side:
@@ -230,7 +230,7 @@ accepted pair (λ, v, its run, residual, threshold). For slice $[a, b]$ with σ:
        largest gap in it keeps the count's degree ∝ 1/g low;
      - **no cut:** that side's interval up to the other side's cut or edge becomes one remainder
        (a run with the converged pairs deflated: a binary split; when the other side is complete
-       that remainder is $[a, b]$ itself; with neither side complete nor cut, $[a, b]$ once).
+       that remainder is $[a, b]$ itself; with neither side complete nor cut, $[a, b]$ itself as one remainder, its complete edges kept).
      The span leaf $[s_{lo}, s_{hi}]$ exists when both sides are complete or cut: no Lanczos run,
      its pairs are the stored ones inside (extended over chains < 100 r; implemented after code
      review round 9), it counts as converged. When verify, its count runs
@@ -399,8 +399,8 @@ constants.)
    converged flags): an unconverged Ritz value between two converged values below σ puts the cut
    above it (no mode claimed past it); an unconverged value nearest σ with new converged pairs
    elsewhere grows the run from the converged value nearest σ (no raise); a W mode next to an
-   unconverged Ritz value: the run stops at the unconverged value; the halves are the static
-   split (k = 2: the gap is the lower side's); the cut is the largest gap within its half, not
+   unconverged Ritz value: the run stops at the unconverged value; the halves are the
+   split ($k = 2$: the gap is the lower side's, the upper side's when the lower side is complete; code review round 19); the cut is the largest gap within its half, not
    the run's overall largest; a qualifying gap whose midpoint is on the edge (a W neighbour
    beyond it) is not a cut; a rerun of the same interval with no new pair and no newly complete
    side raises; a complete side (neighbour converged) closes the span at
@@ -411,7 +411,7 @@ constants.)
    not both sides complete) with no new pair inside $[a, b]$ and no newly completed side raises
    (a remainder completing only its cut side included); a slice with a cut or both sides
    complete and nothing new splits or finishes (no check);
-   a slice with new pairs and neither side complete or cut is requeued whole; a span leaf whose count is flagged is requeued as a run
+   a slice with new pairs and neither side complete or cut is requeued whole, keeping its complete edges and span reruns (a side completed again on its rerun raises "no progress"; code review round 19); a span leaf whose count is flagged is requeued as a run
    with W = its pairs; `edge_unreached` "both" with valid cuts splits (no raise); `max_slices`
    exceeded raises; an inner failure stops the band with the pairs found, `converged` False and
    the reason; an unverifiable (capped) and a flagged run leaf are not split, `count["passed"]`

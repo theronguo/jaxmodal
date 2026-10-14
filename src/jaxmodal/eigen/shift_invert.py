@@ -609,8 +609,8 @@ def _split(v, conv, sigma, a, b, r):
     converged chains (relative gaps < 100 r) holding the converged value nearest sigma. A side
     is done when the run holds the value beyond the edge and goes on past it (si_slice's rule;
     at a = 0 every value below); otherwise it is cut at the largest gap >= 100 r between run
-    values inside (a, b), in its half of them (gaps g < k // 2 below, the rest above; the middle
-    one, k even, above when the lower side is done).
+    values inside (a, b), in its half of them (k the run values inside (a, b): gaps g < k // 2
+    below, the rest above; the middle one, k even, above when the lower side is done).
     Returns None (nothing converged) or (s_lo, s_hi, done_lo, done_hi), a cut or None per side."""
     if not len(v):
         return None
