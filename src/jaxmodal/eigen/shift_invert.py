@@ -704,9 +704,9 @@ def _merge(op, m, groups, consts, c):
 def _span_count(op, free, P, lam_s, cols, x0, x1, r, nbs, R, verify, opts):
     """info["count"] of a span leaf [x0, x1]: its pairs are the stored ones inside, extended over
     chains (relative gaps < 100 r, as si_checked's widened set), the nearest stored pair (or the
-    parent's last run's Ritz neighbour nbs, beyond the chain gap) beyond each end its
-    out-of-band pairs; P the parent's
-    preconditioner. A verifiable count >= 0.5 is flagged (the span is rerun)."""
+    parent's last run's Ritz neighbour nbs, beyond the chain gap) beyond each end its out-of-band
+    pairs; P the parent's preconditioner. A verifiable count >= 0.5 is flagged (the span is
+    rerun)."""
     o = np.argsort(lam_s, kind="stable")
     ls = lam_s[o]
     i0, i1 = _extend_chain(ls, np.searchsorted(ls, x0), np.searchsorted(ls, x1, "right"), 100 * r)
@@ -752,13 +752,12 @@ def si_band(
     modes is rerun with them deflated. A slice that fills its capacity keeps the span verified by
     si_slice's stop rule on its last Ritz values (a leaf without a run, counted with the parent's
     preconditioner, rerun if its count flags) and requeues its remainders: each side cut at the
-    largest gap >= 100 r_acc (the last run's) in its half of the converged run, a side without a
-    cut as one remainder
-    (a binary split); nothing converged, no progress, or no side done or cut raises. Clusters
-    held by two or more runs are merged: duplicates (projected M-norm < 0.5) dropped,
-    Rayleigh-Ritz, the window widened once if a Ritz residual fails (edge_rr_failed if it still
-    fails). edges: provisional interior edges, used as given (default one slice). verify: count
-    every leaf (False: none, the predicted degree and gap recorded). Slice i uses seed +
+    largest gap >= 100 r_acc (the last run's) in its half of the converged run, a side without a cut
+    as one remainder (a binary split); nothing converged, no progress, or no side done or cut
+    raises. Clusters held by two or more runs are merged: duplicates (projected M-norm < 0.5)
+    dropped, Rayleigh-Ritz, the window widened once if a Ritz residual fails (edge_rr_failed if it
+    still fails). edges: provisional interior edges, used as given (default one slice). verify:
+    count every leaf (False: none, the predicted degree and gap recorded). Slice i uses seed +
     (RESTARTS + 1) i, the count's seed likewise. slice_options: si_checked's and si_slice's (tau,
     maxit_inner, ...; not sigma or count_precond).
 
