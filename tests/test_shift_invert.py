@@ -1382,7 +1382,7 @@ SPLITS = {  # name: (first mode, last mode + 1, capacity, block), 3 runs each
 def test_band_capacity_split(case, monkeypatch):
     """15c test 2 (roadmap: a forced small capacity splits the slice and matches eigsh): at
     least one full slice replaced by a span and remainders, every leaf converged and counted
-    < 0.5, the reference matched, the recorded run count per seed; a spy checks every slice's
+    < 0.5, the reference matched, 3 runs; a spy checks every slice's
     basis within the first's and the remainders' W (stored modes of the window and the known
     neighbours)."""
     i0, i1, cap, block = SPLITS[case]
@@ -1952,7 +1952,7 @@ def test_split_own_r(monkeypatch):
 
 
 def test_span_R(monkeypatch):
-    """Code review round 5: r reaches every slice and the span counts."""
+    """Code review round 5: R reaches every slice and the span counts."""
     lr = prob("short")[6]
     lo, hi = edges(lr, 3, 16)
     R = np.zeros((prob("short")[2].n_dof, 6))

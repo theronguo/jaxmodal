@@ -469,7 +469,8 @@ def si_checked(
     ran) plus ran, reason, estimate, estimates, flagged (some verifiable count >= 0.5) and
     restarts. reason: None (passed), "slice not converged", "restart capacity", "degree above
     MAX_DEGREE: the gap is too small to count", "count unverifiable: an inner solve failed" or
-    "count >= 0.5 after RESTARTS restarts". A failed check is flagged and not passed."""
+    "count >= 0.5 after RESTARTS restarts". A failed check is not passed; only a verifiable
+    count >= 0.5 flags it."""
     n = op.n_dof
     if (W is None) != (lam_W is None):
         raise ValueError("W and lam_W must be given together")
@@ -729,20 +730,20 @@ def si_band(
     si_slice's stop rule on its last Ritz values (a leaf without a run, counted with the parent's
     preconditioner, rerun if its count flags) and requeues its remainders: each side cut at the
     largest gap >= 100 r_acc in its half of the converged run, a side without a cut as one remainder
-    (a binary split); no progress, or no side done or cut, raises. Clusters held by two or more
-    runs are merged: duplicates (projected M-norm < 0.5) dropped, Rayleigh-Ritz, the window
-    widened once if a Ritz residual fails (edge_rr_failed if it still fails). edges: provisional
-    interior edges, used as given (default one slice). verify: count every leaf (False: none, the
-    predicted degree and gap recorded). Slice i uses seed + (RESTARTS + 1) i, the count's seed
-    likewise. slice_options: si_checked's and si_slice's (tau, maxit_inner, ...; not sigma or
-    count_precond).
+    (a binary split); nothing converged, no progress, or no side done or cut raises. Clusters
+    held by two or more runs are merged: duplicates (projected M-norm < 0.5) dropped,
+    Rayleigh-Ritz, the window widened once if a Ritz residual fails (edge_rr_failed if it still
+    fails). edges: provisional interior edges, used as given (default one slice). verify: count
+    every leaf (False: none, the predicted degree and gap recorded). Slice i uses seed +
+    (RESTARTS + 1) i, the count's seed likewise. slice_options: si_checked's and si_slice's (tau,
+    maxit_inner, ...; not sigma or count_precond).
 
     Returns lam (ascending), V (host fp64; M-orthonormal within a window, to residual level across
     runs that deflate neither the other: |x_i^T M x_j| <= (||x_j|| ||r_i|| + ||x_i|| ||r_j||) /
     |lam_i - lam_j|, r_i = K x_i - lam_i M x_i) and info: converged, reason, r_acc, tau_eff,
-    residuals, thresholds, slices (per processed slice: a run's si_checked info without vectors plus
-    interval, kind "run", leaf, n_new, reruns; a span {interval, kind "span", leaf, parent (the
-    parent's index among the runs), count}),
+    residuals, thresholds, slices (per processed slice: a run's si_checked info without
+    neighbours and ritz plus interval, kind "run", leaf, n_new, reruns; a span {interval, kind
+    "span", leaf, parent (the parent's index among the runs), count}),
     merged_edges, collapsed, edge_rr_failed, duplicates, count (si_checked's shape over the leaves)
     and time (total, slices, merge). See docs/eigensolvers.md#slicing-a-band."""
     check_x64("si_band")
