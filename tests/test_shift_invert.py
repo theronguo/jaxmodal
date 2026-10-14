@@ -1475,9 +1475,8 @@ def test_band_progress_side(monkeypatch):
                               count=(0.9, True, False))  # fmt: skip
     _, _, info = fband("short", lo, hi, max_slices=10)
     assert len(calls) == len(counts) == si.RESTARTS + 1 and info["count"]["flagged"]
-    assert [s["leaf"] for s in info["slices"] if s["kind"] == "span"] == [False] * si.RESTARTS + [
-        True
-    ]
+    leafs = [s["leaf"] for s in info["slices"] if s["kind"] == "span"]
+    assert leafs == [False] * si.RESTARTS + [True]
     # the same interval requeued with alternating sides done: a side done before is not progress
     lo4, hi4 = edges(lr, 4, 5)
     alt = [rz([3, 4], [5]), rz([4, 5], [3])]

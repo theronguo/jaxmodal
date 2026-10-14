@@ -790,7 +790,8 @@ def si_band(
     c0 = opts.pop("seed", 0)
     m = jnp.asarray(np.asarray(free), jnp.float64)[:, None]
     lam_s, run_s, res_s, thr_s, vecs = np.zeros(0), np.zeros(0, int), np.zeros(0), np.zeros(0), []
-    work = [(x0, x1, {}) for x0, x1 in zip([lo, *cuts], [*cuts, hi], strict=True)]
+    # (a, e, edges done before, span reruns in the lineage)
+    work = [(x0, x1, set(), 0) for x0, x1 in zip([lo, *cuts], [*cuts, hi], strict=True)]
     slices, leaves = [], []  # leaves: (interval, count info)
     r_s, tau_eff, converged, reason, i = 0.0, 0.0, True, None, 0
 
@@ -804,7 +805,7 @@ def si_band(
         if i >= max_slices:
             raise RuntimeError(f"si_band: more than max_slices = {max_slices} slices")
         work.sort(key=lambda x: x[0])
-        a, e, prev = work.pop(0)
+        a, e, done, k = work.pop(0)
         order = np.argsort(lam_s, kind="stable")
         rw, win, reruns, sd = max(r_s, tol), None, 0, (RESTARTS + 1) * i
         P = V = inf = None  # the previous slice's released first: one alive at a time
@@ -863,7 +864,7 @@ def si_band(
         if sp is None:
             raise _cap_error(a, e, capacity, "nothing converged")
         s_lo, s_hi, done_lo, done_hi = sp
-        if not n_new and not ((done_lo and not prev.get(a)) or (done_hi and not prev.get(e))):
+        if not n_new and not ((done_lo and a not in done) or (done_hi and e not in done)):
             raise _cap_error(a, e, capacity, "no progress")
         if not (done_lo or s_lo) and not (done_hi or s_hi):
             raise _cap_error(a, e, capacity, "neither side done or cut")
@@ -871,20 +872,19 @@ def si_band(
         # parent's done edges kept: an interval requeued whole never counts a side twice)
         if not done_lo:
             x = s_lo or s_hi or e
-            work.append((a, x, {**prev, x: True}))
+            work.append((a, x, done | {x}, k))
         if not done_hi:
             x = s_hi or s_lo or a
-            work.append((x, e, {**prev, x: True}))
+            work.append((x, e, done | {x}, k))
         if (done_lo or s_lo) and (done_hi or s_hi):
             x0, x1 = a if done_lo else s_lo, e if done_hi else s_hi
             cnt = _span_count(op, free, P, lam_s, cols, x0, x1, r_l, inf["neighbours"], R,
                               verify, {**opts, "seed": c0 + sd})  # fmt: skip
-            k = prev.get("span_reruns", 0)  # in this lineage; at most RESTARTS, as si_checked
-            rerun = cnt["flagged"] and k < RESTARTS
+            rerun = cnt["flagged"] and k < RESTARTS  # at most RESTARTS, as si_checked
             slices.append(dict(interval=(x0, x1), kind="span", leaf=not rerun, parent=i - 1,
                                count=cnt))  # fmt: skip
             if rerun:  # a missed mode: the span is rerun, its pairs deflated
-                work.append((x0, x1, {"span_reruns": k + 1}))
+                work.append((x0, x1, set(), k + 1))
             else:
                 leaves.append(((x0, x1), cnt))
             if verbose:
