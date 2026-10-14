@@ -751,15 +751,15 @@ def si_band(
     each end (which can close its sides); a slice whose r_acc widens its window over more stored
     modes is rerun with them deflated. A slice that fills its capacity keeps the span verified by
     si_slice's stop rule on its last Ritz values (a leaf without a run, counted with the parent's
-    preconditioner, rerun if its count flags) and requeues its remainders: each side cut at the
-    largest gap >= 100 r_acc (the last run's) in its half of the converged run, a side without a cut
-    as one remainder (a binary split); nothing converged, no progress, or no side done or cut
-    raises. Clusters held by two or more runs are merged: duplicates (projected M-norm < 0.5)
-    dropped, Rayleigh-Ritz, the window widened once if a Ritz residual fails (edge_rr_failed if it
-    still fails). edges: provisional interior edges, used as given (default one slice). verify:
-    count every leaf (False: none, the predicted degree and gap recorded). Slice i uses seed +
-    (RESTARTS + 1) i, the count's seed likewise. slice_options: si_checked's and si_slice's (tau,
-    maxit_inner, ...; not sigma or count_precond).
+    preconditioner, rerun if its count flags, at most RESTARTS times) and requeues its remainders:
+    each side cut at the largest gap >= 100 r_acc (the last run's) in its half of the converged run,
+    a side without a cut as one remainder (a binary split); nothing converged, no progress, or no
+    side done or cut raises. Clusters held by two or more runs are merged: duplicates (projected
+    M-norm < 0.5) dropped, Rayleigh-Ritz, the window widened once if a Ritz residual fails
+    (edge_rr_failed if it still fails). edges: provisional interior edges, used as given (default
+    one slice). verify: count every leaf (False: none, the predicted degree and gap recorded). Slice
+    i uses seed + (RESTARTS + 1) i, the count's seed likewise. slice_options: si_checked's and
+    si_slice's (tau, maxit_inner, ...; not sigma or count_precond).
 
     Returns lam (ascending), V (host fp64; M-orthonormal within a window, to residual level across
     runs that deflate neither the other: |x_i^T M x_j| <= (||x_j|| ||r_i|| + ||x_i|| ||r_j||) /
@@ -867,21 +867,24 @@ def si_band(
             raise _cap_error(a, e, capacity, "no progress")
         if not (done_lo or s_lo) and not (done_hi or s_hi):
             raise _cap_error(a, e, capacity, "neither side done or cut")
-        # a remainder's outer edge was not done; its inner edge is: stored modes lie beyond
+        # a remainder's outer edge was not done; its inner edge is: stored modes lie beyond (the
+        # parent's done edges kept: an interval requeued whole never counts a side twice)
         if not done_lo:
             x = s_lo or s_hi or e
-            work.append((a, x, {x: True}))
+            work.append((a, x, {**prev, x: True}))
         if not done_hi:
             x = s_hi or s_lo or a
-            work.append((x, e, {x: True}))
+            work.append((x, e, {**prev, x: True}))
         if (done_lo or s_lo) and (done_hi or s_hi):
             x0, x1 = a if done_lo else s_lo, e if done_hi else s_hi
             cnt = _span_count(op, free, P, lam_s, cols, x0, x1, r_l, inf["neighbours"], R,
                               verify, {**opts, "seed": c0 + sd})  # fmt: skip
-            slices.append(dict(interval=(x0, x1), kind="span", leaf=not cnt["flagged"],
-                               parent=i - 1, count=cnt))  # fmt: skip
-            if cnt["flagged"]:  # a missed mode: the span is rerun, its pairs deflated
-                work.append((x0, x1, {}))
+            k = prev.get("span_reruns", 0)  # in this lineage; at most RESTARTS, as si_checked
+            rerun = cnt["flagged"] and k < RESTARTS
+            slices.append(dict(interval=(x0, x1), kind="span", leaf=not rerun, parent=i - 1,
+                               count=cnt))  # fmt: skip
+            if rerun:  # a missed mode: the span is rerun, its pairs deflated
+                work.append((x0, x1, {"span_reruns": k + 1}))
             else:
                 leaves.append(((x0, x1), cnt))
             if verbose:

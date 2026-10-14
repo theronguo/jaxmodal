@@ -1470,6 +1470,22 @@ def test_band_progress_side(monkeypatch):
     spans = [s for s in info["slices"] if s["kind"] == "span"]
     assert [s["parent"] for s in spans] == [0, 1]
     assert [s["count"]["estimates"] for s in spans] == [[0.9], [0.1]]
+    # a span flagged on every rerun: kept as a flagged leaf after RESTARTS reruns (no loop)
+    calls, counts = fake_band(monkeypatch, lambda j, *_: r1b if j == 1 else r2,
+                              count=(0.9, True, False))  # fmt: skip
+    _, _, info = fband("short", lo, hi, max_slices=10)
+    assert len(calls) == len(counts) == si.RESTARTS + 1 and info["count"]["flagged"]
+    assert [s["leaf"] for s in info["slices"] if s["kind"] == "span"] == [False] * si.RESTARTS + [
+        True
+    ]
+    # the same interval requeued with alternating sides done: a side done before is not progress
+    lo4, hi4 = edges(lr, 4, 5)
+    alt = [rz([3, 4], [5]), rz([4, 5], [3])]
+    calls, _ = fake_band(monkeypatch, lambda j, *_: ([4] if j == 1 else [], "capacity full",
+                                                     alt[j % 2], None))  # fmt: skip
+    with pytest.raises(ValueError, match=r"\(no progress\)"):
+        fband("short", lo4, hi4, max_slices=10)
+    assert len(calls) == 3
 
 
 def test_n_new(monkeypatch):

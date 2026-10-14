@@ -234,10 +234,14 @@ accepted pair (λ, v, its run, residual, threshold). For slice $[a, b]$ with σ:
      review round 9), it counts as converged. When verify, its count runs
      before `P` is released (`_count_slice` below, with the out-of-band pairs above; λ_lo = 0 uses
      `count`). A span leaf whose count is ≥ 0.5 (verifiable) is requeued as a run slice with W =
-     its pairs (15b's restarts then apply); an unverifiable one stays a leaf, not passed.
+     its pairs (15b's restarts then apply), at most `RESTARTS` times in its lineage, then a
+     flagged leaf (implemented after code review round 14: a span flagged on every rerun looped
+     to `max_slices`); an unverifiable one stays a leaf, not passed.
      - **Raise** when the run made no progress (no new pair inside $[a, b]$, which W deflates so
-       it cannot be a stored one, and no side complete that was not complete in the run of the
-       slice it came from; a first slice has no side complete; a remainder has its inner
+       it cannot be a stored one, and no side complete that was not complete in the runs of the
+       slices it came from (a requeue keeps its parent's complete edges; implemented after code
+       review round 14: with only the parent's, an interval completing its sides in turn looped
+       to `max_slices`); a first slice has no side complete; a remainder has its inner
        edge (a cut, or the other side's cut or complete edge) complete), or neither side is
        complete or cut:
        `ValueError("slice [a, b] fills capacity C without converging a gap >= 100 r_acc on
