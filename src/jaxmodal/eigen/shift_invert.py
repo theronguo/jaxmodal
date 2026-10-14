@@ -754,13 +754,13 @@ def si_band(
     preconditioner, rerun if its count flags, at most RESTARTS times in its lineage, then a flagged
     leaf) and requeues its remainders: each side cut at the largest gap >= 100 r_acc (the last
     run's) in its half of the converged run, a side without a cut as one remainder (a binary split);
-    one with no side done or cut is requeued whole; nothing converged or no progress (a slice
-    requeued whole) raises. Clusters held by two or more runs are merged: duplicates (projected
-    M-norm < 0.5) dropped, Rayleigh-Ritz, the window widened once if a Ritz residual fails
-    (edge_rr_failed if it still fails). edges: provisional interior edges, used as given (default
-    one slice). verify: count every leaf (False: none, the predicted degree and gap recorded).
-    Slice i uses seed + (RESTARTS + 1) i, the count's seed likewise. slice_options: si_checked's
-    and si_slice's (tau, maxit_inner, ...; not sigma or count_precond).
+    a full slice with no side done or cut is requeued whole (its new pairs deflated); nothing
+    converged or no progress (a slice requeued whole) raises. Clusters held by two or more runs are
+    merged: duplicates (projected M-norm < 0.5) dropped, Rayleigh-Ritz, the window widened once if a
+    Ritz residual fails (edge_rr_failed if it still fails). edges: provisional interior edges, used
+    as given (default one slice). verify: count every leaf (False: none, the predicted degree and
+    gap recorded). Slice i uses seed + (RESTARTS + 1) i, the count's seed likewise. slice_options:
+    si_checked's and si_slice's (tau, maxit_inner, ...; not sigma or count_precond).
 
     Returns lam (ascending), V (host fp64; M-orthonormal within a window, to residual level across
     runs that deflate neither the other: |x_i^T M x_j| <= (||x_j|| ||r_i|| + ||x_i|| ||r_j||) /
@@ -869,7 +869,7 @@ def si_band(
         whole = s_lo is None and s_hi is None and not (done_lo and done_hi)  # requeued whole
         if whole and not n_new and not ((done_lo and a not in done) or (done_hi and e not in done)):
             raise _cap_error(a, e, capacity, "no progress")
-        if not (done_lo or s_lo or done_hi or s_hi):  # new pairs only: rerun, them deflated
+        if not (done_lo or s_lo or done_hi or s_hi):  # new pairs only: rerun [a, e], them deflated
             work.append((a, e, done, k))
             continue
         # a remainder's outer edge was not done; its inner edge is: stored modes lie beyond (the

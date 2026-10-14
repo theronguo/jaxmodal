@@ -346,7 +346,7 @@ def test_tau_eff_seam(monkeypatch):
     assert len(lam) == len(ref) and (np.abs(lam - ref) <= 10 * info["r_acc"] * ref).all()
 
 
-def test_sigma_moves_first_step_only(monkeypatch):
+def test_sigma_moves_first_solve_only(monkeypatch):
     """Only the first solve can move sigma: a later stagnation above 1e3 tau (below TAU_FAIL)
     raises tau_eff and keeps sigma."""
 

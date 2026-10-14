@@ -228,7 +228,7 @@ accepted pair (λ, v, its run, residual, threshold). For slice $[a, b]$ with σ:
        largest gap in it keeps the count's degree ∝ 1/g low;
      - **no cut:** that side's interval up to the other side's cut or edge becomes one remainder
        (a run with the converged pairs deflated: a binary split; when the other side is complete
-       that remainder is $[a, b]$ itself).
+       that remainder is $[a, b]$ itself; with neither side complete nor cut, $[a, b]$ once).
      The span leaf $[s_{lo}, s_{hi}]$ exists when both sides are complete or cut: no Lanczos run,
      its pairs are the stored ones inside (extended over chains < 100 r; implemented after code
      review round 9), it counts as converged. When verify, its count runs
@@ -244,11 +244,13 @@ accepted pair (λ, v, its run, residual, threshold). For slice $[a, b]$ with σ:
        rerun starts with none, bounded by `RESTARTS`; implemented after code review round 14: with
        only the parent's, an interval completing its sides in turn looped to `max_slices`); a first
        slice has no side complete; a remainder has its inner edge (a cut, or the other side's cut or
-       complete edge) complete; a slice with neither side complete nor cut is requeued whole, its
-       new pairs deflated (code review round 18: it raised although it found a new pair):
+       complete edge) complete. The error:
        `ValueError("slice [a, b] fills capacity C without converging a gap >= 100 r_acc on
        either side (why): raise capacity (measured: a slice needs about 50-85 columns before it
-       converges anything); lo may be below lambda_1 or hi above the spectrum")`. (Implemented:
+       converges anything); lo may be below lambda_1 or hi above the spectrum")`, *why* "nothing
+       converged" (no converged Ritz value) or "no progress". A slice with neither side complete
+       nor cut and a new pair is requeued whole, its new pairs deflated and its complete edges kept
+       (code review round 18: it raised although it found a new pair). (Implemented:
        $\texttt{capacity}_j < 2b$ raises its own "raise capacity" message, and si_slice's
        free-space error, naming "hi may be above the spectrum", passes through.) Each requeue is
        a strict sub-interval of its parent (cuts lie strictly inside; without a new pair its
