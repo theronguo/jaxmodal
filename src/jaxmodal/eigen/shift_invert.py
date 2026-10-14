@@ -104,8 +104,9 @@ def _pad(Y, rows, w):
 
 def _form_v(Q, L0, Y, c):
     """Host V = Q_L Y (fp64), formed in chunks of c columns: each device chunk is copied to the
-    host and dropped, so only V and one chunk coexist with Q."""
-    V = np.empty((Q.shape[0], Y.shape[1]))
+    host and dropped, so only V and one chunk coexist with Q. F order: column copies are
+    contiguous."""
+    V = np.empty((Q.shape[0], Y.shape[1]), order="F")
     for j in range(0, Y.shape[1], c):
         w = min(c, Y.shape[1] - j)
         X = _combine(Q, L0, Y.shape[0], _pad(Y[:, j : j + w], Q.shape[1], c), c=c)
@@ -213,9 +214,8 @@ def si_slice(
     modes; W: known M-orthonormal modes to deflate (host array, never returned), lam_W their
     eigenvalues (optional: they then count as converged candidates of the stop rule, so a known
     mode beyond an edge closes that side; an unknown mode between still appears as a nearer
-    Ritz value that must converge). capacity:
-    Lanczos columns (rounded up to a multiple of the chunk width; the basis also stops within
-    block columns of the free space left by R and W).
+    Ritz value that must converge). capacity: Lanczos columns (rounded up to a multiple of the
+    chunk width; the basis also stops within block columns of the free space left by R and W).
     Pair i is accepted at r_i <= t_i = max(tol, 10 tau_eff delta_i, round-off floor).
     verbose: print one progress line per Lanczos step (and on a sigma move).
 
@@ -275,7 +275,6 @@ def si_slice(
         Q = _insert(Q, jnp.asarray(Wc), jnp.asarray(i, jnp.int32))
     key, sub = jax.random.split(jax.random.key(seed))
     consts = _consts(op, m, sub, tol)
-
     limit = min(capacity, n_avail)
 
     def add(Y, key):  # append the new block, dropped columns refilled with random ones
@@ -290,7 +289,7 @@ def si_slice(
             key, sub = jax.random.split(key)
             Y = jnp.where(keep, Y, _random_block(sub, n, b))
         Q, g = _append(Q, Y, op, m, jnp.asarray(L0, jnp.int32), jnp.asarray(k, jnp.int32), c=c)
-        G[: k + b, k : k + b] = np.asarray(g[: k + b])
+        G[: k + b, k : k + b] = np.asarray(g)[: k + b]  # one transfer, no per-k slice compile
         G[k : k + b, :k] = G[:k, k : k + b].T
         k += b
         return key
@@ -374,7 +373,7 @@ def si_slice(
         rr, tt = _chunked(g, np.arange(len(sel)), mu[sel], b, sigma, tau_eff)
         na = len(acc)
         converged = done and bool((rr[:na] <= tt[:na]).all())
-        lam_out, V, res_out, thr_out = mu[acc], Vs[:, :na].copy(), rr[:na], tt[:na]
+        lam_out, V, res_out, thr_out = mu[acc], Vs[:, :na], rr[:na], tt[:na]  # F: a view
         for j, (name, i) in enumerate(nbs):
             nb[name] = (float(mu[i]), Vs[:, na + j].copy())
     unreached = [e for e in ("lo", "hi") if not seen[e]]
@@ -407,17 +406,27 @@ def si_slice(
 
 def _beyond(a, b, nb, W, lam_W):
     """[(lam, v)] of the nearest known out-of-band pair below a and above b: si_slice's
-    neighbours nb or the caller's pairs (W, lam_W), whichever is nearer; None for a side with
-    neither."""
+    neighbours nb (a list per side, e.g. one per run) or the caller's pairs (W, lam_W), whichever
+    is nearer; None for a side with neither."""
     out = []
     for side, sel, pick in (("lo", lam_W < a, np.argmax), ("hi", lam_W > b, np.argmin)):
-        p = nb[side]  # a guard: si_slice's neighbours lie beyond its returned modes
-        cand = [p] if p is not None and (p[0] < a if side == "lo" else p[0] > b) else []
+        # a guard: a neighbour of another run may lie inside [a, b]
+        cand = [p for p in nb[side] if p is not None and (p[0] < a if side == "lo" else p[0] > b)]
         if sel.any():
             i = np.flatnonzero(sel)[pick(lam_W[sel])]
             cand.append((float(lam_W[i]), W[:, i]))
         out.append(min(cand, key=lambda p: abs(p[0] - (a if side == "lo" else b)), default=None))
     return out
+
+
+def _count_nbs(lam_c, lo, hi, nb, W, lam_W):
+    """_beyond around the found modes lam_c (or [lo, hi] without any); raises when a side that
+    needs one (the upper; the lower at lo > 0) has no out-of-band pair."""
+    a, e = (lam_c.min(), lam_c.max()) if len(lam_c) else (lo, hi)
+    nb_lo, nb_hi = _beyond(a, e, nb, W, lam_W)
+    if nb_hi is None or (lo > 0 and nb_lo is None):
+        raise RuntimeError("no converged neighbour to place a counting edge")
+    return nb_lo, nb_hi
 
 
 def _count_slice(op, free, V_c, lam_c, lo, hi, nb_lo, nb_hi, **kw):
@@ -508,7 +517,7 @@ def si_checked(
             thr = np.r_[thr, info["thresholds"]]
             order = np.argsort(lam_f, kind="stable")
             pos = np.argsort(order)  # the sorted position of each column
-            Vn = np.empty((n, len(lam_f)))
+            Vn = np.empty((n, len(lam_f)), order="F")
             Vn[:, pos[:k1]], Vn[:, pos[k1:]] = V_f, V
             lam_f, V_f, res, thr = lam_f[order], Vn, res[order], thr[order]
         if not info["converged"]:
@@ -520,11 +529,8 @@ def si_checked(
         W_in, lam_in = W[:, inb], lam_W[inb]
         lam_c = np.r_[lam_f, lam_in]  # the count's in-band set: found, not returned
         V_c = (V_f, W_in)
-        a = lam_c.min() if len(lam_c) else lo
-        e = lam_c.max() if len(lam_c) else hi
-        nb_lo, nb_hi = _beyond(a, e, info["neighbours"], W, lam_W)
-        if nb_hi is None or (lo > 0 and nb_lo is None):
-            raise RuntimeError("si_checked: no converged neighbour to place a counting edge")
+        nbs = {s: [r["neighbours"][s] for r in runs] for s in ("lo", "hi")}  # every run's
+        nb_lo, nb_hi = _count_nbs(lam_c, lo, hi, nbs, W, lam_W)
         P = precond if count_precond is None else count_precond
         kw = dict(R=slice_options.get("R"), precond=P, seed=c0 + j, **opts)
         est, ci = _count_slice(op, free, V_c, lam_c, lo, hi, nb_lo, nb_hi, _predict=not verify,
@@ -546,10 +552,10 @@ def si_checked(
             break
         if j == RESTARTS:
             reason = f"count >= 0.5 after {RESTARTS} restarts"
-    out = dict(runs[-1]) if runs else {}
+    out = dict(runs[-1])
     out.update(
-        r_acc=max((r["r_acc"] for r in runs), default=np.nan),
-        tau_eff=max((r["tau_eff"] for r in runs), default=np.nan),
+        r_acc=max(r["r_acc"] for r in runs),
+        tau_eff=max(r["tau_eff"] for r in runs),
         residuals=res,
         thresholds=thr,
         runs=runs,
@@ -588,10 +594,10 @@ def _split(v, conv, sigma, a, b, r):
     """The span of a full slice [a, b] from its last step's values v (Ritz values and W merged,
     ascending) with converged flags conv, at its r_acc r. The run: the maximal sequence of whole
     converged chains (relative gaps < 100 r) holding the converged value nearest sigma. A side
-    is done when the run reaches the value beyond the edge (si_slice's rule; at a = 0 every value
-    below); otherwise it is cut at the largest gap >= 100 r between run values inside (a, b), in
-    its half of them (gaps g <= (k - 2) // 2 below, the rest above). Returns None (nothing
-    converged) or (s_lo, s_hi, done_lo, done_hi), a cut or None per side."""
+    is done when the run holds the value beyond the edge and goes on past it (si_slice's rule;
+    at a = 0 every value below); otherwise it is cut at the largest gap >= 100 r between run
+    values inside (a, b), in its half of them (gaps g <= (k - 2) // 2 below, the rest above).
+    Returns None (nothing converged) or (s_lo, s_hi, done_lo, done_hi), a cut or None per side."""
     if not len(v):
         return None
     start = _starts(v, 100 * r)
@@ -607,8 +613,8 @@ def _split(v, conv, sigma, a, b, r):
         q1 += 1
     run = np.flatnonzero((cid >= q0) & (cid <= q1))
     _, below, above = _slice_sets(v, a, b, r)
-    done_lo = run[0] == 0 if a == 0 else below is not None and run[0] <= below
-    done_hi = above is not None and run[-1] >= above
+    done_lo = run[0] == 0 if a == 0 else below is not None and run[0] <= below < run[-1]
+    done_hi = above is not None and run[0] < above <= run[-1]
     idx = run[(v[run] > a) & (v[run] < b)]
     gaps = (v[idx[1:]] - v[idx[:-1]]) / np.abs(v[idx[1:]])
     lower = np.arange(len(gaps)) <= (len(idx) - 2) // 2
@@ -682,19 +688,18 @@ def _merge(op, m, groups, consts, c):
     return theta, X, r, t, drop
 
 
-def _span_count(op, free, P, lam_s, cols, x0, x1, nbs, R, verify, opts):
-    """info["count"] of a span leaf [x0, x1]: its pairs are the stored ones inside, the nearest
-    stored pair (or the parent's Ritz neighbour nbs) beyond each end its out-of-band pairs; P the
-    parent's preconditioner. A verifiable count >= 0.5 is flagged (the span is rerun)."""
-    inb = np.flatnonzero((lam_s >= x0) & (lam_s <= x1))
-    lam_c = lam_s[inb]
-    a = lam_c.min() if len(lam_c) else x0
-    e = lam_c.max() if len(lam_c) else x1
-    near = [np.flatnonzero(s)[pick(lam_s[s])]
-            for s, pick in ((lam_s < a, np.argmax), (lam_s > e, np.argmin)) if s.any()]  # fmt: skip
-    nb_lo, nb_hi = _beyond(a, e, nbs, cols(near), lam_s[near])
-    if nb_hi is None or (x0 > 0 and nb_lo is None):
-        raise RuntimeError("si_band: no converged neighbour to place a span's counting edge")
+def _span_count(op, free, P, lam_s, cols, x0, x1, r, nbs, R, verify, opts):
+    """info["count"] of a span leaf [x0, x1]: its pairs are the stored ones inside, extended over
+    chains (relative gaps < 100 r, as si_checked's widened set), the nearest stored pair (or the
+    parent's Ritz neighbour nbs) beyond each end its out-of-band pairs; P the parent's
+    preconditioner. A verifiable count >= 0.5 is flagged (the span is rerun)."""
+    o = np.argsort(lam_s, kind="stable")
+    ls = lam_s[o]
+    i0, i1 = _extend_chain(ls, np.searchsorted(ls, x0), np.searchsorted(ls, x1, "right"), 100 * r)
+    inb, lam_c = o[i0:i1], ls[i0:i1]
+    near = o[[i for i in (i0 - 1, i1) if 0 <= i < len(ls)]]
+    nb = {k: [p] for k, p in nbs.items()}
+    nb_lo, nb_hi = _count_nbs(lam_c, x0, x1, nb, cols(near), lam_s[near])
     est, ci = _count_slice(op, free, (cols(inb),), lam_c, x0, x1, nb_lo, nb_hi, R=R, precond=P,
                            _predict=not verify, **opts)  # fmt: skip
     if not verify:
@@ -856,8 +861,8 @@ def si_band(
             work.append((x, e, {**here, x: True}))
         if (done_lo or s_lo) and (done_hi or s_hi):
             x0, x1 = a if done_lo else s_lo, e if done_hi else s_hi
-            cnt = _span_count(op, free, P, lam_s, cols, x0, x1, inf["neighbours"], R, verify,
-                              {**opts, "seed": c0 + sd})  # fmt: skip
+            cnt = _span_count(op, free, P, lam_s, cols, x0, x1, inf["r_acc"], inf["neighbours"], R,
+                              verify, {**opts, "seed": c0 + sd})  # fmt: skip
             slices.append(dict(interval=(x0, x1), kind="span", leaf=not cnt["flagged"],
                                parent=i - 1, count=cnt))  # fmt: skip
             if cnt["flagged"]:  # a missed mode: the span is rerun, its pairs deflated
@@ -923,8 +928,8 @@ def si_band(
             V_f[:, k : k + X.shape[1]] = X
             k += X.shape[1]
     bounds = sorted({x for (x0, x1), _ in leaves for x in (x0, x1)} - {lo, hi})
-    near = lambda s: any(v0 * (1 - 100 * r_s) <= s <= v1 * (1 + 100 * r_s) for v0, v1 in ranges)  # noqa: E731
-    merged = [s for s in bounds if near(s)]
+    rel = 100 * r_s
+    merged = [s for s in bounds if any(v0 * (1 - rel) <= s <= v1 * (1 + rel) for v0, v1 in ranges)]
     info = dict(
         converged=converged and not rr_failed,
         reason=reason or ("a merged window failed its re-check" if rr_failed else None),
