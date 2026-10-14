@@ -252,7 +252,7 @@ accepted pair (λ, v, its run, residual, threshold). For slice $[a, b]$ with σ:
 with $\lambda_{hi}$ above the largest eigenvalue the top side never closes: each top remainder
 deflates the modes found below and eventually converges nothing new, which raises the capacity
 error naming "hi above the spectrum" (or si_slice's free-space error when the deflated modes leave
-less than $2b$ free DOFs, which names the same hint). 15d checks $\lambda_{hi}$ against
+less than $2b$ free DOFs, which names a similar hint). 15d checks $\lambda_{hi}$ against
 the λ̂_max bound up front; an edge between λ_max and λ̂_max is caught here, at the cost of the
 top remainders' full runs. A lower edge in $(0, \lambda_1)$ is the mirror case (15d's f₁ < λ₁
 rule guards it up front).

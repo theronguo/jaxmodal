@@ -520,8 +520,11 @@ def test_errors():
     with pytest.raises(ValueError, match="capacity"):
         run(1.0, 2.0, capacity=6)
     tf, top = prob("tiny")[1:3]
-    with pytest.raises(ValueError, match="free space"):  # 54 free DOFs
+    with pytest.raises(ValueError, match=r"free space left by R and W \(54\)$"):  # 54 free DOFs
         si.si_slice(top, tf, 1.0, 2.0, jacobi(top, tf, 1.0), capacity=72, block=30)
+    Wt = np.linalg.qr(np.where(tf[:, None], np.eye(len(tf))[:, :50], 0.0))[0][:, :48]
+    with pytest.raises(ValueError, match="free space.*hi may be above the spectrum"):  # W of 48
+        si.si_slice(top, tf, 1.0, 2.0, jacobi(top, tf, 1.0), capacity=72, block=4, W=Wt)
     with pytest.raises(ValueError, match="W must have shape"):
         run(1.0, 2.0, W=np.zeros((5, 2)))
     with pytest.raises(ValueError, match="R must have shape"):

@@ -166,6 +166,9 @@ Code review round 1 (hex20 $8\times6\times5$, AMG; scratch measurements):
 - **Verification slices.** 11 of those 37 slices found at most one new mode: their pairs were already stored by the parent, and they ran 10–15 steps to close their edges. MINRES is about 92% of slice time. 15d's cost model should price this; closing such remainders more cheaply is an option.
 - **A top remainder holding only known modes can raise.** Its upper neighbour must still converge at σ = its midpoint. Seen on the cube band [6.855, 39.384] at capacity 96 ("no progress" after all band modes were found). Option: σ toward an edge whose neighbour is missing.
 
+- **Per-step residuals of inside candidates (code review round 7, not measured).** `_slice_check` recomputes the explicit residuals of every inside candidate each step ($|\text{inside}|$ K products plus $2nk\,|\text{inside}|$ flops). Full slices are the normal case in 15c, so a shallow, wide slice may spend about as much there as in MINRES; `info["time"]["ritz"]` records it for 15d's cost model.
+- **`verify=False` still does input work.** A span count with `verify=False` still gathers its pairs and runs the counts' W check before returning the predicted degree (a host copy of up to one slice's V plus two streamed passes); 15d can branch before the gather if it predicts often.
+
 ### Span counts at small capacities (PR 15c → PR 15d)
 
 A small capacity converges few modes per slice, so a span's cut can only fall in a small gap, and the count's degree grows as $1/g$: modes 8–21 of hex20 $6\times5\times4$ at block 2 and capacity 24 needed a degree of about 18 000 for the first span (about 6 min, against seconds for the slices), and the band then raised the capacity error ("no progress"), so the count was wasted. Default: the count runs (`verify=True`); 15d's per-leaf `verify=None` decides on the predicted cost (`degree` is recorded with `verify=False`), and its capacity choice should avoid such slices.
