@@ -982,7 +982,7 @@ def test_checked_half(monkeypatch):
 def test_checked_w_view(monkeypatch):
     """The caller's in-band W columns reach the count as a view when consecutive (a sorted W), a
     copy otherwise (the out-of-band columns in between)."""
-    args, real = [], None
+    args = []
     _, _, run = checked_fake(monkeypatch, 0.1)
     real = si.band_count
     monkeypatch.setattr(si, "band_count", lambda *a, **kw: args.append(a) or real(*a, **kw))
@@ -1029,32 +1029,28 @@ def test_checked_restart_neighbour(monkeypatch, case):
     takes run 1's copy of mode 19 (it would fail the count's orthonormality check). inside: the
     restart finds 15 only, its neighbours inside the found set: run 1's (modes 12, 19) are used.
     own_lo: the mirror below (run 1's lower neighbour mode 12 a hair below, the restart finding
-    15 and 12, neighbour 11).
-    own, own_lo: the restart's r_acc is 2e-3 (100 r_acc above the neighbours' gaps): the gap g
-    takes the smallest r_acc."""
+    15 and 12, neighbour 11). own, own_lo: the restart's r_acc is 2e-3 (100 r_acc above the
+    neighbours' gaps): the gap g takes the smallest r_acc."""
     lr, Vr = prob("short")[6:]
     _, free, op = prob("short")[:3]
     lo, hi = cb_edges()
     calls = []
+    N = lambda k, f=1: (lr[k] * f, Vr[:, k])  # noqa: E731
+    r1 = [13, 14, 16, 17, 18]
+    runs = {  # per run: found, lower neighbour, upper neighbour, r_acc
+        "own": [(r1, N(12), N(19, 1 + 1e-5), 1e-6), ([15, 19], N(12), N(20), 2e-3)],
+        "w20": [(r1, N(12), N(19, 1 + 1e-5), 1e-6), ([15, 19], N(12), None, 1e-6)],
+        "inside": [(r1, N(12), N(19, 1 + 1e-5), 1e-6), ([15], N(14), N(18), 1e-6)],
+        "own_lo": [(r1, N(12, 1 - 1e-13), N(19), 1e-6), ([12, 15], N(11), N(19), 2e-3)],
+    }[case]
 
     def fake(*a, **kw):
         calls.append(kw)
-        lo_nb = (lr[12], Vr[:, 12])
-        if len(calls) == 1:
-            i, h = [13, 14, 16, 17, 18], (lr[19] * (1 + 1e-5), Vr[:, 19])
-            if case == "own_lo":
-                h, lo_nb = (lr[19], Vr[:, 19]), (lr[12] * (1 - 1e-13), Vr[:, 12])
-        else:
-            i, h = {"own": ([15, 19], (lr[20], Vr[:, 20])), "w20": ([15, 19], None),
-                    "inside": ([15], (lr[18], Vr[:, 18])),
-                    "own_lo": ([12, 15], (lr[19], Vr[:, 19]))}[case]  # fmt: skip
-            if case in ("own_lo", "inside"):
-                lo_nb = (lr[11], Vr[:, 11]) if case == "own_lo" else (lr[14], Vr[:, 14])
+        i, nb_lo, nb_hi, r = runs[len(calls) - 1]
         z = np.zeros(len(i))
-        nb = {"lo": lo_nb, "hi": h}
-        r = 2e-3 if case in ("own", "own_lo") and len(calls) == 2 else 1e-6
-        return lr[i], Vr[:, i], dict(converged=True, neighbours=nb, residuals=z,
-                                     thresholds=z + 1e-6, r_acc=r, tau_eff=1e-8)  # fmt: skip
+        return lr[i], Vr[:, i], dict(converged=True, neighbours={"lo": nb_lo, "hi": nb_hi},
+                                     residuals=z, thresholds=z + 1e-6, r_acc=r,
+                                     tau_eff=1e-8)  # fmt: skip
 
     monkeypatch.setattr(si, "si_slice", fake)
     P = exact("short", (lr[18] + lr[19]) / 2)

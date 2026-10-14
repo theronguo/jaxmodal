@@ -408,8 +408,8 @@ def _beyond(a, b, nb, W, lam_W, g):
     """[(lam, v)] of the nearest known out-of-band pair below a and above b: si_slice's
     neighbours nb[side] (a list, e.g. one per run; one within the relative gap g of the edge,
     relative to the lower value as in _extend_chain, is skipped: it may be another run's copy of
-    a found mode) or the caller's pairs (W, lam_W),
-    whichever is nearer; None for a side with neither."""
+    a found mode) or the caller's pairs (W, lam_W), whichever is nearer; None for a side with
+    neither."""
     out = []
     for side, x, sgn, sel, pick in (("lo", a, -1, lam_W < a, np.argmax),
                                     ("hi", b, 1, lam_W > b, np.argmin)):  # fmt: skip
@@ -469,12 +469,12 @@ def si_checked(
     RESTARTS restarts it is returned flagged. lo > 0: band_count with the nearest out-of-band
     pair on each side (any run's si_slice neighbour beyond the chain gap of the smallest run
     r_acc, or the caller's W, whichever is nearer); lo = 0: count, the step polynomial, below
-    the nearest pair above. W (host), lam_W: the caller's
-    known M-orthonormal modes (e.g. adjacent slices'), deflated by si_slice (and converged
-    candidates of its stop rule). verify False: the slice alone, no count and no restarts
-    (info["count"] then holds the predicted degree and gap, reason "not requested").
-    count_precond: the count's preconditioner (default precond, the slice's). count_options:
-    count's options (verbose defaults to verbose). slice_options: si_slice's.
+    the nearest pair above. W (host), lam_W: the caller's known M-orthonormal modes (e.g.
+    adjacent slices'), deflated by si_slice (and converged candidates of its stop rule). verify
+    False: the slice alone, no count and no restarts (info["count"] then holds the predicted
+    degree and gap, reason "not requested"). count_precond: the count's preconditioner (default
+    precond, the slice's). count_options: count's options (verbose defaults to verbose).
+    slice_options: si_slice's.
 
     The caller's W modes inside [lo, hi] or the returned span count as found (deflated in the
     count, not returned).
@@ -533,7 +533,7 @@ def si_checked(
         x0, x1 = lam_f.min(initial=lo), lam_f.max(initial=hi)
         inb = (lam_W >= x0) & (lam_W <= x1)
         i = np.flatnonzero(inb)  # a sorted W (si_band's window): a view, not a copy
-        W_in = W[:, i[0] : i[-1] + 1] if len(i) and i[-1] - i[0] + 1 == len(i) else W[:, inb]
+        W_in = W[:, i[0] : i[-1] + 1] if len(i) and i[-1] - i[0] + 1 == len(i) else W[:, i]
         lam_in = lam_W[inb]
         lam_c = np.r_[lam_f, lam_in]  # the count's in-band set: found, not returned
         V_c = (V_f, W_in)
