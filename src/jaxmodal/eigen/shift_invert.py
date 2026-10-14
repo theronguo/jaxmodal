@@ -900,6 +900,7 @@ def si_band(
             g = g + ([g[-1] + 1] if g[-1] + 1 < len(windows) else [])
             if len(g) == n_g:  # nothing to widen by: the same result again
                 break
+            del X  # freed before the wider merge
         rr_failed |= not (rr <= tt).all()
         dup += d
         parts.append((th, X, rr, tt))
