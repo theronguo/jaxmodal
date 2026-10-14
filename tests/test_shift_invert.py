@@ -381,7 +381,8 @@ def test_slice_check():
     t = {i: 1e-8 for i in range(5)}
     ok = {i: 1e-9 for i in range(6)}
     asked = []
-    done, inside, below, above, r_acc, res = si._slice_check(mu, 1.5, 3.5, 1e-8, fake(ok, t, asked))
+    out = si._slice_check(mu, 1.5, 3.5, 1e-8, fake(ok, t, asked))
+    done, inside, below, above, r_acc, res, _ = out
     assert sorted(res) == [0, 1, 2, 3] and res[3] == (1e-9, 1e-8)
     assert done and list(inside) == [1, 2] and (below, above) == (0, 3) and r_acc == 1e-8
     assert sorted(asked[0]) == [0, 1, 2, 3]
@@ -398,7 +399,7 @@ def test_slice_check():
     mu = np.array([1.0, 2.0, 3.0, 3.1, 5.0])
     t = {0: 1e-8, 1: 1e-8, 2: 1e-8, 3: 1e-3, 4: 1e-8}
     asked = []
-    done, inside, below, above, r_acc, _ = si._slice_check(mu, 1.5, 3.05, 1e-8, fake(ok, t, asked))
+    done, inside, below, above, r_acc, *_ = si._slice_check(mu, 1.5, 3.05, 1e-8, fake(ok, t, asked))
     assert done and list(inside) == [1, 2, 3] and above == 4 and r_acc == 1e-3
     assert asked == [[1, 2, 0, 3], [4]]
     # a chain of re-forms: each merge brings a larger threshold until the set stops growing;
@@ -406,7 +407,7 @@ def test_slice_check():
     mu = np.array([1.0, 2.0, 3.0, 3.001, 3.05, 3.3, 3.32, 10.0])
     t = {i: 1e-8 for i in range(8)} | {3: 1e-4, 4: 1e-3}
     ok = {i: 1e-9 for i in range(8)}
-    done, inside, _, above, r_acc, _ = si._slice_check(mu, 1.5, 3.0005, 1e-8, fake(ok, t, []))
+    done, inside, _, above, r_acc, *_ = si._slice_check(mu, 1.5, 3.0005, 1e-8, fake(ok, t, []))
     assert list(inside) == [1, 2, 3, 4, 5, 6] and above == 7 and r_acc == 1e-3 and done
 
 
@@ -781,7 +782,7 @@ def test_restart(monkeypatch, capsys):
 
 def test_checked_edges():
     """15b test 10: lo = 0 uses the step count (lam_c midway between the last mode and the
-    neighbour); a W mode beyond hi nearer than si_slice's neighbour places the upper edge."""
+    neighbour); a W mode beyond hi closes that side (15c) and places the upper edge."""
     lr, Vr = prob("short")[6:]
     hi = (lr[3] + lr[4]) / 2
     lam, V, info = checked(0.0, hi, (lr[3] + lr[4]) / 2)
@@ -792,7 +793,7 @@ def test_checked_edges():
     lam, V, info = checked(lo, hi, (lr[18] + lr[19]) / 2, W=Vr[:, [19]], lam_W=lr[[19]])
     c = info["count"]
     check_cb(lam, info)
-    assert info["neighbours"]["hi"][0] == pytest.approx(lr[20], rel=1e-8)  # 19 is in W
+    assert info["neighbours"]["hi"] is None  # 15c: W mode 19 closes the upper side
     assert c["passed"] and c["edges"][1] == pytest.approx((lr[18] + lr[19]) / 2, rel=1e-10)
     # a W mode inside a band from 0 (the step count) counts as found
     hi0 = (lr[3] + lr[4]) / 2
