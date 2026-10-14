@@ -498,6 +498,7 @@ def si_checked(
         lam, V, info = si_slice(op, free, lo, hi, precond, capacity=cap,
                                 W=Wj if Wj.shape[1] else None, lam_W=lj if len(lj) else None,
                                 seed=seed + j, verbose=verbose, **slice_options)  # fmt: skip
+        del Wj, lj  # the stacked copy is not kept while the next copies are made
         runs.append(info)
         if j == 0:  # si_slice returns them sorted: no copy
             lam_f, V_f, res, thr = lam, V, info["residuals"], info["thresholds"]
