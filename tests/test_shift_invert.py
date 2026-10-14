@@ -530,6 +530,32 @@ def test_errors():
         run(1.0, 2.0, W=2 * Vr[:, :3])
 
 
+@pytest.mark.parametrize("arg", ["R", "W"])
+def test_free_space_rw(arg):
+    """Code review round 7: 54 free DOFs minus 31 columns of R or W leave 23 < 2 block = 24 (54
+    alone would not): the free-space error before any work."""
+    tf, top = prob("tiny")[1:3]
+    Vt = prob("tiny")[7]
+    with pytest.raises(ValueError, match=r"free space left by R and W \(23\)"):
+        si.si_slice(top, tf, 1.0, 2.0, jacobi(top, tf, 1.0), capacity=48, block=12,
+                    **{arg: Vt[:, :31]})  # fmt: skip
+
+
+def test_checked_zero_predict():
+    """Code review round 7: verify=False at lo = 0: the step count's degree predicted, nothing
+    run; a lam_W of the wrong length raises."""
+    _, free, op, *_, lr, Vr = prob("short")
+    hi = edges(lr, 0, 3)[1]
+    _, _, info = si.si_checked(op, free, 0.0, hi, precond("short", hi / 2), capacity=300,
+                               verify=False, tol=TOL, tau=TAU)  # fmt: skip
+    c = info["count"]
+    assert not c["ran"] and c["reason"] == "not requested" and c["degree"] > 0
+    assert c["steps"] == 0 and np.isnan(c["estimate"]) and "total" in c["time"]
+    with pytest.raises(ValueError, match="lam_W must have shape"):
+        si.si_slice(op, free, 1.0, 2.0, jacobi(op, free, 1.0), capacity=60, W=Vr[:, :2],
+                    lam_W=lr[:3])  # fmt: skip
+
+
 def gmg_like():
     class P:
         dtype = "float32"
