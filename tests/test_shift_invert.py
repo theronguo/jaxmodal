@@ -2398,3 +2398,42 @@ def test_band_above_spectrum():
     with pytest.raises(ValueError, match=r"nothing converged.*hi above the spectrum"):
         si.si_band(op, free, top[-3], 2 * top[-1], functools.partial(exact, "tiny"),
                    capacity=48, tol=TOL)  # fmt: skip
+
+
+def test_band_requeue_lineage(monkeypatch):
+    """A slice requeued whole (a new pair, no side done or cut) keeps its done edges and span
+    reruns: its rerun newly completing either side is progress (once), its remainder's inner
+    edge is not, and its span starts with no rerun (code review round 19)."""
+    lr = prob("short")[6]
+    lo, hi = edges(lr, 3, 16)
+    first = ([9], "capacity full", rz([9], [2, 8, 10, 16]), None)
+    for side in (rz([2, 3], [4]), rz([15, 16], [14])):
+        runs = {1: first, 2: ([], "capacity full", side, None)}
+        calls, _ = fake_band(
+            monkeypatch, lambda j, a, e, kw, r=runs: r.get(j) or found(j, a, e, kw)
+        )
+        lam, _, info = fband("short", lo, hi)
+        assert [c["interval"] for c in calls] == [(lo, hi)] * 3 and np.array_equal(lam, lr[3:16])
+        # the same side completed again with nothing new is no progress
+        runs3 = {**runs, 3: runs[2]}
+        calls, _ = fake_band(
+            monkeypatch, lambda j, a, e, kw, r=runs3: r.get(j) or found(j, a, e, kw)
+        )
+        with pytest.raises(ValueError, match=r"\(no progress\)"):
+            fband("short", lo, hi)
+        assert len(calls) == 3
+    runs = {1: first, 2: ([], "capacity full", rz(range(2, 17)), None)}
+    fake_band(monkeypatch, lambda j, a, e, kw: runs.get(j) or found(j, a, e, kw))
+    _, _, info = fband("short", lo, hi)
+    assert [s["count"]["restarts"] for s in info["slices"] if s["kind"] == "span"] == [0]
+    # a remainder requeued whole keeps its inner edge done: completing it again is no progress
+    lo2, hi2 = edges(lr, 3, 10)
+    runs = {
+        1: ([5, 6, 7, 8, 9], "capacity full", rz([5, 6, 7, 8, 9, 10], [2, 3, 4]), None),
+        2: ([3], "capacity full", rz([3, 5, 6], [2, 4]), None),
+        3: ([], "capacity full", rz([5, 6], [2, 3, 4]), None),
+    }
+    calls, _ = fake_band(monkeypatch, lambda j, a, e, kw: runs.get(j) or found(j, a, e, kw))
+    with pytest.raises(ValueError, match=r"\(no progress\)"):
+        fband("short", lo2, hi2)
+    assert len(calls) == 3 and calls[2]["interval"] == calls[1]["interval"]
