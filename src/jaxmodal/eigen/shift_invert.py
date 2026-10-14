@@ -625,9 +625,7 @@ def _apply_km(op, m, X, c):
     KX, MX = np.empty_like(X), np.empty_like(X)
     for j in range(0, X.shape[1], c):
         w = min(c, X.shape[1] - j)
-        Y = np.zeros((X.shape[0], c))
-        Y[:, :w] = X[:, j : j + w]
-        k, mx = _km(op, m, jnp.asarray(Y))
+        k, mx = _km(op, m, _pad(X[:, j : j + w], X.shape[0], c))
         KX[:, j : j + w], MX[:, j : j + w] = np.asarray(k)[:, :w], np.asarray(mx)[:, :w]
     return KX, MX
 
@@ -650,7 +648,7 @@ def _merge(op, m, groups, consts, c):
         if k:  # project in place, one temporary at a time
             C = Q[:, :k].T @ MU
             for X, B in ((U, Q), (KU, KQ), (MU, MQ)):
-                X -= (C.T @ B[:, :k].T).T  # F order, no transposing copy
+                X -= (C.T @ B[:, :k].T).T  # F-order result: a contiguous in-place update
             ev, Y = np.linalg.eigh((U.T @ MU + MU.T @ U) / 2)
             keep = ev >= 0.25
             drop += int((~keep).sum())
@@ -675,8 +673,7 @@ def _merge(op, m, groups, consts, c):
     r, t = np.empty(len(theta)), np.empty(len(theta))
     for j in range(0, len(theta), c):  # explicit residuals, one device chunk at a time
         sl = slice(j, j + c)
-        r[sl], t[sl] = _resid(*(jnp.asarray(Y[:, sl]) for Y in (X, KX, MX)),
-                              jnp.asarray(theta[sl]), consts)  # fmt: skip
+        r[sl], t[sl] = _resid(X[:, sl], KX[:, sl], MX[:, sl], theta[sl], consts)
     return theta, X, r, t, drop
 
 
@@ -732,12 +729,13 @@ def si_band(
     si_slice's stop rule on its last Ritz values (a leaf without a run, counted with the parent's
     preconditioner, rerun if its count flags) and requeues its remainders: each side cut at the
     largest gap >= 100 r_acc in its half of the converged run, a side without a cut as one remainder
-    (a binary split); no progress, or no side done or cut, raises. Clusters held by two runs are
-    merged: duplicates (projected M-norm < 0.5) dropped, Rayleigh-Ritz, the window widened once if a
-    Ritz residual fails (edge_rr_failed if it still fails). edges: provisional interior edges, used
-    as given (default one slice). verify: count every leaf (False: none, the predicted degree and
-    gap recorded). Slice i uses seed + (RESTARTS + 1) i, the count's seed likewise. slice_options:
-    si_checked's and si_slice's (tau, maxit_inner, ...; not sigma or count_precond).
+    (a binary split); no progress, or no side done or cut, raises. Clusters held by two or more
+    runs are merged: duplicates (projected M-norm < 0.5) dropped, Rayleigh-Ritz, the window
+    widened once if a Ritz residual fails (edge_rr_failed if it still fails). edges: provisional
+    interior edges, used as given (default one slice). verify: count every leaf (False: none, the
+    predicted degree and gap recorded). Slice i uses seed + (RESTARTS + 1) i, the count's seed
+    likewise. slice_options: si_checked's and si_slice's (tau, maxit_inner, ...; not sigma or
+    count_precond).
 
     Returns lam (ascending), V (host fp64; M-orthonormal within a window, to residual level across
     runs that deflate neither the other: |x_i^T M x_j| <= (||x_j|| ||r_i|| + ||x_i|| ||r_j||) /
@@ -868,9 +866,10 @@ def si_band(
                 print(f"si_band: span [{x0:.6g}, {x1:.6g}], count {cnt['reason'] or 'passed'}",
                       flush=True)  # fmt: skip
         P = None
+    P = None  # also on a break
     t_slices = time.perf_counter() - t0
 
-    # clusters held by two runs: duplicates, Rayleigh-Ritz, the re-check at the band's r_acc
+    # clusters held by several runs: duplicates, Rayleigh-Ritz, the re-check at the band's r_acc
     order = np.argsort(lam_s, kind="stable")
     ls = lam_s[order]
     windows = np.split(order, np.flatnonzero(_starts(ls, 100 * r_s))[1:]) if len(ls) else []

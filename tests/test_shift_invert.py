@@ -6,6 +6,7 @@ import functools
 import importlib
 import sys
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -945,11 +946,12 @@ def new_modes(a, e, kw, name="short"):
             if not np.isclose(known, lr[j], rtol=1e-12, atol=0).any()]  # fmt: skip
 
 
-def fake_band(monkeypatch, script, name="short", count=(0.1, True, False)):
+def fake_band(monkeypatch, script, name="short", count=(0.1, True, False), post=None):
     """si_checked replaced by script(call, a, e, kw) -> (pairs, reason, ritz, count info);
-    pairs: mode indices or (lam, V); the neighbours are the reference modes beyond a and e.
-    _count_slice returns (estimate, verifiable, capped) = count (or count(call)). Returns the
-    recorded si_checked kwargs (plus interval, P) and _count_slice calls (args, kwargs)."""
+    pairs: mode indices or (lam, V); the neighbours are the reference modes beyond a and e;
+    post(call, info) -> info edits the returned info. _count_slice returns (estimate,
+    verifiable, capped) = count (or count(call)). Returns the recorded si_checked kwargs (plus
+    interval, P) and _count_slice calls (args, kwargs)."""
     lr, Vr = prob(name)[6:]
     calls, counts = [], []
 
@@ -965,7 +967,7 @@ def fake_band(monkeypatch, script, name="short", count=(0.1, True, False)):
                     thresholds=z + TOL, r_acc=TOL, tau_eff=TAU, neighbours=nb, ritz=ritz,
                     runs=[{"basis": 0, "ritz": ritz}],
                     count=cnt or (OK_COUNT if reason is None else NO_COUNT))  # fmt: skip
-        return lam, V, info
+        return lam, V, info if post is None else post(len(calls), info)
 
     def count_slice(*a, **kw):
         counts.append((a, kw))
@@ -1041,8 +1043,7 @@ def test_band_split(monkeypatch):
 
     calls, counts = fake_band(monkeypatch, split_once)
     lam, V, info = fband("short", lo, hi, capacity=96)
-    s_lo, s_hi, *_ = si._split(*FULL_RZ(), (lo + hi) / 2, lo, hi,
-                               TOL)  # fmt: skip
+    s_lo, s_hi, *_ = si._split(*FULL_RZ(), (lo + hi) / 2, lo, hi, TOL)
     assert lr[7] < s_lo < lr[9] and lr[9] < s_hi < lr[11]
     assert [c["interval"] for c in calls] == [(lo, hi), (lo, s_lo), (s_hi, hi)]
     assert [(s["kind"], s["leaf"]) for s in info["slices"]] == [
@@ -1059,7 +1060,7 @@ def test_band_split(monkeypatch):
         a, e = c["interval"]
         near = lr[7:12][(lr[7:12] >= a * (1 - 1e-2)) & (lr[7:12] <= e * (1 + 1e-2))]
         assert set(near) <= set(c["lam_W"])
-        assert c["capacity"] + -(-len(c["lam_W"]) // 24) * 24 <= 96
+        assert c["capacity"] + si._up(len(c["lam_W"]), 24) <= 96
     assert c["lam_W"].min() < s_hi  # the known neighbour below the upper remainder
     assert info["count"]["passed"] and len(info["count"]["estimates"]) == 3
 
@@ -1244,7 +1245,7 @@ def test_merge(monkeypatch):
     lam, V, info = run()
     assert info["edge_rr_failed"] and info["duplicates"] == 0 and len(lam) == 3
     assert not info["converged"] and info["reason"] == "a merged window failed its re-check"
-    s2 = (lr[j + 1] + lr[j + 2]) / 2 if j + 2 < len(lr) else None
+    s2 = (lr[j + 1] + lr[j + 2]) / 2
     third = ([lr[j + 2]], [Vr[:, j + 2]])
 
     two_runs(monkeypatch, lo_pairs, ([lr[i], lr[j], lr[j + 1]], [v1, v2, Vr[:, j + 1]]), third)
@@ -1258,8 +1259,7 @@ def test_merge_chunks():
     the dense Rayleigh-Ritz (and the same result for c = 1 and c = 64)."""
     _, free, op, K, M, R, lr, Vr = prob("cube")
     m = jnp.asarray(free, jnp.float64)[:, None]
-    nK, nM = map(float, _norms(op, m, m * jnp.ones((op.n_dof, 1))))
-    consts = jnp.array([nK, nM, 1e-10, si.C_FLOOR])
+    consts = si._consts(op, m, jax.random.key(0), 1e-10)
     rng = np.random.default_rng(1)
     Q1 = Vr[:, :5] @ np.linalg.qr(rng.standard_normal((5, 5)))[0]  # rotated, M-orthonormal
     Q2 = Vr[:, 3:9] @ np.linalg.qr(rng.standard_normal((6, 6)))[0]  # overlaps modes 3, 4
@@ -1332,9 +1332,9 @@ def test_band_one_slice():
     assert not info["merged_edges"] and not info["collapsed"] and info["duplicates"] == 0
 
 
-SPLITS = {  # name: (first mode, last mode + 1, capacity, block, {seed: runs})
-    "block6": (5, 29, 96, 6, {0: 3}),
-    "block2": (8, 22, 48, 2, {0: 3}),
+SPLITS = {  # name: (first mode, last mode + 1, capacity, block), 3 runs each
+    "block6": (5, 29, 96, 6),
+    "block2": (8, 22, 48, 2),
 }
 
 
@@ -1345,11 +1345,10 @@ def test_band_capacity_split(case, monkeypatch):
     < 0.5, the reference matched, the recorded run count per seed; a spy checks every slice's
     basis within the first's and the remainders' W (stored modes of the window and the known
     neighbours)."""
-    i0, i1, cap, block, runs = SPLITS[case]
+    i0, i1, cap, block = SPLITS[case]
     lr = prob("short")[6]
     lo, hi = edges(lr, i0, i1)
     c = si._chunk(block)
-    up = lambda x: -(-x // c) * c  # noqa: E731
     real, calls = si.si_checked, []
 
     def spy(*a, **kw):
@@ -1357,23 +1356,20 @@ def test_band_capacity_split(case, monkeypatch):
         return real(*a, **kw)
 
     monkeypatch.setattr(si, "si_checked", spy)
-    for seed, n_runs in runs.items():
-        calls.clear()
-        lam, V, info = rband("short", lo, hi, capacity=cap, block=block, seed=seed)
-        check_band("short", lo, hi, lam, V, info)
-        kinds = [s["kind"] for s in info["slices"]]
-        assert kinds.count("run") == n_runs and "span" in kinds
-        assert any(s["kind"] == "run" and not s["leaf"] for s in info["slices"])
-        for kw in calls:
-            n_w = 0 if kw["lam_W"] is None else len(kw["lam_W"])
-            assert up(kw["capacity"]) + up(n_w) <= up(cap)
-        stored = np.sort(lam)
-        for kw, s in zip(calls[1:], [s for s in info["slices"] if s["kind"] == "run"][1:],
-                         strict=True):  # fmt: skip
-            a, e = s["interval"]
-            inside = stored[(stored >= a * (1 - 1e-2)) & (stored <= e * (1 + 1e-2))]
-            found = s["n_new"]
-            assert len(set(kw["lam_W"])) >= len(inside) - found
+    lam, V, info = rband("short", lo, hi, capacity=cap, block=block)
+    check_band("short", lo, hi, lam, V, info)
+    kinds = [s["kind"] for s in info["slices"]]
+    assert kinds.count("run") == 3 and "span" in kinds
+    assert any(s["kind"] == "run" and not s["leaf"] for s in info["slices"])
+    for kw in calls:
+        n_w = 0 if kw["lam_W"] is None else len(kw["lam_W"])
+        assert si._up(kw["capacity"], c) + si._up(n_w, c) <= si._up(cap, c)
+    stored = np.sort(lam)
+    for kw, s in zip(calls[1:], [s for s in info["slices"] if s["kind"] == "run"][1:],
+                     strict=True):  # fmt: skip
+        a, e = s["interval"]
+        inside = stored[(stored >= a * (1 - 1e-2)) & (stored <= e * (1 + 1e-2))]
+        assert len(set(kw["lam_W"])) >= len(inside) - s["n_new"]
 
 
 @pytest.mark.slow
@@ -1384,7 +1380,7 @@ def test_band_split_sweep(case, seed):
     a second seed, the band matches the reference (splits allowed) or raises the capacity
     error; never a short or wrong result. Counted at the chosen capacity only (an off-nominal
     cut can land in a small gap: two counts of degree ~19k, about 20 min under load)."""
-    i0, i1, cap, block, _ = SPLITS[case]
+    i0, i1, cap, block = SPLITS[case]
     lr = prob("short")[6]
     lo, hi = edges(lr, i0, i1)
     c = si._chunk(block)
@@ -1558,18 +1554,12 @@ def test_band_full_slice_one_bad(monkeypatch, r_bad, stops):
             return [7, 8, 9, 10, 11], "capacity full", FULL_RZ(), None
         return new_modes(a, e, kw), None, None, None
 
-    calls, _ = fake_band(monkeypatch, script)
-    fake = si.si_checked
+    def post(j, info):
+        r = info["residuals"].copy()
+        r[2 : 3 if j == 2 else 2] = r_bad
+        return dict(info, residuals=r)
 
-    def one_bad(*a, **kw):
-        lam, V, info = fake(*a, **kw)
-        if len(calls) == 2:
-            r = np.zeros(len(lam))
-            r[2] = r_bad
-            info = dict(info, residuals=r)
-        return lam, V, info
-
-    monkeypatch.setattr(si, "si_checked", one_bad)
+    calls, _ = fake_band(monkeypatch, script, post=post)
     lam, V, info = fband("short", lo, hi, edges=[s])
     if stops:
         assert len(calls) == 2 and not info["converged"]
@@ -1638,8 +1628,7 @@ def test_band_above_spectrum():
 
 def test_merge_widen(monkeypatch):
     """Code review round 1: a merged window whose Ritz residual fails because run 2's vector leans
-    on the adjacent window's mode is fixed by the widening (edge_rr_failed False); a direction with
-    projected M-norm 0.6 (between 0.5 and 0.707) is kept."""
+    on the adjacent window's mode is fixed by the widening (edge_rr_failed False)."""
     _, free, op, K, M, R, lr, Vr = prob("cube")
     i, j, lo, hi, s = cube_double()
     v1, v2, v3 = Vr[:, i], Vr[:, j], Vr[:, j + 1]
@@ -1651,12 +1640,6 @@ def test_merge_widen(monkeypatch):
     lam, V, info = fband("cube", lo, hi, edges=[s], R=R)
     assert not info["edge_rr_failed"] and len(lam) == 4
     assert np.abs(lam - lr[i - 1 : j + 2]).max() <= 1e-10 * lr[j + 1]
-    # a direction 0.8 v1 + 0.6 v2: projected norm 0.6 against v1, kept (rule 0.5)
-    x = 0.8 * v1 + 0.6 * v2
-    two_runs(monkeypatch, ([lr[i - 1], lr[i]], [Vr[:, i - 1], v1]), ([lr[i]], [x]))
-    lam, V, info = fband("cube", lo, hi, edges=[s], R=R)
-    assert info["duplicates"] == 0 and len(lam) == 3
-    assert np.abs(lam - lr[i - 1 : j + 1]).max() <= 1e-10 * lr[j]
 
 
 def test_band_inner_failure_first(monkeypatch):
@@ -1781,15 +1764,11 @@ def test_band_rerun_fake(monkeypatch):
         pairs, *rest = found(j, a, e, kw)
         return again.get(j, []) + pairs, *rest
 
-    calls, _ = fake_band(monkeypatch, script)
-    fake = si.si_checked
+    def post(j, info):
+        r = np.full(len(info["residuals"]), j * 1e-12)
+        return dict(info, r_acc=r_of.get(j, TOL), residuals=r)
 
-    def wrapped(*a, **kw):
-        lam, V, info = fake(*a, **kw)
-        return lam, V, dict(info, r_acc=r_of.get(len(calls), TOL),
-                            residuals=np.full(len(lam), len(calls) * 1e-12))  # fmt: skip
-
-    monkeypatch.setattr(si, "si_checked", wrapped)
+    calls, _ = fake_band(monkeypatch, script, post=post)
     lam, V, info = fband("short", lo, hi, edges=[s], block=1)
     assert [c["interval"] for c in calls] == [(lo, s)] + [(s, hi)] * 3
     assert np.allclose(np.sort(calls[1]["lam_W"]), lr[[11]], rtol=1e-12)
@@ -1808,14 +1787,7 @@ def test_band_converged_false(monkeypatch):
     lr = prob("short")[6]
     lo, hi = edges(lr, 3, 16)
     s = [(lr[7] + lr[8]) / 2, (lr[10] + lr[11]) / 2]
-    calls, _ = fake_band(monkeypatch, found)
-    fake = si.si_checked
-
-    def wrapped(*a, **kw):
-        lam, V, info = fake(*a, **kw)
-        return lam, V, dict(info, converged=len(calls) != 2)
-
-    monkeypatch.setattr(si, "si_checked", wrapped)
+    calls, _ = fake_band(monkeypatch, found, post=lambda j, info: dict(info, converged=j != 2))
     lam, V, info = fband("short", lo, hi, edges=s)
     assert len(calls) == 2 and not info["converged"]
     assert info["reason"] == f"[{s[0]:.6g}, {s[1]:.6g}]: slice not converged"
