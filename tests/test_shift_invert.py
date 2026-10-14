@@ -1117,8 +1117,8 @@ def test_band_rules(monkeypatch):
     with pytest.raises(ValueError, match=r"\(no progress\).*hi above the spectrum"):
         fband("short", lo, hi)
     fake_band(monkeypatch, lambda *_: ([], "capacity full", rz([], [2, 3, 4]), None))
-    with pytest.raises(ValueError, match=r"nothing converged.*below lambda_1"):
-        fband("short", lo, hi)
+    with pytest.raises(ValueError, match=r"fills capacity 90 .*nothing converged.*below lambda_1"):
+        fband("short", lo, hi, capacity=90)  # the capacity asked for (96 inside)
     fake_band(monkeypatch, lambda *_: ([9], "capacity full", rz([9], [2, 8, 10, 16]), None))
     with pytest.raises(ValueError, match="neither side done or cut"):
         fband("short", lo, hi)
@@ -1147,6 +1147,12 @@ def test_band_leaves(monkeypatch, capsys):
     assert np.array_equal(lam, lr[3:16]) and info["count"]["passed"]  # the replaced span's flag
     out = capsys.readouterr().out
     assert out.count("si_band: slice") == 4 and out.count("si_band: span") == 1
+    lines = [ln for ln in out.splitlines() if ln.startswith("si_band: slice")]
+    runs = [s for s in info["slices"] if s["kind"] == "run"]
+    assert all(f", {s['n_new']} new, count" in ln for ln, s in zip(lines, runs, strict=True))
+    assert "count count >= 0.5: the span is rerun" in out
+    t = info["time"]
+    assert 0 < t["slices"] <= t["total"] and t["merge"] >= 0
 
     flagged = dict(OK_COUNT, passed=False, flagged=True, estimate=0.8, estimates=[0.8, 0.9, 0.7],
                    reason="count >= 0.5 after 2 restarts")  # fmt: skip
@@ -1222,15 +1228,15 @@ def cube_double():
     return i, j, *edges(lr, i - 1, j + 2), (lr[i] + lr[j]) / 2
 
 
-def two_runs(monkeypatch, *runs):
+def two_runs(monkeypatch, *runs, post=None):
     """fake_band on the cube: run k returns runs[k - 1] = (lam, vectors), every later run the
-    last."""
+    last; post as in fake_band."""
 
     def script(k, a, e, kw):
         lam, V = runs[min(k, len(runs)) - 1]
         return (np.asarray(lam), np.stack(V, 1)), None, None, None
 
-    fake_band(monkeypatch, script, name="cube")
+    fake_band(monkeypatch, script, name="cube", post=post)
 
 
 def test_merge(monkeypatch):
@@ -1264,6 +1270,14 @@ def test_merge(monkeypatch):
         check(lam, V, want)
         assert info["duplicates"] == dup and info["merged_edges"] == [s] and info["collapsed"]
         assert not info["edge_rr_failed"] and info["thresholds"].max() < 1e-8  # tol, not a default
+
+    # round 8: the merged window keeps its runs' largest threshold
+    def raise2(k, inf):  # run 2 accepted at 1e-7
+        return dict(inf, thresholds=np.full(len(inf["thresholds"]), 1e-7 if k == 2 else TOL))
+
+    two_runs(monkeypatch, lo_pairs, cases[0][0], post=raise2)
+    lam, V, info = run()
+    assert info["duplicates"] == 1 and len(lam) == 3 and (info["thresholds"][1:] == 1e-7).all()
     t = 1e-3
     near = ([lr[i]], [np.cos(t) * v1 + np.sin(t) * v2])
     two_runs(monkeypatch, ([lr[i - 1], lr[i], lr[j]], [Vr[:, i - 1], v1, v2]), near)
@@ -1781,6 +1795,7 @@ def test_band_progress_inside(monkeypatch):
     span = info["slices"][1]  # neither the span's count nor the band's ran
     assert counts[0][1]["_predict"] is True and span["kind"] == "span" and not span["count"]["ran"]
     assert span["count"]["reason"] == "not requested" and not info["count"]["ran"]
+    assert not info["count"]["verifiable"]  # round 8: no leaf counted
 
 
 @pytest.mark.parametrize("p, dup", [(0.49, 1), (0.51, 0)])
