@@ -209,7 +209,8 @@ accepted pair (λ, v, its run, residual, threshold). For slice $[a, b]$ with σ:
      converged flag per value (a small 15a addition, `info["ritz"]` = (μ, converged); W modes
      True, values never evaluated False). The **run** is the maximal sequence of consecutive
      converged values containing the converged value nearest σ (a chain $< 100r$ is taken whole,
-     $r$ = the slice's $r_{acc}$); the cut candidates are the gaps between consecutive run values
+     $r$ = the $r_{acc}$ of the slice's last run, whose Ritz values these are; implemented after
+     code review round 12); the cut candidates are the gaps between consecutive run values
      both inside $(a, b)$, $m_0 < \dots < m_{k-1}$, gap $i$ between $m_i$ and $m_{i+1}$; gaps
      $i \le \lfloor (k - 2)/2 \rfloor$ are the lower half, the others the upper half (static; for
      $k = 2$ the single gap is the lower side's). A gap touching a W neighbour beyond an edge is
