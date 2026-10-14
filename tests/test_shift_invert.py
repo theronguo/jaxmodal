@@ -1538,6 +1538,19 @@ def test_band_span_rerun(monkeypatch):
     _, _, info = fband("short", lo, hi)
     assert [c["interval"] for c in calls] == [(lo, hi)] + [(c45, hi)] * 3
     assert info["count"]["passed"]
+    # a slice cut on one side only (the other not done), with nothing new, is split, not "no
+    # progress": the span [c45, hi] rerun (its pairs 5, 6 deflated) converges only them, a cut 5|6
+    c56 = (lr[5] + lr[6]) / 2
+    lo6, hi6 = edges(lr, 3, 7)
+    rit = {1: ([3, 4, 5, 6], rz([4, 5, 6, 7], [3])), 3: ([], rz([5, 6], [4, 7]))}
+
+    def script(j, a, e, kw):
+        return (rit[j][0], "capacity full", rit[j][1], None) if j in rit else found(j, a, e, kw)
+
+    calls, _ = fake_band(monkeypatch, script, count=lambda k: (0.9 if k == 1 else 0.1, True, False))
+    lam, _, info = fband("short", lo6, hi6)
+    assert [c["interval"] for c in calls][2:] == [(c45, hi6), (c45, c56), (c56, hi6)]
+    assert np.array_equal(lam, lr[3:7]) and info["converged"]
 
 
 def test_n_new(monkeypatch):
