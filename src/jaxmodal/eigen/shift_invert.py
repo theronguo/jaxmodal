@@ -406,13 +406,16 @@ def si_slice(
 
 def _beyond(a, b, nb, W, lam_W, g):
     """[(lam, v)] of the nearest known out-of-band pair below a and above b: si_slice's
-    neighbours nb[side] (a list, e.g. one per run) farther than the relative gap g (nearer, one
-    may be a copy of a found mode: another run's Ritz value of it) or the caller's pairs (W,
-    lam_W), whichever is nearer; None for a side with neither."""
+    neighbours nb[side] (a list, e.g. one per run; one within the relative gap g of the edge,
+    relative to the lower value as in _extend_chain, is skipped: it may be another run's copy of
+    a found mode) or the caller's pairs (W, lam_W),
+    whichever is nearer; None for a side with neither."""
     out = []
     for side, x, sgn, sel, pick in (("lo", a, -1, lam_W < a, np.argmax),
                                     ("hi", b, 1, lam_W > b, np.argmin)):  # fmt: skip
-        cand = [p for p in nb[side] if p is not None and sgn * (p[0] - x) > g * abs(x)]
+        cand = [
+            p for p in nb[side] if p is not None and sgn * (p[0] - x) > g * min(abs(p[0]), abs(x))
+        ]
         if sel.any():
             i = np.flatnonzero(sel)[pick(lam_W[sel])]
             cand.append((float(lam_W[i]), W[:, i]))
@@ -464,8 +467,9 @@ def si_checked(
     + j), deflated by the in-band modes found so far (within the first run's device memory: the
     capacity drops by the extra deflation columns), and counts again with fresh probes; after
     RESTARTS restarts it is returned flagged. lo > 0: band_count with the nearest out-of-band
-    pair on each side (si_slice's neighbours or the caller's W, whichever is nearer); lo = 0:
-    count, the step polynomial, below the nearest pair above. W (host), lam_W: the caller's
+    pair on each side (any run's si_slice neighbour beyond the chain gap of the smallest run
+    r_acc, or the caller's W, whichever is nearer); lo = 0: count, the step polynomial, below
+    the nearest pair above. W (host), lam_W: the caller's
     known M-orthonormal modes (e.g. adjacent slices'), deflated by si_slice (and converged
     candidates of its stop rule). verify False: the slice alone, no count and no restarts
     (info["count"] then holds the predicted degree and gap, reason "not requested").
@@ -521,14 +525,16 @@ def si_checked(
             Vn = np.empty((n, len(lam_f)), order="F")
             Vn[:, pos[:k1]], Vn[:, pos[k1:]] = V_f, V
             lam_f, V_f, res, thr = lam_f[order], Vn, res[order], thr[order]
-            V = Vn = None  # the run's block is not kept through the next run
+            V = None  # the run's block is not kept through the next run
         if not info["converged"]:
             reason = "slice not converged"
             break
         # the caller's modes inside [lo, hi] or the returned span (si_slice's edge margins)
         x0, x1 = lam_f.min(initial=lo), lam_f.max(initial=hi)
         inb = (lam_W >= x0) & (lam_W <= x1)
-        W_in, lam_in = W[:, inb], lam_W[inb]
+        i = np.flatnonzero(inb)  # a sorted W (si_band's window): a view, not a copy
+        W_in = W[:, i[0] : i[-1] + 1] if len(i) and i[-1] - i[0] + 1 == len(i) else W[:, inb]
+        lam_in = lam_W[inb]
         lam_c = np.r_[lam_f, lam_in]  # the count's in-band set: found, not returned
         V_c = (V_f, W_in)
         # every run's neighbours: a restart may close a side on a deflated mode (no neighbour of
@@ -541,6 +547,7 @@ def si_checked(
         kw = dict(R=slice_options.get("R"), precond=P, seed=c0 + j, **opts)
         est, ci = _count_slice(op, free, V_c, lam_c, lo, hi, nb_lo, nb_hi, _predict=not verify,
                                **kw)  # fmt: skip
+        V_c = W_in = None  # not kept through a restart
         if not verify:
             reason = "not requested"
             break
@@ -850,7 +857,8 @@ def si_band(
             continue
         # a full slice: its verified span (a leaf without a run) and its remainders
         entry["leaf"] = False
-        sp = _split(*inf["ritz"], inf["sigma"], a, e, inf["r_acc"])
+        r_l = inf["runs"][-1]["r_acc"]  # the last run's: its ritz and neighbours
+        sp = _split(*inf["ritz"], inf["sigma"], a, e, r_l)
         if sp is None:
             raise _cap_error(a, e, capacity, "nothing converged")
         s_lo, s_hi, done_lo, done_hi = sp
@@ -867,7 +875,7 @@ def si_band(
             work.append((x, e, {x: True}))
         if (done_lo or s_lo) and (done_hi or s_hi):
             x0, x1 = a if done_lo else s_lo, e if done_hi else s_hi
-            cnt = _span_count(op, free, P, lam_s, cols, x0, x1, inf["r_acc"], inf["neighbours"], R,
+            cnt = _span_count(op, free, P, lam_s, cols, x0, x1, r_l, inf["neighbours"], R,
                               verify, {**opts, "seed": c0 + sd})  # fmt: skip
             slices.append(dict(interval=(x0, x1), kind="span", leaf=not cnt["flagged"],
                                parent=i - 1, count=cnt))  # fmt: skip

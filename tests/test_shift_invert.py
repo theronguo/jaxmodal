@@ -979,6 +979,23 @@ def test_checked_half(monkeypatch):
     assert seen and all(kw["precond"] == "CP" for kw in seen)
 
 
+def test_checked_w_view(monkeypatch):
+    """The caller's in-band W columns reach the count as a view when consecutive (a sorted W), a
+    copy otherwise (the out-of-band columns in between)."""
+    args, real = [], None
+    _, _, run = checked_fake(monkeypatch, 0.1)
+    real = si.band_count
+    monkeypatch.setattr(si, "band_count", lambda *a, **kw: args.append(a) or real(*a, **kw))
+    lr, Vr = prob("short")[6:]
+    s = np.arange(CB[0] - 1, CB[1] + 1)
+    for k, w in enumerate((s, np.r_[s[1:3], s[0], s[-1], s[3:-1]])):
+        W = Vr[:, w]
+        run(W=W, lam_W=lr[w])
+        W_in = args[-1][2][1]
+        assert W_in.shape[1] == CB[1] - CB[0] and np.shares_memory(W_in, W) == (k == 0)
+        assert np.array_equal(np.sort(args[-1][3][-W_in.shape[1] :]), lr[CB[0] : CB[1]])
+
+
 def test_checked_no_neighbour(monkeypatch):
     """lo > 0 and no neighbour below (si_slice's or W): the error; a restart run without an upper
     neighbour (its edge mode deflated) counts with the first run's."""
@@ -1073,7 +1090,8 @@ def test_checked_merge_order(monkeypatch):
 
 def test_beyond_guard():
     """A si_slice neighbour on the wrong side of [a, b], or within the chain gap g of it (a copy
-    of a found mode), is not used; any run's may be (an older one when a newer lies inside)."""
+    of a found mode; relative to the lower value), is not used; any run's may be (an older one
+    when a newer lies inside)."""
     v = np.ones(3)
     W, lam_W = np.zeros((3, 0)), np.zeros(0)
     assert si._beyond(4.0, 6.0, {"lo": [(5.0, v)], "hi": [(5.5, v)]}, W, lam_W, 0) == [None, None]
@@ -1084,6 +1102,8 @@ def test_beyond_guard():
     nb = {"lo": [(0.9, v)], "hi": [(2.1, v), (1.95, v)]}  # the restart's 1.95 lies inside
     lo, hi = si._count_nbs(np.array([1.0, 1.5, 2.0]), 1.0, 1.9, nb, W, lam_W, 1e-4)
     assert lo[0] == 0.9 and hi[0] == 2.1
+    p = 1.0 / (1 + 1e-4 * (1 + 1e-5))  # beyond the gap 1e-4 relative to itself, not to a = 1
+    assert si._beyond(1.0, 2.0, {"lo": [(p, v)], "hi": [None]}, W, lam_W, 1e-4)[0][0] == p
 
 
 # ---------------------------------------------------------------- PR 15c: si_band, fakes
@@ -1131,7 +1151,7 @@ def fake_band(monkeypatch, script, name="short", count=(0.1, True, False), post=
         z = np.zeros(len(lam))
         info = dict(converged=reason is None, reason=reason, sigma=(a + e) / 2, residuals=z,
                     thresholds=z + TOL, r_acc=TOL, tau_eff=TAU, neighbours=nb, ritz=ritz,
-                    runs=[{"basis": 0, "ritz": ritz}],
+                    runs=[{"basis": 0, "ritz": ritz, "r_acc": TOL}],
                     count=cnt or (OK_COUNT if reason is None else NO_COUNT))  # fmt: skip
         return lam, V, info if post is None else post(len(calls), info)
 
@@ -1540,14 +1560,16 @@ def test_span_chain_edge(monkeypatch):
 
 
 def test_span_chain_r(monkeypatch):
-    """The span count chains at its parent's r_acc (1e-4: modes 10 and 11, relative gap 1.4e-3,
-    one chain), not at tol: the band edge between them leaves mode 11 in the span's set."""
+    """The span count chains at its parent's last run's r_acc (1e-4: modes 10 and 11, relative
+    gap 1.4e-3, one chain), not at tol or the max over runs: the band edge between them leaves
+    mode 11 in the span's set."""
     lr, Vr = prob("short")[6:]
     lo, hi = edges(lr, 3, 11)[0], (lr[10] + lr[11]) / 2
     full = (list(range(3, 12)), "capacity full", rz(range(2, 13)), None)
 
     def post(j, inf):  # si_slice's upper neighbour lies beyond the chain
-        return dict(inf, r_acc=1e-4, neighbours=dict(inf["neighbours"], hi=(lr[12], Vr[:, 12])))
+        nb = dict(inf["neighbours"], hi=(lr[12], Vr[:, 12]))
+        return dict(inf, r_acc=1e-2, runs=[dict(inf["runs"][0], r_acc=1e-4)], neighbours=nb)
 
     _, counts = fake_band(monkeypatch, lambda *_: full, post=post)
     fband("short", lo, hi)
