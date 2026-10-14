@@ -514,7 +514,7 @@ def test_option_sets_pinned():
     assert params(api._precond_sigma) - {"op", "free", "R", "build", "seed"} == set(
         api.SIGMA_OPTIONS
     )
-    assert params(count) - api.RESERVED["count"] - {"_steps"} == set(api.COUNT_OPTIONS)
+    assert params(count) - api.RESERVED["count"] - {"_steps", "_predict"} == set(api.COUNT_OPTIONS)
 
 
 # ------------------------------------------------------------- 7: Chebyshev loop

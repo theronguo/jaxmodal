@@ -650,26 +650,33 @@ def _merge(op, m, groups, consts, c):
         if k:  # project in place, one temporary at a time
             C = Q[:, :k].T @ MU
             for X, B in ((U, Q), (KU, KQ), (MU, MQ)):
-                X -= B[:, :k] @ C
+                X -= (C.T @ B[:, :k].T).T  # F order, no transposing copy
             ev, Y = np.linalg.eigh((U.T @ MU + MU.T @ U) / 2)
             keep = ev >= 0.25
             drop += int((~keep).sum())
             S = Y[:, keep] / np.sqrt(ev[keep])
         j = U.shape[1] if S is None else S.shape[1]
-        for X, B in ((U, Q), (KU, KQ), (MU, MQ)):
-            B[:, k : k + j] = X if S is None else X @ S
-        k += j
+        src = [U, KU, MU]
         del U, KU, MU
+        for B in (Q, KQ, MQ):  # each source freed right after its write
+            X = src.pop(0)
+            B[:, k : k + j] = X if S is None else (S.T @ X.T).T
+            del X
+        k += j
     Q, KQ, MQ = Q[:, :k], KQ[:, :k], MQ[:, :k]
     GK, GM = Q.T @ KQ, Q.T @ MQ
     theta, Z = sla.eigh((GK + GK.T) / 2, (GM + GM.T) / 2)
-    X = Q @ Z
+    X = (Z.T @ Q.T).T
+    del Q
+    KX = (Z.T @ KQ.T).T
+    del KQ
+    MX = (Z.T @ MQ.T).T
+    del MQ
     r, t = np.empty(len(theta)), np.empty(len(theta))
     for j in range(0, len(theta), c):  # explicit residuals, one device chunk at a time
-        z, x = Z[:, j : j + c], X[:, j : j + c]
-        r[j : j + c], t[j : j + c] = _resid(jnp.asarray(x), jnp.asarray(KQ @ z),
-                                            jnp.asarray(MQ @ z), jnp.asarray(theta[j : j + c]),
-                                            consts)  # fmt: skip
+        sl = slice(j, j + c)
+        r[sl], t[sl] = _resid(*(jnp.asarray(Y[:, sl]) for Y in (X, KX, MX)),
+                              jnp.asarray(theta[sl]), consts)  # fmt: skip
     return theta, X, r, t, drop
 
 
@@ -698,11 +705,11 @@ def _span_count(op, free, P, lam_s, cols, x0, x1, nbs, R, verify, opts):
 
 def _band_count(leaves):
     """info["count"] of a band: si_checked's shape over the leaves' counts."""
-    cs = [x for _, x, _ in leaves]
+    cs = [x for _, x in leaves]
     ran = [x for x in cs if x["ran"]]
     passed = bool(cs) and all(x["passed"] for x in cs)
     est = [x["estimate"] for x in cs]
-    fail = next(((iv, x) for iv, x, _ in leaves if not x["passed"]), None)
+    fail = next(((iv, x) for iv, x in leaves if not x["passed"]), None)
     return dict(
         ran=bool(ran), passed=passed, verifiable=bool(ran) and all(x["verifiable"] for x in ran),
         flagged=any(x["flagged"] for x in cs),
@@ -762,11 +769,14 @@ def si_band(
     n_free = int(m.sum()) - (0 if R is None else R.shape[1])
     lam_s, run_s, res_s, thr_s, vecs = np.zeros(0), np.zeros(0, int), np.zeros(0), np.zeros(0), []
     work = [(x0, x1, {}) for x0, x1 in zip([lo, *cuts], [*cuts, hi], strict=True)]
-    slices, leaves = [], []  # leaves: (interval, count info, converged)
+    slices, leaves = [], []  # leaves: (interval, count info)
     r_s, tau_eff, converged, reason, i = 0.0, 0.0, True, None, 0
 
-    def cols(idx):
-        return np.stack([vecs[q] for q in idx], 1) if len(idx) else np.zeros((n, 0))
+    def cols(idx):  # F order: a column touches only its own pages, no transposing copies
+        U = np.empty((n, len(idx)), order="F")
+        for j, q in enumerate(idx):
+            U[:, j] = vecs[q]
+        return U
 
     while work:
         if i >= max_slices:
@@ -822,7 +832,7 @@ def si_band(
         i += 1
         bad = not (inf["residuals"] <= inf["thresholds"]).all()  # si_slice's final check
         if why != "capacity full" or bad:
-            leaves.append(((a, e), inf["count"], bool(inf["converged"])))
+            leaves.append(((a, e), inf["count"]))
             if not inf["converged"]:  # the band stops with the pairs found
                 msg = why if why not in (None, "capacity full") else "slice not converged"
                 converged, reason = False, f"[{a:.6g}, {e:.6g}]: {msg}"
@@ -853,7 +863,7 @@ def si_band(
             if cnt["flagged"]:  # a missed mode: the span is rerun, its pairs deflated
                 work.append((x0, x1, {}))
             else:
-                leaves.append(((x0, x1), cnt, True))
+                leaves.append(((x0, x1), cnt))
             if verbose:
                 print(f"si_band: span [{x0:.6g}, {x1:.6g}], count {cnt['reason'] or 'passed'}",
                       flush=True)  # fmt: skip
@@ -912,11 +922,11 @@ def si_band(
         else:
             V_f[:, k : k + X.shape[1]] = X
             k += X.shape[1]
-    bounds = sorted({x for (x0, x1), _, _ in leaves for x in (x0, x1)} - {lo, hi})
+    bounds = sorted({x for (x0, x1), _ in leaves for x in (x0, x1)} - {lo, hi})
     near = lambda s: any(v0 * (1 - 100 * r_s) <= s <= v1 * (1 + 100 * r_s) for v0, v1 in ranges)  # noqa: E731
     merged = [s for s in bounds if near(s)]
     info = dict(
-        converged=converged and all(x[2] for x in leaves) and not rr_failed,
+        converged=converged and not rr_failed,
         reason=reason or ("a merged window failed its re-check" if rr_failed else None),
         r_acc=r_s,
         tau_eff=tau_eff,

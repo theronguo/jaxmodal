@@ -1215,6 +1215,7 @@ def test_merge(monkeypatch):
     def check(lam, V, want):
         assert np.abs(lam - want).max() <= 1e-10 * want.max()
         assert np.abs(V.T @ (M @ V) - np.eye(V.shape[1])).max() <= 1e-10
+        assert np.abs(V.T @ (K @ V) - np.diag(lam)).max() <= 1e-10 * want.max()
 
     run = functools.partial(fband, "cube", lo, hi, edges=[s], R=R)
     lo_pairs = ([lr[i - 1], lr[i]], [Vr[:, i - 1], v1])
@@ -1543,6 +1544,41 @@ def test_band_full_slice_fails_check(monkeypatch):
     assert not info["converged"] and info["reason"] == f"[{lo:.6g}, {hi:.6g}]: slice not converged"
 
 
+@pytest.mark.parametrize("r_bad, stops", [(2 * TOL, True), (TOL, False)])
+def test_band_full_slice_one_bad(monkeypatch, r_bad, stops):
+    """Code review round 3: the second slice, full, with one of its five residuals above its
+    threshold stops the band there; a residual equal to its threshold passes (the slice
+    splits)."""
+    lr = prob("short")[6]
+    lo, hi = edges(lr, 3, 16)
+    s = (lr[6] + lr[7]) / 2
+
+    def script(j, a, e, kw):
+        if j == 2:
+            return [7, 8, 9, 10, 11], "capacity full", FULL_RZ(), None
+        return new_modes(a, e, kw), None, None, None
+
+    calls, _ = fake_band(monkeypatch, script)
+    fake = si.si_checked
+
+    def one_bad(*a, **kw):
+        lam, V, info = fake(*a, **kw)
+        if len(calls) == 2:
+            r = np.zeros(len(lam))
+            r[2] = r_bad
+            info = dict(info, residuals=r)
+        return lam, V, info
+
+    monkeypatch.setattr(si, "si_checked", one_bad)
+    lam, V, info = fband("short", lo, hi, edges=[s])
+    if stops:
+        assert len(calls) == 2 and not info["converged"]
+        assert info["reason"] == f"[{s:.6g}, {hi:.6g}]: slice not converged"
+        assert np.array_equal(lam, lr[3:12])
+    else:
+        assert len(calls) > 2 and info["converged"] and np.array_equal(lam, lr[3:16])
+
+
 def test_band_from_zero():
     """15c test 6 (roadmap): the clamped band [0, hi] over modes 0-5 matches the reference; the
     count is the step count (no band edges)."""
@@ -1686,17 +1722,34 @@ def test_band_progress_inside(monkeypatch):
     assert counts[0][1]["_predict"] is True
 
 
-def test_merge_threshold(monkeypatch):
-    """Code review round 1: a direction with projected M-norm 0.3 (< 0.5) is a duplicate and
-    dropped."""
+@pytest.mark.parametrize("p, dup", [(0.45, 1), (0.55, 0)])
+def test_merge_threshold(monkeypatch, p, dup):
+    """Code review rounds 1 and 3: the duplicate rule's 0.5 bracketed tightly; a direction with
+    projected M-norm 0.45 is dropped, 0.55 kept."""
     _, free, op, K, M, R, lr, Vr = prob("cube")
     i, j, lo, hi, s = cube_double()
-    v1, v2 = Vr[:, i], Vr[:, j]
-    x = np.sqrt(1 - 0.09) * v1 + 0.3 * v2
-
-    two_runs(monkeypatch, ([lr[i - 1], lr[i]], [Vr[:, i - 1], v1]), ([lr[i]], [x]))
+    x = np.sqrt(1 - p**2) * Vr[:, i] + p * Vr[:, j]
+    two_runs(monkeypatch, ([lr[i - 1], lr[i]], [Vr[:, i - 1], Vr[:, i]]), ([lr[i]], [x]))
     lam, V, info = fband("cube", lo, hi, edges=[s], R=R)
-    assert info["duplicates"] == 1 and len(lam) == 2
+    assert info["duplicates"] == dup and len(lam) == 3 - dup
+
+
+@pytest.mark.parametrize("side", ["above", "below"])
+def test_merge_edge_margin(monkeypatch, side):
+    """Code review round 3: a boundary within 100 r_acc outside a window (s = lam (1 +- 1e-12)
+    next to the cube's double, both copies on one side, the other run finding one copy again)
+    is merged and listed in merged_edges."""
+    _, free, op, K, M, R, lr, Vr = prob("cube")
+    i, j, lo, hi, _ = cube_double()
+    v0, v1, v2, v3 = Vr[:, i - 1], Vr[:, i], Vr[:, j], Vr[:, j + 1]
+    if side == "above":
+        s, runs = lr[j] * (1 + 1e-12), [([i - 1, i, j], [v0, v1, v2]), ([j, j + 1], [v2, v3])]
+    else:
+        s, runs = lr[i] * (1 - 1e-12), [([i - 1, i], [v0, v1]), ([i, j, j + 1], [v1, v2, v3])]
+    two_runs(monkeypatch, *[(lr[q], V) for q, V in runs])
+    lam, V, info = fband("cube", lo, hi, edges=[s], R=R)
+    assert np.abs(lam - lr[i - 1 : j + 2]).max() <= 1e-10 * lr[j + 1]
+    assert info["duplicates"] == 1 and info["merged_edges"] == [s] and info["collapsed"]
 
 
 def test_merge_widen_back(monkeypatch):
