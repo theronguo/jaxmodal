@@ -237,8 +237,9 @@ accepted pair (λ, v, its run, residual, threshold). For slice $[a, b]$ with σ:
        slice it came from; a first slice has none complete), or neither side is complete or cut:
        `ValueError("slice [a, b] fills capacity C without converging a gap >= 100 r_acc on
        either side: raise capacity (measured: a slice needs about 50-85 columns before it
-       converges anything); lo may be below lambda_1 or hi above the spectrum")`. The same
-       message covers $\texttt{capacity}_j < 2b$ and si_slice's free-space stop. Each requeue is
+       converges anything); lo may be below lambda_1 or hi above the spectrum")`. (Implemented:
+       $\texttt{capacity}_j < 2b$ raises its own "raise capacity" message, and si_slice's
+       free-space error, naming "hi may be above the spectrum", passes through.) Each requeue is
        a strict sub-interval of its parent (cuts lie strictly inside) or the same interval with
        more stored pairs or a side newly complete, so the list terminates; `max_slices` is the
        backstop.
@@ -250,8 +251,8 @@ accepted pair (λ, v, its run, residual, threshold). For slice $[a, b]$ with σ:
 **Edge above the spectrum.** A side is complete only with a converged neighbour beyond it, so
 with $\lambda_{hi}$ above the largest eigenvalue the top side never closes: each top remainder
 deflates the modes found below and eventually converges nothing new, which raises the capacity
-error naming "hi above the spectrum" (or si_slice's free-space stop when the basis reaches the
-free DOF count, which si_band reports with the same message). 15d checks $\lambda_{hi}$ against
+error naming "hi above the spectrum" (or si_slice's free-space error when the deflated modes leave
+less than $2b$ free DOFs, which names the same hint). 15d checks $\lambda_{hi}$ against
 the λ̂_max bound up front; an edge between λ_max and λ̂_max is caught here, at the cost of the
 top remainders' full runs. A lower edge in $(0, \lambda_1)$ is the mirror case (15d's f₁ < λ₁
 rule guards it up front).

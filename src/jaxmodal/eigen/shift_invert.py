@@ -258,7 +258,8 @@ def si_slice(
         nw = W.shape[1]
     n_avail = int(free.sum()) - R.shape[1] - nw  # the Krylov space cannot grow beyond it
     if n_avail < 2 * b:
-        raise ValueError(f"2 block = {2 * b} exceeds the free space left by R and W ({n_avail})")
+        raise ValueError(f"2 block = {2 * b} exceeds the free space left by R and W ({n_avail}):"
+                         " hi may be above the spectrum")  # fmt: skip
     if nw:
         _check_ortho(op, m, W, seed)
     lam_W = np.zeros(0) if lam_W is None else np.asarray(lam_W, float)
