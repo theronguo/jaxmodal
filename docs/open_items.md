@@ -160,7 +160,7 @@ PR 15c's stagnation rule skips plateaus only while the best explicit residual is
 
 ### Late capacity errors and slice efficiency (PR 15c → PR 15d)
 
-Code review rounds 1 (hex20 $8\times6\times5$, AMG; scratch measurements), 7, 8 and 9:
+Code review rounds 1 (hex20 $8\times6\times5$, AMG; scratch measurements), 7, 8, 9 and 10:
 
 - **A capacity error discards the band.** Modes 5–200 at capacity 96 ran 37 slices (about 25 min) and then raised at a remainder. At 1M DOF a slice step can take hours. Remainders run at capacity 72 there because a 2-mode window costs a whole projector chunk (24 columns). Options for 15d: size the capacity with the window's chunk included; return the pairs found with `converged` False and the reason, as an inner failure does; or attach them to the error.
 - **Verification slices.** 11 of those 37 slices found at most one new mode: their pairs were already stored by the parent, and they ran 10–15 steps to close their edges. MINRES is about 92% of slice time. 15d's cost model should price this; closing such remainders more cheaply is an option.

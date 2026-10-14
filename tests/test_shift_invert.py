@@ -877,6 +877,7 @@ def test_restart_capacity(monkeypatch):
                                  lam_W=lr[w], count_precond=exact("short", c_hi))  # fmt: skip
     c = info["count"]
     assert [k["capacity"] for k in calls] == [300, 312] and calls[1]["W"].shape[1] == 15
+    assert np.array_equal(calls[1]["lam_W"][:10], lr[w])  # paired with W's columns
     assert c["restarts"] == 1 and c["flagged"] and c["passed"] and len(lam) == 6
     assert info["r_acc"] == 2 * TOL and info["tau_eff"] == 2 * TAU  # the max over the runs
 
@@ -1003,10 +1004,14 @@ def test_checked_no_neighbour(monkeypatch):
     assert len(calls) == 2 and len(lam) == 6 and info["count"]["passed"]
 
 
-def test_checked_restart_neighbour(monkeypatch):
+@pytest.mark.parametrize("case", ["own", "w20", "inside", "own_lo"])
+def test_checked_restart_neighbour(monkeypatch, case):
     """Run 1 misses mode 15, its upper neighbour mode 19 a hair above; the restart finds 15 and 19
-    (in-band at its r_acc), neighbour 20: the count takes the last run's neighbour (an earlier
-    run's would duplicate mode 19 and fail the count's orthonormality check)."""
+    (in-band at its r_acc) with neighbour 20 (own), or with the caller's W = mode 20 closing its
+    upper side (w20, no neighbour of its own): the count never takes run 1's copy of mode 19 (it
+    would fail the count's orthonormality check). inside: the restart finds 15 only, its
+    neighbour inside the found set: run 1's neighbour (mode 19) is used. own_lo: the mirror below
+    (run 1's lower neighbour mode 12 a hair below, the restart finding 15 and 12, neighbour 11)."""
     lr, Vr = prob("short")[6:]
     _, free, op = prob("short")[:3]
     lo, hi = cb_edges()
@@ -1014,19 +1019,30 @@ def test_checked_restart_neighbour(monkeypatch):
 
     def fake(*a, **kw):
         calls.append(kw)
-        i, h = ([13, 14, 16, 17, 18], (lr[19] * (1 + 1e-13), Vr[:, 19])) if len(calls) == 1 else (
-            [15, 19], (lr[20], Vr[:, 20]))  # fmt: skip
+        lo_nb = (lr[12], Vr[:, 12])
+        if len(calls) == 1:
+            i, h = [13, 14, 16, 17, 18], (lr[19] * (1 + 1e-13), Vr[:, 19])
+            if case == "own_lo":
+                h, lo_nb = (lr[19], Vr[:, 19]), (lr[12] * (1 - 1e-13), Vr[:, 12])
+        else:
+            i, h = {"own": ([15, 19], (lr[20], Vr[:, 20])), "w20": ([15, 19], None),
+                    "inside": ([15], (lr[18], Vr[:, 18])),
+                    "own_lo": ([12, 15], (lr[19], Vr[:, 19]))}[case]  # fmt: skip
+            if case == "own_lo":
+                lo_nb = (lr[11], Vr[:, 11])
         z = np.zeros(len(i))
-        nb = {"lo": (lr[12], Vr[:, 12]), "hi": h}
+        nb = {"lo": lo_nb, "hi": h}
         return lr[i], Vr[:, i], dict(converged=True, neighbours=nb, residuals=z,
                                      thresholds=z + 1e-6, r_acc=1e-6, tau_eff=1e-8)  # fmt: skip
 
     monkeypatch.setattr(si, "si_slice", fake)
     P = exact("short", (lr[18] + lr[19]) / 2)
-    lam, _, info = si.si_checked(op, free, lo, hi, None, capacity=300, count_precond=P)
+    W = dict(W=Vr[:, 20:21], lam_W=lr[20:21]) if case == "w20" else {}
+    lam, _, info = si.si_checked(op, free, lo, hi, None, capacity=300, count_precond=P, **W)
     c = info["count"]
     assert len(calls) == 2 and c["estimates"][0] >= 0.5 and c["passed"]
-    assert np.array_equal(lam, lr[13:20])
+    want = {"inside": lr[13:19], "own_lo": lr[12:19]}.get(case, lr[13:20])
+    assert np.array_equal(lam, want)
 
 
 def test_checked_merge_order(monkeypatch):
@@ -1056,12 +1072,18 @@ def test_checked_merge_order(monkeypatch):
 
 
 def test_beyond_guard():
-    """A si_slice neighbour on the wrong side of [a, b] is not used."""
+    """A si_slice neighbour on the wrong side of [a, b], or within the chain gap g of it (a copy
+    of a found mode), is not used; any run's may be (an older one when a newer lies inside)."""
     v = np.ones(3)
     W, lam_W = np.zeros((3, 0)), np.zeros(0)
-    assert si._beyond(4.0, 6.0, {"lo": [(5.0, v)], "hi": [(5.5, v)]}, W, lam_W) == [None, None]
-    lo, hi = si._beyond(4.0, 6.0, {"lo": [None, (3.0, v)], "hi": [(7.0, v), (5.5, v)]}, W, lam_W)
+    assert si._beyond(4.0, 6.0, {"lo": [(5.0, v)], "hi": [(5.5, v)]}, W, lam_W, 0) == [None, None]
+    nb = {"lo": [None, (3.0, v)], "hi": [(6.0 * (1 + 1e-9), v), (7.0, v)]}
+    lo, hi = si._beyond(4.0, 6.0, nb, W, lam_W, 1e-6)  # a copy of 6.0 within the gap: ignored
     assert lo[0] == 3.0 and hi[0] == 7.0
+    assert si._beyond(4.0, 6.0, {"lo": [(4.0, v)], "hi": [(6.0, v)]}, W, lam_W, 0) == [None, None]
+    nb = {"lo": [(0.9, v)], "hi": [(2.1, v), (1.95, v)]}  # the restart's 1.95 lies inside
+    lo, hi = si._count_nbs(np.array([1.0, 1.5, 2.0]), 1.0, 1.9, nb, W, lam_W, 1e-4)
+    assert lo[0] == 0.9 and hi[0] == 2.1
 
 
 # ---------------------------------------------------------------- PR 15c: si_band, fakes
@@ -2040,9 +2062,8 @@ def test_slice_w_neighbours():
     assert np.abs(lam - lam0).max() <= 1e-10 * lam0.max() and info["steps"] <= info0["steps"]
     v, conv = info["ritz"]
     assert conv[np.isin(v, lr[w])].all()
-    nb = si._beyond(
-        lam.min(), lam.max(), {k: [p] for k, p in info["neighbours"].items()}, Vr[:, w], lr[w]
-    )
+    nbs = {k: [p] for k, p in info["neighbours"].items()}
+    nb = si._beyond(lam.min(), lam.max(), nbs, Vr[:, w], lr[w], 0)
     assert (nb[0][0], nb[1][0]) == (lr[12], lr[19])
     lam, V, info = solve("short", lo, hi, W=Vr[:, [20]], lam_W=lr[[20]])
     assert info["converged"] and info["neighbours"]["hi"][0] == pytest.approx(lr[19], rel=1e-8)

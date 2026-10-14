@@ -337,8 +337,9 @@ one line per slice (interval, σ, capacity_j, outcome, new modes, span and cuts,
   `gap`. Its count block (band_count with the nearest out-of-band pair on each side, or `count`
   at λ_lo = 0) moves into `_count_slice(op, free, V_c, lam_c, lo, hi, nb_lo, nb_hi, **kw)`, used
   by `si_checked` and by `si_band`'s span leaves (implemented: the neighbour choice and its
-  error in `_count_nbs`, shared too; on a restart each side's neighbour is the last run's that
-  has one, since a restart may close a side on a deflated mode of the first run).
+  error in `_count_nbs`, shared too; on a restart every run's neighbours are candidates, beyond
+  the chain gap of the smallest run $r_{acc}$: a restart may close a side on a deflated mode or
+  return an earlier run's neighbour in-band).
 - Nothing else in 15a/15b changes. An inner failure still stops the band (no seed retry): its
   measured cause is fixed at the source, for plateaus above $\|b\|$ only; a plateau below
   $\|b\|$ in the 2-norm (another norm ratio, a better preconditioner) would still stop the
