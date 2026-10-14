@@ -2014,6 +2014,12 @@ def test_band_progress_side(monkeypatch):
     assert [c["interval"] for c in calls] == [(lo, hi), (cut, hi)] and len(counts) == 2
     assert [s["interval"] for s in info["slices"] if s["kind"] == "span"] == [(lo, cut), (cut, hi)]
     assert np.array_equal(lam, lr[3:6]) and info["converged"]
+    # round 8: completing the remainder's cut side is not progress (no identical rerun)
+    r3 = ([], "capacity full", rz([2, 3, 4, 5], [6]), None)
+    calls, _ = fake_band(monkeypatch, lambda j, *_: r1 if j == 1 else r3)
+    with pytest.raises(ValueError, match=r"\(no progress\)"):
+        fband("short", lo, hi)
+    assert [c["interval"] for c in calls] == [(lo, hi), (cut, hi)]
     # round 6: a flagged span covering its whole parent (both sides done) is rerun with no side
     # marked done; the rerun completing both sides is progress, its span counted
     r1b = ([3, 4, 5], "capacity full", rz([2, 3, 4, 5, 6]), None)

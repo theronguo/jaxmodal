@@ -234,7 +234,7 @@ accepted pair (λ, v, its run, residual, threshold). For slice $[a, b]$ with σ:
      its pairs (15b's restarts then apply); an unverifiable one stays a leaf, not passed.
      - **Raise** when the run made no progress (no new pair inside $[a, b]$, which W deflates so
        it cannot be a stored one, and no side complete that was not complete in the run of the
-       slice it came from; a first slice has none complete), or neither side is complete or cut:
+       slice it came from; a first slice has none complete, a remainder its inner edge), or neither side is complete or cut:
        `ValueError("slice [a, b] fills capacity C without converging a gap >= 100 r_acc on
        either side: raise capacity (measured: a slice needs about 50-85 columns before it
        converges anything); lo may be below lambda_1 or hi above the spectrum")`. (Implemented:
