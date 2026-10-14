@@ -1358,7 +1358,8 @@ def test_band_one_cut(monkeypatch, side):
 def test_band_rules(monkeypatch):
     """15c test 3: one side complete and the other without a cut reruns [a, b] with W; a rerun
     of the same interval without a new pair or a newly complete side raises; nothing converged
-    and neither side done or cut raise; max_slices; the capacity error names both causes."""
+    raises, neither side done or cut requeues whole; max_slices; the capacity error names both
+    causes."""
     lr = prob("short")[6]
     lo, hi = edges(lr, 3, 16)
     first = ([3], "capacity full", rz([2, 3], [4, 5]), None)
@@ -1381,9 +1382,23 @@ def test_band_rules(monkeypatch):
     fake_band(monkeypatch, lambda *_: ([], "capacity full", rz([], [2, 3, 4]), None))
     with pytest.raises(ValueError, match=r"fills capacity 90 .*nothing converged.*below lambda_1"):
         fband("short", lo, hi, capacity=90)  # the capacity asked for (96 inside)
-    fake_band(monkeypatch, lambda *_: ([9], "capacity full", rz([9], [2, 8, 10, 16]), None))
-    with pytest.raises(ValueError, match="neither side done or cut"):
+    # neither side done or cut: requeued whole, its new pair deflated; again with nothing new raises
+    calls, _ = fake_band(monkeypatch, lambda j, *_: ([9] if j == 1 else [], "capacity full",
+                                                      rz([9], [2, 8, 10, 16]), None))  # fmt: skip
+    with pytest.raises(ValueError, match=r"\(no progress\)"):
         fband("short", lo, hi)
+    assert [c["interval"] for c in calls] == [(lo, hi)] * 2 and lr[9] in calls[1]["lam_W"]
+    # a remainder whose run nearest sigma (new mode 3) has no side done or cut, while a stored run
+    # (5, 6) reaches its edge: requeued whole, not a capacity error (code review round 18)
+    lo2, hi2 = edges(lr, 3, 10)
+    rit = {
+        1: ([5, 6, 7, 8, 9], rz([5, 6, 7, 8, 9, 10], [2, 3, 4])),
+        2: ([3], rz([3, 5, 6], [2, 4])),
+    }
+    calls, _ = fake_band(monkeypatch, lambda j, a, e, kw: (rit[j][0], "capacity full", rit[j][1],
+                         None) if j in rit else found(j, a, e, kw))  # fmt: skip
+    lam, V, info = fband("short", lo2, hi2)
+    assert np.array_equal(lam, lr[3:12]) and calls[2]["interval"] == calls[1]["interval"]
     # slice 2 converges only stored modes below its edge: no side done, no rerun
     c1 = (lr[7] + lr[8]) / 2
     calls, _ = fake_band(monkeypatch, lambda j, a, e, kw: found(j, a, e, kw) if j == 1 else (

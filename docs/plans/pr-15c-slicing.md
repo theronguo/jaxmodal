@@ -244,9 +244,10 @@ accepted pair (λ, v, its run, residual, threshold). For slice $[a, b]$ with σ:
        rerun starts with none, bounded by `RESTARTS`; implemented after code review round 14: with
        only the parent's, an interval completing its sides in turn looped to `max_slices`); a first
        slice has no side complete; a remainder has its inner edge (a cut, or the other side's cut or
-       complete edge) complete, or neither side is complete or cut:
+       complete edge) complete; a slice with neither side complete nor cut is requeued whole, its
+       new pairs deflated (code review round 18: it raised although it found a new pair):
        `ValueError("slice [a, b] fills capacity C without converging a gap >= 100 r_acc on
-       either side: raise capacity (measured: a slice needs about 50-85 columns before it
+       either side (why): raise capacity (measured: a slice needs about 50-85 columns before it
        converges anything); lo may be below lambda_1 or hi above the spectrum")`. (Implemented:
        $\texttt{capacity}_j < 2b$ raises its own "raise capacity" message, and si_slice's
        free-space error, naming "hi may be above the spectrum", passes through.) Each requeue is
@@ -406,7 +407,7 @@ constants.)
    not both sides complete) with no new pair inside $[a, b]$ and no newly completed side raises
    (a remainder completing only its cut side included); a slice with a cut or both sides
    complete and nothing new splits or finishes (no check);
-   neither side complete or cut raises; a span leaf whose count is flagged is requeued as a run
+   a slice with new pairs and neither side complete or cut is requeued whole; a span leaf whose count is flagged is requeued as a run
    with W = its pairs; `edge_unreached` "both" with valid cuts splits (no raise); `max_slices`
    exceeded raises; an inner failure stops the band with the pairs found, `converged` False and
    the reason; an unverifiable (capped) and a flagged run leaf are not split, `count["passed"]`
