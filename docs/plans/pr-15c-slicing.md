@@ -244,13 +244,14 @@ accepted pair (λ, v, its run, residual, threshold). For slice $[a, b]$ with σ:
        rerun starts with none, bounded by `RESTARTS`; implemented after code review round 14: with
        only the parent's, an interval completing its sides in turn looped to `max_slices`); a first
        slice has no side complete; a remainder has its inner edge (a cut, or the other side's cut or
-       complete edge) complete), or neither side is complete or cut:
+       complete edge) complete, or neither side is complete or cut:
        `ValueError("slice [a, b] fills capacity C without converging a gap >= 100 r_acc on
        either side: raise capacity (measured: a slice needs about 50-85 columns before it
        converges anything); lo may be below lambda_1 or hi above the spectrum")`. (Implemented:
        $\texttt{capacity}_j < 2b$ raises its own "raise capacity" message, and si_slice's
        free-space error, naming "hi may be above the spectrum", passes through.) Each requeue is
-       a strict sub-interval of its parent (cuts lie strictly inside) or the same interval with
+       a strict sub-interval of its parent (cuts lie strictly inside; without a new pair its
+       endpoints are midpoints of stored values, a finite set) or the same interval with
        more stored pairs or a side newly complete, and a span is rerun at most `RESTARTS` times
        in its lineage, so the list terminates; `max_slices` is the backstop.
    - **Count flagged** (after 15b's restarts) or **unverifiable**: a leaf; its pairs join the store
@@ -401,9 +402,10 @@ constants.)
    the edge with that neighbour as `lam_out`, likewise with a W mode as the neighbour; an
    unreached side without a cut becomes one remainder holding its converged pairs as W; one side
    complete and the other without a cut reruns $[a, b]$ with W; a remainder holding only W modes
-   with known neighbours converges at once and becomes a leaf; a full slice with no new pair
-   inside $[a, b]$ and no newly completed side raises (a remainder completing only its cut
-   side included);
+   with known neighbours converges at once and becomes a leaf; a slice requeued whole (no cut,
+   not both sides complete) with no new pair inside $[a, b]$ and no newly completed side raises
+   (a remainder completing only its cut side included); a slice with a cut or both sides
+   complete and nothing new splits or finishes (no check);
    neither side complete or cut raises; a span leaf whose count is flagged is requeued as a run
    with W = its pairs; `edge_unreached` "both" with valid cuts splits (no raise); `max_slices`
    exceeded raises; an inner failure stops the band with the pairs found, `converged` False and

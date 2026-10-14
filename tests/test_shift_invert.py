@@ -1487,7 +1487,8 @@ def test_band_progress_side(monkeypatch):
 
 def test_band_span_rerun(monkeypatch):
     """A flagged span is rerun fresh (no side done), at most RESTARTS times per lineage (through
-    remainders), then kept as a flagged leaf."""
+    remainders), then kept as a flagged leaf; a rerun cut on one side only with nothing new is
+    split, not "no progress"."""
     lr = prob("short")[6]
     lo, hi = edges(lr, 3, 5)
     r2 = ([], "capacity full", rz([2, 3, 4, 5, 6]), None)
