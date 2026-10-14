@@ -34,9 +34,9 @@ configurations chosen on the implementation and checked at ± one chunk and a se
 reference docs of `si_slice`/`si_checked` and the roadmap note in the docs list.
 
 Revision 5 (plan review round 4): a MINRES false-stagnation fix (a seed-dependent "inner solves
-failed" of plain si_slice, measured, diagnosed and prototyped below); cuts only between run
-values inside the slice (a cut on the edge gave zero-width spans and identical reruns); progress
-defined against the parent; static run halves; a W neighbour sets si_slice's `seen`; a capped deflation
+failed" of plain si_slice, measured, diagnosed and prototyped below); cuts only between run values
+inside the slice (a cut on the edge gave zero-width spans and identical reruns); progress defined
+against the parent; static run halves; a W neighbour sets si_slice's `seen`; a capped deflation
 margin; test 2's robustness property restated (match or raise, never a short result) with the
 measured candidates; the roadmap stop-rule text and si_checked's neighbour sentence in the docs
 list.
@@ -347,33 +347,32 @@ constants.)
 1. **One slice:** `si_band` on modes 13–18's band (15b's) with a large capacity equals
    `si_checked`'s result; one leaf, no split, count passed.
 2. **Capacity split (roadmap), real runs:** (a) a block-6 configuration (candidate: the band of
-   modes 5–28, capacity 96: 2–3 runs by seed in the round-5 emulations); (b) a block-2
-   configuration (candidate: modes 8–21, capacity 48, 2–3 runs by seed; 40, which lost modes 20
-   and 21 under revision 2's rule, passes or raises by seed in the round-5 emulations). The configurations are chosen
-   on the implementation. Robustness: at ± one chunk of capacity and with a second seed the band
-   matches the reference (splits allowed) or raises the capacity error, never a short or wrong
-   result (a chunk is about a quarter of a slice's need here, so −1 chunk may raise); this sweep
-   is marked slow, the chosen configurations stay fast. At the
-   chosen capacity and seed: at least one full slice replaced by a span and
-   remainders, every leaf converged (span leaves included), the result matches the reference
-   (count, λ to max(1e-8, 10 ε λ̂_max/λ) for gaps ≥ 1e-2, else 10 r_acc), $\|V^\top M V - I\|
-   \le 10^{-10}$, no duplicates, every counted leaf's count < 0.5 (roadmap "each slice's count"),
-   the recorded number of runs (per seed); a spy checks $\lceil \texttt{capacity}_j/c\rceil c +
-   \lceil n_{W,j}/c\rceil c \le \lceil \texttt{capacity}/c\rceil c$, that a remainder's W holds
-   the stored modes of its window and its known neighbours, and records the smallest remainder
-   capacity_j (measured 0.75–0.83 of the capacity; recorded, not asserted). (c) modes 8–21 at block 6, capacity 72: raises the
-   capacity error (5–12 runs by seed; only the raise is asserted, the time recorded). (d) The
-   MINRES regression: plain `si_slice` on [32.120, 39.101], capacity 72, seed 0 converges (it
-   stopped with "inner solves failed" before the fix); plus a `tests/test_krylov.py` case: an
-   indefinite system with an initial 2-norm plateau above $\|b\|$ longer than STALL_C checks
-   converges and is not flagged. A plateau above $\|b\|$ needs a norm mismatch (with P = I the
-   2-norm residual is monotone): a diagonal indefinite A with a diagonal SPD P of widely spread
-   entries, chosen (and asserted) so the early explicit residual exceeds $\|b\|$ for more than
-   STALL_C checks, or the slice's step-2 column rebuilt from the run; and a column for which
-   $x = 0$ stays the best iterate (e.g. A = diag(1, −1, 0, …) with b on the null direction)
-   exits at `maxit`, neither converged nor stagnated, in the expected iterations. (e) Slow:
-   modes 5–40 at block 6, capacity 96 (6–7 runs, 38 modes, about 45 s; it stopped with "inner
-   solves failed" before the fix) matches the reference.
+   modes 5–28, capacity 96: 2–3 runs by seed in the round-5 emulations); (b) a block-2 configuration
+   (candidate: modes 8–21, capacity 48, 2–3 runs by seed; 40, which lost modes 20 and 21 under
+   revision 2's rule, passes or raises by seed in the round-5 emulations). The configurations are
+   chosen on the implementation. Robustness: at ± one chunk of capacity and with a second seed the
+   band matches the reference (splits allowed) or raises the capacity error, never a short or wrong
+   result (a chunk is about a quarter of a slice's need here, so −1 chunk may raise); this sweep is
+   marked slow, the chosen configurations stay fast. At the chosen capacity and seed: at least one
+   full slice replaced by a span and remainders, every leaf converged (span leaves included), the
+   result matches the reference (count, λ to max(1e-8, 10 ε λ̂_max/λ) for gaps ≥ 1e-2, else 10
+   r_acc), $\|V^\top M V - I\| \le 10^{-10}$, no duplicates, every counted leaf's count < 0.5
+   (roadmap "each slice's count"), the recorded number of runs (per seed); a spy checks $\lceil
+   \texttt{capacity}_j/c\rceil c + \lceil n_{W,j}/c\rceil c \le \lceil \texttt{capacity}/c\rceil c$,
+   that a remainder's W holds the stored modes of its window and its known neighbours, and records
+   the smallest remainder capacity_j (measured 0.75–0.83 of the capacity; recorded, not asserted).
+   (c) modes 8–21 at block 6, capacity 72: raises the capacity error (5–12 runs by seed; only the
+   raise is asserted, the time recorded). (d) The MINRES regression: plain `si_slice` on [32.120,
+   39.101], capacity 72, seed 0 converges (it stopped with "inner solves failed" before the fix);
+   plus a `tests/test_krylov.py` case: an indefinite system with an initial 2-norm plateau above
+   $\|b\|$ longer than STALL_C checks converges and is not flagged. A plateau above $\|b\|$ needs a
+   norm mismatch (with P = I the 2-norm residual is monotone): a diagonal indefinite A with a
+   diagonal SPD P of widely spread entries, chosen (and asserted) so the early explicit residual
+   exceeds $\|b\|$ for more than STALL_C checks, or the slice's step-2 column rebuilt from the run;
+   and a column for which $x = 0$ stays the best iterate (e.g. A = diag(1, −1, 0, …) with b on the
+   null direction) exits at `maxit`, neither converged nor stagnated, in the expected iterations.
+   (e) Slow: modes 5–40 at block 6, capacity 96 (6–7 runs, 38 modes, about 45 s; it stopped with
+   "inner solves failed" before the fix) matches the reference.
 3. **Fakes for the outcome rules** (a fake `si_checked` returning chosen pairs, Ritz values and
    converged flags): an unconverged Ritz value between two converged values below σ puts the cut
    above it (no mode claimed past it); an unconverged value nearest σ with new converged pairs
