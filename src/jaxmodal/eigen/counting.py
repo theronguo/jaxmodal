@@ -164,7 +164,7 @@ def _calibrate(run, d, n_blocks):
 
 
 def _decide(verify, d, n_probes, block, m, t_ref, t_it, tau, n_free, run, prepare=None):
-    """(count?, record) of the completeness-count rule (docs/eigensolvers.md#verify). d: the
+    """(count?, record) of the completeness-count rule (docs/eigensolvers.md#frequency-band-0-f_max). d: the
     degree (None above MAX_DEGREE); block: probes per block; m, t_it: the solver's block width
     and warm iteration seconds (the a-priori bound); t_ref: the solve's seconds. verify True or
     False: count = verify, with the bound recorded. None: skip above MAX_DEGREE or when the bound

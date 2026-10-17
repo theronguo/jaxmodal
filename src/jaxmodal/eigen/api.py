@@ -308,7 +308,7 @@ def solve_modes(
     cost no more than the solve; count_options (COUNT_OPTIONS) go to count. V is the solver's
     own array compacted in place. info adds band, strategy, reason, chunk, c_max, budget, mu1_ub,
     n_store, from_zero, stagnation_risk, count, and LOBPCG's n_beyond, capacity, t_iteration
-    or si_band's slices (docs/eigensolvers.md#frequency-bands)."""
+    or si_band's slices (docs/eigensolvers.md#interior-bands-and-strategy)."""
     if band is None:
         if n_modes is None:
             raise ValueError("pass n_modes or band")
