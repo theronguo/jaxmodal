@@ -800,3 +800,107 @@ def test_edge_above_spectrum(fake_builds):
         run("tiny", band, strategy="lobpcg")
     with pytest.raises(ValueError, match="no progress.*hi above the spectrum"):
         run("tiny", band, strategy="shift_invert")
+
+
+# ---------------------------------------------------------------- 12: _solve(max_capacity)
+
+
+def band_solve(cap, lam_stop, n_modes=30, chunk=5, dtype="float64", maxit=200):
+    """lobpcg._solve in band mode on "short" with the exact preconditioner at 0."""
+    _, free, op, *_ = prob("short")
+    return lob._solve(op, free, n_modes, TOL, None, exact("short", 0.0), None, maxit, 0,
+                      chunk=chunk, basis_dtype=dtype, lam_stop=lam_stop,
+                      max_capacity=cap)  # fmt: skip
+
+
+def test_solve_capacity_sequence(monkeypatch):
+    """Test 12: every basis width a multiple of c_L = 40 (chunk 5, k = 10), growing straight to
+    the cap 120 (40 -> 80 -> 120), then the capacity stop below lam_stop: 110 + k = 120 locks,
+    115 stops."""
+    news, real = [], lob._grow
+    monkeypatch.setattr(lob, "_grow", lambda V, count, new, c, dt: news.append(new)
+                        or real(V, count, new, c, dt))  # fmt: skip
+    lam, V, info = band_solve(120, 10 * prob("short")[6][-1])
+    assert news == [80, 120] and info["capacity"] == 120 and info["stopped"] == "capacity"
+    assert len(lam) == 115 and V.shape == (V.shape[0], 130)
+
+
+def test_solve_boundary(monkeypatch):
+    """Test 12: C_max = 40 at chunk 5: count 30 (count + k = C_max) locks to 35 (a >= mutant
+    stops at 30), the next lock stops and is dropped; V is the preallocated F-order zeros
+    array of C_max + k columns, zero from the locked count on; the initial basis is capped
+    (n_modes 60 -> C_max - k = 30)."""
+    n = prob("short")[2].n_dof
+    made, real = [], np.zeros
+
+    def zeros(shape, *a, **kw):
+        out = real(shape, *a, **kw)
+        if shape == (n, 50) and kw.get("order") == "F":
+            made.append(id(out))
+        return out
+
+    monkeypatch.setattr(np, "zeros", zeros)
+    lam, V, info = band_solve(40, prob("short")[6][-1], n_modes=60)
+    monkeypatch.undo()
+    assert info["stopped"] == "capacity" and len(lam) == 35 and info["capacity"] == 40
+    assert len(info["residuals"]) == len(info["thresholds"]) == 35
+    assert info["chunks"][-1]["locked"] == 0 and made == [id(V)]
+    assert V.shape == (n, 50) and V.flags.f_contiguous and not V[:, 35:].any()
+    assert info["n_modes"] == 30
+
+
+def test_solve_boundary_one(monkeypatch):
+    """Test 12: chunks locking one mode each reach count + k = C_max + 1 at count 31: stop."""
+    real = lob._iterate
+
+    def one(*a, **kw):
+        state, r, t, j, rec = real(*a, **kw)
+        return state, r, t, min(j, 1), rec
+
+    monkeypatch.setattr(lob, "_iterate", one)
+    lam, _, info = band_solve(40, prob("short")[6][-1])
+    assert info["stopped"] == "capacity" and len(lam) == 31
+
+
+def test_solve_capped_start():
+    """Test 12: a band ending in the first chunk: no growth, the capped basis and n_modes."""
+    lam, V, info = band_solve(40, prob("short")[6][3], n_modes=60)
+    assert info["capacity"] == 40 and info["n_modes"] == 30 and "stopped" not in info
+    assert V.shape[1] == 50 and len(lam) >= 4 and not V[:, len(lam):].any()
+
+
+@pytest.mark.parametrize("dtype", ["float64", "float32"])
+def test_solve_refill(monkeypatch, dtype):
+    """Test 12: after a growth and its lock, B's first count + j columns are V's (cast to the
+    basis dtype) and the rest 0; at _grow's entry no live array has the old basis's shape (the
+    state and B freed first), while one had it at the lock before."""
+    n = prob("short")[2].n_dof
+    rec = dict(old=None, checks=0)
+    real_grow, real_lock = lob._grow, lob._lock
+
+    def grow(V, count, new, c, dt):
+        shapes = [x.shape for x in jax.live_arrays()]
+        assert rec["old"] > 0 and (n, rec["old"]) not in shapes
+        rec.update(V=V, grown=True)
+        return real_grow(V, count, new, c, dt)
+
+    def lock(B, count, X, j):
+        rec["old"] = B.shape[1]
+        assert sum(x.shape == B.shape for x in jax.live_arrays()) == 1  # B alone has the width
+        out = real_lock(B, count, X, j)
+        if rec.pop("grown", False):
+            Bh, Vh = np.asarray(out), rec.pop("V")
+            assert np.array_equal(Bh[:, : count + j], Vh[:, : count + j].astype(dtype))
+            assert not Bh[:, count + j :].any()
+            rec["checks"] += 1
+        return out
+
+    monkeypatch.setattr(lob, "_grow", grow)
+    monkeypatch.setattr(lob, "_lock", lock)
+    _, _, info = band_solve(80, prob("short")[6][-1], dtype=dtype)
+    assert rec["checks"] == 1 and info["capacity"] == 80
+
+
+def test_solve_needs_cap():
+    with pytest.raises(ValueError, match="needs max_capacity"):
+        band_solve(None, 1.0)
