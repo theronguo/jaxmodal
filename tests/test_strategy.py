@@ -14,7 +14,21 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from test_shift_invert import EPS, MAT, MESHES, edges, exact, lam_hat, prob
+import test_shift_invert as tsi
+from test_shift_invert import (
+    EPS,
+    MAT,
+    MESHES,
+    TAU,
+    cb_edges,
+    edges,
+    exact,
+    fake_band,
+    lam_hat,
+    prob,
+    ref_slice,
+    spy_slice,
+)
 
 from jaxmodal.eigen import counting, solve_modes
 from jaxmodal.eigen.lobpcg import _band_count
@@ -1173,3 +1187,346 @@ def test_count_block_none(fake_builds, monkeypatch, verify):
 def test_solve_modes_memory_band():
     with pytest.raises(ValueError, match="needs band=\\(0, f_max\\)"):
         mem.solve_modes_memory(prob("short")[0], MESHES["short"][1], band=(1.0, 2.0))
+
+
+# ---------------------------------------------------------------- 14: si_band(verify=None)
+
+SKIP_BOUND = "predicted cost (a lower bound) above the solve"
+SKIP_CAL = "predicted cost above the solve"
+SKIP_DEG = "degree above MAX_DEGREE: the gap is too small to count"
+
+
+class Clock:
+    """A fake perf_counter advanced by hand."""
+
+    def __init__(self):
+        self.t = 0.0
+
+    def perf_counter(self):
+        return self.t
+
+
+def decide(verify, d=7, t_ref=1.0, t_it=None, tau=None, step=0.0, block=0.0, monkeypatch=None):
+    """counting._decide with 50 probes in blocks of 10 (5 blocks), m = 6, 100 free DOFs; run(s)
+    returns the times step and block; rec: the run's steps, prepare's calls."""
+    rec = dict(runs=[], prepared=0)
+    clock = Clock()
+    monkeypatch.setattr(counting, "time", clock)
+
+    def run(s):
+        rec["runs"].append(s)
+        return np.nan, dict(time=dict(step=step, block=block))
+
+    def prepare():
+        rec["prepared"] += 1
+        clock.t += 0.25
+
+    go, out = counting._decide(verify, d, 50, 10, 6, t_ref, t_it, tau, 100, run, prepare)
+    return go, out, rec
+
+
+def test_decide_table(monkeypatch):
+    """Test 14: the count rule as a pure table."""
+    bound2 = 2.0 * 35 * 10 / 6 * 1e-3  # 5 blocks x d = 7 steps, b = 10, m = 6, t_it 1e-3
+    for verify in (True, False):
+        go, r, rec = decide(verify, t_it=1e-3, monkeypatch=monkeypatch)
+        assert go is verify and r["predicted_kind"] == "bound" and not rec["runs"]
+        assert r["predicted_s"] == pytest.approx(bound2) and r["predicted_steps"] == 35
+        assert r["reason"] is None and not rec["prepared"]
+    go, r, rec = decide(True, monkeypatch=monkeypatch)  # no warm time: no bound
+    assert go and r["predicted_kind"] == "unknown" and r["predicted_s"] is None
+    go, r, rec = decide(None, d=None, monkeypatch=monkeypatch)
+    assert not go and r["reason"] == SKIP_DEG and not rec["runs"]
+    go, r, rec = decide(None, t_it=1e-3, t_ref=0.5 * bound2, monkeypatch=monkeypatch)
+    assert not go and r["reason"] == SKIP_BOUND and not rec["prepared"] and not rec["runs"]
+    bound3 = 0.3 / 2.0 * bound2  # tau looser than the rule: one PCG iteration a step
+    go, r, rec = decide(None, t_it=1e-3, tau=1.0, t_ref=0.5 * bound3, monkeypatch=monkeypatch)
+    assert not go and r["reason"] == SKIP_BOUND and r["predicted_s"] == pytest.approx(bound3)
+    go, r, rec = decide(None, t_it=1e-3, tau=1.0, t_ref=1.5 * bound3, step=1.0, block=1.0,
+                        monkeypatch=monkeypatch)  # fmt: skip
+    assert not go and r["reason"] == SKIP_CAL and rec == dict(runs=[1, 3], prepared=1)
+    assert r["predicted_kind"] == "calibrated" and r["build_s"] == 0.25
+    assert r["predicted_s"] == pytest.approx(5 * (7 + 1) + 0.25)
+    go, r, rec = decide(None, t_it=1e-3, tau=1.0, t_ref=1.0, step=0.01, block=0.02,
+                        monkeypatch=monkeypatch)  # fmt: skip
+    assert go and r["reason"] is None and r["calibrated_step"] == 0.01
+    assert r["predicted_s"] == pytest.approx(5 * (7 * 0.01 + 0.02) + 0.25)
+
+
+def clocked_slice(monkeypatch, lo, hi, *, move=False, fail=False, capacity=96):
+    """si_slice on "short" (exact preconditioner) under a fake clock: MINRES call 1 takes 10 s,
+    later calls 1e-3 s per iteration; move: call 1 reports stagnation (sigma moves); fail: call
+    1 returns non-finite residuals. Returns info and the per-call (seconds, iterations)."""
+    clock, calls = Clock(), []
+    real = si.minres
+
+    def minres(A, b, P, **kw):
+        x, info = real(A, b, P, **kw)
+        its = int(np.asarray(info["iterations"]).max())
+        dt = 10.0 if not calls else 1e-3 * its
+        clock.t += dt
+        calls.append((dt, its))
+        if len(calls) == 1 and (move or fail):
+            info = dict(info, stagnated=jnp.ones_like(info["stagnated"]),
+                        residuals=jnp.full_like(info["residuals"], np.nan if fail else 1.0))
+        return x, info
+
+    monkeypatch.setattr(si, "minres", minres)
+    monkeypatch.setattr(si, "time", clock)
+    _, free, op = prob("short")[:3]
+    _, _, info = si.si_slice(op, free, lo, hi, exact("short", (lo + hi) / 2), capacity=capacity,
+                             tol=TOL, tau=TAU)  # fmt: skip
+    return info, calls
+
+
+def test_t_minres_warm(monkeypatch):
+    """Test 14: the warm MINRES seconds per iteration drop the discarded move solve and the
+    first kept step (its compile): (sum - move - first) / (iterations - first's)."""
+    lo, hi = edges(prob("short")[6], 17, 24)
+    info, calls = clocked_slice(monkeypatch, lo, hi, move=True)
+    its = info["minres_iterations"]
+    assert info["sigma_moved"] and len(its) >= 2 and [i for _, i in calls[1:]] == its
+    want = (sum(d for d, _ in calls) - calls[0][0] - calls[1][0]) / (sum(its) - its[0])
+    assert info["t_minres"] == pytest.approx(want)
+    assert info["time"]["total"] == pytest.approx(sum(d for d, _ in calls))
+
+
+def test_t_minres_cold(monkeypatch):
+    """Test 14: a one-step slice (mode 3 of "short", _slice_check reporting done at once) gives
+    the cold mean; a failed first step gives None."""
+    lo, hi = edges(prob("short")[6], 3, 4)
+    real = si._slice_check
+    monkeypatch.setattr(si, "_slice_check", lambda *a: (True, *real(*a)[1:]))
+    info, calls = clocked_slice(monkeypatch, lo, hi)
+    assert info["steps"] == 1 and len(calls) == 1
+    assert info["t_minres"] == pytest.approx(10.0 / calls[0][1])
+    monkeypatch.undo()
+    info, _ = clocked_slice(monkeypatch, lo, hi, fail=True)
+    assert info["reason"] == "inner solves failed" and info["t_minres"] is None
+
+
+def stub_count(monkeypatch, *, degree=7, capped=False, step=0.0, block=0.0, est=0.1):
+    """si._count_slice replaced: a _predict call returns the degree, a calibration (_steps) the
+    times step and block, a real count est (or est(call)); calls: (_predict, _steps) each."""
+    calls, real = [], []
+
+    def count_slice(*a, _predict=False, _steps=None, **kw):
+        calls.append((_predict, _steps))
+        t = dict(step=step, block=block, total=0.0)
+        ci = dict(capped=capped, degree=degree, block=10, time=t, steps=_steps or 1)
+        if _predict or _steps:
+            return np.nan, ci
+        real.append(kw)
+        e = est(len(real)) if callable(est) else est
+        return e, dict(ci, verifiable=True, passed=e < 0.5)
+
+    monkeypatch.setattr(si, "_count_slice", count_slice)
+    return calls
+
+
+def leaf(monkeypatch, verify, t_leaf=1.0, t_minres=1e-3, **kw):
+    """si_checked on CB with ref_slice (time t_leaf, t_minres) and the _count_slice stub."""
+    spy_slice(monkeypatch, ref_slice, lambda j, out: (out[0], out[1], dict(
+        out[2], time=dict(total=t_leaf), t_minres=t_minres)))  # fmt: skip
+    calls = stub_count(monkeypatch, **{k: kw.pop(k) for k in list(kw) if k != "count_options"})
+    _, free, op = prob("short")[:3]
+    lo, hi = cb_edges()
+    _, _, info = si.si_checked(op, free, lo, hi, None, capacity=300, verify=verify, **kw)
+    return info["count"], calls
+
+
+def test_leaf_branches(monkeypatch):
+    """Test 14, run leaves under None: each branch makes one _predict call; calibrations
+    (_steps 1, 3) only on calibrated branches; the real count only on the count branch."""
+    P, C1, C3, REAL = (True, None), (False, 1), (False, 3), (False, None)
+    c, calls = leaf(monkeypatch, None, capped=True)
+    assert c["reason"] == SKIP_DEG and calls == [P] and not c["ran"]
+    monkeypatch.undo()
+    c, calls = leaf(monkeypatch, None, t_leaf=1e-9)
+    assert c["reason"] == SKIP_BOUND and calls == [P] and c["predicted_kind"] == "bound"
+    monkeypatch.undo()
+    c, calls = leaf(monkeypatch, None, t_leaf=1e-9, count_options={"tau": 1.0})
+    assert c["reason"] == SKIP_BOUND and calls == [P]
+    assert c["predicted_s"] == pytest.approx(0.3 * 5 * 7 * 10 / 6 * 1e-3)
+    monkeypatch.undo()
+    c, calls = leaf(monkeypatch, None, t_minres=None, step=1.0, block=1.0)
+    assert c["reason"] == SKIP_CAL and calls == [P, C1, C3] and c["predicted_kind"] == "calibrated"
+    monkeypatch.undo()
+    cal = []
+    real = counting._calibrate
+    monkeypatch.setattr(counting, "_calibrate", lambda *a: cal.append(a[1:]) or real(*a))
+    c, calls = leaf(monkeypatch, None, t_leaf=100.0, t_minres=None)
+    assert c["ran"] and c["reason"] is None and calls == [P, C1, C3, REAL] and cal == [(7, 5)]
+
+
+@pytest.mark.parametrize("verify", [True, False])
+def test_leaf_recorded(monkeypatch, verify):
+    """Test 14: under True and False the prediction is recorded, no calibration."""
+    c, calls = leaf(monkeypatch, verify)
+    assert c["predicted_kind"] == "bound" and c["predicted_s"] > 0
+    assert calls == [(True, None)] + ([(False, None)] if verify else [])
+    assert c["reason"] == (None if verify else "not requested")
+
+
+def test_leaf_restart(monkeypatch):
+    """Test 14: restarts follow the first decision: one _predict call and one _decide call,
+    two real counts (0.8 verifiable, then 0.1), restarts 1."""
+    decided, real = [], counting._decide
+    monkeypatch.setattr(counting, "_decide", lambda *a: decided.append(1) or real(*a))
+    c, calls = leaf(monkeypatch, True, est=lambda j: 0.8 if j == 1 else 0.1)
+    assert decided == [1] and calls.count((True, None)) == 1
+    assert calls.count((False, None)) == 2 and c["restarts"] == 1 and c["passed"]
+
+
+def span_spy(monkeypatch):
+    """si._span_count wrapped: its t_leaf / t_minres and the counting._decide calls inside."""
+    rec, decided = [], []
+    real_decide, real_span = counting._decide, si._span_count
+    monkeypatch.setattr(counting, "_decide", lambda *a: decided.append(a[0]) or real_decide(*a))
+
+    def span(*a, **kw):
+        n0 = len(decided)
+        out = real_span(*a, **kw)
+        rec.append(dict(t_leaf=kw["t_leaf"], t_minres=kw["t_minres"], decides=len(decided) - n0))
+        return out
+
+    monkeypatch.setattr(si, "_span_count", span)
+    return rec
+
+
+@pytest.mark.parametrize("verify", [None, True, False])
+def test_span_inherits(monkeypatch, verify):
+    """Test 14: a span leaf is decided once, on its parent run's t_leaf and t_minres (fake_band
+    post): under None 1e-9 s against 1 s per MINRES iteration skips on the bound; under True
+    and False the bound is recorded."""
+
+    def post(j, info):
+        return dict(info, count=dict(info["count"], t_leaf=1e-9, t_minres=1.0))
+
+    fake_band(monkeypatch, tsi.split_once, post=post)
+    rec = span_spy(monkeypatch)
+    lo, hi = edges(prob("short")[6], 3, 16)
+    _, _, info = tsi.fband("short", lo, hi, verify=verify)
+    (sp,) = [x for x in info["slices"] if x["kind"] == "span"]
+    assert rec == [dict(t_leaf=1e-9, t_minres=1.0, decides=1)]
+    assert sp["count"]["predicted_kind"] == "bound"
+    want = {None: SKIP_BOUND, True: None, False: "not requested"}[verify]
+    assert sp["count"]["reason"] == want and sp["count"]["ran"] == bool(verify)
+
+
+def slice_fake(monkeypatch, r_of):
+    """si_slice replaced: each call converges the reference modes in [a, e] new to it (r_acc
+    r_of.get(call, TOL), 1 s, 1e-3 s per MINRES iteration); returns the intervals."""
+    lr, Vr = prob("short")[6:]
+    calls = []
+
+    def fake(op, free, a, e, P, **kw):
+        calls.append((a, e))
+        i = tsi.new_modes(a, e, kw)
+        below, above = np.flatnonzero(lr < a), np.flatnonzero(lr > e)
+        nb = {"lo": (lr[below[-1]], Vr[:, below[-1]]) if len(below) else None,
+              "hi": (lr[above[0]], Vr[:, above[0]]) if len(above) else None}  # fmt: skip
+        z = np.zeros(len(i))
+        info = dict(converged=True, reason=None, sigma=(a + e) / 2, neighbours=nb, residuals=z,
+                    thresholds=z + TOL, r_acc=r_of.get(len(calls), TOL), tau_eff=TAU, basis=0,
+                    ritz=None, time=dict(total=1.0), t_minres=1e-3)  # fmt: skip
+        return lr[i], Vr[:, i], info
+
+    monkeypatch.setattr(si, "si_slice", fake)
+    return calls
+
+
+def test_rerun_redecides(monkeypatch):
+    """Test 14: a slice whose r_acc widens its window over a stored mode is rerun, and the rerun
+    decides again: counting._bound once per si_checked call, twice on the rerun slice."""
+    lr = prob("short")[6]
+    lo, hi = edges(lr, 3, 16)
+    s = (lr[11] + lr[12]) / 2
+    slice_fake(monkeypatch, {2: 1e-4})
+    stub_count(monkeypatch)
+    bounds, checked = [], []
+    real_bound, real_checked = counting._bound, si.si_checked
+    monkeypatch.setattr(counting, "_bound", lambda *a: bounds.append(len(checked))
+                        or real_bound(*a))  # fmt: skip
+
+    def chk(op, free, a, e, P, **kw):
+        checked.append((a, e))
+        return real_checked(op, free, a, e, P, **kw)
+
+    monkeypatch.setattr(si, "si_checked", chk)
+    tsi.fband("short", lo, hi, edges=[s], block=1)
+    assert checked == [(lo, s), (s, hi), (s, hi)] and bounds == [1, 2, 3]
+
+
+@pytest.mark.parametrize("verify", [None, True])
+def test_real_band_verify(verify, monkeypatch):
+    """Test 14: a real si_band (exact preconditioner, test 4's band at capacity 96: >= 2 runs, a
+    span): every leaf records its reason and predicted kind, each span leaf decided once on its
+    parent's t_leaf / t_minres, never "not requested"; under True every leaf counted < 0.5."""
+    rec = span_spy(monkeypatch)
+    lo, hi = edges(prob("short")[6], 5, 29)
+    lam, V, info = tsi.rband("short", lo, hi, capacity=96, verify=verify)
+    tsi.check_band("short", lo, hi, lam, V, info, counted=verify is True)
+    spans = [x for x in info["slices"] if x["kind"] == "span"]
+    assert spans and sum(x["kind"] == "run" for x in info["slices"]) >= 2
+    assert len(rec) == len(spans) and all(r["decides"] == 1 for r in rec)
+    runs = [x for x in info["slices"] if x["kind"] == "run"]
+    for r, x in zip(rec, spans, strict=True):
+        parent = runs[x["parent"]]["count"]  # parent: the index among the runs
+        assert (r["t_leaf"], r["t_minres"]) == (parent["t_leaf"], parent["t_minres"])
+    for x in [x for x in info["slices"] if x["leaf"]]:  # a full slice is never decided
+        c = x["count"]
+        assert c["predicted_kind"] in ("unknown", "bound", "calibrated")
+        assert c["reason"] != "not requested"
+        if verify:
+            assert c["ran"] and c["estimate"] < 0.5 and c["reason"] is None
+
+
+def test_solve_modes_records(fake_builds):
+    """Test 14: solve_modes(strategy="shift_invert") at the default verify records the rule."""
+    _, _, info = run("short", fband("short", 15, 25), n_modes=12, strategy="shift_invert")
+    for x in [x for x in info["slices"] if x["leaf"]]:
+        assert {"reason", "predicted_kind", "predicted_s"} <= set(x["count"])
+
+
+@pytest.mark.slow
+def test_leaf_calibration(monkeypatch):
+    """Test 14 (as 14b's test_calibration): one leaf on hex20 12^3 with real AMG under None,
+    the count forced: the bound <= the measured count time, the calibrated prediction within
+    [0.5, 2] x it."""
+    from jaxmodal.mesh import box_mesh
+    from jaxmodal.operators import dof_mask, unstructured
+    from jaxmodal.precond import amg
+
+    rec = {}
+    real_cal, real_bound = counting._calibrate, counting._bound
+
+    def calibrate(*a):
+        rec["cal"] = real_cal(*a)
+        return (0.0, 0.0) + rec["cal"][2:]  # force the count
+
+    monkeypatch.setattr(counting, "_calibrate", calibrate)
+    monkeypatch.setattr(counting, "_bound", lambda *a: rec.update(bound=real_bound(*a)) or 0.0)
+    mesh = box_mesh((12,) * 3, (1 / 12,) * 3, type="hex20")
+    f = solve_modes(mesh, MAT, {"xmin": "xyz"}, 8)[2]["frequencies"]
+    lam = (2 * np.pi * f) ** 2
+    lo, hi = (lam[2] + lam[3]) / 2, (lam[6] + lam[7]) / 2
+    free = dof_mask(mesh, {"xmin": "xyz"})
+    op = unstructured(mesh, MAT)
+    P = amg(op, free, (lo + hi) / 2, mesh.points, nonsingular=True)
+    _, _, info = si.si_checked(op, free, lo, hi, P, capacity=300, tol=1e-8, verify=None,
+                               count_options={"n_probes": 12})  # fmt: skip
+    c = info["count"]
+    actual = c["time"]["total"]
+    print(f"calibrated {rec['cal'][0]:.2f} s, actual {actual:.2f} s, bound {rec['bound']:.2f} s")
+    assert c["ran"] and c["predicted_kind"] == "calibrated"
+    assert rec["bound"] <= actual and 0.5 * actual <= rec["cal"][0] <= 2 * actual
+
+
+def test_store_warning(monkeypatch):
+    """Test 14: the store warning once, when the store passes n_store."""
+    fake_band(monkeypatch, tsi.found)
+    lo, hi = edges(prob("short")[6], 3, 16)
+    with pytest.warns(UserWarning, match="stored modes exceed n_store = 5") as w:
+        tsi.fband("short", lo, hi, edges=[(lo + hi) / 2], n_store=5)
+    assert sum("exceed n_store" in str(x.message) for x in w) == 1
