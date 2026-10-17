@@ -597,3 +597,206 @@ def test_pre_estimate_free(fake_builds, monkeypatch, precond):
     else:
         assert [c for c, _ in calls] == ["est"] and "maxit" not in calls[0][1]
     assert mu <= info["mu1_ub"] <= 1.1 * mu and not info["from_zero"]
+
+
+# ---------------------------------------------------------------- 8: the band filter
+
+LO = 3.0
+
+
+@pytest.mark.parametrize(
+    "lam, t, lam_lo, n_band, want",
+    [
+        ([1, 2, 3, 4, 5], 1e-8, LO, 5, (2, 5)),  # the exact edge
+        ([1, 3 - 1e-7, 3.5, 4], 1e-8, LO, 4, (1, 4)),  # inside 100 t
+        ([1, 2.99, 3.5, 4], 1e-8, LO, 4, (2, 4)),  # outside 100 t
+        ([1, 3 - 4e-6, 3 - 2e-6, 4], 1e-8, LO, 4, (1, 4)),  # a chain crossing lam_lo
+        ([1, 2.99, 2.9999, 3.1], [1e-8, 1e-2, 1e-9, 1e-8], LO, 4, (1, 4)),  # non-monotone t
+        ([1, 3.5, 4, 5, 6], [1e-8, 1e-8, 1e-8, 1e-2, 1e-8], LO, 3, (1, 3)),  # the upper end
+        ([1, 2], 1e-8, LO, 2, (2, 2)),  # all below lam_lo
+        ([], 1e-8, LO, 0, (0, 0)),  # nothing
+        ([1, 2, 3], 1e-8, 0.0, 2, (0, 2)),  # from 0
+    ],
+)
+def test_keep(lam, t, lam_lo, n_band, want):
+    assert api._keep(np.array(lam, float), t, lam_lo, n_band) == want
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_permute(seed):
+    """The in-place cycle permutation equals V[:, order] and keeps V's F order and buffer."""
+    rng = np.random.default_rng(seed)
+    V = np.asfortranarray(rng.standard_normal((7, 12)))
+    order = rng.permutation(9)
+    want, ptr = V[:, order], V.ctypes.data
+    rest = V[:, 9:].copy()
+    api._permute(V, order)
+    assert np.array_equal(V[:, :9], want) and np.array_equal(V[:, 9:], rest)
+    assert V.flags.f_contiguous and V.ctypes.data == ptr
+
+
+def harness(monkeypatch, lam, n_band, *, t=TOL, stopped=None, converged=True, hold=None):
+    """solve_modes' band path on "short" with api._solve returning the crafted Ritz values lam
+    (residuals 1e-12 lam, thresholds t: per mode or one value), F-order V of 3 spare zero columns
+    with column j filled with j + 1, built inside (only its id kept, or the array appended to
+    hold). rec: the id, the lam api._verify received (its stand-in returns a no-count record),
+    the si_band calls."""
+    rec = dict(verify=[], band=[])
+    lam = np.array(lam, float)
+    n = prob("short")[2].n_dof
+
+    def solve(*a, **kw):
+        V = np.zeros((n, len(lam) + 3), order="F")
+        V[:, : len(lam)] = np.arange(1, len(lam) + 1)
+        rec["id"] = id(V)
+        if hold is not None:
+            hold.append(V)
+        info = dict(converged=converged, residuals=1e-12 * lam,
+                    thresholds=np.broadcast_to(np.asarray(t, float), lam.shape).copy(),
+                    n_band=n_band, n_modes=len(lam), block=10, chunk=5, t_iteration=0.0,
+                    time=dict(setup=0.0, iterations=0.0))  # fmt: skip
+        if stopped:
+            info["stopped"] = stopped
+        return lam.copy(), V, info
+
+    def verify(verify, opts, op, free, R, lam, *a):
+        rec["verify"].append(lam.copy())
+        return dict(ran=False, reason="faked")
+
+    seen = {}
+
+    def band(*a, **kw):
+        rec["band"].append(a[2:4])
+        return stub_band(seen)(*a, **kw)
+
+    monkeypatch.setattr(api, "_solve", solve)
+    monkeypatch.setattr(api, "_verify", verify)
+    monkeypatch.setattr(api, "si_band", band)
+    return rec
+
+
+def fake_run(lo, hi, **kw):
+    """solve_modes on "short" for the band [lo, hi] (eigenvalues) through the harness."""
+    return run("short", (freq(lo), freq(hi)), sigma=0.5, **kw)
+
+
+def assert_compacted(rec, lam, V, cols):
+    assert id(V) == rec["id"] and V.base is None and V.flags.f_contiguous
+    assert V.nbytes == 8 * V.shape[0] * len(lam) and V.shape[1] == len(cols)
+    assert np.array_equal(V[0], np.array(cols, float))
+
+
+@pytest.mark.parametrize("lo, cols", [(0.0, [1, 2, 3, 4, 5]), (1.5, [2, 3, 4, 5])])
+def test_filter_compacted(fake_builds, monkeypatch, lo, cols):
+    """Test 8: the kept columns compacted in place in the solver's own array, then shrunk (i0 =
+    0, and i0 = 1 with the source overlapping the destination)."""
+    rec = harness(monkeypatch, [1, 2, 3, 4, 5, 7], 5)
+    lam, V, info = fake_run(lo, 6.0)
+    assert_compacted(rec, lam, V, cols)
+    assert np.array_equal(lam, np.array(cols, float)) and len(info["residuals"]) == len(cols)
+    assert np.array_equal(rec["verify"][0], [1, 2, 3, 4, 5, 7])
+
+
+def test_filter_held(fake_builds, monkeypatch):
+    """Test 8: another reference to V: the warning, and a copy with the kept columns."""
+    hold = []
+    harness(monkeypatch, [1, 2, 3, 4, 5, 7], 5, hold=hold)
+    with pytest.warns(RuntimeWarning, match="returned modes copied"):
+        lam, V, _ = fake_run(1.5, 6.0)
+    assert V.flags.f_contiguous and V.base is None and np.array_equal(V[0], [2, 3, 4, 5])
+    assert id(V) != id(hold[0])
+
+
+@pytest.mark.parametrize("collect", [True, False])
+def test_filter_jax_view(fake_builds, monkeypatch, collect):
+    """Test 8: a _verify whose last jax call transfers a view of V: jaxlib holds that view until
+    a collection, which the resize's gc.collect runs (no warning, the same id); with the
+    collect a no-op and automatic collection off, the copy warning (the scenario needs it)."""
+    rec = harness(monkeypatch, list(range(1, 11)), 9)
+
+    def verify(verify, opts, op, free, R, lam, V, *a):
+        rec["verify"].append(lam.copy())
+        jnp.asarray(V[:, :8]).block_until_ready()
+        return dict(ran=False, reason="faked")
+
+    monkeypatch.setattr(api, "_verify", verify)
+    if not collect:
+        monkeypatch.setattr(api, "gc", types.SimpleNamespace(collect=lambda: 0))
+    gc.disable()
+    try:
+        if collect:
+            lam, V, _ = fake_run(1.5, 9.5)
+            assert_compacted(rec, lam, V, list(range(2, 10)))
+        else:
+            with pytest.warns(RuntimeWarning, match="returned modes copied"):
+                fake_run(1.5, 9.5)
+    finally:
+        gc.enable()
+
+
+def test_filter_sorted(fake_builds, monkeypatch):
+    """Test 8: out-of-order LOBPCG values sorted with their columns, residuals and thresholds
+    before the cut; _verify sees the sorted values; the result is the solver's array."""
+    rec = harness(monkeypatch, [1, 2, 5, 6, 4.8], 3, t=[1e-8, 2e-8, 3e-8, 4e-8, 5e-8])
+    lam, V, info = fake_run(4.9, 5.5)
+    assert np.array_equal(rec["verify"][0], [1, 2, 4.8, 5, 6])
+    assert_compacted(rec, lam, V, [3])  # 5.0 was column 3
+    assert np.array_equal(lam, [5.0]) and np.array_equal(info["residuals"], [5e-12])
+    assert np.array_equal(info["thresholds"], [3e-8])
+
+
+def test_filter_recut(fake_builds, monkeypatch):
+    """Test 8: the cut recomputed after the sort: 5 moved below lam_hi = 5.5 is kept."""
+    rec = harness(monkeypatch, [1, 5, 2, 3, 6], 1)
+    lam, V, _ = fake_run(1.5, 5.5)
+    assert np.array_equal(lam, [2, 3, 5]) and np.array_equal(rec["verify"][0], [1, 2, 3, 5, 6])
+    assert_compacted(rec, lam, V, [3, 4, 2])
+
+
+def test_filter_cut_at_end(fake_builds, monkeypatch):
+    """Test 8: a sort that moves the cut to the end: not converged, "sorted cut at the end", no
+    _verify call."""
+    rec = harness(monkeypatch, [1, 5, 2], 1)
+    lam, _, info = fake_run(1.5, 5.5)
+    assert not info["converged"] and info["stopped"] == "sorted cut at the end"
+    assert info["count"]["reason"] == "sorted cut at the end" and not rec["verify"]
+    assert np.array_equal(lam, [2, 5])
+
+
+def test_filter_capacity_sorted(fake_builds, monkeypatch):
+    """Test 8: a capacity stop with values out of order still falls back to si_band."""
+    rec = harness(monkeypatch, [1, 5, 2, 3], 4, stopped="capacity")
+    with pytest.warns(UserWarning, match="4 modes locked"):
+        _, _, info = fake_run(1.5, 9.0)
+    assert len(rec["band"]) == 1 and not rec["verify"] and info["reason"] == "capacity"
+    assert info["mu1_ub"] == 1.0
+
+
+# ---------------------------------------------------------------- 9, 10: clusters, the top
+
+
+@pytest.mark.parametrize("strategy", ["lobpcg", "shift_invert"])
+@pytest.mark.parametrize("i_lo, i0", [(8, 8), (3, 2)])  # on a double; mid-triple (2-4)
+def test_lower_edge_clusters(fake_builds, strategy, i_lo, i0):
+    """Test 9: lam_lo exactly on a cube eigenvalue of a double (11.68) and in the middle of a
+    triple (8.86): every copy returned, not from 0."""
+    fake_builds["name"] = "cube"
+    _, _, _, K, M, _, lr, _ = prob("cube")
+    f1, f2 = freq(lr[i_lo]), fband("cube", i0, 12)[1]
+    i1 = int((lr <= (2 * np.pi * f2) ** 2).sum())  # edges widens over the 12.74 triple
+    lam, V, info = run("cube", (f1, f2), strategy=strategy)
+    assert not info["from_zero"] and len(lam) == i1 - i0
+    assert np.allclose(lam, lr[i0:i1], rtol=1e-8)
+    assert np.abs(V.T @ (M @ V) - np.eye(len(lam))).max() <= 1e-6
+
+
+def test_edge_above_spectrum(fake_builds):
+    """Test 10: f2 above the largest eigenvalue of "tiny": LOBPCG raises 14b's free-space error,
+    the slices their "no progress" error naming the upper side."""
+    fake_builds["name"] = "tiny"
+    lr = prob("tiny")[6]
+    band = (fband("tiny", 3, 6)[0], freq(2 * lr[-1]))
+    with pytest.raises(ValueError, match="more modes than the mesh provides"):
+        run("tiny", band, strategy="lobpcg")
+    with pytest.raises(ValueError, match="no progress.*hi above the spectrum"):
+        run("tiny", band, strategy="shift_invert")
