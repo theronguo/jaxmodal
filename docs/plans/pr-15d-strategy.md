@@ -5,7 +5,7 @@ Branch `pr-15d-strategy` from `main` (PR 15c merged). Roadmap: PR 15 (the [15d] 
 the PR 15c plan's split (15d = the cost model, the memory budget, the strategy choice,
 `verify=None` for bands and `solve_modes(..., band=(f1, f2))`).
 
-Revision 15. Rounds 1–8:
+Revision 16. Rounds 1–8:
 - one decision, no seeding;
 - memory-driven, no time crossover;
 - no hybrid junction;
@@ -135,7 +135,30 @@ Round 14 (with the late round-13 correctness report):
   - 17a2's `lam_stop` and environment;
   - 17c at degree 2 vs 8.
 - **Docs:** the Returns fields, the probe budget's independence from `memory_budget`, and ROADMAP
-  line 107.
+  line 107 (it is eigensolvers.md line 107, the Capacity item; see round 15).
+
+Round 15:
+- **The resize** runs inline, in the one frame holding the only reference (`_solve` for its
+  resize to `end`, `solve_modes` for the filter). numpy refuses it under any weakref or second
+  name, so a helper taking V could never resize. The copy fallback now warns.
+- **Tests** track identity by `id()`, never by a weakref or a stored array. Spies record ids,
+  shapes and flags only. An extra-reference row checks the warning.
+- **Stale text** from round 14 (`block_until_ready`, the band-mode view) is rewritten.
+- **Simplifications:**
+  - `_decision` is dropped, and a rerun re-decides;
+  - `_count_nbs`/`_beyond` are unchanged;
+  - `need` has no `up()`;
+  - `_count_block` uses `_largest`;
+  - `info["budget"]` is a pair;
+  - `pc64 = pc` unless GMG is fp32.
+- **`verify=None` inputs** are pinned: si_slice's new `time["total"]`, and the span's parent
+  time and $t_\text{minres}$.
+- **Tests:**
+  - the cache-spy scenario;
+  - the lever $C_{max}$ evaluation;
+  - test_shift_invert.py:1826 (`verify=None` is now valid);
+  - test_band.py's count spy, which held W.
+- **Docs:** preconditioners.md line 479, eigensolvers.md lines 103 and 107, and the refill rates.
 
 ## Scope
 
@@ -201,6 +224,7 @@ Out of scope (deferred, listed in `docs/open_items.md`):
   - the default budget and the fit test's factors;
   - the GPU peaks of the new compositions, including growth fragmentation under the BFC
     allocator and the refill's PCIe time;
+  - the growth refill's host transient (modelled at 1–2 host chunks);
   - the cost ratio on the GPU;
   - stagnation near depth 1000 at 10M.
 
@@ -262,7 +286,7 @@ solve_modes(..., band=(f1, f2), strategy="shift_invert", memory_budget=8e9,
       Exact terms are persistent, so they are inside every phase of `total`.
     - GPU: `device_total` with E = `device_exact` against the budget, and `host_total` with
       E = `host_exact` against the host budget.
-  - Recorded in `info["budget"]`.
+  - Recorded in `info["budget"]` as the pair (budget, host_budget), host_budget None on CPU.
 - `slice_options`: dict with keys `tau`, `maxit_inner`, `block` (default 6, the roadmap's b),
   `max_slices`, `capacity` (overrides the sizing), `edges` and `verbose`. They are validated as
   si_band does, and pinned in test_options.py against si_band's and si_slice's signatures.
@@ -324,10 +348,19 @@ solve_modes(..., band=(f1, f2), strategy="shift_invert", memory_budget=8e9,
         keep the i0 modes below the band resident, about 16 GB for a 1.6 GB result at 2M DOF
         with band modes 900–1000. A copy would need V + copy on the host, which is unbudgeted
         on GPU.
-      - So `_solve` in band mode returns its owning V resized to `end`, not a view, and
-        solve_modes holds the only reference.
-      - If `resize` raises `ValueError` (another reference exists), the result falls back to
-        `np.array(V[:, :i1 − i0], order="F")` (documented; no reference is kept today).
+      - **Inline, in the owning frame.** numpy's `refcheck` refuses the resize under any other
+        name, helper parameter, container or weakref (measured in round 15). So the
+        compaction loop and `V.resize` are written inline:
+        - in `solve_modes`, which tuple-unpacks the solver's result (`lam, V, info =
+          lobpcg._solve(...)` / `si_band(...)`), so V is its only name;
+        - and in `_solve`, for its own resize to `end`.
+
+        A pure helper computes only (i0, i1). The loop is skipped when i0 = 0.
+      - **Fallback.** If `resize` raises `ValueError`, the result is
+        `np.array(V[:, :i1 − i0], order="F")` and a `RuntimeWarning` says "returned modes
+        copied: another reference to V exists". `_solve`'s resize uses the same fallback. The
+        fallback runs after the in-place compaction, so another holder would see shifted
+        columns (documented; no code path keeps one, and tests assert the warning is absent).
   - **Fields:**
     - `strategy` ∈ {"lobpcg", "shift_invert"};
     - `reason` ∈ {"forced", "fits", "capacity", "memory"};
@@ -453,12 +486,16 @@ Every slice path makes this check.
          $c_L$ = 64. That fits well under the dropped 9-block step, about 61 GB at k = 48.
      - **Synchronised.** Each chunk is synchronised (`block_until_ready`) and dropped before the
        next, so queued transfers do not pile up.
+     - The host-side refill transient (2 chunks on CPU) is measured on CPU only; on GPU it is
+       modelled (one host chunk, up to 2 with the F→C copy) and listed in the Deferred GPU
+       checks.
      - After the lock, B equals the old B with the lock applied, exactly.
    - The host V is `np.zeros((n, C_max + k), order="F")`, allocated once. Its calloc is lazy:
      untouched columns cost no pages. It is never concatenated. The k extra columns are
      needed: after the last lock count ≤ $C_{max}$, and a band-end final chunk writes up to
      count + chunk.
-   - **Band mode returns its owning V,** resized in place to `end` columns (`V.resize`).
+   - **Band mode returns its owning V,** resized in place to `end` columns (`V.resize`, inline
+     in `_solve`, with the warning fallback above).
      Today's `np.ascontiguousarray(V[:, :end])` (lobpcg.py:563) is removed, since it would
      make a C-order copy.
    - **At a capacity stop** (checked right after the band-end break, lobpcg.py:546–548, and
@@ -568,16 +605,19 @@ memory-driven rule.
   - `_slice_capacity(op_memory, pc64, n_dof, *, n_store, block, n_rigid, budget,
     host_budget)` → int or None;
   - `_count_block(op_memory, pc64, n_dof, *, voxel, n_rigid, n_store, window, n_probes,
-    budget, host_budget)` → int or None. `voxel` picks `count_memory`'s `COUNT_STEP` row;
+    budget, host_budget)` → int or None, through `_largest(fits, 1, 1, n_probes)`. `voxel`
+    picks `count_memory`'s `COUNT_STEP` row;
   - `_default_budget()` → (budget, host_budget), with host_budget None on CPU. On GPU a user
     `memory_budget` sets the device budget, and the host budget stays 0.8 × RAM.
   - In api.py, `_ladder(reach, need)` → chunk or None is the pure rule of test 3:
     - `reach` is the {chunk: C_max or None} dict, also `info["c_max"]`;
     - `need` is None or a {chunk: threshold} dict, built by the caller from
-      min(up(⌈1.25 n_modes⌉ + k, $c_L$), the free-space cap) per chunk.
+      min(⌈1.25 n_modes⌉ + k, the free-space cap) per chunk (no rounding: $C_{max}$ is a
+      multiple of $c_L$, so reach ≥ need is the same test).
   - solve_modes builds `op_memory, pc = (functools.cache(f) if f else f for f in
-    _models(...))`. The slice searches reuse `op_memory`, with `pc64 = pc` when
-    `precond_dtype` is already float64, else one cached fp64 model.
+    _models(...))`. The slice searches reuse `op_memory`, with `pc64 = pc` unless the
+    preconditioner is GMG in fp32 (the only model that depends on `precond_dtype`), else one
+    cached fp64 model.
   - The levers' $C_{max}$ in the warnings is computed at the chosen chunk, or at chunk 5 on
     "memory".
 - **One search helper,** `_largest(fits, step, lo, hi)`: the largest multiple of `step` in [lo, hi]
@@ -644,7 +684,8 @@ memory-driven rule.
     denominator.
   - With one step, the cold mean is used;
 - otherwise calibrate (PR 14b's `_calibrate`, with the leaf's count closure and preconditioner)
-  and count iff the prediction ≤ the leaf's time.
+  and count iff the prediction ≤ the leaf's time. `_slice_degree` returns $g_\text{eff}$ as
+  its gap, the value `_bound` reads.
 
 The details:
 - **Order.** The degree comes from λ only, through a new slice-only helper in shift_invert.py:
@@ -655,24 +696,27 @@ The details:
     the neighbours' λ.
   - A user `count_options["degree"]` is returned as d.
   - `count`, `band_count` and `_run` are unchanged.
-  - The neighbours come from `_count_nbs`/`_beyond`, which today return λ and columns
-    together. They are split into a λ-only pass, which keeps the "no converged neighbour"
-    RuntimeError, and the column gather (`W[:, i]`, `cols(near)`), which runs only after the
-    decision. Both skips happen before the gather.
+  - The neighbours come from `_count_nbs`/`_beyond`, unchanged: they gather at most one
+    column per side, and keep the "no converged neighbour" RuntimeError. Only the in-band
+    gather (`W_in` in si_checked, `cols(inb)` in `_span_count`) moves after the decision, so
+    both skips happen before it.
 - **Restarts.** The rule is decided once per leaf, on its first count. si_checked's restarts
   follow that decision. The falsy-verify sites (`_predict=not verify` and `if not verify:`
   at shift_invert.py:548, 551, 719, 720) become explicit three-way tests, so None never acts
   as False.
 - **Reruns.** si_band's widen-and-rerun loop (shift_invert.py:816–836) calls si_checked again
-  for the same leaf. si_checked records its decision in `count["decision"]` = (count or skip,
-  reason, predicted_s, predicted_kind). si_band passes it back through an internal
-  `_decision=` argument, and the rerun applies it without re-deciding. If the first call
-  ended before any decision (for example "slice not converged"), `_decision` is None and the
-  rerun decides itself. The leaf's time is the last rerun's slice.
-- **Times.** A run leaf's time is its slice's; a span's is its parent run's. This reads the
-  roadmap's "no more than the solve" per leaf, so a run and its span may each spend up to the
-  run's time (logged). $t_\text{minres}$ is the leaf's slice's measured seconds per MINRES
-  iteration.
+  for the same leaf. Each si_checked call decides on its own first count, so a rerun
+  re-decides from its own slice (documented; it costs at most one more bound or calibration).
+- **Times.**
+  - si_slice gains `info["time"]["total"]`, its wall time from entry (line 230's `t0`) to
+    return.
+  - A run leaf's time is the sum of `time["total"]` over the si_slice calls of its si_checked
+    call up to the deciding count (normally one); `make(σ)` is not included.
+  - A span's time and $t_\text{minres}$ are its parent run's. si_checked records both in its
+    `info["count"]` (`t_leaf`, `t_minres`), and si_band passes them to `_span_count` as two
+    new keyword arguments.
+  - This reads the roadmap's "no more than the solve" per leaf, so a run and its span may each
+    spend up to the run's time (logged).
 - **`band_count(_steps=)`** is passed through to `_run`, so `_calibrate` works on leaves with
   lo > 0.
 - **Location.** `_bound` and `_calibrate` move to `counting.py`. api.py and shift_invert.py call
@@ -695,16 +739,17 @@ si_band's `_cap_error` is worded per case:
   - band mode requires `max_capacity`;
   - the capped initial allocation with the n_modes invariant;
   - the capped growth rule through `_grow(V, count, new, c_L, dtype)` and `_insert`, with
-    the caller's `block_until_ready` and drop;
+    the caller's drop (`B = None`; a comment states that the V write and residual reads have
+    already synchronised B's readers);
   - the capacity stop's return (the stopping chunk removed);
-  - band mode returns `V[:, :end]`;
+  - band mode returns its owning V resized in place to `end` (inline, warning fallback);
   - the count + k stop;
   - V is a preallocated zeroed F-order array;
   - non-band mode is unchanged.
 - `si_band`: `verify=None`, `n_store` and its warning, the `_cap_error` wording.
-- `si_checked`/`_span_count`: three-way `verify`; `si_checked`: `count["decision"]` and the
-  internal `_decision=`; `si_slice`: `minres_first_s`; `_slice_degree`; `_count_nbs`/`_beyond`
-  split into a λ-only pass and the column gather.
+- `si_checked`/`_span_count`: three-way `verify`; the in-band gather after the decision;
+  `si_checked` records `t_leaf`/`t_minres`, and `_span_count` takes them; `si_slice`:
+  `minres_first_s` and `time["total"]`; `_slice_degree`.
 - `counting.py`: `_bound` and `_calibrate` moved from `api.py`; `band_count(_steps=)`.
 - `api.py`:
   - `solve_modes`:
@@ -730,9 +775,13 @@ si_band's `_cap_error` is worded per case:
   - `tests/test_band.py`:
     - line 151 asserts an owning, F-contiguous result with exactly the band's columns (it
       asserted a copy);
+    - the `spy` fixture (line 74) stores `np.array(W)`, not W itself, so it holds no reference
+      to the returned V (otherwise the resize falls back and warns);
     - the `_bound`/`_calibrate` monkeypatches (lines 283–384) target `counting`;
     - `test_errors` (line 473): the interior-band row now succeeds or moves to test_strategy,
       and the `check_band` rows follow the new messages;
+  - `tests/test_shift_invert.py:1826`: the `verify=None` row becomes `verify="yes"`, matching
+    the new message "verify must be True, False or None";
   - si_memory callers pass the store columns as `n_modes`;
   - test_options.py pins the `slice_options` keys.
 
@@ -789,7 +838,8 @@ Method:
    - `info["chunk"] == 40` (the band count does not reach `band_defaults`);
    - `count["ran"]` True and the estimate < 0.5;
    - `V` owns its data (`V.base is None`), is F-contiguous, and has exactly 8n·(band count)
-     bytes (compacted in place, since i0 > 0);
+     bytes; `id(V)` equals the id a `_solve` wrapper recorded for the solver's V (compacted in
+     place, since i0 > 0), and no "returned modes copied" warning is raised;
    - matches eigsh.
 2. **"capacity"** ("short"), `chunk=5` (k = 10, $c_L$ = 40), `n_modes=22`, band
    `edges(lr, 25, 46)`, `slice_options={"capacity": 96}`. The budget is at the top of the
@@ -835,7 +885,6 @@ Method:
        reaches it (expects the smaller one);
      - the known-depth fallback when no chunk reaches the depth;
      - a top chunk below 5;
-     - a given `chunk` not fitting;
      - a tiny mesh where up(4·chunk + k, $c_L$) exceeds the free-space cap.
 4. **"shift_invert"**, with 15c test 2(a)'s configuration (modes 5–28, block 6, its seed) and
    `n_modes` given.
@@ -844,9 +893,10 @@ Method:
    - One real-AMG copy, marked slow.
 5. **Empty band:** strictly between two well-separated modes of the voxel "cube" (named gap).
    0 modes and count < 0.5 under both strategies; `from_zero` False.
-6. **Clamped box**, `band=(0, f)`, "shift_invert": matches eigsh, `from_zero` True; the returned V is si_band's V_f itself (identity through a weakref spy, so no reference
-   blocks the resize), F-contiguous, with
-   exactly the band's columns.
+6. **Clamped box**, `band=(0, f)`, "shift_invert": matches eigsh, `from_zero` True; the
+   returned V is si_band's V_f itself (a wrapper around si_band records `id(V_f)` only, never
+   the array or a weakref), owning, F-contiguous, with exactly the band's columns; no copy
+   warning.
 7. **$\lambda_{lo} < \mu_1$**, clamped and free, "shift_invert":
    - `from_zero` True, filtered, matches eigsh;
    - the margin, with μ₁^ub monkeypatched ≥ the true μ₁:
@@ -866,16 +916,18 @@ Method:
    - a non-monotone per-mode-t row: index a passes with a large t, a+1 fails with a small t,
      a+2 passes; asserts i0 = a;
    - per-mode t, the upper end taken from `n_band`;
-   - the result compacted in place: the harness's `_solve` builds V internally and keeps
-     only a `weakref.ref`, so solve_modes holds the only reference. Asserts the result is the
-     weakref's object, F-contiguous, owning, with exactly the kept columns, at i0 = 0 and
-     i0 > 0. A second row keeps an extra reference: `resize` raises and the copy fallback
-     gives the same values;
+   - the result compacted in place: the harness's `_solve` builds V internally and records
+     only `id(V)`, so solve_modes holds the only reference. Asserts `id(result)` equals the
+     recorded id (a fallback copy is allocated while V lives, so its id differs), owning,
+     F-contiguous, `nbytes` exact, the kept columns, no warning, at i0 = 0 and i0 > 0. A
+     second row keeps an extra reference: the `RuntimeWarning` is raised and the copy has the
+     right values. Spies in this test (on `_verify`/`count`) record only `lam`/`lam_c`, never
+     W;
    - all modes below λ_lo, and an empty λ: an empty result, no IndexError;
    - out-of-order LOBPCG λ (e.g. [1, 2, 5, 6, 4.8] with lo between 4.8 and 5, and [1, 5, 2, 3,
      6]) sorted with their columns before the cut:
      - each mode's r and t follow its λ;
-     - the result is the solver's V object, compacted;
+     - `id(result)` is the solver's V's id, compacted;
      - `count["lam_c"]` comes from the sorted λ (`_verify` spied);
      - the cut is recomputed: a mode moved below λ_hi is kept, and a cut at `len(lam)` gives
        `converged` False and `stopped` "sorted cut at the end", with `_verify` not called;
@@ -895,8 +947,15 @@ Method:
         measured peak of `amg(..., aggregates=aggs)` with aggs held, plus `_nbytes(aggs)`, ≤
         `amg_memory(...)["build"]` (slow, darwin, as test_amg's `test_amg_build_peak`;
         ratios 0.63–0.83 measured in round 13);
-      - the per-call estimator cache (spy): each (estimator, width) pair is called exactly
-        once per band call, and a second band call does not reuse the first call's cache;
+      - the per-call estimator cache (spy): on a "fits" run with `count_options={"block":
+        b}` (so no probe-block search) and on a slice path with no lever warning, cache misses
+        are counted through the cached wrappers (`band_probe_block` and the lever models
+        excluded; the width is passed positionally). Each (estimator, width) pair misses
+        exactly once per band call, and a second band call does not reuse the first call's
+        cache;
+      - the levers in the "memory" warning: each lever not already set is evaluated alone
+        (`_c_max(..., low=True)`, `basis_dtype="float32"`, and on unstructured meshes in mode
+        "stored" one extra cached `_models` with mode "otf"), checked by spy;
       - `_amg_scan` runs once per mesh (spy; tests touching it call `_amg_scan.cache_clear()`);
       - si_memory's device basis exactly up(C, c)·8n, with `host_window` and the store only in
         the host term, and the Gram term $8Q^2$;
@@ -936,8 +995,10 @@ Method:
       no reference to B, and the configuration is chosen so that the old width is > 0 and no
       other live block has it (asserted);
     - a capacity stop drops the stopping chunk: `len(lam) == count`, `len(info["residuals"])
-      == len(info["thresholds"]) == count`, `chunks[-1]["locked"] == 0`, V's columns from
-      `count` on are zero;
+      == len(info["thresholds"]) == count`, `chunks[-1]["locked"] == 0`, V's shape is
+      (n, count);
+    - band mode's return: V owning, F-contiguous, (n, end), with the same id as the
+      preallocated V (a `np.zeros` spy records it), and no warning;
     - `max_capacity` required in band mode;
     - test_band.py's growth tests (`test_growth_from_zero` and the capacity tests) still pass,
       with `max_capacity` passed through solve_modes.
@@ -946,7 +1007,9 @@ Method:
     [0.75, 1.3]. The crossover and per-chunk entries are present.
 14. **`si_band(verify=None)`:**
     - `_slice_degree` against `_count_slice(..., _predict=True)`'s (degree, gap, lam_c) on a
-      table of leaves (lo = 0 and lo > 0, a MAX_DEGREE row with d None, a user `degree=` row);
+      table of leaves (lo = 0 and lo > 0, a MAX_DEGREE row, a user `degree=` row); d is None
+      iff `capped`. The lo = 0 rows use real M-orthonormal columns, since `count`'s predict
+      path reads them;
     - the warm $t_\text{minres}$:
       - a pure row on crafted si_slice info (`minres_iterations` [120, 50, 50], `time["minres"]`,
         `minres_first_s`, a σ-move solve) asserts the exact warm value, the move counted in
@@ -954,11 +1017,13 @@ Method:
       - a run leaf whose cold mean gives "bound skip" and whose warm value gives "calibrate"
         takes the calibrate branch;
       - `minres_first_s` is recorded, with the one-step fallback to the cold mean;
-    - a None decision carried across si_band's widen-and-rerun call through `_decision`
-      (spy), and a rerun with no first decision deciding itself;
+    - a widen-and-rerun call re-decides on its own first count (spy);
+    - `time["total"]` recorded by si_slice; a span leaf receives its parent's `t_leaf` and
+      `t_minres`;
     - **run leaves** are faked at the `si_slice` level (as `spy_slice`, test_shift_invert.py
       1060–1078), so si_checked's three-way code runs. The fake returns crafted info
-      (`minres_iterations`, `time["minres"]`, `minres_first_s`, `sigma_moved`), and
+      (`minres_iterations`, `time["minres"]`, `time["total"]`, `minres_first_s`,
+      `sigma_moved`), and
       `_count_slice` runs either for real with the exact preconditioner or as a stub that
       honours `_predict`/`_steps` and returns `degree` and `time`. **Span leaves** and test 15
       keep `fake_band`. Each branch, run leaves: MAX_DEGREE skip; bound skip with 2 and with 0.3; calibrated
@@ -979,6 +1044,8 @@ Method:
       `slice_options` keys, `f1 >= f2`;
     - the pinned `slice_options` keys (test_options.py);
     - forced "lobpcg" with no chunk fitting raises up front;
+    - a given `chunk` that does not fit, under "auto" (moved from test 3's pure table, since
+      `_ladder` only sees the reach dict): "memory";
     - the default budgets (monkeypatched `os.sysconf`, a fake `memory_stats` with
       `bytes_in_use`);
     - spies: `slice_options`, `tol`, `count_options` (a user `block` kept) and
@@ -1007,9 +1074,10 @@ Method:
         - The bug it guards against is B kept alive across the allocation, which adds old =
           14 $c_L$ columns. The test runs that mutant ≥ 3 times (a held reference) and asserts
           that its minimum exceeds the threshold (340–352 measured).
-        - The `block_until_ready` in `_solve` is protocol, not tested here: `_solve`'s V
-          write and residual reads already synchronise B's readers, so the in-flight case
-          does not arise there. The test does its own `block_until_ready` before the drop.
+        - `_solve` has no extra sync call: its V write and residual reads already synchronise
+          B's readers, so the in-flight case does not arise there (a comment states this).
+          The test does its own `block_until_ready` before the drop, since it calls `_grow`
+          directly.
     - **(a2) The fit test** on a short real run: `_solve(max_capacity=...)` on a non-cubic voxel
       $52\times48\times44$ (no cube multiplicities at the chunk boundary), low-memory, chunk 10,
       with `lam_stop` past mode 100 (at mode 95 the growth stopped at 90). The growth sequence
@@ -1082,8 +1150,9 @@ measured):
       - the in-place compaction of the returned modes (and the copy fallback);
       - the 0.8 × RAM default assumes an otherwise idle machine (the OS and other apps also
         use the 0.2 × RAM headroom);
-      - the refill rate, about 3.3 GB/s measured with `_insert` on CPU (under 10 s per growth
-        at 2M DOF and 1500 columns), the host F→C copy dominating;
+      - the refill rate on CPU: about 9.5 GB/s for the warm `jnp.asarray` alone, about
+        3.3 GB/s including first-touch and `_insert` (under 10 s per growth at 2M DOF and 1500
+        columns), the host F→C copy dominating;
     - the order check before the filter;
     - `verify=None` for slices;
     - errors, including late edge errors above the spectrum and their cost;
@@ -1092,8 +1161,11 @@ measured):
     - δ_max on slices from 0.
   - **§Measured MINRES cost:** the $\alpha D(1 + D/D_0)$ constants per family.
   - **§Frequency band [0, f_max],** rewritten:
-    - the Capacity bullet: capped growth, free-and-refill (the `block_until_ready` before
-      the drop that makes XLA CPU's free synchronous, whole-chunk refill), preallocated V;
+    - the Capacity bullet (line 107): capped growth, free-and-refill (B dropped after the V
+      write and residual reads have synchronised its readers, so XLA CPU frees it at once;
+      whole-chunk refill), preallocated V;
+    - line 103's `n_modes` sentence: for $f_1 = 0$ it is a lower bound on the returned count,
+      for $f_1 > 0$ the store reservation's floor;
     - the sort right after `_solve` with the in-place column permutation;
     - the Returns bullet (line 108): the solver's V compacted in place to the band (an owning
       F-order array), and the band `info` fields `stopped` ("capacity", "sorted cut at the
@@ -1140,6 +1212,8 @@ measured):
   cached per mesh (`maxsize=1`), 2.3 s at 10.2M hex20; the gather path's `layout` cost (3.2 s
   per call at 10.2M). The `build` bullet (line 472): it also bounds the kept aggregates plus
   the rebuild with aggs held (test 11), or names the new `aggregates` term if that test fails.
+  Line 479: keep "not in `total`", and add that the build does count in `host_total`, next to
+  the host V, since both are alive at the AMG build.
 - `README.md`:
   - the `band=(f1, f2)` example;
   - the options paragraph near line 222;
@@ -1213,7 +1287,7 @@ measured):
       store's columns).
   - **Partly addressed:**
     - "`edge_unreached` is not evidence…" (line 147): the μ₁ rule done, the λ_hi bound → PR 18;
-    - "A top remainder holding only known modes can raise" (line 169): the message fixed by the
+    - "A top remainder holding only known modes can raise" (line 169's last clause): the message fixed by the
       per-case wording, the cost → PR 18 with "halving before a capacity error";
     - line 167, "size the capacity with the window's chunk included" / "a capacity error
       discards the band": the window reservation; `err.result` → PR 18;
@@ -1270,7 +1344,8 @@ measured):
 - **The LOBPCG growth:**
   - keeps the rounding to $c_L$;
   - frees the state first;
-  - synchronises the last outputs reading B before dropping it, so the free is synchronous;
+  - drops B after the V write and residual reads, which already synchronise its readers, so
+    the free is synchronous (no extra call; a comment states the invariant);
   - rebuilds B from the zeroed host V by whole chunks (one host copy each) through `_insert`, synchronised
     (at 10M the host F→C copy, about 16 s per 1000 columns, dominates PCIe; about 30–60 s per
     solve over all growths, negligible against the solve), instead of copying;
@@ -1284,11 +1359,12 @@ measured):
   shows otherwise, a fitted `aggregates` term is added.
 - **L** counts the locked modes the filter's lower-end rule keeps (λ ≥ λ_lo(1 − 100t) with
   chain extension).
-- **`verify=None` under restarts** is decided once per leaf, on its first count; restarts
-  follow that decision.
+- **`verify=None` under restarts** is decided once per si_checked call, on its first count;
+  restarts follow that decision, and a widen-and-rerun call re-decides.
 - **Returned modes:** the solver's own F-order V, compacted in place and resized to the band,
   so modes below the band are not kept resident and no extra memory is needed. A copy is the
-  fallback when another reference exists. This refines 14b's compact copy.
+  fallback when another reference exists, with a `RuntimeWarning`. The resize runs inline in
+  the owning frame. This refines 14b's compact copy.
 - **The upper cut's per-mode-t mask** (`_band_count`'s `.sum()`) is kept as is: pre-existing,
   inside the 100t window; → PR 18.
 - **No up-front spectrum bound:** the late errors meet the roadmap criterion, at about
