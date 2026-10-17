@@ -1,6 +1,7 @@
 """Device memory estimators (bytes). See docs/operators.md and docs/eigensolvers.md."""
 
 import functools
+import math
 import os
 
 import jax
@@ -331,8 +332,8 @@ def amg_memory(mesh, m, max_coarse=1000, degree=2):
     """Estimated bytes of amg(unstructured(mesh, ...), free, sigma, mesh.points, degree=degree,
     max_coarse=max_coarse) applied to (n_dof, m) blocks: storage (the p-level exact from the
     mesh, the AMG levels per corner DOF, the coarsest factor), build and host_build (the setup
-    host peak), step
-    and step_low (extra LOBPCG step bytes over Jacobi), count (extra count-recurrence bytes).
+    host peak), step and step_low (extra LOBPCG step bytes over Jacobi), count (extra
+    count-recurrence bytes).
     Calibrated on box meshes at max_coarse 1000; the coarse term uses max(max_coarse, 1000) (an
     upper bound, loose above 1000)."""
     n_nodes = len(mesh.points)
@@ -344,10 +345,11 @@ def amg_memory(mesh, m, max_coarse=1000, degree=2):
     a9, c9, K9 = AMG_STEP[(fam, "9-block")]
     al, cl, Kl = AMG_STEP[(fam, "low")]
     loop = AMG_LOOP_K if degree > 2 else 0
+    hb = beta + max(alpha[t] for t in mesh.blocks) * n_c
     out = dict(
         storage=storage,
-        build=beta + max(alpha[t] for t in mesh.blocks) * n_c,
-        host_build=beta + max(alpha[t] for t in mesh.blocks) * n_c,  # pyamg runs on the host
+        build=hb,
+        host_build=hb,  # pyamg runs on the host
         step=8 * n_dof * (a9 * m + c9) + 8 * m * (K9 + loop),
         step_low=8 * n_dof * (al * m + cl) + 8 * m * (Kl + loop),
         count=8 * n_dof * (AMG_COUNT[0] * m + AMG_COUNT[1]) + 8 * m * loop,
@@ -572,10 +574,11 @@ def _largest(fits, step, lo, hi):
 
 
 def _c_max(op_memory, pc, n_dof, *, chunk, guards, low, basis_dtype, n_rigid, n_avail, budget,
-           host_budget):  # fmt: skip
+           host_budget, need=None):  # fmt: skip
     """C_max: the largest LOBPCG band basis (a multiple of the projector chunk c_L, at most the
     free space up(n_avail + k, c_L)) whose band solve passes the fit test, from the initial basis
-    up(4 chunk + k, c_L); None when that does not fit."""
+    up(4 chunk + k, c_L), or up(need, c_L) when a known depth needs less; None when that does
+    not fit."""
     _, guards, k = _block_size(chunk, chunk, guards)
     c = _capacity(0, chunk, k, low)[0]
     cap = _up(n_avail + k, c)
@@ -585,7 +588,7 @@ def _c_max(op_memory, pc, n_dof, *, chunk, guards, low, basis_dtype, n_rigid, n_
                             True, capacity=C)  # fmt: skip
         return _fits(est, budget, host_budget)
 
-    return _largest(fits, c, min(_up(4 * chunk + k, c), cap), cap)
+    return _largest(fits, c, min(_up(min(4 * chunk + k, need or math.inf), c), cap), cap)
 
 
 def _slice_capacity(op_memory, pc64, n_dof, *, n_store, block, n_rigid, budget, host_budget):

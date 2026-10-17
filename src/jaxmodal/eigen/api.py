@@ -247,17 +247,17 @@ def _ladder(reach, need):
 
 
 def _keep(lam, t, lam_lo, n_band):
-    """(i0, n_band): the band filter's range of the ascending lam (thresholds t, per mode or one
+    """i0: the band filter's range [i0, n_band) of the ascending lam (thresholds t, per mode or one
     value): from the first mode >= lam_lo (1 - 100 t) (len(lam) if none), extended down over
     chains (relative gaps < 100 t) below n_band; i0 = 0 for lam_lo = 0."""
     if lam_lo == 0:
-        return 0, n_band
+        return 0
     t = np.broadcast_to(np.asarray(t, float), np.shape(lam))
     ok = np.flatnonzero(lam >= lam_lo * (1 - 100 * t))
     i0 = int(ok[0]) if len(ok) else len(lam)
     while 0 < i0 < n_band and lam[i0] - lam[i0 - 1] < 100 * t[i0 - 1] * lam[i0 - 1]:
         i0 -= 1
-    return min(i0, n_band), n_band
+    return min(i0, n_band)
 
 
 def _permute(V, order):
@@ -320,10 +320,13 @@ def solve_modes(
         f1, f2 = check_band(band)
     if strategy not in STRATEGIES:
         raise ValueError(f"strategy must be one of {STRATEGIES}, got {strategy!r}")
-    budget_ok = (isinstance(memory_budget, numbers.Real) and not isinstance(memory_budget, bool)
-                 and math.isfinite(memory_budget))  # fmt: skip
-    if memory_budget is not None and not (budget_ok and memory_budget > 0):
-        raise ValueError(f"memory_budget must be a finite number of bytes > 0, got {memory_budget}")
+    if memory_budget is not None and not (
+        isinstance(memory_budget, numbers.Real) and not isinstance(memory_budget, bool)
+        and math.isfinite(memory_budget) and memory_budget > 0
+    ):  # fmt: skip
+        raise ValueError(
+            f"memory_budget must be a finite number of bytes > 0, got {memory_budget!r}"
+        )
     if verify not in (None, True, False):
         raise ValueError(f"verify must be None, True or False, got {verify!r}")
     cn_opts = _check_options("count", count_options, COUNT_OPTIONS)
@@ -396,35 +399,40 @@ def solve_modes(
     if memory_budget is not None:
         budget = float(memory_budget)
 
-    def models(dtype):  # the estimators, cached per call (only distinct widths cost anything)
+    def models(dtype, ops=op_opts):  # the estimators, cached per call (distinct widths cost)
         return [f and functools.cache(f) for f in
-                mem._models(mesh, mass, precond, dtype, op_opts, pc_opts)]  # fmt: skip
+                mem._models(mesh, mass, precond, dtype, ops, pc_opts)]  # fmt: skip
 
     op_memory, pc = models(precond_dtype)
     pc64 = models("float64")[1] if precond == "gmg" and precond_dtype == "float32" else pc
 
-    def c_max(c, low=low_memory, dtype=basis_dtype):
-        return mem._c_max(op_memory, pc, n, chunk=c, guards=guards, low=low, basis_dtype=dtype,
-                          n_rigid=k, n_avail=n_avail, budget=budget,
-                          host_budget=host_budget)  # fmt: skip
+    def c_max(c, low=low_memory, dtype=basis_dtype, op_m=None, pc_m=None):
+        return mem._c_max(op_m or op_memory, pc_m or pc, n, chunk=c, guards=guards, low=low,
+                          basis_dtype=dtype, n_rigid=k, n_avail=n_avail, budget=budget,
+                          host_budget=host_budget, need=need and need.get(c))  # fmt: skip
 
     def levers(c):  # the memory levers not set, with their C_max at chunk c
         out = [f"low_memory=True (C_max {c_max(c, low=True)})"] if not low_memory else []
         if basis_dtype != "float32":
             out.append(f"basis_dtype='float32' (C_max {c_max(c, dtype='float32')})")
-        return ", ".join(out + ["on-the-fly Ke (operator_options={'mode': 'otf'})"])
+        if precond == "gmg" and precond_dtype != "float32":
+            out.append(f"precond_dtype='float32' (C_max {c_max(c, pc_m=models('float32')[1])})")
+        if not voxel and op_opts.get("mode") != "otf":
+            otf = models(precond_dtype, op_opts | {"mode": "otf"})[0]
+            out.append(f"operator_options={{'mode': 'otf'}} (C_max {c_max(c, op_m=otf)})")
+        return ", ".join(out)
 
-    reach, ch = {}, None
+    reach, ch, need = {}, None, None
     if strategy != "shift_invert":
         top = band_defaults(n_modes if f1 == 0 else None, chunk, guards, n_avail)[1]
-        reach = {c: c_max(c) for c in ([chunk] if chunk is not None else _halvings(top))}
-        need = None
+        chunks = [chunk] if chunk is not None else _halvings(top)
         if f1 == 0 and n_modes is not None:  # the known depth: n_modes, at most the free space
             need = {}
-            for c in reach:
+            for c in chunks:
                 kc = _block_size(c, c, guards)[2]
                 cl = _capacity(0, c, kc, low_memory)[0]
                 need[c] = min(math.ceil(1.25 * n_modes) + kc, -(-(n_avail + kc) // cl) * cl)
+        reach = {c: c_max(c) for c in chunks}
         ch = _ladder(reach, need)
         if ch is None and strategy == "lobpcg":
             raise ValueError(
@@ -434,12 +442,14 @@ def solve_modes(
     out = dict(band=(f1, f2), strategy="lobpcg", reason="forced" if strategy != "auto" else "fits",
                chunk=ch, c_max=reach, stagnation_risk=False, budget=(budget, host_budget),
                mu1_ub=None, n_store=None, from_zero=False)  # fmt: skip
-    pre, L, t_lob, stopped = None, 0, None, None  # the pre-estimate, the locked depth kept
+    # the sigma pre-estimate, the in-band locked count (sizes n_store), LOBPCG's time, its stop
+    pre, L, t_lob, stopped = None, 0, None, None
     if ch is not None:
         if sigma is None and precond != "jacobi":
             sigma, its = _precond_sigma(op, free, Rd, make, seed=seed, **sg_opts)
             pre = sigma
-        P, aggs = lobpcg_precond(sigma or 0.0)
+        sigma = sigma or 0.0
+        P, aggs = lobpcg_precond(sigma)
         t_p = time.perf_counter() - t0
         n_m, ch = band_defaults(n_modes if f1 == 0 else None, ch, guards, n_avail)
         lam, V, info = _solve(
@@ -453,8 +463,8 @@ def solve_modes(
             order = np.argsort(lam, kind="stable")
             lam = lam[order]
             info.update(residuals=info["residuals"][order], thresholds=info["thresholds"][order])
-            _permute(V, order)
-            if stopped is None:
+            if stopped is None:  # after a capacity stop V is dropped unsorted
+                _permute(V, order)
                 info["n_band"] = _band_count(lam, info["thresholds"], lam_hi)
         if stopped == "capacity":
             depth = len(lam)
@@ -464,7 +474,7 @@ def solve_modes(
                     f" below f2: raise memory_budget (now {budget:.4g} bytes), or pass"
                     f" {levers(ch)}, or strategy='shift_invert' or 'auto'"
                 )  # fmt: skip
-            L = depth - _keep(lam, info["thresholds"], lam_lo, depth)[0]
+            L = depth - _keep(lam, info["thresholds"], lam_lo, depth)
             out["mu1_ub"] = min([float(lam[0])] + ([pre] if pre is not None else []))
             t_lob = info["time"]
             V = lam = info = aggs = None  # LOBPCG's modes and aggregates freed before the slices
@@ -501,16 +511,15 @@ def solve_modes(
                 lambda s: make(s) if aggs is None else make(s, aggregates=aggs), probe_budget,
             )  # fmt: skip
         aggs = None
-        i0, i1 = _keep(lam, info["thresholds"], lam_lo, nb)
+        i0, i1 = _keep(lam, info["thresholds"], lam_lo, nb), nb
         info["n_beyond"] = len(lam) - nb
         info["time"]["precond"] = t_p
         info.update({**base, **out}, sigma=sigma, sigma_iterations=its)
     else:  # shift-invert slices: forced, no chunk fits ("memory") or after a capacity stop
         if ch is None:
             t_p = 0.0
-            out.update(strategy="shift_invert",
-                       reason="forced" if strategy == "shift_invert" else "memory")  # fmt: skip
-            if out["reason"] == "memory":
+            if strategy == "auto":
+                out["reason"] = "memory"
                 warnings.warn(
                     f"no LOBPCG chunk fits memory_budget = {budget:.4g} bytes: the band is solved"
                     f" by shift-invert slices; levers: {levers(min(reach))}", stacklevel=2,
@@ -565,14 +574,13 @@ def solve_modes(
         if no_count:
             info["count"]["reason"] = no_count
         info["slice_reason"] = info.pop("reason")  # si_band's; reason is the strategy's
-        i0, i1 = _keep(lam, info["r_acc"], lam_lo, len(lam))
+        i0, i1 = _keep(lam, info["r_acc"], lam_lo, len(lam)), len(lam)
         info["time"]["precond"] = t_p
         if t_lob is not None:
             info["time"]["lobpcg"] = t_lob
         info.update({**base, **out}, capacity=C, n_store=n_store, sigma=sigma, sigma_iterations=its)
         if stopped:
             info["stopped"] = stopped
-        info["thresholds"] = np.broadcast_to(info["thresholds"], lam.shape)
     info.update(residuals=info["residuals"][i0:i1], thresholds=info["thresholds"][i0:i1])
     # compacted in place (the destination never runs ahead of the source), then shrunk: V must
     # have no other reference. jaxlib holds the last host view it transferred (the count's W

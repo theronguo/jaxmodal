@@ -169,6 +169,7 @@ def test_fits(fake_builds):
     check("short", f1, f2, lam, V, info)
 
 
+@pytest.mark.slow
 def test_capacity(fake_builds, monkeypatch):
     """Test 2: chunk 5 (k = 10, c_L = 40) at the top of the C_max = 40 window: LOBPCG stops at
     the cap (35 locked: test 12's rule) inside the band (modes 25-45), L = 10; si_band runs on
@@ -225,7 +226,7 @@ def test_capacity(fake_builds, monkeypatch):
     assert all(s.get("count", {}).get("degree") is None or s["count"]["degree"] <= 1000
                for s in info["slices"])  # fmt: skip
     check("short", f1, f2, lam, V, info)
-    with pytest.raises(ValueError, match="memory_budget"):
+    with pytest.raises(ValueError, match="reached its basis cap"):
         run("short", (f1, f2), **(kw | {"strategy": "lobpcg"}))
 
 
@@ -399,6 +400,20 @@ def chunk_need(name, c):
     return need(lob_est(name, c, min(mem._up(4 * c + k, cl), mem._up(n_avail(name) + k, cl))))
 
 
+def test_c_max_need_floor(fake_builds):
+    """Test 3: with a known depth (f1 = 0, n_modes 10: chunk 15) the C_max search starts at the
+    need, so a budget fitting the need but not the 4 chunk initial basis still runs LOBPCG."""
+    k = lob._block_size(15, 15, None)[2]
+    cl = lob._capacity(0, 15, k, False)[0]
+    want = math.ceil(1.25 * 10) + k
+    B = need(lob_est("short", 15, mem._up(want, cl)))
+    assert c_max("short", 15, B) is None and c_max("short", 15, B, need=want) >= want
+    f2 = fband("short", 0, 10)[1]
+    lam, V, info = run("short", (0, f2), n_modes=10, memory_budget=B)
+    assert info["reason"] == "fits" and info["chunk"] == 15
+    check("short", 0.0, f2, lam, V, info)
+
+
 def test_ladder_real(fake_builds):
     """Test 3: an interior band on "short" at a budget between chunk 20's and chunk 40's needs:
     the chunk is the reach rule's on the searched C_max table, below the top chunk (measured:
@@ -494,6 +509,7 @@ def shift_invert_run(monkeypatch):
     assert len(ref) == len(lam) and np.allclose(ref, lam, rtol=1e-6)
 
 
+@pytest.mark.slow
 def test_shift_invert(fake_builds, monkeypatch):
     """Test 4 with the exact preconditioner."""
     shift_invert_run(monkeypatch)
@@ -656,13 +672,14 @@ LO = 3.0
         ([1, 3 - 4e-6, 3 - 2e-6, 4], 1e-8, LO, 4, (1, 4)),  # a chain crossing lam_lo
         ([1, 2.99, 2.9999, 3.1], [1e-8, 1e-2, 1e-9, 1e-8], LO, 4, (1, 4)),  # non-monotone t
         ([1, 3.5, 4, 5, 6], [1e-8, 1e-8, 1e-8, 1e-2, 1e-8], LO, 3, (1, 3)),  # the upper end
+        ([2.99, 3.1], [1e-8, 1e-2], LO, 2, (1, 2)),  # the chain uses the lower mode's t
         ([1, 2], 1e-8, LO, 2, (2, 2)),  # all below lam_lo
         ([], 1e-8, LO, 0, (0, 0)),  # nothing
         ([1, 2, 3], 1e-8, 0.0, 2, (0, 2)),  # from 0
     ],
 )
 def test_keep(lam, t, lam_lo, n_band, want):
-    assert api._keep(np.array(lam, float), t, lam_lo, n_band) == want
+    assert (api._keep(np.array(lam, float), t, lam_lo, n_band), n_band) == want
 
 
 @pytest.mark.parametrize("seed", range(5))
@@ -1059,8 +1076,9 @@ def test_models_cached(fake_builds, monkeypatch):
             assert seen and len(calls) == len(set(calls)), kw
 
 
-def test_levers(fake_builds):
-    """Test 11: the "memory" warning names each lever's C_max at chunk 5 and the otf lever."""
+def test_levers(fake_builds, monkeypatch):
+    """Test 11: the "memory" warning names each lever's C_max at chunk 5: on voxel the fp32
+    V-cycle and no otf (stencil has no mode); on "short" (unstructured) the otf operator."""
     fake_builds["name"] = "voxel"
     B = voxel_budget(1.15)
     op, pc = models("voxel")
@@ -1069,11 +1087,25 @@ def test_levers(fake_builds):
     n = prob("voxel")[2].n_dof
     low = mem._c_max(op, pc, n, low=True, **kw)
     f32 = mem._c_max(op, pc, n, low=False, **(kw | {"basis_dtype": "float32"}))
+    vc = mem._c_max(op, models("voxel", dtype="float32")[1], n, low=False, **kw)
     with pytest.warns(UserWarning) as w:
         run("voxel", fband("voxel", 3, 12), n_modes=10, memory_budget=B, verify=False)
     (msg,) = [str(x.message) for x in w if "levers" in str(x.message)]
-    assert f"low_memory=True (C_max {low})" in msg and f"'float32' (C_max {f32})" in msg
-    assert "operator_options={'mode': 'otf'}" in msg and (low or f32)
+    assert f"low_memory=True (C_max {low})" in msg and f"basis_dtype='float32' (C_max {f32})" in msg
+    assert f"precond_dtype='float32' (C_max {vc})" in msg and "otf" not in msg and (low or f32)
+    fake_builds["name"] = "short"
+    monkeypatch.setattr(api, "si_band", stub_band({}))
+    B = chunk_need("short", 20) - 1
+    otf = mem._models(prob("short")[0], "consistent", "auto", "float64", {"mode": "otf"}, None)
+    _, pc = models("short")
+    cm = mem._c_max(otf[0], pc, prob("short")[2].n_dof, chunk=20, guards=None, low=False,
+                    basis_dtype="float64", n_rigid=0, n_avail=n_avail("short"), budget=B,
+                    host_budget=None)  # fmt: skip
+    with pytest.warns(UserWarning) as w:
+        run("short", fband("short", 15, 25), chunk=20, memory_budget=B,
+            slice_options={"capacity": 96})  # fmt: skip
+    (msg,) = [str(x.message) for x in w if "levers" in str(x.message)]
+    assert f"operator_options={{'mode': 'otf'}} (C_max {cm})" in msg and "precond_dtype" not in msg
 
 
 def est(e, m, de=0, dm=0, he=0, hm=0):
@@ -1097,8 +1129,8 @@ def test_fit_rule():
 
 @pytest.mark.parametrize("seed", range(4))
 def test_largest(seed):
-    """Test 11: the bisection equals brute force over the multiples of step (a monotone fit with
-    a jump), None when nothing fits."""
+    """Test 11: the bisection equals brute force over the multiples of step (a monotone fit), None
+    when nothing fits."""
     rng = np.random.default_rng(seed)
     step, lo, hi = int(rng.integers(1, 30)), int(rng.integers(0, 100)), int(rng.integers(100, 900))
     top = int(rng.integers(0, 1000))
@@ -1494,6 +1526,7 @@ def test_rerun_redecides(monkeypatch):
     assert checked == [(lo, s), (s, hi), (s, hi)] and bounds == [1, 2, 3]
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("verify", [None, True])
 def test_real_band_verify(verify, monkeypatch):
     """Test 14: a real si_band (exact preconditioner, test 4's band at capacity 96: >= 2 runs, a
@@ -1521,8 +1554,9 @@ def test_real_band_verify(verify, monkeypatch):
 def test_solve_modes_records(fake_builds):
     """Test 14: solve_modes(strategy="shift_invert") at the default verify records the rule."""
     _, _, info = run("short", fband("short", 15, 25), n_modes=12, strategy="shift_invert")
-    for x in [x for x in info["slices"] if x["leaf"]]:
-        assert {"reason", "predicted_kind", "predicted_s"} <= set(x["count"])
+    leaves = [x for x in info["slices"] if x["leaf"]]
+    assert leaves and all({"reason", "predicted_kind", "predicted_s"} <= set(x["count"])
+                          for x in leaves)  # fmt: skip
 
 
 @pytest.mark.slow
@@ -1624,8 +1658,8 @@ def test_cap_error_band(monkeypatch, zero):
         (dict(memory_budget=1e9), "need band"),
         (dict(slice_options={"tau": 1e-6}), "need band"),
         (dict(band=(0, 10), strategy="slices"), "strategy"),
-        (dict(band=(0, 10), memory_budget=-1.0), "memory_budget"),
-        (dict(band=(0, 10), memory_budget="1GB"), "memory_budget"),
+        (dict(band=(0, 10), memory_budget=-1.0), "memory_budget must be a finite number"),
+        (dict(band=(0, 10), memory_budget="1GB"), "memory_budget must be a finite number"),
         (dict(band=(0, 10), slice_options={"capcity": 96}), "capcity"),
         (dict(band=(10, 10)), "f1 < f2"),
         (dict(band=(-1, 10)), "f1 >= 0"),
@@ -1705,8 +1739,9 @@ def test_options_reach(fake_builds, monkeypatch):
 
 def test_budget_bool(fake_builds):
     """Test 16: a bool memory_budget raises."""
-    with pytest.raises(ValueError, match="memory_budget"):
+    with pytest.raises(ValueError, match="memory_budget must be a finite number"):
         run("short", fband("short", 15, 25), memory_budget=True)
+    assert not fake_builds["builds"]
 
 
 def test_budget_before_build(fake_builds, monkeypatch):
@@ -1751,13 +1786,17 @@ def test_fp32_slices(fake_builds, monkeypatch):
     monkeypatch.setattr(api, "si_band", band)
     real_g, real_cap = api.gmg, mem._slice_capacity
     monkeypatch.setattr(api, "gmg", lambda *a, **kw: kws.append(kw) or real_g(*a, **kw))
+    real_cb = mem._count_block
     monkeypatch.setattr(mem, "_slice_capacity", lambda *a, **kw: pcs.append(a[1]) or
                         real_cap(*a, **kw))  # fmt: skip
+    monkeypatch.setattr(mem, "_count_block", lambda *a, **kw: pcs.append(a[1]) or
+                        real_cb(*a, **kw))  # fmt: skip
     run("voxel", fband("voxel", 3, 12), n_modes=10, strategy="shift_invert",
         precond_dtype="float32")  # fmt: skip
     assert seen and kws and all(kw.get("dtype", "float64") == "float64" for kw in kws)
     want = mem.gmg_memory(prob("voxel")[0], 6, dtype="float64")
-    assert pcs and pcs[0](6) == want and want != mem.gmg_memory(prob("voxel")[0], 6, "float32")
+    assert len(pcs) == 2 and all(p(6) == want for p in pcs)
+    assert want != mem.gmg_memory(prob("voxel")[0], 6, "float32")
 
 
 @pytest.mark.parametrize("depth, risk", [(999, False), (1000, True)])
@@ -1786,6 +1825,8 @@ import ctypes, importlib, json, os, sys, time
 sys.path.insert(0, {root!r})
 from jaxmodal import config
 config.enable_x64()
+import warnings
+warnings.filterwarnings("error", "returned modes copied")
 import jax, numpy as np
 from jaxmodal.materials import Material, isotropic
 from jaxmodal.mesh import voxel_mesh

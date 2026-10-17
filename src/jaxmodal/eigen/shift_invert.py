@@ -389,7 +389,7 @@ def si_slice(
     delta = np.abs(lam_out - sigma) / np.abs(lam_out) if len(lam_out) else np.zeros(0)
     if len(iters) > 1 and sum(iters[1:]):  # warm: without the first step's compile
         t_minres = sum(t_its[1:]) / sum(iters[1:])
-    elif iters:  # one step: the cold mean, the discarded move solve included
+    elif iters:  # one step (or no warm iterations): the cold mean, the move solve included
         t_minres = (t_its[0] + t_move) / max(iters[0] + (moved or 0), 1)
     else:
         t_minres = None
