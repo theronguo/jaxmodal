@@ -583,7 +583,8 @@ def gmg_like():
 
 def test_memory_formulas():
     """Test 15: storage = operator + preconditioner + basis (chunk-rounded) + R and M R; the
-    host term; the end phase; total = overhead + storage + host + max(builds, phases)."""
+    host term (window, store of n_modes columns, Gram matrix); the end phase; total = overhead +
+    storage + host + max(builds, phases)."""
     mesh = voxel_mesh((16,) * 3, (1 / 16,) * 3)
     n = 3 * len(mesh.points)
     est = functools.partial(stencil_memory, mesh)
@@ -592,8 +593,8 @@ def test_memory_formulas():
     cap = 72  # 50 rounded up to the chunk 24
     v = 8 * n
     storage = est(6)["storage"] + pcm(6)["storage"] + v * (24 + cap) + 2 * v * 6
-    assert e["storage"] == storage and e["host"] == v * 10 + 8 * cap**2
-    assert e["end"] == v * (30 + 2 + 24)
+    assert e["storage"] == storage and e["host"] == v * 10 + v * 30 + 8 * cap**2
+    assert e["end"] == v * (2 + 24)
     phases = max(e[k] for k in ("minres", "reortho", "ritz", "end"))
     assert e["ritz"] < e["minres"] and e["reortho"] < e["minres"]
     total = OVERHEAD + storage + e["host"] + max(est(6)["build"], pcm(6)["build"], phases)
@@ -680,8 +681,8 @@ def test_form_v_peak():
 
     n, cap, k = 800_000, 240, 150
     zero = lambda m: dict(storage=0, workspace=0, build=0, overhead=OVERHEAD)  # noqa: E731
-    e = si_memory(zero, n, cap, k - 2)  # end: host V of k columns and one chunk
-    model = OVERHEAD + e["storage"] + e["end"]
+    e = si_memory(zero, n, cap, k - 2)  # end: one chunk; host: the store of k - 2 columns
+    model = OVERHEAD + e["storage"] + e["end"] + 8 * n * (k - 2)  # host V, no Gram term
     setup = FORM_V.replace("N", str(n)).replace("CAP", str(cap))
     # values do not matter for memory; jax.random.normal alone peaks at 2.5x the basis
     code = "Q = jnp.ones((n, cap)); V = _form_v(Q, 0, Y, 24)"
@@ -755,7 +756,7 @@ def ref_slice(op, free, lo, hi, P, **kw):
     nb = {"lo": (lr[i[0] - 1], Vr[:, i[0] - 1]), "hi": (lr[i[-1] + 1], Vr[:, i[-1] + 1])}
     z = np.zeros(len(i))
     info = dict(converged=True, reason=None, neighbours=nb, residuals=z, thresholds=z + TOL,
-                r_acc=TOL, tau_eff=TAU)  # fmt: skip
+                r_acc=TOL, tau_eff=TAU, time=dict(total=0.0), t_minres=0.0)  # fmt: skip
     return lr[i], Vr[:, i], info
 
 
@@ -792,8 +793,9 @@ def test_restart(monkeypatch, capsys):
     calls = spy_slice(monkeypatch, real, lambda j, out: _drop(out, lr[MID]) if j == 1 else out)
     seeds, real_bc = [], si.band_count  # the recounts use fresh probes: count seed + j
     monkeypatch.setattr(
-        si, "band_count", lambda *a, **kw: seeds.append(kw["seed"]) or real_bc(*a, **kw)
-    )
+        si, "band_count",
+        lambda *a, **kw: (kw.get("_predict") or seeds.append(kw["seed"]), real_bc(*a, **kw))[1],
+    )  # fmt: skip
     lam, V, info = checked(lo, hi, c_hi, verbose=True)
     c = info["count"]
     assert len(calls) == 2 and c["restarts"] == 1 and c["flagged"] and c["passed"]
@@ -864,7 +866,8 @@ def test_checked_w_margin(monkeypatch):
         z = np.zeros(5)
         nb = {"lo": (lr[12], Vr[:, 12]), "hi": (lr[19], Vr[:, 19])}
         return lr[i], Vr[:, i], dict(converged=True, neighbours=nb, residuals=z,
-                                     thresholds=z + TOL, r_acc=TOL, tau_eff=TAU)  # fmt: skip
+                                     thresholds=z + TOL, r_acc=TOL, tau_eff=TAU,
+                                     time=dict(total=0.0), t_minres=0.0)  # fmt: skip
 
     monkeypatch.setattr(si, "si_slice", fake)
     lam, V, info = si.si_checked(op, free, lo, hi, None, capacity=300, W=Vr[:, [14]],
@@ -918,7 +921,7 @@ def test_checked_flags(monkeypatch, capsys):
 
     spy_slice(monkeypatch, ref_slice, ident)
     monkeypatch.setattr(si, "band_count", lambda *a, **kw: (np.nan, dict(
-        verifiable=False, passed=False, degree=10**6, steps=0, bias=np.nan, capped=True,
+        verifiable=False, passed=False, degree=10**6, steps=0, bias=np.nan, capped=True, block=1,
         time=dict(total=0.0))))  # fmt: skip
     lam, V, info = run(capacity=300)
     c = info["count"]
@@ -975,12 +978,13 @@ def checked_fake(monkeypatch, est, rule=None):
     seen = []
     calls = spy_slice(monkeypatch, ref_slice, rule or (lambda j, out: out))
 
-    def bc(*a, **kw):
+    def bc(*a, _predict=False, **kw):
+        if _predict:  # the decision's degree: not recorded
+            return np.nan, dict(degree=7, capped=False, block=1, time=dict(total=0.0))
         seen.append(kw)
         e = est(len(seen)) if callable(est) else est
-        return e, dict(
-            verifiable=True, passed=e < 0.5, degree=7, steps=1, capped=False, time=dict(total=0.0)
-        )
+        return e, dict(verifiable=True, passed=e < 0.5, degree=7, steps=1, capped=False, block=1,
+                       time=dict(total=0.0))  # fmt: skip
 
     monkeypatch.setattr(si, "band_count", bc)
     _, free, op = prob("short")[:3]
@@ -1073,7 +1077,8 @@ def test_checked_restart_neighbour(monkeypatch, case):
         z = np.zeros(len(i))
         return lr[i], Vr[:, i], dict(converged=True, neighbours={"lo": nb_lo, "hi": nb_hi},
                                      residuals=z, thresholds=z + 1e-6, r_acc=r,
-                                     tau_eff=1e-8)  # fmt: skip
+                                     tau_eff=1e-8, time=dict(total=0.0),
+                                     t_minres=0.0)  # fmt: skip
 
     monkeypatch.setattr(si, "si_slice", fake)
     P = exact("short", (lr[18] + lr[19]) / 2)
@@ -1137,9 +1142,10 @@ def test_beyond_guard():
 # ---------------------------------------------------------------- PR 15c: si_band, fakes
 
 OK_COUNT = dict(ran=True, passed=True, verifiable=True, flagged=False, estimate=0.1,
-                estimates=[0.1], reason=None, restarts=0)  # fmt: skip
+                estimates=[0.1], reason=None, restarts=0, t_leaf=0.0, t_minres=0.0)  # fmt: skip
 NO_COUNT = dict(ran=False, passed=False, verifiable=False, flagged=False, estimate=np.nan,
-                estimates=[], reason="slice not converged", restarts=0)  # fmt: skip
+                estimates=[], reason="slice not converged", restarts=0, t_leaf=0.0,
+                t_minres=0.0)  # fmt: skip
 
 
 def rz(conv, unconv=(), name="short"):
@@ -1164,8 +1170,9 @@ def fake_band(monkeypatch, script, name="short", count=(0.1, True, False), post=
     """si_checked replaced by script(call, a, e, kw) -> (pairs, reason, ritz, count info);
     pairs: mode indices or (lam, V); the neighbours are the reference modes beyond a and e;
     post(call, info) -> info edits the returned info. _count_slice returns (estimate,
-    verifiable, capped) = count (or count(call)). Returns the recorded si_checked kwargs (plus
-    interval, P) and _count_slice calls (args, kwargs)."""
+    verifiable, capped) = count (or count(call)); a _predict call returns the degree only and is
+    not recorded. Returns the recorded si_checked kwargs (plus interval, P) and _count_slice
+    calls (args, kwargs)."""
     lr, Vr = prob(name)[6:]
     calls, counts = [], []
 
@@ -1183,10 +1190,14 @@ def fake_band(monkeypatch, script, name="short", count=(0.1, True, False), post=
                     count=cnt or (OK_COUNT if reason is None else NO_COUNT))  # fmt: skip
         return lam, V, info if post is None else post(len(calls), info)
 
-    def count_slice(*a, **kw):
+    def count_slice(*a, _predict=False, **kw):
+        t = dict(step=0.0, block=0.0, total=0.0)
+        if _predict:
+            return np.nan, dict(capped=False, degree=7, block=1, time=t)
         counts.append((a, kw))
         est, ver, capped = count(len(counts)) if callable(count) else count
-        return est, dict(verifiable=ver, passed=ver and est < 0.5, capped=capped, degree=7)
+        return est, dict(verifiable=ver, passed=ver and est < 0.5, capped=capped, degree=7,
+                         block=1, time=t)  # fmt: skip
 
     monkeypatch.setattr(si, "si_checked", fake)
     monkeypatch.setattr(si, "_count_slice", count_slice)
@@ -1466,7 +1477,7 @@ def test_band_progress_inside(monkeypatch):
     _, counts = fake_band(monkeypatch, lambda j, a, e, kw: (*split_once(j, a, e, kw)[:3], nr))
     _, _, info = fband("short", lo, hi, verify=False)
     span = info["slices"][1]  # neither the span's count nor the band's ran
-    assert counts[0][1]["_predict"] is True and span["kind"] == "span" and not span["count"]["ran"]
+    assert not counts and span["kind"] == "span" and not span["count"]["ran"]
     assert span["count"]["reason"] == "not requested" and not info["count"]["ran"]
     assert not info["count"]["verifiable"]  # no leaf counted
 
@@ -1694,7 +1705,8 @@ def test_span_chain_edge(monkeypatch):
     lam_s = np.array([3.0, 1.0, 2.0, 2.0 * (1 - 1e-9), 5.0])
     cols = lambda idx: np.eye(5)[:, idx]  # noqa: E731
     nbs = {"lo": (2.0 * (1 - 1.5e-9), np.ones(5)), "hi": None}
-    si._span_count(op, free, None, lam_s, cols, 2.0 * (1 - 5e-10), 3.0, 1e-8, nbs, None, True, {})
+    si._span_count(op, free, None, lam_s, cols, 2.0 * (1 - 5e-10), 3.0, 1e-8, nbs, None, True, {},
+                   block=6, t_leaf=0.0, t_minres=0.0)  # fmt: skip
     args = counts[0][0]
     assert np.array_equal(args[3], lam_s[[3, 2, 0]]) and args[6][0] == 1.0 and args[7][0] == 5.0
 
@@ -1823,7 +1835,7 @@ def test_band_options(monkeypatch):
         (dict(edges=[lo]), "edges must be sorted"),
         (dict(edges=[s[0], s[0]]), "edges must be sorted"),
         (dict(capacity=11), "capacity must be an int >= 2 block"),
-        (dict(verify=None), "verify must be True or False"),
+        (dict(verify="yes"), "verify must be True, False or None"),
         (dict(block=0), "block must be"),
     ):
         kw = dict(lo=lo, hi=hi) | bad

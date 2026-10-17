@@ -9,7 +9,7 @@ import json
 
 from benchmarks import harness
 from jaxmodal import config
-from jaxmodal.eigen import api, solve_modes
+from jaxmodal.eigen import counting, solve_modes
 from jaxmodal.materials import Material, isotropic
 from jaxmodal.mesh import box_mesh, voxel_mesh
 
@@ -20,7 +20,7 @@ BCS = {"xmin": "xyz"}
 def ratio(mesh):
     """Real warm step / the bound's step: the calibration timed (forced), the bound recorded."""
     rec = {}
-    real_bound, real_cal = api._bound, api._calibrate
+    real_bound, real_cal = counting._bound, counting._calibrate
 
     def bound(*a):
         rec["bound"], rec["steps"] = real_bound(*a), a[0]
@@ -30,13 +30,13 @@ def ratio(mesh):
         rec["cal"] = real_cal(*a)
         return (1e9,) + rec["cal"][1:]  # skip the count itself
 
-    api._bound, api._calibrate = bound, calibrate
+    counting._bound, counting._calibrate = bound, calibrate
     try:
         f = solve_modes(mesh, STEEL, BCS, 4)[2]["frequencies"]
         opts = {"block": 10}
         _, _, info = solve_modes(mesh, STEEL, BCS, band=(0, (f[2] + f[3]) / 2), count_options=opts)
     finally:
-        api._bound, api._calibrate = real_bound, real_cal
+        counting._bound, counting._calibrate = real_bound, real_cal
     t_step = rec["cal"][2]
     per_step = rec["bound"] / rec["steps"]
     return dict(n_dof=3 * len(mesh.points), chunk=info["chunk"], t_iteration=info["t_iteration"],

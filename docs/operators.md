@@ -177,7 +177,7 @@ Call it on the mesh that will be used (after `rcm`, if any), with the same keywo
 - `storage`: every leaf, from `layout` (padded counts, $W_b$, valence).
 - `vectors`: $3 \cdot 8\,n_\text{dof} m$: $v$ and two outputs (XLA frees an apply's output asynchronously, so it can overlap the next apply's).
 - `workspace`: the apply temporaries. Scatter, stored: $8c(2km + k^2)$ ($u_e$, $y_e$, unpacked $K_e$). Otf: a fitted per-element envelope of apply_K, $c(a_t + b_t(m-1))$ (XLA's fusion of the strain and stress fields varies with $m$), or `diag_K`'s $B$ matrices, $c\,t_t^\text{stored}$, whichever is larger. Gather: $8\sum_b W_b k_b m$ plus the larger of the gathered rows $8\cdot 3R\cdot\text{valence}\cdot m$ (XLA does not fuse the gather with the sum) and the chunk temporaries (they are never live together).
-- `build`: the padded connectivity and phase on the host, the phase index (and the int64 inverse map) plus one chunk of the build kernel's XLA temporaries, $c\,t_t$, with $t$ per element exactly linear in $c$:
+- `build` (counted on the host in the per-space entries; its one chunk of build-kernel temporaries is small and sits on the device on a GPU, a simplification): the padded connectivity and phase on the host, the phase index (and the int64 inverse map) plus one chunk of the build kernel's XLA temporaries, $c\,t_t$, with $t$ per element exactly linear in $c$:
 
   | | hex8 | hex20 | hex27 |
   |---|---|---|---|
@@ -188,7 +188,7 @@ Call it on the mesh that will be used (after `rcm`, if any), with the same keywo
 - `overhead`: 10 MB, the only constant fitted to measured peaks ($t$, $a$, $b$ come from `memory_analysis`; measured on hex20 $30^3$ and hex8 $60^3$; the formulas match `memory_analysis` without factors).
 - `total = overhead + storage + max(build, vectors + workspace)`.
 - Not counted: `layout`'s host transient (≈ 4× the int64 inverse map while it is built, e.g. 0.55 GB at hex20 $55^3$ gather). It is freed before any device leaf exists, so it does not set the peak of `unstructured`, but an estimator that composes this one with live device memory should add it.
-- The estimate costs as much as `layout` (0.3 s at 1M DOF gather).
+- The estimate costs as much as `layout` (0.3 s at 1M DOF gather, 3.2 s per call at 10.2M: about 35 s of estimates per band call there; caching `layout` is PR 18).
 - **Composition:** later estimators (PR 9/11/13/14/15) add PR 5's `storage + workspace` and count `overhead` once; they count their own vectors.
 
 ## Voxel stencil (`stencil`)

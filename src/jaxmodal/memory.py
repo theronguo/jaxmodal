@@ -1,7 +1,10 @@
 """Device memory estimators (bytes). See docs/operators.md and docs/eigensolvers.md."""
 
 import functools
+import math
+import os
 
+import jax
 import numpy as np
 
 from .eigen.api import (
@@ -12,7 +15,7 @@ from .eigen.api import (
     resolve_precond,
 )
 from .eigen.lobpcg import _block_size, _capacity, band_defaults  # shared with the solver
-from .eigen.shift_invert import _chunk
+from .eigen.shift_invert import _chunk, _up
 from .elements import ELEMENTS
 from .materials import phases
 from .operators import dof_mask, rigid_modes
@@ -122,20 +125,31 @@ def stencil_memory(mesh, m, mass="consistent", slab=None):
 STEP_FIT = {"9-block": (16, 2.5), "low": (11, 1.75)}
 
 
+def _pc_builds(pc):
+    """(device, host) build bytes of a preconditioner estimate: AMG builds on the host."""
+    return pc["build"] - pc.get("host_build", 0), pc.get("host_build", 0)
+
+
 def lobpcg_memory(
     op_memory, n_dof, n_modes, chunk=None, guards=None, low_memory=False, basis_dtype="float64",
-    n_rigid=0, precond_memory=None, band=False,
+    n_rigid=0, precond_memory=None, band=False, capacity=None,
 ):  # fmt: skip
     """Estimated peak bytes of lobpcg(...) (band: a band solve expecting n_modes modes, whose
     host V holds one more block). op_memory: m -> the operator estimate at block width
     m, e.g. lambda m: unstructured_memory(mesh, m); precond_memory: m -> the preconditioner
-    estimate (e.g. lambda m: gmg_memory(mesh, m)), None for the default Jacobi.
+    estimate (e.g. lambda m: gmg_memory(mesh, m)), None for the default Jacobi. capacity: the
+    basis columns (default _capacity's for n_modes).
 
-    Returns step, basis, rigid, host, precond (its storage) and
-    total = overhead + storage + precond + basis + rigid + host + max(build, precond build, step).
+    Returns step, basis, rigid, host, precond (its storage),
+    total = overhead + storage + precond + basis + rigid + host + max(build, precond build, step)
+    and per memory space (a GPU; the CPU uses total): device_total (the device terms and the
+    device builds), host_total (the host peak: max(operator build, V + AMG build, V + 2 chunks
+    of a band basis refill), the AMG aggregates inside the fit test's modelled factor) and their
+    exact parts device_exact (operator storage, basis, R and M R) and host_exact (V).
     """
     chunk, guards, k = _block_size(n_modes, chunk, guards)
-    _, cap = _capacity(n_modes, chunk, k, low_memory)
+    c, cap = _capacity(n_modes, chunk, k, low_memory)
+    cap = cap if capacity is None else capacity
     op = op_memory(k)
     pc = precond_memory(k) if precond_memory else dict(storage=0, build=0, step=0, step_low=0)
     b = 8 * n_dof * k
@@ -153,6 +167,16 @@ def lobpcg_memory(
     out["total"] = (
         op["overhead"] + op["storage"] + out["precond"] + out["basis"] + out["rigid"]
         + out["host"] + max(op["build"], pc["build"], out["step"])
+    )  # fmt: skip
+    V = 8 * n_dof * n_modes + (b if band else 0)  # the host modes
+    pc_dev, pc_host = _pc_builds(pc)
+    out.update(
+        device_exact=op["storage"] + out["basis"] + out["rigid"],
+        host_exact=V,
+        device_total=op["overhead"] + op["storage"] + out["precond"] + out["basis"]
+        + out["rigid"] + out["host"] - V + max(out["step"], pc_dev),
+        # a band growth refills the basis from V: a host chunk and its F -> C copy
+        host_total=max(op["build"], V + pc_host, V + (2 * 8 * n_dof * c if band else 0)),
     )  # fmt: skip
     return {k: int(v) for k, v in out.items()}
 
@@ -285,19 +309,13 @@ AMG_LOOP_K = 120_000
 AMG_COUNT = (11.5, 45.0)
 
 
-def amg_memory(mesh, m, max_coarse=1000, degree=2):
-    """Estimated bytes of amg(unstructured(mesh, ...), free, sigma, mesh.points, degree=degree,
-    max_coarse=max_coarse) applied to (n_dof, m) blocks: storage (the p-level exact from the
-    mesh, the AMG levels per corner DOF, the coarsest factor), build (the setup host peak), step
-    and step_low (extra LOBPCG step bytes over Jacobi), count (extra count-recurrence bytes).
-    Calibrated on box meshes at max_coarse 1000; the coarse term uses max(max_coarse, 1000) (an
-    upper bound, loose above 1000)."""
+@functools.lru_cache(maxsize=1)  # Mesh hashes by identity; keeps the last mesh alive
+def _amg_scan(mesh):
+    """(family, corner DOFs n_c, p-level table bytes) of amg_memory: the mesh scan alone."""
     n_nodes = len(mesh.points)
     blocks = [c for c in mesh.blocks.values() if len(c)]
     corner = np.unique(np.concatenate([c[:, :8].ravel() for c in blocks]))
-    n_c, n_dof = 3 * len(corner), 3 * n_nodes
-    fam = "hex8" if mesh.blocks.keys() == {"hex8"} else "p"
-    storage = 120 * n_nodes  # free mask, node-block Jacobi inverses and mask (fp64)
+    fam, tables = ("hex8" if mesh.blocks.keys() == {"hex8"} else "p"), 0
     if fam == "p":  # NodalTransfer: (int32, fp64) parent / child tables
         # w: parents per fine node; child.max(): fine nodes interpolating from one corner
         w = max(int((_w8(c.shape[1]) > 0).sum(1).max()) for c in blocks)
@@ -306,15 +324,32 @@ def amg_memory(mesh, m, max_coarse=1000, degree=2):
             a, j = np.nonzero(_w8(c.shape[1]) > 0)
             pairs.append(c[:, a].astype(np.int64).ravel() * n_nodes + c[:, j].ravel())
         child = np.unique(np.unique(np.concatenate(pairs)) % n_nodes, return_counts=True)[1]
-        storage += 12 * (w * n_nodes + child.max() * len(corner))
+        tables = 12 * (w * n_nodes + int(child.max()) * len(corner))
+    return fam, 3 * len(corner), tables
+
+
+def amg_memory(mesh, m, max_coarse=1000, degree=2):
+    """Estimated bytes of amg(unstructured(mesh, ...), free, sigma, mesh.points, degree=degree,
+    max_coarse=max_coarse) applied to (n_dof, m) blocks: storage (the p-level exact from the
+    mesh, the AMG levels per corner DOF, the coarsest factor), build and host_build (the setup
+    host peak), step and step_low (extra LOBPCG step bytes over Jacobi), count (extra
+    count-recurrence bytes).
+    Calibrated on box meshes at max_coarse 1000; the coarse term uses max(max_coarse, 1000) (an
+    upper bound, loose above 1000)."""
+    n_nodes = len(mesh.points)
+    fam, n_c, tables = _amg_scan(mesh)
+    n_dof = 3 * n_nodes
+    storage = 120 * n_nodes + tables  # free mask, node-block Jacobi inverses and mask (fp64)
     storage += AMG_STORAGE[fam] * n_c + 8 * min(n_c, max(max_coarse, 1000)) ** 2
     beta, alpha = AMG_BUILD
     a9, c9, K9 = AMG_STEP[(fam, "9-block")]
     al, cl, Kl = AMG_STEP[(fam, "low")]
     loop = AMG_LOOP_K if degree > 2 else 0
+    hb = beta + max(alpha[t] for t in mesh.blocks) * n_c
     out = dict(
         storage=storage,
-        build=beta + max(alpha[t] for t in mesh.blocks) * n_c,
+        build=hb,
+        host_build=hb,  # pyamg runs on the host
         step=8 * n_dof * (a9 * m + c9) + 8 * m * (K9 + loop),
         step_low=8 * n_dof * (al * m + cl) + 8 * m * (Kl + loop),
         count=8 * n_dof * (AMG_COUNT[0] * m + AMG_COUNT[1]) + 8 * m * loop,
@@ -357,11 +392,12 @@ def solve_modes_memory(
     operator_options and precond_options as in solve_modes (coarse_degree and ratio change no
     memory). n_rigid=None counts the rigid modes left by bcs on the host (builds the dense rigid
     modes: about 20 GB at 100M DOF; pass n_rigid for large meshes). band=(0, f_max): the band
-    solve expecting n_modes modes (n_modes and chunk default as in solve_modes); its count fits
-    by construction (solve_modes sizes the probe block from this estimate)."""
-    if band is not None:
-        check_band(band)
-    elif n_modes is None:
+    solve expecting n_modes modes (n_modes and chunk default as band_defaults gives them, not
+    the ladder's possibly halved chunk); its count fits by construction (solve_modes sizes the
+    probe block from this estimate)."""
+    if band is not None and check_band(band)[0] > 0:
+        raise ValueError("solve_modes_memory needs band=(0, f_max): no estimate of f1 > 0 yet")
+    if band is None and n_modes is None:
         raise ValueError("pass n_modes or band")
     op_memory, pc = _models(mesh, mass, precond, precond_dtype, operator_options, precond_options)
     free = dof_mask(mesh, bcs)
@@ -395,7 +431,8 @@ def count_memory(
     precond_memory: m -> gmg_memory or amg_memory (its "count" term), None for Jacobi. W stays
     on the host: one chunk of `chunk` columns is on the device at a time.
 
-    Returns storage, sampling, step, projector and total = overhead + storage + max(phases)."""
+    Returns storage, sampling, step, projector, total = overhead + storage + max(phases) and
+    the per-space entries of lobpcg_memory (all device; exact: operator storage, R and M R)."""
     op = op_memory(b)
     pc = precond_memory(b) if precond_memory else dict(storage=0, count=0)
     v, ws = 8 * n_dof, op["workspace"]
@@ -413,6 +450,8 @@ def count_memory(
     )
     peak = max(out["sampling"], out["step"], out["projector"])
     out["total"] = op["overhead"] + out["storage"] + peak
+    out.update(device_total=out["total"], host_total=0, host_exact=0,
+               device_exact=op["storage"] + 2 * v * n_rigid)  # fmt: skip
     return {k: int(x) for k, x in out.items()}
 
 
@@ -423,14 +462,11 @@ def probe_block(budget, n_probes, op_memory, n_dof, **kwargs):
     def total(b):
         return count_memory(op_memory, n_dof, b, **kwargs)["total"]
 
-    if total(1) > budget:
+    b = _largest(lambda b: total(b) <= budget, 1, 1, n_probes)  # total is non-decreasing in b
+    if b is None:
         one = total(1) / 1e9
         raise ValueError(f"budget {budget / 1e9:.2f} GB is below one probe ({one:.2f} GB)")
-    lo, hi = 1, n_probes + 1  # total is non-decreasing in b
-    while hi - lo > 1:
-        mid = (lo + hi) // 2
-        lo, hi = (mid, hi) if total(mid) <= budget else (lo, mid)
-    return lo
+    return b
 
 
 def band_probe_block(mesh, bcs, n_modes, n_probes, host_bytes, *, n_rigid, **options):
@@ -463,16 +499,20 @@ SI_RITZ = 6.0
 
 
 def si_memory(
-    op_memory, n_dof, capacity, n_modes, block=6, precond_memory=None, n_rigid=0, n_deflate=0
-):
-    """Estimated peak bytes of si_slice(...) with `capacity` Lanczos columns, expecting at most
-    n_modes modes in the slice (the end phase assumes it). op_memory, precond_memory: m -> the
-    operator / preconditioner estimate (as lobpcg_memory); n_rigid: columns of R (R and M R are
-    stored); n_deflate: columns of W.
+    op_memory, n_dof, capacity, n_modes, block=6, precond_memory=None, n_rigid=0, n_deflate=0,
+    host_window=None,
+):  # fmt: skip
+    """Estimated peak bytes of si_slice(...) with `capacity` Lanczos columns inside a band solve
+    whose host store holds n_modes columns. op_memory, precond_memory: m -> the operator /
+    preconditioner estimate (as lobpcg_memory); n_rigid: columns of R (R and M R are stored);
+    n_deflate: columns of W on the device; host_window: W's host columns (default n_deflate;
+    si_band: the window and si_checked's restart copy).
 
-    Returns storage (operator, preconditioner, basis, R and M R), host (W's host copy and the
-    projected matrix), the phases minres, reortho, ritz, end, and
-    total = overhead + storage + host + max(operator build, preconditioner build, phases)."""
+    Returns storage (operator, preconditioner, basis, R and M R), host (the window, the store and
+    the projected matrix), the phases minres, reortho, ritz, end (one device chunk of the host
+    V, while Q is alive), total = overhead + storage + host + max(operator build, preconditioner
+    build, phases), and the per-space entries of lobpcg_memory (device: storage and phases;
+    host: host + the host builds; exact: operator storage, basis, R, M R, window and store)."""
     c = _chunk(block)
     capacity = -(-capacity // c) * c
     op_b = op_memory(block)
@@ -481,14 +521,114 @@ def si_memory(
     out = dict(
         storage=op_b["storage"] + pc["storage"] + v * (-(-n_deflate // c) * c + capacity)
         + 2 * v * n_rigid,
-        host=v * n_deflate + 8 * capacity**2,
+        host=v * (n_deflate if host_window is None else host_window) + v * n_modes
+        + 8 * capacity**2,
         minres=op_b["workspace"] + SI_MINRES * b + pc["count"],
         reortho=op_b["workspace"] + SI_REORTHO * b,
         ritz=op_b["workspace"] + SI_RITZ * b + v * c,
-        end=v * (n_modes + 2 + c),  # host V and one device chunk, while Q is alive
+        end=v * (2 + c),
     )  # fmt: skip
     phases = max(out["minres"], out["reortho"], out["ritz"], out["end"])
     out["total"] = (
         op_b["overhead"] + out["storage"] + out["host"] + max(op_b["build"], pc["build"], phases)
     )
+    pc_dev, pc_host = _pc_builds(pc)
+    out.update(
+        device_exact=out["storage"] - pc["storage"],
+        host_exact=out["host"] - 8 * capacity**2,
+        device_total=op_b["overhead"] + out["storage"] + max(pc_dev, phases),
+        host_total=out["host"] + max(op_b["build"], pc_host),
+    )
     return {k: int(x) for k, x in out.items()}
+
+
+# ---------------------------------------------------------------- budgets (solve_modes band)
+
+# The fit test (docs/eigensolvers.md#memory-budget): exact column arrays grow 5% with the
+# allocator, the modelled terms run up to 9-16% low (the roadmap's 20% validation band).
+FIT_EXACT, FIT_MODEL = 1.05, 1.2
+
+
+def _fits(est, budget, host_budget=None, host_extra=0):
+    """The fit test on one estimate, host_extra exact host bytes added: host_budget None is
+    unified memory (one check on total), else device_total against budget and host_total against
+    host_budget."""
+    if host_budget is None:
+        e = est["device_exact"] + est["host_exact"]
+        return FIT_EXACT * (e + host_extra) + FIT_MODEL * (est["total"] - e) <= budget
+    dev = FIT_EXACT * est["device_exact"] + FIT_MODEL * (est["device_total"] - est["device_exact"])
+    host = FIT_EXACT * (est["host_exact"] + host_extra) + FIT_MODEL * (
+        est["host_total"] - est["host_exact"])  # fmt: skip
+    return dev <= budget and host <= host_budget
+
+
+def _largest(fits, step, lo, hi):
+    """The largest multiple of step in [lo, hi] with fits True (fits monotone: True below some
+    value), by bisection; None when none fits."""
+    lo, hi = -(-lo // step), hi // step
+    if lo > hi or not fits(lo * step):
+        return None
+    while hi > lo:
+        mid = (lo + hi + 1) // 2
+        lo, hi = (mid, hi) if fits(mid * step) else (lo, mid - 1)
+    return int(lo * step)
+
+
+def _c_max(op_memory, pc, n_dof, *, chunk, guards, low, basis_dtype, n_rigid, n_avail, budget,
+           host_budget, need=None):  # fmt: skip
+    """C_max: the largest LOBPCG band basis (a multiple of the projector chunk c_L, at most the
+    free space up(n_avail + k, c_L)) whose band solve passes the fit test, from the initial basis
+    up(4 chunk + k, c_L), or up(need, c_L) when a known depth needs less; None when that does
+    not fit."""
+    _, guards, k = _block_size(chunk, chunk, guards)
+    c = _capacity(0, chunk, k, low)[0]
+    cap = _up(n_avail + k, c)
+
+    def fits(C):
+        est = lobpcg_memory(op_memory, n_dof, C, chunk, guards, low, basis_dtype, n_rigid, pc,
+                            True, capacity=C)  # fmt: skip
+        return _fits(est, budget, host_budget)
+
+    return _largest(fits, c, min(_up(min(4 * chunk + k, need or math.inf), c), cap), cap)
+
+
+def _slice_capacity(op_memory, pc64, n_dof, *, n_store, block, n_rigid, budget, host_budget):
+    """The slice capacity C (Lanczos and deflation columns, a multiple of c = _chunk(block)): the
+    largest passing the fit test with the device window W = 2c inside C, the host window and
+    si_checked's restart copy 2 (C - 2 block) and the store of n_store columns, between the
+    floor up(2c + 2 block, c) and the need cap up(1.25 (1.8 n_store + 84) + W, c); None when the
+    floor does not fit."""
+    c = _chunk(block)
+    w = 2 * c
+
+    def fits(C):
+        est = si_memory(op_memory, n_dof, C - w, n_store, block, pc64, n_rigid, n_deflate=w,
+                        host_window=2 * (C - 2 * block))  # fmt: skip
+        return _fits(est, budget, host_budget)
+
+    need = _up(int(np.ceil(1.25 * (1.8 * n_store + 84))) + w, c)
+    return _largest(fits, c, _up(2 * c + 2 * block, c), need)
+
+
+def _count_block(op_memory, pc64, n_dof, *, voxel, n_rigid, n_store, window, n_probes, budget,
+                 host_budget):  # fmt: skip
+    """The largest probe block <= n_probes of a slice count passing the fit test with the store
+    (n_store columns) and the host window (window columns) as exact host terms; None when one
+    probe does not fit."""
+
+    def fits(b):
+        est = count_memory(op_memory, n_dof, b, voxel=voxel, precond_memory=pc64, n_rigid=n_rigid)
+        return _fits(est, budget, host_budget, 8 * n_dof * (n_store + window))
+
+    return _largest(fits, 1, 1, n_probes)
+
+
+def _default_budget():
+    """(budget, host_budget): on a GPU its free pool (bytes_limit - bytes_in_use) and 0.8 x
+    physical RAM; on the CPU (unified) 0.8 x RAM and None."""
+    ram = 0.8 * os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    dev = jax.devices()[0]
+    if dev.platform == "cpu":
+        return ram, None
+    st = dev.memory_stats()
+    return st["bytes_limit"] - st["bytes_in_use"], ram
