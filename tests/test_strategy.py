@@ -1943,3 +1943,25 @@ def test_mac_count_peak():
         p = r["peak_bytes"] + held
         assert p <= fit and abs(p - comp) <= 0.2 * comp, (d, p / 1e9, comp / 1e9, r["time_s"])
     assert abs(peaks[2]["peak_bytes"] - peaks[8]["peak_bytes"]) <= 0.05 * peaks[8]["peak_bytes"]
+
+
+# ---------------------------------------------------------------- 13: cost-model record
+
+
+def test_cost_record():
+    """Test 13: strategy_study.json's constants are the log least-squares refit of
+    shift_invert_study.json's rows (frac 0.5, non-floor, recheck_1005), every ratio in
+    [0.75, 1.3]; the crossover and per-chunk entries are present."""
+    import json
+
+    from benchmarks import harness, strategy_study
+
+    rec = json.loads((harness.RESULTS / "strategy_study.json").read_text())
+    si_rec = json.loads((harness.RESULTS / "shift_invert_study.json").read_text())
+    for family, c in strategy_study.constants(si_rec).items():
+        r = rec["constants"][family]
+        assert np.allclose([r["alpha"], r["D0"]], [c["alpha"], c["D0"]], rtol=1e-12), family
+        assert r["depths"] == c["depths"] and min(r["ratios"]) >= 0.75 and max(r["ratios"]) <= 1.3
+    lob = rec["lobpcg"]
+    assert [x["depth"] for x in lob["crossover"]] == rec["constants"]["hex20"]["depths"]
+    assert set(lob["per_chunk"]) == {"40", "20", "10", "5"} and lob["held_out"]["measured"] > 0
