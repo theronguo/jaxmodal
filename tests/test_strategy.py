@@ -31,6 +31,7 @@ from test_shift_invert import (
 )
 
 from jaxmodal.eigen import counting, solve_modes
+from jaxmodal.mesh import voxel_mesh
 from jaxmodal.precond import SingularShiftError
 
 api = importlib.import_module("jaxmodal.eigen.api")
@@ -1723,3 +1724,222 @@ def test_not_converged(fake_builds, monkeypatch):
     _, _, info = fake_run(1.5, 5.0)
     assert not info["converged"] and not rec["band"] and info["strategy"] == "lobpcg"
     assert info["count"]["reason"] == "solve not converged"
+
+
+# ---------------------------------------------------------------- 17: Mac peaks
+
+MAC = pytest.mark.skipif(sys.platform != "darwin", reason="Mac peaks")
+CHILD_SETUP = """
+import ctypes, importlib, json, os, sys, time
+sys.path.insert(0, {root!r})
+from jaxmodal import config
+config.enable_x64()
+import jax, numpy as np
+from jaxmodal.materials import Material, isotropic
+from jaxmodal.mesh import voxel_mesh
+from jaxmodal.operators import dof_mask, stencil
+from jaxmodal.precond import gmg
+MAT = {{0: Material(isotropic(3.0, 0.3), 2.0)}}
+_lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+class _RU(ctypes.Structure):
+    _fields_ = [("uuid", ctypes.c_uint8 * 16), ("f", ctypes.c_uint64 * 35)]
+def footprint():
+    r = _RU()
+    _lib.proc_pid_rusage(os.getpid(), 4, ctypes.byref(r))
+    return int(r.f[7])
+def dump(obj, path):
+    json.dump(obj, open(path, "w"))
+"""
+
+
+def child(body, code, **fmt):
+    """harness.measure_json of code after CHILD_SETUP + body (a fresh subprocess with
+    MallocLargeCache=0; the peak above the setup's footprint)."""
+    from benchmarks import harness
+
+    setup = CHILD_SETUP.format(root=str(harness.RESULTS.parents[1])) + body.format(**fmt)
+    return harness.measure_json(code, setup)
+
+
+GROWTH = """
+mesh = voxel_mesh((52, 48, 44), (1 / 52, 1 / 48, 1 / 44))
+free = dof_mask(mesh, {{"zmin": "xyz"}})
+op = stencil(mesh, MAT)
+P = gmg(op, free, 0.0)
+jax.block_until_ready(P)
+lob = importlib.import_module("jaxmodal.eigen.lobpcg")
+EV = []
+_grow, _lock = lob._grow, lob._lock
+def grow(V, count, new, c, dt):
+    e = footprint()
+    B = _grow(V, count, new, c, dt)
+    B.block_until_ready()
+    EV.append(dict(kind="grow", count=count, new=new, entry=e, exit=footprint()))
+    return B
+def lock(B, count, X, j):
+    w = B.shape[1]
+    out = _lock(B, count, X, j)
+    out.block_until_ready()
+    EV.append(dict(kind="lock", count=count, j=int(j), width=w, fp=footprint()))
+    return out
+lob._grow, lob._lock = grow, lock
+def main():
+    t = time.perf_counter()
+    lam, V, info = lob._solve(op, free, 40, 1e-6, None, P, None, 1000, 0, chunk=10, low=True,
+                              lam_stop=1e30, max_capacity=135)
+    return dict(events=EV, locked=len(lam), capacity=info["capacity"], n=op.n_dof,
+                stopped=info.get("stopped"), time_s=time.perf_counter() - t)
+"""
+
+
+@pytest.mark.slow
+@MAC
+def test_mac_growth_peak():
+    """Test 17 (a2): _solve(max_capacity=135) on voxel 52 x 48 x 44 (no cube multiplicities),
+    low memory, chunk 10 (k = c = 15): the growth 60 -> 90 -> 135, then the capacity stop (run
+    time recorded in the assertion message). Per growth: B allocated at exactly new columns
+    (jump <= 1.05 new 8n; about 1.0008 measured by emulation in plan round 17) after the
+    caller's drop (entry <= the previous post-lock footprint - (0.9 old - j) 8n). The whole run:
+    peak - baseline (setup built) <= 1.05 E + 1.2 M - the setup terms (operator storage at 1.05,
+    preconditioner storage and overhead at 1.2) at the final capacity and locked count, and >=
+    0.8 x the unit-factor composition (no over-conservative estimate)."""
+    r = child(GROWTH, 'dump(main(), "{out}")')
+    n, v = r["n"], 8 * r["n"]
+    ev = r["events"]
+    grows = [i for i, e in enumerate(ev) if e["kind"] == "grow"]
+    assert [ev[i]["new"] for i in grows] == [90, 135] and r["capacity"] == 135, r
+    assert r["stopped"] == "capacity"
+    for i in grows:
+        g = ev[i]
+        prev = next(e for e in reversed(ev[:i]) if e["kind"] == "lock")
+        nxt = next(e for e in ev[i:] if e["kind"] == "lock")
+        jump = g["exit"] - g["entry"]
+        assert jump <= 1.05 * g["new"] * v, (g, jump / (g["new"] * v))
+        assert g["entry"] <= prev["fp"] - (0.9 * prev["width"] - nxt["j"]) * v, (g, prev, nxt)
+    mesh = voxel_mesh((52, 48, 44), (1 / 52, 1 / 48, 1 / 44))
+    op, pc = mem._models(mesh, "consistent", "auto", "float64", None, None)
+    e = mem.lobpcg_memory(op, n, r["locked"], 10, None, True, "float64", 0, pc, True,
+                          capacity=135)  # fmt: skip
+    assert e["total"] >= 2e9
+    E = e["device_exact"] + e["host_exact"]
+    M = e["total"] - E
+    st, pst, ovh = op(15)["storage"], e["precond"], op(15)["overhead"]
+    peak = r["peak_bytes"]
+    hi = 1.05 * (E - st) + 1.2 * (M - pst - ovh)
+    lo = 0.8 * (E + M - st - pst - ovh)
+    assert lo <= peak <= hi, (peak / 1e9, lo / 1e9, hi / 1e9, r["time_s"])
+
+
+SLICE = """
+mesh = voxel_mesh((80, 80, 80), (1 / 80,) * 3)
+from jaxmodal.eigen import solve_modes
+def main(B, band):
+    t = time.perf_counter()
+    lam, V, info = solve_modes(mesh, MAT, {{"zmin": "xyz"}}, band=band, mass="lumped", sigma=0.6,
+                               strategy="shift_invert", memory_budget=B, verify=False, n_modes=3)
+    return dict(n=len(lam), slices=len(info["slices"]), capacity=info["capacity"],
+                time_s=time.perf_counter() - t, precond_s=info["time"]["precond"])
+"""
+
+
+def lumped80():
+    mesh = voxel_mesh((80,) * 3, (1 / 80,) * 3)
+    op, pc = mem._models(mesh, "lumped", "auto", "float64", None, None)
+    return mesh, op, pc, 3 * len(mesh.points)
+
+
+def bisect_budget(ok, lo=1e8, hi=1e11):
+    """The smallest budget (to 1e-6 relative) with ok(budget) True (ok monotone)."""
+    while hi - lo > 1e-6 * hi:
+        mid = (lo + hi) / 2
+        lo, hi = (lo, mid) if ok(mid) else (mid, hi)
+    return hi
+
+
+@pytest.mark.slow
+@MAC
+def test_mac_slice_peak():
+    """Test 17 (b): one shift-invert slice from 0 (the band's lowest 3 elastic modes, mu_1
+    pre-estimate inside the peak) on lumped voxel 80^3 at the budget whose searched capacity is
+    the need cap (168): the peak <= B and <= the worst-case composition (the fit test at 168,
+    window 48 inside), and within 20% of the composition with the run's window (none) and
+    stored count (run time and pre-estimate share in the assertion message)."""
+    mesh, op, pc, n = lumped80()
+    need_cap = mem._up(math.ceil(1.25 * (1.8 * 3 + 84)) + 48, 24)
+
+    def cap(B):
+        return mem._slice_capacity(op, pc, n, n_store=3, block=6, n_rigid=0, budget=B,
+                                   host_budget=None) or 0  # fmt: skip
+
+    B = bisect_budget(lambda B: cap(B) >= need_cap)
+    band = (freq(0.3), freq(2.5))  # modes 1-3 of the clamped cube (0.68 double, 1.25)
+    r = child(SLICE, f'dump(main({B!r}, {band!r}), "{{out}}")')
+    assert r["n"] == 3 and r["slices"] == 1 and r["capacity"] == need_cap, r
+    worst = mem.si_memory(op, n, need_cap - 48, 3, 6, pc, 0, n_deflate=48,
+                          host_window=2 * (need_cap - 12))  # fmt: skip
+    e = worst["device_exact"] + worst["host_exact"]
+    fit = 1.05 * e + 1.2 * (worst["total"] - e)
+    comp = mem.si_memory(op, n, need_cap, 3, 6, pc, 0)["total"]
+    peak = r["peak_bytes"]
+    msg = (peak / 1e9, B / 1e9, fit / 1e9, comp / 1e9, r["time_s"], r["precond_s"])
+    assert peak <= B and peak <= fit and abs(peak - comp) <= 0.2 * comp, msg
+
+
+COUNT = """
+mesh = voxel_mesh((80, 80, 80), (1 / 80,) * 3)
+free = dof_mask(mesh, {{"zmin": "xyz"}})
+op = stencil(mesh, MAT, mass="lumped")
+from jaxmodal.eigen.counting import band_count, band_edges
+f = np.flatnonzero(np.asarray(free))
+Q = np.linalg.qr(np.random.default_rng(0).standard_normal((len(f), {k} + 2)))[0]
+W = np.zeros((op.n_dof, {k} + 2), order="F")
+W[f] = Q / np.sqrt(np.asarray(op.diag_M())[f])[:, None]
+Q = None
+S, Wn, Vout = W[:, :{n_store}], W[:, {n_store}:{k}], W[:, {k}:]
+lam = np.linspace(1.1, 1.9, {k})
+lam_out = np.array([0.5, 3.0])
+c_hi = band_edges(lam, 1.0, 2.0, lam_out)[1]
+P = gmg(op, free, c_hi)
+jax.block_until_ready(P)
+def main(degree, b):
+    t = time.perf_counter()
+    est, ci = band_count(op, free, (S, Wn), lam, 1.0, 2.0, Vout, lam_out, precond=P,
+                         n_probes=b, degree=degree, block=b)
+    return dict(steps=ci["steps"], block=ci["block"], time_s=time.perf_counter() - t)
+"""
+
+
+@pytest.mark.slow
+@MAC
+def test_mac_count_peak():
+    """Test 17 (c): band_count on lumped voxel 80^3 with the store (10) and window (20) held as
+    host arrays, at the budget giving the probe block 20 (< 50), n_probes = that block: one
+    block; the peak (above the setup: operator, multigrid, arrays) plus the held terms <= the
+    fit-test composition and within 20% of it; degrees 2 and 8 within 5% (run times in the
+    assertion message)."""
+    mesh, op, pc, n = lumped80()
+    n_store, window = 10, 20
+
+    def block(B):
+        return mem._count_block(op, pc, n, voxel=True, n_rigid=0, n_store=n_store, window=window,
+                                n_probes=50, budget=B, host_budget=None) or 0  # fmt: skip
+
+    B = bisect_budget(lambda B: block(B) >= 20)
+    b = block(B)
+    assert b == 20
+    k = n_store + window
+    peaks = {}
+    for d in (2, 8):
+        r = child(COUNT, f'dump(main({d}, {b}), "{{out}}")', k=k, n_store=n_store)
+        assert r["steps"] == d and r["block"] == b, r  # one block
+        peaks[d] = r
+    e = mem.count_memory(op, n, b, voxel=True, precond_memory=pc)
+    host = 8 * n * (k + 2)
+    ex = e["device_exact"] + e["host_exact"]
+    fit = mem.FIT_EXACT * (ex + host) + mem.FIT_MODEL * (e["total"] - ex)
+    held = op(b)["storage"] + pc(b)["storage"] + op(b)["overhead"] + host
+    comp = e["total"] + host
+    for d, r in peaks.items():
+        p = r["peak_bytes"] + held
+        assert p <= fit and abs(p - comp) <= 0.2 * comp, (d, p / 1e9, comp / 1e9, r["time_s"])
+    assert abs(peaks[2]["peak_bytes"] - peaks[8]["peak_bytes"]) <= 0.05 * peaks[8]["peak_bytes"]
