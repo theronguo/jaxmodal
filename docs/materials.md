@@ -106,8 +106,34 @@ C, rho = phase_table(pairs, materials, orientations)  # pure jax.numpy
 - **`check_materials(pairs, materials, orientations=None)`:** raises `ValueError` for a label used in the mesh but missing from a dict, a `C` that fails `check_stiffness`, a density that is not a finite positive scalar, or an $R$ that is not a finite rotation ($\max|R^\top R - I| \le 10^{-12}$, so fp32-accurate rotations are rejected; $\det R > 0$). Extra dict entries are allowed. `unstructured` and `stencil` (and so `solve_modes`) call it before tracing, so it takes concrete materials.
 - **Density** is the physical density $\rho$ of a material. Design densities in topology optimization (PR 23) enter through the operators' per-element scaling $s_K$, $s_M$, not through `rho`.
 
+## Laminates (solid shells)
+
+```python
+from jaxmodal.materials import Laminate, Material, Ply, ply_table
+
+carbon = Material(orthotropic(...), 1600.0)
+lam = Laminate((Ply(carbon, 0.0, 0.25), Ply(carbon, np.pi / 2, 0.5), Ply(carbon, 0.0, 0.25)))
+materials = {0: steel, 1: lam}  # label -> Material | Laminate
+plies, R_o = ply_table(pairs, materials, orientations)  # pure jax.numpy
+```
+
+- **`Ply(material, angle, fraction)`:** a `Material`, the angle in radians about the shell normal from the shell frame's axis 1, and the thickness fraction. **`Laminate(plies)`:** a tuple of `Ply`, bottom to top along $+\zeta$. Both are NamedTuples (pytrees).
+- **Where:** a `Laminate` only on `ssh8` elements. `assemble` and `unstructured` raise "material $m$ is a Laminate on $t$ elements; laminates need ssh8" for a hex block, and `stencil` likewise (voxel meshes are hex8). A `Material` on `ssh8` is one ply (angle 0, fraction 1).
+- **Ply mapping:** ply $k$ occupies $\zeta \in [-1 + 2\sum_{j<k}f_j,\ -1 + 2\sum_{j\le k}f_j]$. A trilinear map is linear in $\zeta$ along each fibre, so reference fractions equal physical thickness fractions on any element.
+- **`check_materials`** checks each ply as a `Material` (errors `material m ply k: ...`), a finite angle, and fractions $> 0$ summing to 1 within $10^{-12}$ ("material $m$: ply fractions must be > 0 and sum to 1").
+- **`ply_table(pairs, materials, orientations=None) -> (Ply(Material(C, rho), angle, fraction), R_o)`:** unrotated `C (P, L, 6, 6)`, `rho`, `angle`, `fraction` `(P, L)` and `R_o (P, 3, 3)`, with $L$ the largest ply count; shorter stacks are padded with copies of ply 0 at fraction 0 (weight 0). The shell kernels take one element's slice `(jax.tree.map(lambda a: a[p], plies), R_o[p])` (`docs/elements.md`). `phase_table` gives a `Laminate` phase ply 0's rotated $C$ and $\rho$ as a placeholder, read by no `ssh8` code.
+
+**Shell frame** (per element, at the centre, Abaqus-like):
+
+- $t_3 = g_1\times g_2/\|g_1\times g_2\|$ at $\xi = 0$ (the element normal along $+\zeta$).
+- $t_1$ = axis 1 of $R_o$ (the orientation label's rotation, identity by default) projected onto the shell plane and normalized; $t_2 = t_3\times t_1$.
+- **Fallback:** if that projection has norm $< 0.1$, $t_2$ = axis 2 of $R_o$ projected and normalized, and $t_1 = t_2\times t_3$. The normalization is NaN-free (double `where`); the frame is not differentiable at the switch.
+- $R_\text{shell} = [t_1\ t_2\ t_3]$, and ply $k$ uses $C_k' = $ `rotate`$(C_k, R_\text{shell}R_z(\theta_k))$. When $R_o$'s axis 3 is $+t_3$, $R_\text{shell} = R_o$, so a one-ply `Material` acts as on hex8.
+- **Stacking sign:** a $\zeta$ flip turns the frame by $\mathrm{diag}(1,-1,-1)$ (by $\mathrm{diag}(-1,1,-1)$ in the fallback), reverses the plies and negates the angles. See `solid_shell`'s `direction` (`docs/mesh.md`).
+- **hex8 vs `ssh8`:** a hex8 element uses $R_o$ itself; an `ssh8` element projects it onto its shell plane. On a tilted plate, hex8 and `ssh8` parts with one orientation label are therefore oriented differently unless $R_o$'s axis 3 is the normal.
+
 ## Not covered
 
-- Composing rotations, e.g. ply angles in a shell frame (PR 16): $R = R_\text{shell}R_\text{ply}$, a plain matrix product.
+- Composing general rotations: the shell frame composes $R_\text{shell}R_z(\theta_k)$ (above); other compositions are a plain matrix product passed as an orientation.
 - Abaqus `*MATERIAL`/`*ORIENTATION` cards are not read; only the labels are (`docs/mesh.md`).
 - Damping, temperature dependence, nonlinearity.

@@ -1,13 +1,17 @@
 """Assembled SciPy K and M: the reference oracle for the matrix-free operators.
 See docs/operators.md."""
 
+from functools import partial
+
 import jax
+import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
 from ..elements import check_elements, kernels
-from ..materials import check_materials, phase_table, phases
-from .common import check_nodal_mass, check_x64
+from ..elements.shell import shell_mass, shell_stiffness
+from ..materials import check_materials, phase_table, phases, ply_table
+from .common import check_laminates, check_nodal_mass, check_x64
 from .dofmap import element_dofs
 
 _KERNELS = {
@@ -15,14 +19,26 @@ _KERNELS = {
 }
 
 
-def _chunked(kernel, t, X, conn, p, chunk):
-    """kernel(t, X[conn], p) in chunks of min(chunk, n_el); the last chunk is padded."""
+def _shell_mass(X, plies):  # m_e (x) I_3, as kernels.mass
+    m = shell_mass(X, plies)
+    return (m[:, None, :, None] * jnp.eye(3, dtype=m.dtype)[:, None, :]).reshape(24, 24)
+
+
+_SHELL = {
+    "stiffness": jax.jit(jax.vmap(shell_stiffness)),
+    "mass": jax.jit(jax.vmap(lambda X, table_e: _shell_mass(X, table_e[0]))),
+}
+
+
+def _chunked(kernel, X, conn, p, chunk):
+    """kernel(X[conn], p) in chunks of min(chunk, n_el); the last chunk is padded. p is an array
+    or a pytree of per-element arrays."""
     n, out = len(conn), []
     c = min(chunk, n)
     for s in range(0, n, c):
         e = np.arange(s, s + c)
         e = np.where(e < n, e, s)  # pad by repeating the chunk's first element
-        out.append(np.asarray(kernel(t, X[conn[e]], p[e]))[: n - s])
+        out.append(np.asarray(kernel(X[conn[e]], jax.tree.map(lambda a, e=e: a[e], p)))[: n - s])
     return np.concatenate(out)
 
 
@@ -46,6 +62,7 @@ def assemble(
     check_x64("assemble")
     index, pairs = phases(mesh)
     check_materials(pairs, materials, orientations)
+    check_laminates(mesh, index, pairs, materials)
     check_elements(mesh, mass)
     n_nodes = len(mesh.points)
     n_dof = 3 * n_nodes
@@ -56,13 +73,20 @@ def assemble(
         if x is not None and (x.shape != (mesh.n_el,) or not (np.isfinite(x) & (x >= 0)).all()):
             raise ValueError(f"{name} must be None or a finite, non-negative ({mesh.n_el},) array")
     C, rho = (np.asarray(a) for a in phase_table(pairs, materials, orientations))
+    if "ssh8" in mesh.blocks:
+        plies = jax.tree.map(np.asarray, ply_table(pairs, materials, orientations))
     dofs = element_dofs(mesh)
 
     def values(kernel, table, scale):
         out = []
         for t, conn in mesh.blocks.items():
             e = slice(mesh.offsets[t], mesh.offsets[t] + len(conn))
-            v = _chunked(_KERNELS[kernel], t, mesh.points, conn, table[index[e]], chunk)
+            if t == "ssh8":
+                p = jax.tree.map(lambda a, e=e: a[index[e]], plies)
+                v = _chunked(_SHELL[kernel], mesh.points, conn, p, chunk)
+            else:
+                k = partial(_KERNELS[kernel], t)
+                v = _chunked(k, mesh.points, conn, table[index[e]], chunk)
             if scale is not None:
                 v = v * np.asarray(scale, float)[e].reshape(-1, *[1] * (v.ndim - 1))
             out.append(v.ravel())

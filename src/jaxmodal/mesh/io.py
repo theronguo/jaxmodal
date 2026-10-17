@@ -32,7 +32,7 @@ def write(path, mesh):
     """Write a VTU file with `material`/`orientation` cell data. Sets are not written."""
     if Path(path).suffix.lower() != ".vtu":
         raise ValueError("only .vtu can be written")
-    names = {v: k for k, v in MESHIO.items()}
+    names = {v: k for k, v in MESHIO.items()} | {"ssh8": "hexahedron"}  # read back as hex8
     off = mesh.offsets
     rows = {t: slice(off[t], off[t] + len(c)) for t, c in mesh.blocks.items()}
     m = meshio.Mesh(

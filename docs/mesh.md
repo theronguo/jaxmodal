@@ -1,6 +1,6 @@
 # Mesh
 
-`jaxmodal.mesh` holds the host-side mesh: a NumPy data model, file readers, a VTU writer, voxel and box generators, corner Jacobians, renumbering (`renumber`, `rcm`) and face-connected parts (`parts`, `docs/boundary_conditions.md`). There is no JAX here (a test imports it in a fresh interpreter and checks that `jax` is not loaded); `element_dofs` casts topology to int32 for the device (`docs/operators.md`).
+`jaxmodal.mesh` holds the host-side mesh: a NumPy data model, file readers, a VTU writer, voxel and box generators, corner Jacobians, renumbering (`renumber`, `rcm`), the solid-shell conversion (`solid_shell`) and face-connected parts (`parts`, `docs/boundary_conditions.md`). There is no JAX here (a test imports it in a fresh interpreter and checks that `jax` is not loaded); `element_dofs` casts topology to int32 for the device (`docs/operators.md`).
 
 ```python
 from jaxmodal.mesh import read, write, voxel_mesh, corner_jacobians
@@ -24,7 +24,7 @@ class Mesh:
     voxel: Voxel | None = None
 ```
 
-- **Types:** `TYPES = ("hex8", "hex20", "hex27")`. Blocks appear in this order.
+- **Types:** `TYPES = ("hex8", "hex20", "hex27", "ssh8")`. Blocks appear in this order. `ssh8` is the solid shell: hex8 topology with reference $\zeta$ as the thickness ([Solid shells](#solid-shells-solid_shell)).
 - **Global element index:** blocks in `TYPES` order, rows in order within a block. `mesh.offsets[t]` is the first global index of block `t` (present types only), and `mesh.n_el` the total.
 - **Labels:** `material` and `orientation` are labels (any int64, possibly negative or non-contiguous, e.g. Gmsh physical tags), not table indices. `jaxmodal.materials.phases` and `phase_table` map them to materials and orientations (`docs/materials.md`). Label 0 is the default.
 - **dtypes are strict:** the arrays must be `np.ndarray` with exactly these dtypes, or construction raises `ValueError`. Nothing is cast silently, so there are no hidden copies at 100M-node scale.
@@ -105,7 +105,7 @@ Save with `Mesh.MshFileVersion = 4.1` and `Mesh.Binary = 0`. Other versions rais
 ### VTU `.vtu`
 
 - **Read:** `material` / `orientation` cell data (integer, or float with integral values, below $2^{31}$ in magnitude) become the labels, defaulting to 0. VTU carries no sets.
-- **Write:** points, blocks and the two label arrays (int64). Sets and voxel metadata are not written.
+- **Write:** points, blocks and the two label arrays (int64). Sets and voxel metadata are not written. `ssh8` is written as a VTK hexahedron, so it reads back as hex8; `solid_shell(mesh, direction=...)` restores it up to `order` (the VTU type field is deferred).
 
 ## Voxel meshes
 
@@ -144,6 +144,23 @@ mesh = box_mesh(shape, type="hex27", coords=(cx, cy, cz))  # graded
 - A structured block of $n_x \times n_y \times n_z$ elements of type `hex8`, `hex20` or `hex27`, with shared nodes in VTK order. It is the test mesh for PRs 4, 5, 7 and 8 (`voxel_mesh` is hex8 only).
 - **Nodes** are the used points of the half-spacing grid $(2n_x+1)\times(2n_y+1)\times(2n_z+1)$: hex8 uses even indices, hex20 indices with at most one odd component, hex27 all. Position $o + h \odot (i, j, k)/2$; nodes and elements in grid order ($x$ fastest), like `voxel_mesh`. Connectivity is the grid index of $2\,\text{cell} + \texttt{REFERENCE\_NODES}[:n] + 1$, one code path for all types.
 - **Sets:** the six face node sets as for voxel meshes; no element sets; labels 0; no `voxel` metadata. The hex8 box equals the unmasked `voxel_mesh` on points, connectivity and node sets.
-- **Validation:** `shape`, `spacing` and `origin` as for `voxel_mesh` (`check_grid`); an unknown `type` raises.
+- **Validation:** `shape`, `spacing` and `origin` as for `voxel_mesh` (`check_grid`); a `type` other than hex8, hex20, hex27 raises (`ssh8` too: convert with `solid_shell`).
 - **Graded meshes:** `coords=(cx, cy, cz)` gives the element boundaries per axis (lengths $n_d + 1$, finite, strictly increasing, else `ValueError`) and overrides `spacing` and `origin`. A node at half-grid index $i$ on axis $d$ sits at `np.interp(i / 2, arange(n_d + 1), coords[d])`: corner nodes on the boundaries, midside and centre nodes at element midpoints. Each element is thus an affine axis-aligned box, so geometry stays exact and refined meshes stay nested when their boundaries are. Remapping points instead would move midside nodes off the edge midpoints. The NAFEMS runs use cosine grading $x_i = \tfrac L2\big(1 - \cos(\pi i/n)\big)$ ([verification](verification.md)).
 - **Cost** (M3 Max): hex8 $100^3$ (3.1M DOF) 0.44 s and 0.8 GB, hex20 $60^3$ (2.7M DOF) 0.22 s, hex27 $40^3$ (1.6M DOF) 0.11 s. It sorts all (element, node) grid indices (`np.unique`), so it is O(N log N) and about 6× slower than `voxel_mesh` for hex8; fine for test meshes, while a used-node bitmask as in `voxel_mesh` would be the route above ~10M DOF.
+
+## Solid shells (`solid_shell`)
+
+```python
+mesh, order = solid_shell(mesh, elements=None, direction=None)
+```
+
+Converts hex8 elements to solid shells (`ssh8`, `docs/elements.md`) by permuting their connectivity so that reference $\zeta$ is the thickness.
+
+- **Selection:** an element set name, an array of global element indices, or all hex8 when `None`. Non-hex8 elements in the selection and an empty selection raise `ValueError`.
+- **Output:** the selected elements are appended to the `ssh8` block (created if absent), in sorted selection order; an emptied hex8 block is dropped. `material`, `orientation` and `element_sets` follow; node sets and points are unchanged; `voxel` becomes None. `order` is new → old over all elements, like `renumber`'s `q` but moving elements across blocks (map per-element arrays as `a[order]`). A second call converts another region, e.g. with another `direction`.
+- **Permutations:** fixed proper rotations of the reference cube take the chosen axis to $\zeta$; the 180° turn about $\xi$ flips $\zeta$ (and $\eta$). New node $i$ is the old node at $Q^\top$`CORNERS[i]`, so $\det J$ keeps its sign.
+- **`direction` given:** a (3,) vector, or `(n_sel, 3)` vectors in sorted selection order (e.g. radial directions on a cylinder). The thickness axis is the reference axis whose mean edge vector (over its 4 parallel edges) has the largest $|\cos|$ with it, and $\zeta$ points along $+$direction. If the two largest $|\cos|$ differ by $< 0.1$, `ValueError` names the element.
+- **`direction=None` (sweep):** a chain runs from an element through the opposite faces of a reference axis, continuing in each face neighbour along that neighbour's axis through the shared face, and stopping at unselected elements and boundary faces; a closed ring counts its length once. Each chain is walked once ($O(n_\text{el})$) and its element count given to every member. The thickness axis is the unique smallest of an element's 3 counts; a tie raises `ValueError("ambiguous thickness direction: pass direction=")` (e.g. the $3^3$ cube, a $6\times1\times1$ strip, $8\times8\times12$). The count is topological: an $8\times10\times12$ box picks $x$ whatever the element shapes.
+- **Sweep sign:** $\zeta$ along the positive global axis most aligned with the element's mean thickness edge, by a tolerant `argmax` (the first axis with $|e_i| \ge \max_j|e_j| - 10^{-8}\|e\|$), so round-off cannot split a flat plate (e.g. normal $(0,1,-1)/\sqrt2$). It is consistent on flat plates and may flip on curved shells.
+- **When the sign matters:** under a $\zeta$ flip the plies are reversed, the angles negated and each ply turned 180° about an in-plane material axis. Pass `direction` for off-axis plies (even $[\pm45]_s$), non-orthotropic plies or unsymmetric stacking; this is documented, not enforced.
+- **Not checked:** edge lengths (a thick element converts if its topology says so). Hand-built `ssh8` blocks are the user's responsibility; `check_elements` checks $\det J$ through the thickness.

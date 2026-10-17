@@ -14,6 +14,7 @@ from ..mesh.model import CORNERS
 from .common import (
     as_float,
     cast_floats,
+    check_laminates,
     check_nodal_mass,
     check_v,
     check_x64,
@@ -125,6 +126,7 @@ def stencil(mesh, materials, orientations=None, mass="consistent", nodal_mass=No
     _check_grid(mesh)
     index, pairs = phases(mesh)
     check_materials(pairs, materials, orientations)
+    check_laminates(mesh, index, pairs, materials)
     n_nodes, n_el = len(mesh.points), mesh.n_el
     nodal_mass = check_nodal_mass(nodal_mass, n_nodes)
     axes, _, slab, L = grid_layout(mesh.voxel.shape, slab)

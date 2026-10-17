@@ -24,6 +24,20 @@ def rel(a, b):
     return np.abs(np.asarray(a) - np.asarray(b)).max() / np.abs(np.asarray(b)).max()
 
 
+def fd_rel(f, x, g):
+    """rel(g, central differences of f at x), best over steps 1e-4..1e-6 x max(|x|, 1)."""
+    best = np.inf
+    for h in (1e-4, 1e-5, 1e-6):
+        step = h * np.maximum(np.abs(x), 1)
+        fd = np.zeros_like(x)
+        for idx in np.ndindex(x.shape):
+            e = np.zeros_like(x)
+            e[idx] = step[idx]
+            fd[idx] = (f(x + e) - f(x - e)) / (2 * step[idx])
+        best = min(best, rel(g, fd))
+    return best
+
+
 def tensor(C):
     """Voigt (6, 6) stiffness -> 4th-order tensor C_ijkl."""
     T = np.zeros((3, 3, 3, 3))

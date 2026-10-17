@@ -5,8 +5,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-TYPES = ("hex8", "hex20", "hex27")  # canonical block order
-NODES = {"hex8": 8, "hex20": 20, "hex27": 27}
+TYPES = ("hex8", "hex20", "hex27", "ssh8")  # canonical block order; ssh8: solid shell
+NODES = {"hex8": 8, "hex20": 20, "hex27": 27, "ssh8": 8}
 
 # Reference hex [-1, 1]^3 in VTK order: corners, edge midpoints, face centres, centre.
 CORNERS = np.array(
