@@ -7,7 +7,9 @@ Large-scale 3D linear modal analysis (Kv = λMv) in JAX. The solver uses matrix-
 - Frequency accuracy of 0.1% (relative error in f, i.e. about 0.2% in λ) against a converged reference, for hex20/hex27 and solid-shell meshes.
 - 10M DOFs, unstructured, on a single GPU.
 - 100M DOFs on voxel meshes with a small block size (see the memory budget).
-- Multi-GPU later.
+- Multi-GPU later (PR 19), multi-node included (user, 2026-10-17): first hardware is 2× A100, possibly on different nodes.
+- Topology optimization as large as possible on multi-GPU, multi-node hardware (user, 2026-10-17).
+- Checkpoint/restart for long runs under HPC time limits (user, 2026-10-17).
 - An FP64-capable GPU (A100/H100 class) for production runs.
 - Until a GPU is available, development and all tests run on an Apple M3 Max (64 GB, CPU backend, fp64).
 
@@ -643,14 +645,18 @@ Split into three parts with unchanged acceptance criteria: **8a** the reference 
   - `psum` Gram matrices.
   - Distributed GMG first.
   - Developed on the Mac with forced host devices, in a separate pytest process.
+  - Multi-node (user, 2026-10-17): `jax.distributed.initialize`, one process per GPU; distributed setup (partitioning, padding, halo maps, GMG levels) without building the global mesh on one host; int32 index headroom per shard; GMG coarse-level agglomeration onto fewer devices; on-the-fly Ke for unstructured meshes where stored Ke does not fit.
+  - Checkpoint/restart (user, 2026-10-17): sharded save/load of the LOBPCG block and solver state, so a run cut off by an HPC time limit resumes from the last checkpoint; optional wall-clock budget for long solves that writes a checkpoint and returns before the limit.
 - Docs: `docs/parallel.md`.
 - Tests:
   - Results match single-device runs.
-  - Deferred GPU check: weak scaling.
+  - Multi-process CPU runs on the Mac (several `jax.distributed` processes on localhost) match single-process runs.
+  - A run stopped at a checkpoint and restarted (also with a different process count where supported) matches an uninterrupted run.
+  - Deferred GPU checks: weak scaling; 2× A100 across two nodes.
 
 ## M6: Optimization
 
-Working assumptions, still open: topology optimization at ≤ 10M voxel elements, clamped, densities as the only design variables. The user will decide later. Principle 5 keeps the alternatives open.
+Topology optimization targets the largest size the hardware allows, multi-GPU and multi-node (user, 2026-10-17; replaces the earlier ≤ 10M voxel-element working assumption), so PR 23 builds on PR 19. Still open: clamped supports and densities as the only design variables. The user will decide later. Principle 5 keeps the alternatives open.
 
 ### PR 20: MMA
 - Contents: MMA in JAX.
@@ -704,6 +710,8 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
   - Optional Heaviside projection with η-continuation: H_η(x) = (tanh(η/2) + tanh(η(x − 1/2)))/(2·tanh(η/2)), so H_η(0) = 0 and H_η(1) = 1.
   - Voxel sensitivity pass (reference Ke and Me scaled per element by s_K, s_M) feeding the cone-filter VJP.
   - Bound formulation with MMA.
+  - Sharded on PR 19: densities, sensitivities, the filter (halo exchange for the cone filter, the distributed operator for the Helmholtz filter) and MMA (element-wise updates, `psum` for the constraint sums).
+  - Optimizer checkpoint/restart: densities, MMA state (asymptotes, previous iterates), iteration count, continuation parameters and the last modes (warm start X0), saved on PR 19's sharded checkpoints.
 - First step of the PR: choose the Du & Olhoff 2007 example (and its volume fraction) and record it in `docs/verification.md`. The benchmark's pass criteria below are then fixed to that example.
 - Docs: `docs/optimization.md`; `docs/verification.md` gets the full Du & Olhoff setup (table and figure numbers).
 - Tests:
@@ -779,7 +787,7 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
 | 20 MMA | 0 |
 | 21 Sensitivities | 9 |
 | 22 FFD | 20, 21 |
-| 23 Topology opt | 11, 20, 21 |
+| 23 Topology opt | 11, 19, 20, 21 |
 | 24 GPU validation | CUDA hardware; the PRs in the deferred list |
 
 - **Critical path:** 0 → 1 → 3 → 4 → 7 → 8 → 9, with PR 2 in parallel with 1 and PR 5 in parallel with 7–8. This gives first modes in pure JAX.
