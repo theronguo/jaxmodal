@@ -12,6 +12,7 @@ import scipy.sparse as sp
 from ..operators import dof_mask, m_orthonormalize, rigid_modes, stencil, unstructured
 from ..operators.common import is_count
 from ..precond import SingularShiftError, amg, gmg, jacobi
+from . import counting
 from .counting import count, count_degree
 from .lobpcg import _solve, band_defaults, lobpcg, sigma_estimate
 
@@ -118,25 +119,6 @@ def _nbytes(x):
     return 0
 
 
-def _bound(steps, b, m, t_iteration, tau, rule):
-    """A-priori lower bound on the count's seconds: a step runs >= 7 PCG iterations at width
-    b, a LOBPCG iteration costs at most about 3 of their applies at width m (factor 2; 0.3, one
-    PCG iteration, when tau is looser than the rule). None without a warm iteration time."""
-    if not t_iteration:
-        return None
-    return (0.3 if tau is not None and tau > rule else 2.0) * steps * b / m * t_iteration
-
-
-def _calibrate(run, d, n_blocks):
-    """(predicted seconds of the count, calibration seconds, t_step, t_block): run(s) counts one
-    block with at most s steps; s = 1 compiles, s = 3 is timed."""
-    t = time.perf_counter()
-    run(1)
-    tm = run(3)[1]["time"]
-    t_step, t_block = tm["step"], tm["block"]
-    return n_blocks * (d * t_step + t_block), time.perf_counter() - t, t_step, t_block
-
-
 def _verify(verify, opts, op, free, R, lam, V, n_band, lam_stop, m, t_it, solve_s, build, budget):
     """info["count"] of a band solve: the predicted counting cost, and the count itself unless
     verify is False or (verify None) predicted to cost more than the solve. budget() -> the
@@ -164,39 +146,28 @@ def _verify(verify, opts, op, free, R, lam, V, n_band, lam_stop, m, t_it, solve_
             return out
         b = None
     out["block"] = b
-    if d is not None and b is not None:
-        n_blocks = -(-n_probes // b)
-        steps = n_blocks * d
-        bound = _bound(steps, b, m, t_it, opts.get("tau"), 0.01 / (d * math.sqrt(n_free)))
-        out.update(predicted_steps=steps, predicted_s=bound,
-                   predicted_kind="unknown" if bound is None else "bound")  # fmt: skip
-    if verify is False:
-        out["reason"] = out["reason"] or "verify=False"
+    if b is None:  # verify False: nothing predicted without a block
         return out
+    P = None  # built by prepare (verify None, the bound passed) or below; skips never build
+
+    def prepare():
+        nonlocal P
+        P = build(lam_c)
+
     args = (op, free, V, lam, lam_last, lam_next)
-    if d is None and verify is None:
-        out["reason"] = "degree above MAX_DEGREE: the gap is too small to count"
+    kw = {**opts, "R": R, "block": b}
+    run = lambda s: count(*args, **{**kw, "precond": P, "n_probes": b, "_steps": s})  # noqa: E731
+    go, rec = counting._decide(verify, d, n_probes, b, m, solve_s, t_it, opts.get("tau"), n_free,
+                               run, prepare)  # fmt: skip
+    out.update(rec)
+    if not go:
+        out["reason"] = rec["reason"] or "verify=False"
         return out
-    if verify is None and (out["predicted_s"] or 0) > solve_s:
-        out["reason"] = "predicted cost (a lower bound) above the solve"
-        return out
-    P = None  # d None: count returns NaN, unverifiable, before using it
-    if d is not None:
+    if P is None and d is not None:  # d None: count returns NaN, unverifiable, before using it
         t = time.perf_counter()
         P = build(lam_c)
         out["build_s"] = time.perf_counter() - t
-    kw = {**opts, "R": R, "precond": P, "block": b}
-    if verify is None:
-        pred, cal, t_step, t_block = _calibrate(
-            lambda s: count(*args, **{**kw, "n_probes": b, "_steps": s}), d, n_blocks
-        )
-        pred += out["build_s"] + cal
-        out.update(predicted_s=pred, predicted_kind="calibrated", calibration_s=cal,
-                   calibrated_step=t_step, calibrated_block=t_block)  # fmt: skip
-        if pred > solve_s:
-            out["reason"] = "predicted cost above the solve"
-            return out
-    est, ci = count(*args, **kw)
+    est, ci = count(*args, **kw, precond=P)
     return {**out, **ci, "estimate": est, "ran": True}
 
 

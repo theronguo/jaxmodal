@@ -687,6 +687,16 @@ def band_run(miss=(), bcs="clamped", band=BAND, R=None, **kw):
     return est, info, band_expected(lam, np.r_[kept, out, rig], info)
 
 
+def test_band_steps():
+    """PR 15d test 14: band_count's _steps caps the steps per block (same compile), and _steps
+    >= d gives the full count's estimate (the calibration of a leaf with lo > 0)."""
+    est = band_run(degree=20, n_probes=6, block=3)[0]
+    n0 = counting._recurrence._cache_size()
+    capped = band_run(degree=20, n_probes=6, block=3, _steps=3)[1]
+    assert capped["steps"] == 2 * 3 and counting._recurrence._cache_size() == n0
+    assert band_run(degree=20, n_probes=6, block=3, _steps=20)[0] == est
+
+
 def test_band_polynomial():
     """15b test 1: jackson_step(d, 0) is 14a's; the coefficients of x >= x0 against quad of
     the indicator's Chebyshev projection; the band-pass grid stays in [0, 1]."""

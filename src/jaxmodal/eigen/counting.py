@@ -144,6 +144,58 @@ def count_degree(gap, lam_top, n_top, n_free, lower=None):
     return best if best[0] <= MAX_DEGREE else (None, np.nan)
 
 
+
+def _bound(steps, b, m, t_iteration, tau, rule):
+    """A-priori lower bound on the count's seconds: a step runs >= 7 PCG iterations at width
+    b, a LOBPCG iteration costs at most about 3 of their applies at width m (factor 2; 0.3, one
+    PCG iteration, when tau is looser than the rule). None without a warm iteration time."""
+    if not t_iteration:
+        return None
+    return (0.3 if tau is not None and tau > rule else 2.0) * steps * b / m * t_iteration
+
+
+def _calibrate(run, d, n_blocks):
+    """(predicted seconds of the count, calibration seconds, t_step, t_block): run(s) counts one
+    block with at most s steps; s = 1 compiles, s = 3 is timed."""
+    t = time.perf_counter()
+    run(1)
+    tm = run(3)[1]["time"]
+    t_step, t_block = tm["step"], tm["block"]
+    return n_blocks * (d * t_step + t_block), time.perf_counter() - t, t_step, t_block
+
+
+def _decide(verify, d, n_probes, block, m, t_ref, t_it, tau, n_free, run, prepare=None):
+    """(count?, record) of the completeness-count rule (docs/eigensolvers.md#verify). d: the
+    degree (None above MAX_DEGREE); block: probes per block; m, t_it: the solver's block width
+    and warm iteration seconds (the a-priori bound); t_ref: the solve's seconds. verify True or
+    False: count = verify, with the bound recorded. None: skip above MAX_DEGREE or when the bound
+    exceeds t_ref, else prepare() (timed into build_s; e.g. the count's preconditioner), then
+    calibrate with run(s) (the count with _steps = s) and count iff the prediction <= t_ref."""
+    rec = dict(reason=None, predicted_steps=None, predicted_s=None, predicted_kind="unknown",
+               build_s=0.0, calibration_s=0.0)  # fmt: skip
+    n_blocks = -(-n_probes // block)
+    if d is not None:
+        bound = _bound(n_blocks * d, block, m, t_it, tau, 0.01 / (d * math.sqrt(n_free)))
+        rec.update(predicted_steps=n_blocks * d, predicted_s=bound,
+                   predicted_kind="unknown" if bound is None else "bound")  # fmt: skip
+    if verify is not None:
+        return verify, rec
+    if d is None:
+        return False, {**rec, "reason": "degree above MAX_DEGREE: the gap is too small to count"}
+    if (rec["predicted_s"] or 0) > t_ref:
+        return False, {**rec, "reason": "predicted cost (a lower bound) above the solve"}
+    if prepare is not None:
+        t = time.perf_counter()
+        prepare()
+        rec["build_s"] = time.perf_counter() - t
+    pred, cal, t_step, t_block = _calibrate(run, d, n_blocks)
+    rec.update(predicted_s=pred + rec["build_s"] + cal, predicted_kind="calibrated",
+               calibration_s=cal, calibrated_step=t_step, calibrated_block=t_block)  # fmt: skip
+    if rec["predicted_s"] > t_ref:
+        return False, {**rec, "reason": "predicted cost above the solve"}
+    return True, rec
+
+
 # ---------------------------------------------------------------- device kernels
 
 
@@ -471,7 +523,8 @@ def band_edges(lam, lo, hi, lam_out):
 
 def band_count(
     op, free, V, lam, lo, hi, V_out, lam_out, *, R=None, precond=None, n_probes=50, seed=0,
-    tau=None, degree=None, block=None, maxit=1000, verbose=False, _predict=False,
+    tau=None, degree=None, block=None, maxit=1000, verbose=False, _steps=None,
+    _predict=False,
 ):  # fmt: skip
     """Stochastic count of the eigenvalues in the interior band [lo, hi] (0 < lo < hi) missing
     from V, by a Jackson band-pass polynomial of T = (K + c_hi M)^-1 M between the counting
@@ -484,7 +537,8 @@ def band_count(
     K + c_hi M (default jacobi(op, free, c_hi)). The Weyl tail model (no mode index in a band)
     is fitted to the in-band modes and the nearest out-of-band pair on each side. Other options
     and info as count's, plus edges (c_lo, c_hi) and gaps (g_lo, g_hi); lam_c = c_hi, gap = the
-    governing gap, n_top the fitted model count at the upper neighbour.
+    governing gap, n_top the fitted model count at the upper neighbour. _steps, _predict: as
+    count's.
     """
     check_x64("band_count")
     t0 = time.perf_counter()
@@ -506,5 +560,5 @@ def band_count(
     info = dict(edges=(c_lo, c_hi), gaps=(g_lo, g_hi))
     return _run(op, free, m, Ws, R, MR, info, (a / c_hi, bot), g_hi, top, n_top, c_hi,
                 precond=precond, n_probes=n_probes, seed=seed, tau=tau, degree=degree,
-                block=block, maxit=maxit, verbose=verbose, _steps=None, _predict=_predict,
+                block=block, maxit=maxit, verbose=verbose, _steps=_steps, _predict=_predict,
                 t0=t0)  # fmt: skip

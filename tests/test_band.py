@@ -280,21 +280,21 @@ def test_verify_true(spy):
 def test_verify_none(monkeypatch, spy):
     """Test 7: None runs or skips on the calibrated prediction; skips without building when the
     bound exceeds the solve; predicted_s = build + calibration + n_blocks (d t_step + t_block)."""
-    monkeypatch.setattr(api, "_bound", lambda *a: 0.0)
-    monkeypatch.setattr(api, "_calibrate", lambda *a: (0.0, 0.0, 0.0, 0.0))
+    monkeypatch.setattr(counting, "_bound", lambda *a: 0.0)
+    monkeypatch.setattr(counting, "_calibrate", lambda *a: (0.0, 0.0, 0.0, 0.0))
     ci = band_solve()[2]["count"]
     assert ci["ran"] and ci["predicted_kind"] == "calibrated"
-    monkeypatch.setattr(api, "_calibrate", lambda *a: (1e9, 0.0, 0.0, 0.0))
+    monkeypatch.setattr(counting, "_calibrate", lambda *a: (1e9, 0.0, 0.0, 0.0))
     ci = band_solve()[2]["count"]
     assert not ci["ran"] and ci["reason"] == "predicted cost above the solve"
     monkeypatch.undo()
-    monkeypatch.setattr(api, "_bound", lambda *a: 0.0)
+    monkeypatch.setattr(counting, "_bound", lambda *a: 0.0)
     ci = band_solve()[2]["count"]  # the real calibration
     nb = math.ceil(50 / ci["block"])
     pred = ci["build_s"] + ci["calibration_s"]
     pred += nb * (ci["degree"] * ci["calibrated_step"] + ci["calibrated_block"])
     assert ci["predicted_s"] == pytest.approx(pred, rel=1e-12) and ci["calibration_s"] > 0
-    monkeypatch.setattr(api, "_bound", lambda *a: 1e9)
+    monkeypatch.setattr(counting, "_bound", lambda *a: 1e9)
     no_build(monkeypatch)
     ci = band_solve()[2]["count"]
     assert not ci["ran"] and ci["reason"] == "predicted cost (a lower bound) above the solve"
@@ -303,7 +303,7 @@ def test_verify_none(monkeypatch, spy):
 def test_no_warm_time(monkeypatch, spy):
     """Test 7: without a warm iteration time the bound is None: False reports 'unknown', None
     goes to the calibration."""
-    assert api._bound(10, 5, 10, 0.0, None, 1e-6) is None
+    assert counting._bound(10, 5, 10, 0.0, None, 1e-6) is None
     real = api._solve
 
     def solve(*a, **kw):
@@ -314,7 +314,7 @@ def test_no_warm_time(monkeypatch, spy):
     monkeypatch.setattr(api, "_solve", solve)
     ci = band_solve(verify=False)[2]["count"]
     assert ci["predicted_s"] is None and ci["predicted_kind"] == "unknown"
-    monkeypatch.setattr(api, "_calibrate", lambda *a: (1e9, 0.0, 0.0, 0.0))
+    monkeypatch.setattr(counting, "_calibrate", lambda *a: (1e9, 0.0, 0.0, 0.0))
     ci = band_solve()[2]["count"]
     assert ci["reason"] == "predicted cost above the solve"
 
@@ -360,14 +360,14 @@ def test_calibration(monkeypatch):
     """Test 7b: 50 steps on hex20 12^3: the calibrated count time within [0.5, 2] x the
     actual one, and the bound below the warm recurrence time."""
     rec = {}
-    real = api._calibrate
+    real = counting._calibrate
 
     def calibrate(*a):
         rec["out"] = real(*a)
         return (0.0, 0.0) + rec["out"][2:]  # force the run
 
-    monkeypatch.setattr(api, "_calibrate", calibrate)
-    monkeypatch.setattr(api, "_bound", lambda *a: rec.update(bound=api_bound(*a)) or 0.0)
+    monkeypatch.setattr(counting, "_calibrate", calibrate)
+    monkeypatch.setattr(counting, "_bound", lambda *a: rec.update(bound=api_bound(*a)) or 0.0)
     mesh = box_mesh((12,) * 3, (1 / 12,) * 3, type="hex20")
     f1 = solve_modes(mesh, MAT, CLAMP, 4)[2]["frequencies"]
     opts = {"degree": 50, "block": 10, "n_probes": 10}
@@ -381,7 +381,7 @@ def test_calibration(monkeypatch):
     assert rec["bound"] <= 50 * t_step
 
 
-api_bound = api._bound
+api_bound = counting._bound
 
 
 # ---------------------------------------------------------------- 8, 9: growth, the edge error
