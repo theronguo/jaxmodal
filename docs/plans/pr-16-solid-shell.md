@@ -45,6 +45,19 @@ Branch `pr-16-solid-shell` (this plan), from `main` after PR 15d. Roadmap: PR 16
     `solve_modes` option.
   - **M4:** at the PR 9 tolerances.
   - **`solid_shell`:** sweep details; a second call appends.
+- **Revision 6** (round 5: 1 design, 4 minor):
+  - **Srinivas–Rao sizing:** by total elements through the thickness ($n_z = 36$: `pag`
+    $k = 12$ per ply, `ortho` 36), measured on (2,3) and (3,1), not (2,2).
+  - **Zero-index quarters:** width, class labels and sub-plates stated.
+  - **M4 comparison** in `tests/test_api.py`; measured iterations at $10^{-10}$.
+  - **Cylinder $n_z$ term** at the middle level, scaled with $p = 2$; the `ssh8` mesh uniform.
+  - **Patch frames:** hex8 load built with $R_\text{shell}$; tolerances normed.
+  - **Fallback flip** $\mathrm{diag}(-1,1,-1)$; visited mark per (element, axis); prismatic
+    defined.
+  - **Staging:** one up-front `ssh8` check in `unstructured`; one "auto resolved" label in
+    the three option errors; the box type tuple; empty and all-hex8 selections.
+  - **Tests added:** padded plies, per-element `direction`, the cosine-margin raise, the band
+    run assertions; the mass scan split from the stiffness scan.
 
 ## Split and plans
 
@@ -53,7 +66,8 @@ PR 16 is three PRs, each from `main`, merged in order: `pr-16a-element`, `pr-16b
 
 - **16a, the element:** `ssh8`, `solid_shell`, `Laminate`, the kernels, `assemble`, recovery,
   the VTU writer mapping, element-level tests. Staging, so nothing reaches a hex code path:
-  - stored mode fails in `kernels.stiffness`/`mass`, which raise for `ssh8`;
+  - `unstructured` (stored) raises `ValueError("ssh8 operators arrive in PR 16b")` up front on
+    any `ssh8` block; `kernels.stiffness`/`mass` also raise for `ssh8` (direct calls);
   - `unstructured(..., mode="otf")` on an `ssh8` mesh raises `ValueError` before `layout` (the
     roadmap's otf refusal, kept in 16b);
   - `unstructured_memory` and `amg_memory` raise `ValueError("ssh8 operators arrive in PR 16b")`.
@@ -69,20 +83,22 @@ PR 16 is three PRs, each from `main`, merged in order: `pr-16a-element`, `pr-16b
 - **Element type `ssh8`:** hex8 topology (8 nodes, VTK order), added to `TYPES` (last) and
   `NODES`. Reference $\zeta$ (corners 0–3 → 4–7) is the thickness; $+\zeta$ orders the plies
   bottom to top.
-  - `box_mesh(type="ssh8")` raises before its type check, so its error text lists no `ssh8`.
+  - `box_mesh` checks `type` against `("hex8", "hex20", "hex27")` (not `NODES`), so
+    `type="ssh8"` raises and no error text lists `ssh8`.
   - The registry entry is hex8's (nodes, faces, 2×2×2 rule), with `lumping=None`
     (`lumping: str | None`). It is commented "quadrature for `check_elements`, `jacobian` and
     the sampling width only".
 - **`solid_shell(mesh, elements=None, direction=None) -> (mesh, order)`** (`mesh/shell.py`, host
   NumPy):
   - Selection: an element set name, an index array, or all hex8 when None. Non-hex8 elements
-    in the selection raise.
+    in the selection raise; an empty selection raises `ValueError`.
   - The selected elements are appended to the `ssh8` block (created if absent), with their
     connectivity permuted so $\zeta$ is the thickness. A second call can therefore convert
-    another region with another `direction`.
+    another region with another `direction`. An emptied hex8 block is dropped (`Mesh` rejects
+    empty blocks; blocks stay in `TYPES` order).
   - `material`, `orientation` and element sets follow.
-  - `order` is new → old over the whole mesh (`renumber`'s `q` convention); `voxel` becomes
-    None.
+  - `order` is new → old over the whole mesh, like `renumber`'s `q` (but not a valid `q`: it
+    moves elements across blocks); `voxel` becomes None.
   - Besides the `.inp` reader it is the only producer. A hand-built block is the user's
     responsibility.
 - **Node permutations:** fixed proper rotations take a reference axis to $\zeta$, and the 180°
@@ -97,7 +113,8 @@ PR 16 is three PRs, each from `main`, merged in order: `pr-16a-element`, `pr-16b
       shared face it continues in the neighbour along that neighbour's reference axis whose
       face pair contains the face (orientations differ between elements). It stops at
       unselected elements and boundary faces.
-    - Each chain is walked once, with a visited mark (a closed ring's count is its length), and
+    - Each chain is walked once, with a visited mark per (element, axis) (a closed ring's count
+      is its length), and
       its element count is given to all members ($O(n_\text{el})$).
     - The thickness axis is the unique smallest of an element's 3 counts; a tie raises
       `ValueError("ambiguous thickness direction: pass direction=")`.
@@ -109,7 +126,7 @@ PR 16 is three PRs, each from `main`, merged in order: `pr-16a-element`, `pr-16b
   - **When the sign matters:** under a $\zeta$ flip the plies are reversed, the angles negated,
     and each ply turned 180° about its own material axis 1. So `direction` is required for
     off-axis plies (even $[\pm45]_s$), non-orthotropic plies, or unsymmetric stacking
-    (`docs/mesh.md`).
+    (documented in `docs/mesh.md`, not enforced).
 - **Laminates in `materials`:** `materials={label: Material | Laminate}`.
   - `Laminate(plies)` holds a tuple of `Ply(material, angle, fraction)` NamedTuples:
     - `material`: a `Material`;
@@ -123,7 +140,8 @@ PR 16 is three PRs, each from `main`, merged in order: `pr-16a-element`, `pr-16b
     - A trilinear map is linear in $\zeta$ along each fibre, so reference fractions equal the
       physical thickness fractions on any element.
     - Ply volumes follow $\det J$.
-    - Two points per ply are exact in $\zeta$ only on prismatic elements.
+    - Two points per ply are exact in $\zeta$ only on prismatic elements (top face = bottom
+      face + a constant vector $d$, so $J$ does not depend on $\zeta$).
   - `check_materials` (host, before tracing) branches on `Laminate`: `check_stiffness` and $\rho$
     per ply, fractions $> 0$ summing to 1 to $10^{-12}$, angles finite.
   - `phase_table` gives a `Laminate` phase a finite placeholder (ply 0's rotated $C$ and $\rho$),
@@ -142,7 +160,8 @@ PR 16 is three PRs, each from `main`, merged in order: `pr-16a-element`, `pr-16b
   - $R_\text{shell} = [t_1\ t_2\ t_3]$; ply $k$ uses $C_k' = \text{rotate}(C_k,
     R_\text{shell}R_z(\theta_k))$.
   - The frame does not depend on the 4 in-plane connectivity rotations. The $\zeta$ flip turns
-    it by $\mathrm{diag}(1,-1,-1)$.
+    it by $\mathrm{diag}(1,-1,-1)$ in the primary branch and $\mathrm{diag}(-1,1,-1)$ in the
+    fallback (there $\theta \to \pi - \theta$, equivalent to $-\theta$ for orthotropic plies).
   - When $R_o$'s axis 3 is $+t_3$, it equals $R_o$, so a one-ply `Material` acts as on hex8.
   - hex8 and `ssh8` parts with one label on a tilted plate are oriented differently
     (documented).
@@ -193,12 +212,15 @@ PR 16 is three PRs, each from `main`, merged in order: `pr-16a-element`, `pr-16b
     already raises; `"pmg"` is not an option.
   - `levers`: no otf hint.
   - When the caller asked for `"auto"`, the `sigma_options` and `precond_options` errors say
-    "auto resolved to jacobi on ssh8" (the original argument is kept).
+    "auto resolved to jacobi on ssh8". One helper builds that label and is used at the three
+    error sites (api.py `precond_options` and `sigma_options`, and memory.py `_models`).
   - The `solve_modes` docstring is updated.
 - **`mesh/io.py`:**
   - 16a: `write` maps `"ssh8"` to `"hexahedron"`; `MESHIO` is unchanged.
   - 16b: the `.inp` regex adds `SC8R|SC8`, and other `SC*` raise.
-- **Exports (16a):** the `__init__.py` of `mesh`, `materials` and `elements`.
+- **Exports (16a):** `mesh`: `solid_shell`; `materials`: `Laminate`, `Ply` (`ply_table` is
+  internal, beside `phase_table`); `elements`: `shell_stiffness`, `shell_mass`, `shell_recover`,
+  `RECOVER`.
 
 ## The element (16a)
 
@@ -221,8 +243,9 @@ Formulation:
   and $\int M\,d\xi = 0$.
 - **Condensation:** $K_e = K_{uu} - K_{u\alpha}K_{\alpha\alpha}^{-1}K_{\alpha u}$ (5×5
   Cholesky), symmetrized as `_sym`; $\alpha = -K_{\alpha\alpha}^{-1}K_{\alpha u}u_e$.
-- **Quadrature:** 2×2 in-plane times 2 per ply. `lax.scan` over plies accumulates $K_{uu}$,
-  $K_{u\alpha}$, $K_{\alpha\alpha}$ and $m_e$.
+- **Quadrature:** 2×2 in-plane times 2 per ply. In `shell_stiffness`, `lax.scan` over plies
+  accumulates $K_{uu}$, $K_{u\alpha}$, $K_{\alpha\alpha}$; `shell_mass` has its own ply loop.
+  `assemble` and `_build` call the two kernels separately.
 - **Mass:** $M_e = m_e\otimes I_3$, $m_e = \sum_k\rho_k\int_{\text{ply }k}N^\top N\det J$.
   Lumping raises "solid-shell elements are consistent-mass only".
 - **Locking:**
@@ -242,10 +265,12 @@ Formulation:
 
 1. **Independent NumPy kernel** (`tests/shell_ref.py`: point loops, explicit $T$, ANS, EAS,
    dense condensation, the plan's frame and fallback). Random distorted elements (corners
-   $\le 0.2h$), anisotropic $C$, 1–3 plies. $K_e$ and $m_e$ to $10^{-12}\max|K_e|$.
+   $\le 0.2h$, by `helpers.distort`), anisotropic $C$, 1–3 plies. $K_e$ and $m_e$ to
+   $10^{-12}\max|K_e|$.
 2. **Laminate path,** to $10^{-12}$:
    - (a) Invariant under the 4 in-plane connectivity rotations; under the $\zeta$ flip, plies
-     reversed and angles negated (orthotropic plies).
+     reversed and angles negated (orthotropic plies), in the primary branch and in the
+     fallback ($R_o$'s axis 1 near the normal).
    - (b) A rigid rotation $Q$ of the element and $R_o$ gives $QK_eQ^\top$.
    - (c) One ply at $\theta$ equals one ply with `rotate(C, R_z(θ))` at 0.
    - (d) On a prismatic element, identical plies equal one ply.
@@ -262,12 +287,16 @@ Formulation:
    $\ge 1.4\cdot10^{-2}$). Reported only: $h/t = 100$.
 5. **Patch tests** (user decision, 2026-10-17), one layer, $t = 0.01$, anisotropic $C$.
    Linear $u = Ax$ with constant $\sigma_0$, the strain solved for each target stress state.
+   Frames: on (i), (ii) and (iv) $\zeta$ is along $+z$ with $R_o = I$, so $R_\text{shell} = I$;
+   on (iii) $R_o = Q$ (the tilt), so $R_\text{shell} = Q$. $\sigma_0$ and $\varepsilon$ are
+   given in that frame, and the hex8 mesh uses `Material(rotate(C, R_shell), rho)` with
+   $R_o = I$, so both meshes carry the same $C'$.
    - **Lift (gated):** $Ax$ is prescribed on the lateral-boundary nodes. The interior DOFs
      (on the top and bottom faces) are loaded by the consistent traction of $\sigma_0$,
      $f_I = (K_\text{hex8}Ax)_I$ from `assemble` on the same mesh as hex8 (exact, since hex8
      passes the patch test), and $K_{II}u_I = f_I - K_{IB}(Ax)_B$ is solved by `spsolve`.
-     $u_I = (Ax)_I$ and `shell_recover` gives $\sigma_0$, both to $10^{-10}$ (prototype
-     $\le 2.3\cdot10^{-13}$), on:
+     $u_I = (Ax)_I$ and `shell_recover` gives $\sigma_0$, both to $10^{-10}$ relative to
+     $\max|Ax|$ and $\max|\sigma_0|$ (prototype $\le 2.3\cdot10^{-13}$), on:
      - (i) a flat $3\times3$ parallelogram patch: all 6 states;
      - (ii) the flat distorted MacNeal–Harder patch (5 elements): the 4 states with
        $\sigma_{13} = \sigma_{23} = 0$ in the shell frame;
@@ -295,6 +324,8 @@ Formulation:
    - Reported only: parallelogram in-plane, trapezoid, twist.
 7. **`assemble` on hex8 + `ssh8`:**
    - symmetric PSD, $\|KR\| \le 10^{-12}\|K\|\|R\|$, total mass $\sum\rho_kV_k$;
+   - two laminates with different ply counts (padding): $K$ and $M$ equal the per-element
+     unpadded `shell_stiffness`/`shell_mass` assembled by SciPy, to $10^{-12}$;
    - a one-ply `ssh8` block's $M$ equals hex8's;
    - `parts`, `rigid_modes` and `dof_mask` on it.
 8. **`jax.grad`** of $u^\top K_e v$ with respect to $X$, $C$, angle and fraction, and of
@@ -305,9 +336,14 @@ Formulation:
      $\zeta$ along $+z$; the raising cases raise; $8\times10\times12$ picks $x$; a tilted plate
      with `direction` works.
    - A full hex8 cylinder ring (closed circumferential chain) is detected.
-   - A second call appends.
+   - A second call appends; selecting every hex8 element drops the hex8 block; an empty
+     selection raises.
+   - A per-element `direction` array: a laminated hex8 ring with radial directions gives
+     $\zeta$ along each radius.
+   - Cosine margin: an element whose two best axes differ by $< 0.1$ raises naming it.
    - Output: $\det J > 0$; sets and labels follow `order`; `voxel` is None; non-hex8
-     selections raise; VTU write, read, `solid_shell(direction=)` round-trips up to `order`.
+     selections raise. On an all-`ssh8` mesh, VTU write, read, `solid_shell(direction=)`
+     round-trips up to `order` (`write` drops sets and reads back hexahedra as hex8).
 10. **Refusals:**
     - lumped mass;
     - a `Laminate` on a hex block, and in `stencil`;
@@ -331,9 +367,10 @@ Formulation:
   - Test: at 2, 8 and 12 plies the constant is $\ge$ measured and $\le 1.10\times$ measured;
     1 ply is below.
   - Slow test: $820\times820\times1$ with a 3-ply block (672k elements, 4.04M DOF), both paths,
-    $m = 1$ and 16. Estimates 2.2–5.8 GB, each asserted $\ge 2$ GB; scatter $m = 1$ is
-    build-dominated, so it exercises the build term. Each is within 20% of the
-    `harness.measure` peak of build + `apply_K` + `apply_M`. About 3–4 min.
+    $m = 1$ and 16. Estimates 2.2–5.7 GB, each asserted $\ge 2$ GB; scatter $m = 1$ is
+    build-dominated. Each is within 20% of the `harness.measure` peak of build + `apply_K` +
+    `apply_M`. The build is only 13–18% of the total, so the envelope test, not this one,
+    checks the build term. About 3–4 min.
 - **Probe sampling:** the exact factor, so band counts are exact.
 - **`solve_modes`:**
   - auto → Jacobi; `"amg"` refused until PR 18.
@@ -347,13 +384,17 @@ Formulation:
 - **M4 example** (`examples/m4_shell.py`):
   - Setup: an SS square steel plate, $8\times8\times1$ `ssh8`, $L/t = 20$, 6 modes, Jacobi,
     `maxit=2000`.
-  - Accuracy: the PR 9 tolerances (tol $10^{-10}$; $\lambda$ error $\le \max(10^{-8},
-    10\varepsilon\hat\lambda_\max/\lambda)$; principal angles, with the degenerate pairs (1,2)/(2,1)
-    and (1,3)/(3,1) compared as subspaces), reusing the PR 9/11b comparison helpers.
-  - Iterations at $10^{-10}$ are re-measured and recorded (expected ≈ 1.4× those at 1e-6,
-    margin ≥ 5×).
+  - Iterations at $10^{-10}$: measured 367 (1.6× the 233 at $10^{-6}$); `maxit` is 3000
+    (margin 8×).
   - The SS dict is inline; a test asserts it equals `SIMPLY_SUPPORTED`. `test_examples` runs
-    it as the roadmap's check.
+    the example (it asserts "check passed").
+  - The roadmap's comparison is in `tests/test_api.py`, on the example's setup: the PR 9
+    tolerances (tol $10^{-10}$; $\lambda$ error $\le \max(10^{-8},
+    10\varepsilon\hat\lambda_\max/\lambda)$ by `check_lam`; principal angles by `max_sine`
+    and `r_M`, refactored to take `(Kf, Mf)`, with the degenerate pairs (1,2)/(2,1) and
+    (1,3)/(3,1) compared as subspaces). The principal-angle rule needs the reference residual
+    $\le 0.1 r_M$; the measured margin is recorded. If it does not hold, the test uses the
+    11b/13b form ($\lambda$ to $10^{-8}$, MAC $\ge 1 - 10^{-8}$), logged.
 
 ### 16b tests
 
@@ -371,6 +412,8 @@ Formulation:
    - `band=(0, f)`: 154 iterations, 2.5 s; with `verify=True`, 3.8 s;
    - `band=(f_1, f_2)` with `strategy="shift_invert"` (Jacobi MINRES): 2.8 s; with
      `verify=True`, 2.7 s;
+   - both band runs assert $\lambda$ against `reference_modes` to the PR 15 tolerances, the
+     count and multiplicities, and `verify` true;
    - `solve_modes_memory` smoke;
    - auto → Jacobi on hex8 + `ssh8`.
 4. Refusals:
@@ -380,7 +423,7 @@ Formulation:
    - `amg_memory` naming PR 18;
    - `"gmg"`;
    - no otf lever;
-   - the "auto resolved" messages.
+   - the "auto resolved" messages, through `solve_modes` and `solve_modes_memory`.
 5. The build envelope; the $\ge 2$ GB estimator test (slow).
 6. $FF^\top = m_e$ to $10^{-12}$ (laminates); padded elements give $F = 0$; a masked $SS^\top$ on
    hex8 + `ssh8` equals the SciPy $M$.
@@ -393,7 +436,9 @@ The 16c plan fixes meshes, levels and the benchmark layout after the sizing stud
 
 - **Common rules:**
   - `reference_modes` on `assemble`; relative error in $f$; no upper-bound checks.
-  - Gates compare against the finest reference level. The observed-order Richardson estimate
+  - Gates compare against the finest reference level. The $n_z$ term is the change from
+    $n_z = 2$ to 3 at the middle reference level, scaled by $1/(1 - (2/3)^p)$ with $p = 2$
+    (conservative). The observed-order Richardson estimate
     (recomputed by the tests from the recorded levels, $p \in [1, 5]$, monotone, else fail)
     plus the $n_z$ term bounds the reference error, which must meet the roadmap's criterion
     ($\le 0.02\%$ for the cylinder, $\le 0.2\%$ for the skew plate). If it does not, stop and
@@ -405,7 +450,8 @@ The 16c plan fixes meshes, levels and the benchmark layout after the sizing stud
   - Each run is $\le 1$ h with per-level progress; results are recorded with their commit.
   - The slow tests recompute the smallest-margin gated case per test plus the coarsest
     reference level, against the record to $\max(10^{-9}, 2f_\lambda)$. Prototype costs:
-    cylinder about 35 s, Srinivas–Rao 70–80 s (9.3 GB), skew $< 10$ s, no-locking $< 2$ s.
+    cylinder about 35 s, Srinivas–Rao 60–80 s ($\le 9$ GB; `ortho` (3,1) or `pag` (2,3)), skew
+    $< 10$ s, no-locking $< 2$ s.
   - `docs/eigensolvers.md` records the eigsh times and memory on these thin meshes (up to
     about 280k DOF, 14 GB).
 - **Srinivas–Rao** (0.1%):
@@ -417,23 +463,34 @@ The 16c plan fixes meshes, levels and the benchmark layout after the sizing stud
     - SS on xmin/ymin.
     - On each cut face: the mirror (xmax `"x"`, ymax `"y"`) for a nonzero index. For a zero
       index the field does not vary in that direction, so that face's SS condition goes on the
-      cut (`"yz"` on xmax for $m = 0$, `"xz"` on ymax for $n = 0$), with one element across.
+      cut (`"yz"` on xmax for $m = 0$, `"xz"` on ymax for $n = 0$).
+    - Zero-index width: one in-plane element of size $h$ (the other direction's element size)
+      across. With SS on both faces, the class then holds only $m' = 0$ (resp. $n' = 0$); its
+      labels are those with that index 0 and the other index odd. The test asserts that no
+      excluded label ($m' \ge 2$) lies below the target.
     - Matching: by the sorted index of the mapped label among the `plate_modes` labels of the
-      same symmetry class (a zero index counts as antisymmetric) on the quarter.
+      same symmetry class on the quarter. The rule states which class each label falls in
+      (including (1,1,1) on the S/S quarter), and the sizing study confirms every one of the
+      lowest 10 is matched.
   - Equivalence tests:
     - the full plate at $2N\times N$ gives mode (2,1) equal to the $N\times N$ sub-plate's;
-    - the quarter equals the sub-plate for (1,1), (1,0) and (0,1).
-  - Sizing: $k$ is sized on the thickest sub-plate among the lowest 10 (smallest effective
-    $L/t$).
-    - Prototype, `pag` quarters at $n = 64$:
-      - (1,1): $k = 8$ gives $4\cdot10^{-4}$;
-      - (2,2), effective $L/t = 5$: $k = 8$ gives $6\cdot10^{-4}$ (margin 1.7), $k = 12$ gives
-        $3.6\cdot10^{-4}$ (margin 2.8, 114k DOF, 70 s, 8.5 GB).
-    - So $k = 12$ at $L/t = 10$: about 19 sub-plates, about 25 min.
-    - If the thickest needs $k > 12$, $k$ is set per sub-plate ($k = 16$ costs about 3.5 min
-      and 17 GB per run).
+    - the quarter equals the sub-plate for (1,1), (1,0) and (0,1); the (1,0) and (0,1)
+      sub-plates are $L/m\times L$ and $L\times L/n$ (full extent in the zero-index direction).
+  - Sizing by total elements through the thickness $n_z$ (per laminate: $k = n_z/L_\text{plies}$),
+    on the thickest sub-plates among the lowest 10: (2,3) (shortest side $1/3$, wavenumber
+    $\sqrt{13}$), (1,3) and (3,1).
+    - Prototype, quarters at 32×32 in-plane (64 per sub-plate):
+      - `pag` (3 plies): (2,3) at $k = 8$ gives $8.3\cdot10^{-4}$, at $k = 12$ ($n_z = 36$)
+        $4.7\cdot10^{-4}$ (margin 2.1; 114k DOF, 60 s, 7.9 GB).
+      - `ortho` (1 ply) at $n_z = 12$ fails on (2,2), (1,3), (2,3) and (3,1)
+        ($1.0$–$1.37\cdot10^{-3}$) and is thickness-dominated; (3,1) at $n_z = 24$ gives
+        $5.0\cdot10^{-4}$ (77k DOF, 34 s).
+    - So $n_z = 36$ for both at $L/t = 10$ (`pag` $k = 12$, `ortho` $k = 36$; about 120k DOF,
+      about 60 s per run): about 19 sub-plates, about 20–25 min. The sizing study measures
+      the margin on (2,3), (1,3) and (3,1) for both laminates.
+    - If a laminate needs more, $n_z$ is raised for that laminate (logged).
     - $L/t = 100$: $n = 48$, $k = 1$, 2 s.
-  - `docs/verification.md` states $k$ per $L/t$.
+  - `docs/verification.md` states $n_z$ per laminate and $L/t$.
   - Reported only: one layered element per laminate (roadmap), and the full plate at a stated
     mesh.
 - **Clamped cylinder:**
@@ -449,17 +506,20 @@ The 16c plan fixes meshes, levels and the benchmark layout after the sizing stud
     - hex27 levels at circumferential × axial × $n_z$ of $24\times12\times2$, $48\times24\times2$
       and $96\times48\times2$ (276k DOF, 112 s, 14 GB at the finest; about 9 min for 4
       classes).
-    - With uniform axial spacing, the clamped-end layer slows $p$ to 1.8–3.5. The measured
-      reference error is 0.014–0.016% per class, and with the $n_z$ term (0.006%, measured at
-      the coarsest) it exceeds 0.02%.
-    - So the axial `coords` are cosine-graded toward the clamped end (as FV52) at the same
-      sizes, and the $n_z$ term is measured at the finest level.
-    - The sizing study confirms $\le 0.02\%$, or stops and asks.
+    - With uniform axial spacing, the clamped-end layer slows $p$ to 1.8–3.5 and the reference
+      error exceeds 0.02%.
+    - So the axial `coords` are cosine-graded toward the clamped end ($y_i = 1 -
+      \cos(\pi i/2n)$, as FV52) at the same sizes. Prototype on the worst class (S/A):
+      monotone, $p = 3.2$–3.6, Richardson error $\le 0.0053\%$; the $n_z$ term at
+      $48\times24$ (about 37 s per class) is $5.6\cdot10^{-5}$, scaled $\le 0.01\%$; total
+      $\le 0.015\%$.
+    - The sizing study confirms $\le 0.02\%$ on all 4 classes, or stops and asks.
   - `ssh8`: $384\times96\times1$ (220k DOF, 32 s per class).
     - Prototype worst errors per class: 0.051, 0.080, 0.064 and 0.063% (S/S, S/A, A/S, A/A),
-      the worst S/A mode 4, so the margin is 1.25.
+      the worst S/A mode 4, so the margin is 1.25 (0.080% against the graded reference; 0.085%,
+      margin 1.18, against its Richardson value).
     - One layer converges about 0.06% above 3D, so refinement cannot raise the margin.
-    - The `ssh8` mesh may be graded as the reference.
+    - The `ssh8` mesh is uniform (grading it gave 0.081%).
   - Gate: 0.1% (user, 2026-10-17). If it fails, stop and ask with the numbers.
 - **No locking:**
   - Setup: the SS square isotropic plate, $6\times6\times1$, at $L/t = 10$ and 1000. 16 modes
@@ -468,12 +528,13 @@ The 16c plan fixes meshes, levels and the benchmark layout after the sizing stud
     $48\times48\times1$ run. Its Richardson estimate (12/24/48, observed $p \approx 2.06$)
     plus the floor must be $\le 0.1\times$ the error at both $L/t$.
   - Floor: $10\varepsilon\lambda_\max/\lambda$, computed in the test (measured $9.2\cdot10^{-4}$).
-  - Gate: error at 1000 $\le 1.5\times$ error at 10 (measured 0.838/0.64 = 1.31).
+  - Gate: error at 1000 $\le 1.5\times$ error at 10 (measured fractions 0.838/0.64 = 1.31).
   - Reported only: the hex8 baseline.
 - **Skew plate:**
   - Setup: parallelograms only, 30°, clamped, $L/t = 20$, lowest 6 sorted.
   - Reference: hex27 levels 6/12/24/48 at $n_z = 2$ (135k DOF; measured reference error about
-    0.03%).
+    0.03%), the $n_z$ term at level 24 by the common rule.
+  - Gate: 1% (roadmap).
   - `ssh8` at $128\times128\times1$: about 0.71%. One layer converges about 0.61% above 3D
     (modes 5–6), so the margin is about 1.4 and refinement cannot raise it (floor, as for the
     cylinder). If it fails, stop and ask.
@@ -491,7 +552,8 @@ The 16c plan fixes meshes, levels and the benchmark layout after the sizing stud
   - `docs/eigensolvers.md`, `docs/preconditioners.md`: Jacobi auto, AMG until PR 18, numbers.
   - README example.
   - `docs/mesh.md`: SC8R.
-- **16c:** `docs/verification.md`.
+- **16c:** `docs/verification.md`, amending "Richardson extrapolation is not used" for PR
+  16's reference estimates.
 - **Each part:** ROADMAP status, `docs/open_items.md`.
 
 ## Decisions (logged in open_items)
@@ -523,7 +585,8 @@ Without user input:
   - 2 points per ply, fixed (narrows "n per ply");
   - the reference-$\zeta$ ply mapping;
   - the placeholder phase entry;
-  - the frame from $R_o$ axis 1, with the axis-2 fallback at 0.1.
+  - the frame from $R_o$ axis 1, with the axis-2 fallback at 0.1;
+  - hex8 and `ssh8` parts with one label on a tilted plate oriented differently (documented).
 - **Mass:** $m_e$ stored (36 floats, $\rho$ included); the $s_M$-only scale in the 4 mass sites;
   the padded `me` as element 0's.
 - **Code structure:** dispatch by name with `kernels.*` raising; `RECOVER` in
@@ -540,7 +603,8 @@ Without user input:
   - SC8R stacking kept, other `SC*` refused;
   - the VTU type field deferred.
 - **16c:**
-  - Srinivas–Rao per sub-plate as quarters (zero-index cuts SS), $k$ sized on the thickest;
+  - Srinivas–Rao per sub-plate as quarters (zero-index cuts SS, one element across), sized by
+    $n_z = 36$ on (2,3), (1,3) and (3,1);
   - the cylinder classes and exclusions, with axial grading;
   - observed-order Richardson with the $n_z$ term;
   - the one-layer floors (cylinder, skew);
