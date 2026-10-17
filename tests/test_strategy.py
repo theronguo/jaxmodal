@@ -1235,7 +1235,7 @@ def test_count_block_fit():
 @pytest.mark.parametrize("verify", [True, None, False])
 def test_count_block_none(fake_builds, monkeypatch, verify):
     """Test 11: no probe fits beside the store and window: the counts are off (a warning under
-    True only), the reason recorded."""
+    True only), the reason recorded unless verify=False asked for no counts."""
     fake_builds["name"] = "voxel"
     seen = {}
     monkeypatch.setattr(api, "si_band", stub_band(seen))
@@ -1246,7 +1246,7 @@ def test_count_block_none(fake_builds, monkeypatch, verify):
                          verify=verify)  # fmt: skip
     msgs = [str(x.message) for x in w if "no counts run" in str(x.message)]
     assert len(msgs) == (verify is True) and seen["verify"] is False
-    assert "one probe" in info["count"]["reason"]
+    assert ("one probe" in (info["count"]["reason"] or "")) == (verify is not False)
 
 
 def test_solve_modes_memory_band():
@@ -1661,6 +1661,10 @@ def test_cap_error_band(monkeypatch, zero):
         (dict(band=(0, 10), memory_budget=-1.0), "memory_budget must be a finite number"),
         (dict(band=(0, 10), memory_budget="1GB"), "memory_budget must be a finite number"),
         (dict(band=(0, 10), slice_options={"capcity": 96}), "capcity"),
+        (dict(band=(0, 10), slice_options={"capacity": 11}), "capacity must be >= 2 block"),
+        (dict(band=(0, 10), slice_options={"edges": [2.0, 1.0]}), "edges must be sorted"),
+        (dict(band=(0, 10), n_modes=-3), "n_modes must be an int"),
+        (dict(band=(1, 10), n_modes=2.5), "n_modes must be an int"),
         (dict(band=(10, 10)), "f1 < f2"),
         (dict(band=(-1, 10)), "f1 >= 0"),
     ],

@@ -131,6 +131,11 @@ def _check_slice_options(opts):
         raise ValueError(f"slice_options tau must be > 0, got {opts['tau']!r}")
     if "verbose" in opts and not isinstance(opts["verbose"], bool):
         raise ValueError(f"slice_options verbose must be a bool, got {opts['verbose']!r}")
+    if opts.get("capacity", math.inf) < 2 * opts.get("block", 6):
+        raise ValueError(f"slice_options capacity must be >= 2 block, got {opts['capacity']}")
+    edges = [float(x) for x in opts.get("edges", [])]
+    if edges != sorted(set(edges)) or any(not x > 0 for x in edges):
+        raise ValueError(f"slice_options edges must be sorted, distinct and > 0, got {edges}")
 
 
 def _nbytes(x):
@@ -318,6 +323,8 @@ def solve_modes(
             raise ValueError("strategy, memory_budget and slice_options need band")
     else:
         f1, f2 = check_band(band)
+        if n_modes is not None and not is_count(n_modes):
+            raise ValueError(f"n_modes must be an int >= 1, got {n_modes!r}")
     if strategy not in STRATEGIES:
         raise ValueError(f"strategy must be one of {STRATEGIES}, got {strategy!r}")
     if memory_budget is not None and not (
@@ -571,7 +578,7 @@ def solve_modes(
             verify=v_si, count_options=cn, tol=tol, seed=seed, n_store=n_store,
             **{key: x for key, x in sl_opts.items() if key != "capacity"},
         )  # fmt: skip
-        if no_count:
+        if no_count and verify is not False:
             info["count"]["reason"] = no_count
         info["slice_reason"] = info.pop("reason")  # si_band's; reason is the strategy's
         i0, i1 = _keep(lam, info["r_acc"], lam_lo, len(lam)), len(lam)
