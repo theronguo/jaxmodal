@@ -5,7 +5,7 @@ Branch `pr-15d-strategy` from `main` (PR 15c merged). Roadmap: PR 15 (the [15d] 
 the PR 15c plan's split (15d = the cost model, the memory budget, the strategy choice,
 `verify=None` for bands and `solve_modes(..., band=(f1, f2))`).
 
-Revision 9. Rounds 1–7:
+Revision 10. Rounds 1–8:
 - one decision, no seeding;
 - memory-driven, no time crossover;
 - no hybrid junction;
@@ -19,29 +19,22 @@ Revision 9. Rounds 1–7:
 - the slice device/host window split;
 - budgeted slice counts;
 - `band_count(_steps=)`;
-- the capped initial allocation.
+- the capped initial allocation;
+- the per-space fit test.
 
-Round 8:
-- **The fit test** is applied per memory space, each with its own exact part; CPU uses the
-  estimators' `total`.
-- **`fallback_capacity` is dropped** (noisy, optimistic for $f_1 = 0$, undefined below the
-  floor).
-- **The growth rule** keeps the rounding to $c_L$.
-- **The refill** uses `device_put(V[:, i:i+c].T)` (zero-copy) with the transpose in `_insert`.
-- **`si_memory`'s `n_modes`** becomes the store's columns, so there is one store term and the
-  Gram term uses the full Q width.
-- **The count block's fit** is stated per space.
-- **The exact terms** get 1.05 against column-proportional allocator growth, validated by 17a.
-- **The μ₁ refinement** falls back to `sigma_estimate` at a singular hint.
-- **A `verify=True` slice path** where one probe does not fit runs without counts.
-- **Tests:**
-  - 2(c)'s `n_modes`;
-  - test 3's budgets defined as exact + s × modelled;
-  - the count-block spy moved to test 3;
-  - 17a at old = 14 $c_L$;
-  - 17b at `verify=False` plus a new 17c count peak;
-  - test_band.py's view and patch-target updates.
-- **Docs:** the M3b example script and the remaining passages.
+Round 9:
+- **LOBPCG's λ is sorted** (with V's columns) before the filter when chunks returned out of
+  order.
+- **The growth** drops the LOBPCG state before the refill and uses its own `_refill`.
+- **The slice searches** use fp64 preconditioner models.
+- **GPU host** is a max of the builds and V.
+- **17a is split** into a direct `_grow` peak and a short real run with a slope check; the
+  paging claim is corrected (XLA zeros eager, np.zeros lazy).
+- **17b and 17c** are shortened to one slice and one probe block.
+- **The benchmark** shares one AMG-estimate cache and drops the redundant chunk-40 run.
+- **Test fixes:** μ₁ refinement checked against eigsh, both sides of the tol margin,
+  test_band.py's `test_errors` row, pinned `slice_options` keys.
+- **Docs:** the remaining passages.
 
 ## Scope
 
@@ -153,22 +146,23 @@ solve_modes(..., band=(f1, f2), strategy="shift_invert", memory_budget=8e9,
       blocks stay in the footprint, up to about 10 GB measured. The tests run with
       MallocLargeCache=0 and cannot see it (documented, logged).
   - The GPU host budget is 0.8 × physical RAM.
-  - **The fit test,** per check: 1.05 × exact + 1.2 × (total − exact) ≤ budget.
-    - The exact part is the column arrays: basis, V, the slice window and store, R and M R,
-      stored Ke. Its 1.05 covers allocator growth proportional to the columns. Test 17a
-      measures it under the preallocated V; eigensolvers.md records 0.15 × 8n × n_modes with
-      PR 14b's concatenated V.
-    - The modelled part is step, workspace, kernel temporaries, builds and preconditioners.
-      These run up to 9–16% low (si_memory 1.09–1.11×, GMG LOBPCG 1.12×, a one-chunk
-      zero-workspace solve 1.16×), and 1.2 is the roadmap's ±20% validation band.
-    - Unified memory (CPU): one check on the estimator's `total` (the phase max taken across
-      spaces) with exact = `device_exact + host_exact`.
-    - GPU: `device` with `device_exact` against the budget, and `host` with `host_exact`
-      against the host budget.
+  - **The fit test:** the estimate's exact part E and modelled part M pass when 1.05 E + 1.2 M ≤
+    budget.
+    - E is the column arrays: basis, V, the slice window and store, R and M R, stored Ke. Its
+      1.05 covers allocator growth proportional to the columns. Test 17a measures the slope
+      under the preallocated V; eigensolvers.md records 0.15 × 8n × n_modes with PR 14b's
+      concatenated V.
+    - M is everything else: step, workspace, kernel temporaries, builds, preconditioners, the
+      Gram matrix. These run up to 9–16% low (si_memory 1.09–1.11×, GMG LOBPCG 1.12×, a
+      one-chunk zero-workspace solve 1.16×), and 1.2 is the roadmap's ±20% validation band.
+    - Unified memory (CPU): one check, E = `device_exact + host_exact` and M = `total` − E.
+      Exact terms are persistent, so they are inside every phase of `total`.
+    - GPU: `device` with E = `device_exact` against the budget, and `host` with E =
+      `host_exact` against the host budget.
   - Recorded in `info["budget"]`.
 - `slice_options`: dict with keys `tau`, `maxit_inner`, `block` (default 6, the roadmap's b),
-  `max_slices`, `capacity` (overrides the sizing), `edges` and `verbose`, validated as si_band
-  does.
+  `max_slices`, `capacity` (overrides the sizing), `edges` and `verbose`. They are validated as
+  si_band does, and pinned in test_options.py against si_band's and si_slice's signatures.
 - The other `solve_modes` arguments reach the solvers as follows:
   - `tol`, `verify`, `count_options`, `seed` → si_band. On slice paths the count `block`
     defaults to the budgeted one (below);
@@ -185,11 +179,15 @@ solve_modes(..., band=(f1, f2), strategy="shift_invert", memory_budget=8e9,
     default and an initial basis of 4 chunks.
 - Returns the band modes and `info`.
   - **The band filter.**
-    - The upper end comes from LOBPCG's `n_band` (its own chain rule) or si_band's set.
-    - The lower end keeps λ ≥ λ_lo(1 − 100t), extended down over chains with relative gaps
+    - **Order.** si_band's set is ascending. LOBPCG's `np.concatenate(lams)` is not
+      guaranteed to be: a mode an earlier chunk missed can come back in a later chunk below
+      that chunk's top. If `np.diff(lam) < 0` anywhere, λ is stable-sorted and V's columns are
+      reordered (a copy, rare). $\mu_1^{ub}$ is min(λ), and L is counted by a mask.
+    - **The upper end** comes from LOBPCG's `n_band` (its own chain rule) or si_band's set.
+    - **The lower end** keeps λ ≥ λ_lo(1 − 100t), extended down over chains with relative gaps
       < 100t (si_band's `_extend_chain`). t is LOBPCG's per-mode threshold or r_acc.
-    - λ is ascending, so the kept set is one range [i0, i1). Both strategies return the
-      F-contiguous view `V[:, i0:i1]` of their F-order output; no copy is made. The columns
+    - **The view.** The kept set of ascending λ is one range [i0, i1). Both strategies return
+      the F-contiguous view `V[:, i0:i1]` of their F-order output; no copy is made. The columns
       below i0 stay resident behind the view; they were resident during the run, so the peak
       does not change (documented).
   - **Fields:**
@@ -255,8 +253,8 @@ Every slice path makes this check.
      On small meshes $C_{max}$ is capped at the free space, so every chunk reaches it and the top
      chunk wins. Below the top chunk's need, the rule picks a small chunk (5 or 10) in practice:
      the reach gap between chunks is a few hundred columns at every mesh size (documented). The
-     searches run on every band call: milliseconds with the cache, about 2.4 s for the AMG
-     estimate at 10M.
+     searches run on every band call: milliseconds with the cache, about 4 s for the AMG
+     estimate at 10M (measured).
    - No fitting chunk: "memory". si_band runs on the whole band, and a warning names the levers
      and their $C_{max}$ from the cached estimators.
    - A given `chunk` is used if it fits, else "memory".
@@ -267,22 +265,28 @@ Every slice path makes this check.
      n_modes = capacity − k that the count budget uses holds from the start, as after a growth.
    - Basis growth: `new = min(up(max(⌊1.5 old⌋, count + j + k + 1), c_L), C_max)`, as today plus
      the cap. Every width stays a multiple of $c_L$, which `_project`'s chunked slices need.
-   - At a growth, `B`, `args` and every other reference to B are dropped. B is reallocated with
-     zeros and refilled with exactly V's first `count` columns.
-     - The refill runs in chunks of $c_L$: `device_put(V[:, i:i+c_L].T)` is C-contiguous and
-       zero-copy, and the donated `_insert` transposes and casts to `basis_dtype`. A plain
-       `.at[].set()` would copy B per chunk.
-     - Each chunk is synchronised (`block_until_ready`) and dropped before the next, so queued
-       transfers do not pile up.
+   - **At a growth,** `_grow(B, V, count, new, c_L)`:
+     - **Frees first.** `X0 = state[0][:, j:]` is kept, and the state, `B`, `args` and every
+       other reference to B are dropped before the new B is allocated. This applies to the
+       9-block step as well, so only X0 and X are alive during the refill.
+     - **Refill.** B is reallocated with zeros (XLA CPU writes them eagerly) and refilled with
+       exactly V's first `count` columns, in chunks of $c_L$ (the last chunk truncated at
+       `count`):
+       - `device_put(V[:, i:i+c].T)` is C-contiguous: zero-copy when 64-byte aligned, else one
+         chunk copied;
+       - a separate jitted, donated `_refill(B, Xt, i)` does `dynamic_update_slice(B,
+         Xt.T.astype(B.dtype), i, 1)` (measured: no device temporary). `_insert` is
+         unchanged, since `_lock` and si_slice share it.
+     - **Synchronised.** Each chunk is synchronised (`block_until_ready`) and dropped before the
+       next, so queued transfers do not pile up.
      - The refilled B equals the old B exactly.
-   - The host V is `np.zeros((n, C_max + k), order="F")`, allocated once. Calloc is lazy:
+   - The host V is `np.zeros((n, C_max + k), order="F")`, allocated once. Its calloc is lazy:
      untouched columns cost no pages. It is never concatenated.
    - The band-end check comes first. A lock needing count + k > $C_{max}$ stops the solve:
      `info["stopped"] = "capacity"`.
    - Reaching $\lambda_{hi}$ ("fits"): PR 14b's count at the cut above $\lambda_{hi}$, then the
-     filter (a view). The count's probe-block budget passes `band=(0, f₂)` to
-     `band_probe_block`, since `solve_modes_memory` rejects $f_1 > 0$; it only switches on band
-     mode there.
+     filter. The count's probe-block budget passes `band=(0, f₂)` to `band_probe_block`, since
+     `solve_modes_memory` rejects $f_1 > 0$; it only switches on band mode there.
    - Non-convergence ends the solve with `converged` False, as in PR 14b; there is no fallback.
 3. **Capacity stop** ("capacity").
    - LOBPCG's basis, state, preconditioner, AMG aggregates and V are freed after reading
@@ -321,10 +325,10 @@ memory-driven rule.
   iterations rise from 18 to 77, and $t_\text{warm}$ from 0.215 to 0.278 s: the projector adds
   +30% at depth 1000. The projector-to-operator ratio is per DOF, so it carries to larger meshes
   at the same depth.
-- **Time per mode against chunk size** (chunks 5, 10, 20, 40 to about 200 modes), extrapolated
-  to depth $C_{max}$ with the 1005-mode run's $t_\text{warm}$ rise (the projector costs about
-  k/chunk × count per mode). This justifies the ladder's 10% threshold at the reach where it
-  matters.
+- **Time per mode against chunk size** (chunks 5, 10, 20 to about 200 modes; chunk 40 from the
+  first 200 modes of the 1005-mode run), extrapolated to depth $C_{max}$ with that run's
+  $t_\text{warm}$ rise (the projector costs about k/chunk × count per mode). This justifies the
+  ladder's 10% threshold at the reach where it matters.
 - **The crossover table:** per depth D, the smallest N at which a slice beats LOBPCG to D + N.
   "None" is expected. Per mode, a slice costs about 25–110 LOBPCG modes.
 
@@ -336,32 +340,33 @@ memory-driven rule.
   - `lobpcg_memory(..., capacity=None)`:
     - with `capacity`, the basis is exactly that many columns and V is n_modes + k; without it,
       as today;
-    - host = V (exact), plus the AMG build (pyamg runs on the host) and the operator's host
-      build;
-    - device = the rest: basis, R and stored Ke (exact), and step, start, seed and slack
-      blocks, kernel temporaries.
+    - host = max(operator host build, AMG build, V + aggregates). pyamg runs on the host before
+      `_solve` allocates V. Exact: V;
+    - device = basis, R and stored Ke (exact), plus step, start, seed and slack blocks, and
+      kernel temporaries.
   - `si_memory(op_memory, n_dof, capacity, n_modes, ..., n_deflate, host_window=None)`:
     - `n_modes` now means the host store's columns. The `end` phase keeps only its device
       chunk, since a slice's host V lands in the store: one store term;
     - device storage = operator + preconditioner + $v$·Q + R, M R, with Q = up(n_deflate, c) +
       capacity, as today;
-    - host = $8n\,$(host_window, default n_deflate) + $8 Q^2$ (si_slice's G at full width) +
-      $8n\,$n_modes, plus the host builds.
+    - host = $8n\,$(host_window, default n_deflate) + $8 Q^2$ (an upper bound of si_slice's
+      G, modelled) + $8n\,$n_modes, plus the host builds.
   - `count_memory`: operator storage, R, M R exact; the rest modelled; all device (W stays on
     the host in chunks).
 - **One helper,** `_largest(fits, step, lo, hi)`: the largest multiple of `step` in [lo, hi]
   with `fits(C)` True, by bisection (each `fits` is monotone), as a Python `int`, or None when
-  nothing fits. `probe_block`, $C_{max}$ and the slice capacity all use it. Inside a search,
-  `op_memory`/`precond_memory` are wrapped in `functools.cache` (per call; amg_memory takes
-  about 2.4 s at 10M).
+  nothing fits.
+  - `probe_block`, $C_{max}$ and the slice capacity all use it. `probe_block` still raises
+    `ValueError` when it gets None, as today.
+  - Inside a search, `op_memory`/`precond_memory` are wrapped in `functools.cache`.
 - **$C_{max}(\text{chunk})$** = `_largest(fits, c_L, c_L, up(n_avail + k, c_L))` (the
   free-space cap), n_avail = free − rigid.
   - fits(C) applies the fit test to `lobpcg_memory(..., n_modes=C, capacity=C, band=True)`.
   - There is no output term, since the filter returns a view.
-- **Slice capacity $C$** = min(the budget cap, the need cap).
-  - The budget cap: `_largest` over C from up(2c + 2b, c). It applies the fit test to
-    `si_memory(op_memory, n, C − W, n_modes=N_s, block, pc, n_rigid, n_deflate=W,
-    host_window=2(C − 2b))`.
+- **Slice capacity $C$** = `_largest` over [up(2c + 2b, c), the need cap], or the override.
+  - The fit test runs on `si_memory(op_memory, n, C − W, n_modes=N_s, block, pc, n_rigid,
+    n_deflate=W, host_window=2(C − 2b))`. pc is the fp64 preconditioner model (`_models(...,
+    "float64", ...)`, as `band_probe_block`), since `make` is always fp64.
     - The device basis Q is exactly up(C, c).
     - host_window bounds the host window plus si_checked's [W | V] restart copy. The window
       never exceeds C − 2b columns, including a slice requeued whole.
@@ -372,11 +377,14 @@ memory-driven rule.
   - si_slice already stops at the free space.
 - **Slice counts.** si_band's counts (leaf, span, verification) run with `count_options["block"]`
   unless the user gave one.
-  - The block is the largest $b_p$ that passes the fit test with `count_memory(b_p)` (which
-    includes the operator, preconditioner, R and M R) plus the store and the host window as
-    exact host terms. CPU: one check. GPU: `count_memory` against the device budget, the store
-    and window against the host budget. Q is freed when counts run.
-  - When one probe does not fit:
+  - The block is the largest $b_p$ passing the fit test with:
+    - `count_memory(b_p)` (the operator, the fp64 preconditioner model, R and M R);
+    - plus the store ($N_s$ columns) and the host window (2(C − 2b) columns), 8n per column, as
+      exact host terms.
+  - CPU: one check. GPU: `count_memory` against the device budget, the store and window against
+    the host budget. Q is freed when counts run.
+  - **One probe not fitting** is reachable: the count's 64-column W chunk keeps about 128
+    vectors on the device at any block, which can exceed a floor-size slice's Q. Then:
     - `verify=True`: a warning, then si_band runs with `verify=False` (no counts, no restarts),
       with the reason recorded;
     - `verify=None`: no counts, silently;
@@ -429,7 +437,7 @@ si_band's `_cap_error` is worded per case:
 - `lobpcg._solve`:
   - band mode requires `max_capacity`;
   - the capped initial allocation with the n_modes invariant;
-  - the capped growth rule, by synchronised free-and-refill from V;
+  - the capped growth rule through `_grow` and `_refill`;
   - the count + k stop;
   - V is a preallocated zeroed F-order array;
   - non-band mode is unchanged.
@@ -441,14 +449,15 @@ si_band's `_cap_error` is worded per case:
     - the ladder;
     - the μ₁ rule and its refinement;
     - the fallback with its frees;
-    - the view filter;
+    - the order check and the view filter;
     - the `band=(0, f₂)` probe budget;
     - the slice count block;
-  - `check_band` for $f_1 > 0$;
+  - `check_band` for $f_1 > 0$ (messages "f1 >= 0", "f1 < f2");
   - the NotImplementedError removed.
 - `memory.py`:
   - term tags and the per-space entries in `lobpcg_memory`, `si_memory`, `count_memory`;
-  - `lobpcg_memory(capacity=)`, `si_memory(host_window=)` and its store meaning of `n_modes`;
+  - `lobpcg_memory(capacity=)` and its host max;
+  - `si_memory(host_window=)` and its store meaning of `n_modes`;
   - `_largest`, also used by `probe_block`;
   - the $C_{max}$, capacity and count-block searches, the fit test, the default budget;
   - `solve_modes_memory`'s own $f_1 > 0$ check.
@@ -456,20 +465,25 @@ si_band's `_cap_error` is worded per case:
   - `tests/test_band.py`:
     - line 151 asserts the view (it asserted a copy);
     - the `_bound`/`_calibrate` monkeypatches (lines 283–384) target `counting`;
-  - si_memory callers pass the store columns as `n_modes`.
+    - `test_errors` (line 473): the interior-band row now succeeds or moves to test_strategy,
+      and the `check_band` rows follow the new messages;
+  - si_memory callers pass the store columns as `n_modes`;
+  - test_options.py pins the `slice_options` keys.
 
 ## Benchmark (`benchmarks/strategy_study.py`, one invocation, ≤ 15 min, progress to a log)
 
 1. **[15a, 15d] constants.** Refit α and $D_0$ per family on `shift_invert_study.json` by log
    least squares (no runs, seconds).
 2. **[15d] crossover and ladder.** On hex20 $16^3$/AMG:
-   - one LOBPCG band run to about 1005 modes (about 6 min), recording the iterations and
-     $t_\text{warm}$ per chunk;
+   - one LOBPCG band run (chunk 40) to about 1005 modes (about 6 min), recording the iterations
+     and $t_\text{warm}$ per chunk;
    - from it, the crossover table per depth against the MINRES rows, and the held-out "full"
      slice row predicted against measured (about 1.4×);
-   - chunks 5, 10, 20 and 40 to about 200 modes (about 1 min each), recording the time per mode
+   - chunks 5, 10 and 20 to about 200 modes (about 1 min each), recording the time per mode
      against chunk, extrapolated to depth with the first run's $t_\text{warm}$ rise.
-3. **[15d] memory record** (estimators only, seconds with the cache).
+3. **[15d] memory record** (estimators only). One `functools.cache` on the AMG estimate per
+   mesh is shared across part 3, since it does not depend on stored/on-the-fly Ke or the basis
+   dtype; about 4 s per AMG call at 10M.
    - The ladder (chunk 40 → 5: fits, $C_{max}$ under the fit test and the default budget, the
      slice capacity after a capacity stop) × {9-block, low} × {fp64, fp32 basis} × {stored,
      on-the-fly Ke}, plus {fp64, fp32 V-cycle} on voxel. At 10M hex20 on the 76 GB pool, and at
@@ -495,8 +509,7 @@ Method:
 - **`verify`.** Every test asserting counts passes `verify=True`, except test 14, which tests
   `verify=None`. Wiring-only tests use `count_options={"degree": 4, "n_probes": 2}`.
 - **Budgets and capacities** come from the search functions under the fit test, never
-  hard-coded or recorded. A budget "s × the need" means 1.05 × exact + s × modelled at the given
-  capacity.
+  hard-coded or recorded. A budget "s × the need" means 1.05 E + s M at the given capacity.
 - **Timing.** Each test is timed and marked slow above about 20 s.
 - **Accuracy.** Every test mapped to the eigsh item asserts the roadmap bound per mode with that
   mode's t, through test_shift_invert's `check_band` logic generalised.
@@ -545,8 +558,9 @@ Method:
    - With $\lambda_{lo}$ well above $\mu_1$: si_band gets (λ_lo, λ_hi) (spy), `from_zero` False.
    - "auto" with `band=(0, f)` at the 1.15× budget: "memory", si_band on (0, λ_hi), matches
      eigsh.
-   - The ladder, real run: a budget between the chunk-20 and chunk-40 needs gives the chunk the
-     reach rule picks from the searched `c_max` table (5 on this mesh).
+   - The ladder, real run: a budget in the middle between the chunk-20 and chunk-40 needs gives
+     the chunk the reach rule picks from the searched `c_max` table (5 on this mesh; chunk 10
+     reaches 0.81–0.87 of the best).
    - A pure-function table checks the rule:
      - the 0.9 × best reach;
      - the known-depth branch: the largest fitting chunk misses the depth and a smaller one
@@ -565,17 +579,22 @@ Method:
 6. **Clamped box**, `band=(0, f)`, "shift_invert": matches eigsh, `from_zero` True.
 7. **$\lambda_{lo} < \mu_1$**, clamped and free, "shift_invert":
    - `from_zero` True, filtered, matches eigsh;
-   - the margin: λ_lo = μ₁^ub(1 + 0.9e-2) gives True and (1 + 1.1e-2) gives False (μ₁^ub
-     monkeypatched ≥ the true μ₁); tol = 1e-4 widens it to 3e-2;
+   - the margin, with μ₁^ub monkeypatched ≥ the true μ₁:
+     - λ_lo = μ₁^ub(1 + 0.9e-2) gives True and (1 + 1.1e-2) gives False;
+     - at tol = 1e-4, 2.9e-2 gives True and 3.1e-2 gives False;
    - correct with an inflated μ₁^ub;
    - the `sigma=` hint path on voxel $16^3$ with λ_lo ≈ 3μ₁, si_band stubbed by a spy: the
-     multigrid refinement runs, `from_zero` False;
+     multigrid refinement runs, μ₁(eigsh) ≤ `mu1_ub` ≤ μ₁(1 + 1e-3), `from_zero` False;
    - `sigma=0` on the free hex8: the refinement falls back to `sigma_estimate` (spy);
    - the Jacobi path on the 240-DOF "free" hex8 at λ_lo ≈ 3μ₁: the full `sigma_estimate` ran
-     (spy), `from_zero` False;
+     (spy), μ₁ ≤ `mu1_ub` ≤ 1.1 μ₁, `from_zero` False;
    - a hint never enters `mu1_ub`.
-8. **Filter table** (pure): the exact edge, inside and outside 100t, a chain crossing λ_lo,
-   per-mode t, the upper end taken from `n_band`, the result a view.
+8. **Filter table** (pure):
+   - the exact edge, inside and outside 100t, a chain crossing λ_lo;
+   - per-mode t, the upper end taken from `n_band`;
+   - the result a view;
+   - out-of-order LOBPCG λ (e.g. [1, 2, 5, 6, 4.8] with lo between 4.8 and 5, and [1, 5, 2, 3,
+     6]) sorted with their columns before the cut.
 9. **Lower-edge clusters:** the voxel cube (doubles, triples) with λ_lo on a double and in the
    middle of a triple chain, under both strategies. All copies returned, `from_zero` False.
 10. **Edge above the spectrum** (through `solve_modes` on "tiny"): `f2` above the largest
@@ -585,23 +604,24 @@ Method:
 11. **Capacity and $C_{max}$:**
     - **Estimator terms:**
       - one hand-computed device and host term per estimator;
-      - `lobpcg_memory(capacity=C)`'s basis exactly C;
+      - `lobpcg_memory(capacity=C)`'s basis exactly C, and its host the max of the builds and
+        V + aggregates;
       - si_memory's device basis exactly up(C, c)·8n, with `host_window` and the store only in
         the host term, and the Gram term $8Q^2$;
       - the per-space exact parts;
     - **The fit test:**
       - per space on GPU, `total` on CPU;
-      - exact × 1.05, modelled × 1.2;
+      - E × 1.05, M × 1.2;
     - **`_largest`:**
       - against brute force, including a tiny mesh where $8Q^2$ and the end phase matter;
       - the jump at cap > 0;
       - the floor rounded up to c (72 at c = 24);
-      - None when nothing fits;
+      - None when nothing fits, and `probe_block` raising on it;
     - **Caps:**
       - the need cap and the budget cap each binding;
       - $C_{max}$ capped at the free space, a multiple of $c_L$;
     - **Platforms:** unified and GPU (monkeypatched platform and `memory_stats`): a tight host
-      budget where the host V binds lowers $C_{max}$; the AMG build counts in the host check;
+      budget where the host V binds lowers $C_{max}$; the AMG build counts in the host max;
     - **Limits:**
       - in order: an override skips both, below the floor or nothing fitting raises naming the
         budget, below 96 warns;
@@ -616,6 +636,7 @@ Method:
     - the initial allocation capped, with n_modes = $C_{max} - k$;
     - V F-order zeros of C_max + k columns;
     - after a refill, B's first `count` columns equal V's cast, and the rest are 0;
+    - the state freed before a growth, under the 9-block step (spy on `_grow`'s entry);
     - `max_capacity` required in band mode;
     - test_band.py's growth tests (`test_growth_from_zero` and the capacity tests) still pass,
       with `max_capacity` passed through solve_modes.
@@ -639,45 +660,55 @@ Method:
 16. **Options:**
     - `strategy`/`memory_budget`/`slice_options` without `band`, bad values, unknown
       `slice_options` keys, `f1 >= f2`;
+    - the pinned `slice_options` keys (test_options.py);
     - forced "lobpcg" with no chunk fitting raises up front;
     - the default budgets (monkeypatched `os.sysconf`, a fake `memory_stats` with
       `bytes_in_use`);
     - spies: `slice_options`, `tol`, `count_options` (a user `block` kept) and
       `precond_options` reach si_band and `make`;
-    - `precond_dtype="float32"` on voxel through a slice path builds `make` in fp64;
+    - `precond_dtype="float32"` on voxel through a slice path: `make` and the slice searches'
+      preconditioner models are fp64;
     - a capacity stop with 999 locked modes (monkeypatched) leaves `stagnation_risk` False, and
       1000 sets it;
     - LOBPCG not converged under "auto": no fallback, `converged` False.
-17. **Mac peaks** (slow, darwin, fresh subprocess, MallocLargeCache=0, estimates ≥ 2 GB, each
-    ≤ about 5 min with a time precondition):
-    - **(a)** `_solve(max_capacity=...)` on voxel about $48^3$, `low_memory=True`, chunk 10
-      ($c_L$ = 15), `lam_stop` past about 300 modes, so the growths run 60 → 90 → 135 → 210 →
-      315.
-      - The bound applies to the growth 210 → 315 (old = 14 $c_L$), asserted as a precondition.
-      - A spy around that growth resets the interval footprint
-        (`proc_reset_footprint_interval`) and reads its max.
+17. **Mac peaks** (slow, darwin, fresh subprocess, MallocLargeCache=0, each ≤ about 5 min with
+    the run time recorded in the docstring):
+    - **(a1) The growth transient,** `_grow` directly (seconds).
+      - Setup: voxel about $48^3$, low-memory step, $c_L$ = 15, B at 14 $c_L$ columns, V with
+        about 13.5 $c_L$ columns written, growing to 21 $c_L$.
+      - It resets the interval footprint (`proc_reset_footprint_interval`) and reads its max.
       - Asserts: interval max − footprint before < (new − old + old/2)·8n.
-        - A correct synchronised refill holds 2–4.4 $c_L$ of transients (measured), against a
-          slack of 7 $c_L$.
+        - A correct refill pages new − old columns (XLA CPU zeros are eager; asserted as a
+          precondition) plus 2–4.4 $c_L$ of transients (measured), against a slack of 7 $c_L$.
         - The old+new bug adds old = 14 $c_L$ columns.
-        - The bound relies on XLA CPU zeros being lazily paged (docstring).
-      - Asserts: (whole-run peak − 1.05 × exact) ≤ 1.2 × modelled, with the estimate at the
-        final capacity and locked count (V is lazily paged). The excess per exact column is
-        reported and ≤ 0.05.
+    - **(a2) The fit test** on a short real run: `_solve(max_capacity=...)` on a non-cubic voxel
+      $52\times48\times44$ (no cube multiplicities at the chunk boundary), low-memory, chunk 10,
+      to about 100 modes, so growths 60 → 90 → 135. A ≥ 2 GB estimate is a precondition.
+      - The footprint is recorded right after each growth and lock, and regressed against (B
+        columns + touched V columns)·8n. Asserts: slope ≤ 1.05.
+      - Asserts: the whole-run peak ≤ 1.05 E + 1.2 M at the final capacity and locked count (V
+        is lazily paged).
     - **(b)** `solve_modes(strategy="shift_invert", band=..., memory_budget=B, verify=False,
-      n_modes=6)` on lumped voxel $80^3$, modes about 4–8, the capacity from the budget.
-      Asserts:
-      - the peak ≤ B and ≤ the worst-case composition;
-      - within 20% of the composition evaluated with the run's maximum window and stored count;
-      - both reported.
-    - **(c)** `band_count` on lumped voxel $80^3$ at the budgeted block, with
-      `count_options={"degree": 8}` and the store and window held as host arrays. The peak is
-      ≤ the fit-test composition and within 20% of it (the peak does not depend on degree).
+      n_modes=3, sigma=...)` on lumped voxel $80^3$, about 2–3 modes.
+      - B is chosen so that the searched capacity equals the need cap: one slice, asserted with
+        `len(info["slices"]) == 1`.
+      - Asserts:
+        - the peak ≤ B and ≤ the worst-case composition;
+        - within 20% of the composition evaluated with the run's maximum window and stored
+          count;
+        - both reported.
+    - **(c)** `band_count` on lumped voxel $80^3$ at a budget giving a block below 50, with
+      `count_options={"degree": 8, "n_probes": <the budgeted block>}` and the store and window
+      held as host arrays.
+      - Exactly one block runs (asserted).
+      - The peak is ≤ the fit-test composition and within 20% of it; the peak does not depend
+        on degree.
 
 The README example (`band=(f1, f2)` on the "short" box mesh, about 10 modes) runs in
 test_readme.py with every printed value asserted.
 
-`examples/m3b_bands.py` runs in `tests/test_examples.py`, on the "short" mesh:
+`examples/m3b_bands.py` runs in `tests/test_examples.py`, on the "short" mesh (about 40 s
+measured):
 - `band=(0, f)` and `band=(f1, f2)` under "auto";
 - one forced `strategy="shift_invert"`;
 - each ends in a check against eigsh.
@@ -696,8 +727,9 @@ test_readme.py with every printed value asserted.
     - memory and capacity:
       - the fit test and the macOS malloc-cache headroom;
       - small "memory" capacities, the store reservation and its warning;
-      - the slice count block and its one-probe case;
+      - the slice count block and its one-probe case, and why it is reachable;
       - the resident columns behind the returned view;
+    - the order check before the filter;
     - `verify=None` for slices;
     - errors, including late edge errors above the spectrum and their cost;
     - the stagnation warning;
@@ -706,14 +738,17 @@ test_readme.py with every printed value asserted.
   - **§Measured MINRES cost:** the $\alpha D(1 + D/D_0)$ constants per family.
   - **§Frequency band [0, f_max],** rewritten:
     - the Capacity bullet: capped growth, free-and-refill, preallocated V;
-    - the Returns bullet and the copy sentence near line 829: a view, not a compact copy.
+    - the Returns bullet (line 108): a view, not a compact copy.
+  - **The Validation list,** including line 829's "a copy, not a view".
   - **"Edge above the spectrum"** (near line 664): late errors only, with their cost on slice
     paths.
-  - **The estimator reference** (near lines 122, 348, 358 and 674):
-    - `lobpcg_memory(capacity=)`, `si_memory(host_window=)` and its store `n_modes`;
+  - **The estimator reference** (near lines 112, 122, 348, 358, 562 and 674):
+    - `lobpcg_memory(capacity=)` and its host max, `si_memory(host_window=)` and its store
+      `n_modes`;
     - the per-space entries;
     - the 0.15 × 8n × n_modes growth note re-measured;
-    - `probe_block`/`band_probe_block` through `_largest`.
+    - `probe_block`/`band_probe_block` through `_largest`, and the `band=(0, f₂)` probe budget;
+    - `solve_modes_memory(band=...)`: $f_1 > 0$ raises.
   - **The Options block:**
     - new rows for `strategy`, `memory_budget` and `slice_options` (block default 6);
     - rewritten rows:
@@ -721,14 +756,14 @@ test_readme.py with every printed value asserted.
       - `n_modes`, `verify`, `precond_dtype`;
       - `chunk` with `band` (near line 92): chunk 40 for $f_1 > 0$; the ladder replaces "pass
         `chunk` above 2M".
-  - **The Validation list.**
   - **Every mention** of `15d`, `PR 15d` and `NotImplementedError`, and "the roadmap's
     crossover", in `docs/` and `README.md` rewritten (eigensolvers.md near lines 103, 122,
     589–720).
 - `README.md`:
   - the `band=(f1, f2)` example;
   - the options paragraph near line 222;
-  - the band paragraph near line 247 (interior bands, the strategy, the m3b example);
+  - the band paragraph near line 247 (interior bands, the strategy);
+  - the `examples/` sentence near line 259 gains `m3b_bands.py`;
   - the status, naming M3b;
   - the closing "See docs/eigensolvers.md" list gains "interior bands and strategy".
 - `docs/ROADMAP.md`:
@@ -746,14 +781,14 @@ test_readme.py with every printed value asserted.
       the ladder; "≲ 1200" replaced by the measured crossover; the 10M and 2M Mac figures from
       the record (fp32 AMG for PR 18);
     - line 91, "`None` lets the cost model enable it": now PR 14b's rule per leaf;
-    - line 93, "must expect stagnation": the warning and `stagnation_risk`, remedies → PR 18;
+    - lines 92–93, "Near mode index 1000 … PR 15 calibrates this … must expect stagnation": the
+      15d note on $\alpha D(1 + D/D_0)$, the warning and `stagnation_risk`, remedies → PR 18;
     - the Band edges bullet (line 95): "the cost model's cap" → `MAX_DEGREE`; the up-front
       bound deferred, late errors only;
     - line 99, the $f_1 < \lambda_1$ sentence: the margin, the LOBPCG Ritz bound and the
       refinement;
     - line 100, "Slice widths come from the cost model … counting degree": capacity-limited
-      widths and the per-leaf rule;
-    - a 15d note on $\alpha D(1 + D/D_0)$.
+      widths and the per-leaf rule.
   - **Memory budget:** the "Max locked modes" row from the record under the fit test; a
     shift-invert row; the fit test; the Mac np.memmap bullet → PR 18.
   - **PR 18 contents:** the "band follow-ups (features)" and performance items above, including
@@ -769,24 +804,29 @@ test_readme.py with every printed value asserted.
       `precond_options`);
     - the 15c → 15d items done here: capacity from the budget, the `verify` callable (now
       `verify=None`), "15d words it per case".
-  - **Superseded:** 14b's "Basis growth … no `max_modes` cap" and "Host V holds n_modes + chunk
-    columns"; 14b's "Band chunk default 40" annotated with the $f_1 > 0$ rule.
+  - **Superseded:**
+    - 14b's "Basis growth … no `max_modes` cap" and "Host V holds n_modes + chunk columns";
+    - 14b's "Band chunk default 40", annotated with the $f_1 > 0$ rule;
+    - 15a's "`si_memory` … takes the expected slice count `n_modes` for its end phase" (now the
+      store's columns).
   - **Partly addressed:**
     - "`edge_unreached` is not evidence…" (line 147): the μ₁ rule done, the λ_hi bound → PR 18;
     - "A top remainder holding only known modes can raise" (line 169): the message fixed by the
       per-case wording, the cost → PR 18 with "halving before a capacity error";
     - "size the capacity with the window's chunk included" (the window reservation);
-    - "span counts at small capacities" (the 96-column warning);
+    - "Span counts at small capacities": the 96-column warning; the rest → PR 18;
     - "a capacity error discards the band" (the window reservation; `err.result` → PR 18).
   - **Retagged to PR 18,** headings changed from "→ PR 15d" with a one-line 15d disposition per
     bullet:
-    - "Late capacity errors and slice efficiency": "requeue whole", "stop si_checked before its
-      count once r_acc widens the window", "halving before a capacity error";
+    - "Late capacity errors and slice efficiency": "requeue whole"; "halving before a capacity
+      error" (its "up-front $\hat\lambda_\max$ check removes the main case" now reads: the bound
+      is deferred, so the case stays);
     - the 15c decision "a done side gives up its half's gaps" (line 141);
+    - the 15c decision "A slice whose $r_{acc}$ widens its deflation window is rerun" (line
+      153): "stop si_checked before its count";
     - the 15b "σ = $c_{hi}$" item in "Band-pass count and slice restarts" (its own line);
     - "the `verify` skips before the gather" for `verify=False` (None skips before it; False
       still predicts after it);
-    - "Span counts at small capacities";
     - "Shift-invert cost near mode 1000" and "σ-move retries": warned, remedies to PR 18;
     - verification slices, per-step residuals, merge and count copies, host transposes.
   - **New:** the macOS malloc-cache headroom (measured up to about 10 GB, held by the 0.2 × RAM
@@ -817,11 +857,16 @@ test_readme.py with every printed value asserted.
   - the GPU host budget 0.8 × RAM.
 - **The fit test:** 1.05 on the exact column arrays, 1.2 on the modelled terms, per memory
   space. 1.2 on every term would cost 26–32% of reach at 10M; the per-target loss is in the
-  benchmark record. The 1.05 is checked by 17a.
-- **The LOBPCG growth** keeps the rounding to $c_L$ and rebuilds B from the zeroed host V by
-  zero-copy chunks, synchronised (PCIe about 3 s for 1000 columns at 10M), instead of copying.
-  Allocating B at $C_{max}$ up front on GPU, against fragmentation, is left to the GPU checks.
+  benchmark record. The 1.05 is checked by 17a2's slope.
+- **The LOBPCG growth:**
+  - keeps the rounding to $c_L$;
+  - frees the state first;
+  - rebuilds B from the zeroed host V by zero-copy chunks through its own `_refill`,
+    synchronised (PCIe about 3 s for 1000 columns at 10M), instead of copying;
+  - allocating B at $C_{max}$ up front on GPU, against fragmentation, is left to the GPU checks.
 - **The initial allocation** is 14b's, capped, with n_modes = capacity − k.
+- **LOBPCG's λ order:** sorted with its columns before the filter when out of order (rare, a
+  copy then).
 - **Returned modes are a view** of the solver's F-order output for both strategies; the
   columns below the band stay resident. This supersedes 14b's compact copy.
 - **No up-front spectrum bound:** the late errors meet the roadmap criterion, at about
@@ -830,6 +875,7 @@ test_readme.py with every printed value asserted.
   it passes $N_s$; an overrun is an ordinary OOM.
 - **Slice counts** run at a budgeted probe block on slice paths. When one probe does not fit,
   `verify=True` warns and runs without counts.
+- **Slice searches** use the fp64 preconditioner model, since `make` is always fp64.
 - **Stagnation:**
   - warned only after a capacity stop at ≥ 1000 locked modes; the depth is unknown elsewhere;
   - remedies → PR 18;
