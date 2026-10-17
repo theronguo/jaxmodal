@@ -128,7 +128,7 @@ plies, R_o = ply_table(pairs, materials, orientations)  # pure jax.numpy
 - $t_3 = g_1\times g_2/\|g_1\times g_2\|$ at $\xi = 0$ (the element normal along $+\zeta$).
 - $t_1$ = axis 1 of $R_o$ (the orientation label's rotation, identity by default) projected onto the shell plane and normalized; $t_2 = t_3\times t_1$.
 - **Fallback:** if that projection has norm $< 0.1$, $t_2$ = axis 2 of $R_o$ projected and normalized, and $t_1 = t_2\times t_3$. The normalization is NaN-free (double `where`); the frame is not differentiable at the switch.
-- $R_\text{shell} = [t_1\ t_2\ t_3]$, and ply $k$ uses $C_k' = $ `rotate`$(C_k, R_\text{shell}R_z(\theta_k))$. When $R_o$'s axis 3 is $+t_3$, $R_\text{shell} = R_o$, so a one-ply `Material` acts as on hex8.
+- $R_\text{shell} = [t_1\ t_2\ t_3]$, and ply $k$ uses $C_k' = \mathrm{rotate}(C_k, R_\text{shell}R_z(\theta_k))$. When $R_o$'s axis 3 is $+t_3$, $R_\text{shell} = R_o$, so a one-ply `Material` acts as on hex8.
 - **Stacking sign:** a $\zeta$ flip turns the frame by $\mathrm{diag}(1,-1,-1)$ (by $\mathrm{diag}(-1,1,-1)$ in the fallback), reverses the plies and negates the angles. See `solid_shell`'s `direction` (`docs/mesh.md`).
 - **hex8 vs `ssh8`:** a hex8 element uses $R_o$ itself; an `ssh8` element projects it onto its shell plane. On a tilted plate, hex8 and `ssh8` parts with one orientation label are therefore oriented differently unless $R_o$'s axis 3 is the normal.
 

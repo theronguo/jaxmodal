@@ -4,6 +4,8 @@ References: tests/shell_ref.py (independent NumPy element), hex8 kernels, SciPy 
 solves, analytic patch fields, MacNeal-Harder (1985) beam references.
 """
 
+import itertools
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -14,6 +16,7 @@ from helpers import ORTHO, R, fd_rel, rel
 from scipy.spatial.transform import Rotation
 
 from jaxmodal.elements import check_elements, kernels, shell_mass, shell_recover, shell_stiffness
+from jaxmodal.elements.check import _thickness_min
 from jaxmodal.materials import (
     Laminate,
     Material,
@@ -92,16 +95,25 @@ def normal(X):
 # ---------------------------------------------------------------- 1: independent reference
 
 
+STACKS = {  # a different C per ply
+    1: [(C_ANI, 2.0, 0.3, 1.0)],
+    2: [(C_ANI, 2.0, 0.3, 0.4), (C_ORT, 1.0, -0.7, 0.6)],
+    3: [
+        (C_ANI, 2.0, 0.3, 0.2),
+        (C_ORT, 1.0, -0.7, 0.5),
+        (np.asarray(rotate(C_ANI, ref.rz(1.0))), 3.0, 1.1, 0.3),
+    ],
+}
+
+
 @pytest.mark.parametrize("ht", [1, 2, 20])
 @pytest.mark.parametrize("n_ply", [1, 2, 3])
 def test_kernels_match_reference(ht, n_ply):
     rng = np.random.default_rng(10 * ht + n_ply)
-    plies = [(C_ANI, 2.0, 0.3, 1.0)] if n_ply == 1 else three_plies(C_ANI)[:n_ply]
-    if n_ply == 2:
-        plies = [plies[0][:3] + (0.4,), plies[1][:3] + (0.6,)]
+    plies = STACKS[n_ply]
     X = ref.distorted_hex8(rng, ht, plies)
     Ke, Kr = K(X, plies, R), ref.stiffness(X, plies, R)
-    assert np.abs(Ke - Kr).max() <= 1e-12 * np.abs(Kr).max()
+    assert rel(Ke, Kr) <= 1e-12
     assert np.array_equal(Ke, Ke.T)
     assert rel(m(X, plies), ref.mass(X, plies)) <= 1e-12
     u = rng.standard_normal(24)
@@ -129,12 +141,25 @@ def test_connectivity_rotations_and_flip(branch):
         R_o = np.asarray(from_vectors(n + 0.05 * J0[:, 0] / np.linalg.norm(J0[:, 0]), J0[:, 1]))
     assert (np.linalg.norm(R_o[:, 0] - (R_o[:, 0] @ n) * n) >= 0.1) == (branch == "primary")
     Ke = K(X, plies, R_o)
+    assert rel(Ke, ref.stiffness(X, plies, R_o)) <= 1e-12
     for k in (1, 2, 3):  # in-plane connectivity rotations
         p = node_perm(np.rint(ref.rz(k * np.pi / 2)).astype(int))
         assert rel(K(X[p], plies, R_o), Ke[np.ix_(dofs(p), dofs(p))]) <= 1e-12
     p = node_perm(np.diag([1, -1, -1]))  # zeta flip: plies reversed, angles negated
     flipped = [(C, rho, -a, f) for C, rho, a, f in plies[::-1]]
     assert rel(K(X[p], flipped, R_o), Ke[np.ix_(dofs(p), dofs(p))]) <= 1e-12
+
+
+@pytest.mark.parametrize("proj", [0.095, 0.105])
+def test_frame_threshold(proj):
+    """R_o axis 1 projected onto the shell plane just below / above 0.1: fallback / primary."""
+    rng = np.random.default_rng(13)
+    X = ref.distorted_hex8(rng, 4, STACKS[3])
+    n, J0 = normal(X)
+    t = J0[:, 0] - (J0[:, 0] @ n) * n
+    a = np.sqrt(1 - proj**2) * n + proj * t / np.linalg.norm(t)
+    R_o = np.asarray(from_vectors(a, J0[:, 1]))
+    assert rel(K(X, STACKS[3], R_o), ref.stiffness(X, STACKS[3], R_o)) <= 1e-12
 
 
 def test_rigid_rotation():
@@ -278,6 +303,15 @@ def patch(name):
     return hexes, shells, interior, Q, C
 
 
+def lift(Kh, Ks, inner, uA):
+    """u = A x on the boundary; interior surface DOFs solved under the consistent traction."""
+    d_I = dofs(inner)
+    d_B = np.setdiff1d(np.arange(Ks.shape[0]), d_I)
+    u = uA.copy()
+    u[d_I] = spla.spsolve(Ks[d_I][:, d_I].tocsc(), (Kh @ uA)[d_I] - Ks[d_I][:, d_B] @ uA[d_B])
+    return u
+
+
 def recover(mesh, mat, R_o, u):
     conn = mesh.blocks["ssh8"]
     f = jax.jit(jax.vmap(shell_recover, in_axes=(0, None, 0)))
@@ -291,13 +325,9 @@ def test_patch_lift(name):
     mat = Material(C, 1.0)
     Kh = assemble(hexes, {0: Material(rotate(C, Q), 1.0)})[0]
     Ks = assemble(shells, {0: mat}, {0: Q})[0]
-    d_I = dofs(inner)
-    d_B = np.setdiff1d(np.arange(Ks.shape[0]), d_I)
     for s in range(6):
         uA, sig = linear_field(C, Q, s, hexes.points)
-        f = (Kh @ uA)[d_I] - Ks[d_I][:, d_B] @ uA[d_B]
-        u = uA.copy()
-        u[d_I] = spla.spsolve(Ks[d_I][:, d_I].tocsc(), f)
+        u = lift(Kh, Ks, inner, uA)
         err_u = np.abs(u - uA).max() / np.abs(uA).max()
         err_s = np.abs(recover(shells, mat, Q, u)[3] - sig).max() / np.abs(sig).max()
         if name == "i" or s in (0, 1, 2, 5):
@@ -314,20 +344,18 @@ def test_patch_recovery(name):
     conn = shells.blocks["ssh8"]
     for s in range(6):
         uA, sig = linear_field(C, Q, s, hexes.points)
-        x, w, eps, sigma = recover(shells, mat, Q, uA)
+        _, w, eps, sigma = recover(shells, mat, Q, uA)
         assert np.abs(sigma - sig).max() <= 1e-10 * np.abs(sig).max()
         assert np.abs(sigma - eps @ np.asarray(rotate(C, Q)).T).max() <= 1e-12 * np.abs(sig).max()
-    G = 1 / np.sqrt(3)
-    vol = [sum(np.linalg.det(ref.jac(shells.points[c], np.array(p)))
-               for p in np.ndindex(2, 2, 2) for p in [np.where(np.array(p), G, -G)])
-           for c in conn]  # fmt: skip
+    gauss = list(itertools.product((-ref.G, ref.G), repeat=3))
+    vol = [sum(np.linalg.det(ref.jac(shells.points[c], np.array(p))) for p in gauss) for c in conn]
     assert rel(w.reshape(len(conn), -1).sum(1), vol) <= 1e-12
 
 
 def test_patch_reported():
     """Reported only: the lift on the lifted (iv) and warped patches."""
     for name, warp in (("iv", None), ("ii", 0.1 * T)):
-        hexes, shells, inner, Q, C = patch(name)
+        hexes, shells, inner, _, C = patch(name)
         if warp is not None:
             pts = hexes.points.copy()
             pts[[4, 4 + len(MH)], 2] += warp
@@ -335,13 +363,9 @@ def test_patch_reported():
             shells, _ = solid_shell(hexes, direction=(0, 0, 1))
         Kh = assemble(hexes, {0: Material(C, 1.0)})[0]
         Ks = assemble(shells, {0: Material(C, 1.0)})[0]
-        d_I = dofs(inner)
-        d_B = np.setdiff1d(np.arange(Ks.shape[0]), d_I)
         for s in range(6):
-            uA, sig = linear_field(C, np.eye(3), s, hexes.points)
-            u = uA.copy()
-            f = (Kh @ uA)[d_I] - Ks[d_I][:, d_B] @ uA[d_B]
-            u[d_I] = spla.spsolve(Ks[d_I][:, d_I].tocsc(), f)
+            uA, sig = linear_field(C, I3, s, hexes.points)
+            u = lift(Kh, Ks, inner, uA)
             err = np.abs(recover(shells, Material(C, 1.0), np.eye(3), u)[3] - sig).max()
             print(f"lift {name} warp {warp}: state {s} stress error {err / np.abs(sig).max():.2g}")
 
@@ -439,7 +463,7 @@ def test_assemble_mixed():
     assert abs(ones @ Mg @ ones - mass) <= 1e-12 * mass
     assert (parts(mesh) == 0).all()
     free = dof_mask(mesh, {"xmin": "xyz"})
-    assert free.shape == (n,) and not free.all()
+    assert np.array_equal(~free, np.repeat(mesh.points[:, 0] == 0, 3))
 
 
 def test_one_ply_shell_mass_equals_hex8():
@@ -478,20 +502,22 @@ def test_gradients():
 
 
 def test_gradients_finite_at_edge_cases():
+    """No NaN in any gradient (X, plies, R_o): padded plies, R_o axis 1 or 2 exactly normal."""
     rng = np.random.default_rng(12)
     X = ref.distorted_hex8(rng, 3)
     n, J0 = normal(X)
-    P, Ro = ply_table([(0, 0), (1, 0)], {0: Material(C_ANI, 1.0), 1: laminate(three_plies(C_ORT))})
+    P, _ = ply_table([(0, 0), (1, 0)], {0: Material(C_ANI, 1.0), 1: laminate(three_plies(C_ORT))})
     padded = jax.tree.map(lambda a: a[0], P)  # 1 ply + 2 padded
-    for R_o in (np.eye(3), np.asarray(from_vectors(n, J0[:, 0]))):  # axis 1 exactly normal
-        for f in (lambda X, R_o=R_o: jnp.sum(shell_stiffness(X, (padded, R_o))),
-                  lambda X: jnp.sum(shell_mass(X, padded))):  # fmt: skip
-            assert np.isfinite(np.asarray(jax.grad(f)(jnp.asarray(X)))).all()
-    R2 = np.column_stack([J0[:, 0] / np.linalg.norm(J0[:, 0]), n, np.zeros(3)])
-    R2[:, 2] = np.cross(R2[:, 0], R2[:, 1])  # axis 2 exactly normal
-    assert np.abs(R2.T @ R2 - np.eye(3)).max() < 1e-12
-    g = jax.grad(lambda X: jnp.sum(shell_stiffness(X, (padded, R2))))(jnp.asarray(X))
-    assert np.isfinite(np.asarray(g)).all()
+    t = J0[:, 0] / np.linalg.norm(J0[:, 0])
+    axis2 = np.column_stack([t, n, np.cross(t, n)])  # axis 2 exactly normal
+    u = rng.standard_normal(24)
+    fs = (lambda X, p, R_o: jnp.sum(shell_stiffness(X, (p, R_o))),
+          lambda X, p, R_o: jnp.sum(shell_mass(X, p)),
+          lambda X, p, R_o: sum(jnp.sum(a) for a in shell_recover(X, (p, R_o), u)))  # fmt: skip
+    for R_o in (np.eye(3), np.asarray(from_vectors(n, J0[:, 0])), axis2):  # axis 1 normal: 2nd
+        for f in fs:
+            g = jax.grad(f, argnums=(0, 1, 2))(jnp.asarray(X), padded, jnp.asarray(R_o))
+            assert all(np.isfinite(np.asarray(a)).all() for a in jax.tree.leaves(g))
 
 
 # ---------------------------------------------------------------- 9: solid_shell
@@ -520,13 +546,16 @@ def test_solid_shell_sweep():
         p = node_perm(Q)
         m_ = Mesh(box.points, {"hex8": box.blocks["hex8"][:, p]}, {}, {}, box.material,
                   box.orientation)  # fmt: skip
-        e = zeta_edges(solid_shell(m_)[0])
-        assert np.allclose(e, [0, 0, 1])
+        out = solid_shell(m_)[0]
+        assert np.allclose(zeta_edges(out), [0, 0, 1]) and (corner_jacobians(out)["ssh8"] > 0).all()
     for shape in [(3, 3, 3), (6, 1, 1), (8, 8, 12)]:
         with pytest.raises(ValueError, match="ambiguous thickness direction: pass direction="):
             solid_shell(box_mesh(shape))
-    e = zeta_edges(solid_shell(box_mesh((8, 10, 12)))[0])
-    assert np.allclose(e / np.linalg.norm(e, axis=1)[:, None], [1, 0, 0])
+    for shape, d in (((8, 10, 12), 0), ((10, 8, 12), 1)):  # x and y thickness axes
+        out = solid_shell(box_mesh(shape))[0]
+        assert (
+            np.allclose(zeta_edges(out), np.eye(3)[d]) and (corner_jacobians(out)["ssh8"] > 0).all()
+        )
 
 
 def test_solid_shell_direction_and_sign():
@@ -539,7 +568,8 @@ def test_solid_shell_direction_and_sign():
     assert np.allclose(e, -0.1 * Q[:, 2])
     Rx = Rotation.from_rotvec([-3 * np.pi / 4, 0, 0]).as_matrix()  # normal (0, 1, -1) / sqrt 2
     box = box_mesh((8, 6, 2))
-    plate_ = Mesh(box.points @ Rx.T, box.blocks, {}, {}, box.material, box.orientation)
+    jitter = np.random.default_rng(14).uniform(-1e-12, 1e-12, box.points.shape)  # splits the tie
+    plate_ = Mesh(box.points @ Rx.T + jitter, box.blocks, {}, {}, box.material, box.orientation)
     e = zeta_edges(solid_shell(plate_)[0])
     assert np.allclose(np.abs(e), [0, 1 / np.sqrt(2), 1 / np.sqrt(2)])
     assert (e @ e[0] > 0).all()  # one sign throughout
@@ -567,13 +597,19 @@ def test_solid_shell_ring():
     c = out.points[out.blocks["ssh8"]].mean(1)
     e = zeta_edges(out)
     assert np.allclose(e[:, 2], 0) and np.allclose((e[:, :2] * c[:, :2]).sum(1), 0)
+    assert (corner_jacobians(out)["ssh8"] > 0).all()
     mesh = ring(16, 1, 2)  # radial is thinnest; per-element radial directions
     c = mesh.points[mesh.blocks["hex8"]].mean(1)
     radial = c * [1, 1, 0]
     out = solid_shell(mesh, direction=radial)[0]
     e = zeta_edges(out)
     assert ((e * radial).sum(1) > 0.09 * np.linalg.norm(radial, axis=1)).all()  # chord 0.098
-    assert np.allclose(solid_shell(mesh)[0].blocks["ssh8"].shape, (32, 8))
+    assert (corner_jacobians(out)["ssh8"] > 0).all()
+    swept = solid_shell(mesh)[0]  # the sweep finds radial too (the sign may flip on the ring)
+    e = zeta_edges(swept)
+    assert swept.blocks["ssh8"].shape == (32, 8)
+    assert (np.abs((e * radial).sum(1)) > 0.09 * np.linalg.norm(radial, axis=1)).all()
+    assert (corner_jacobians(swept)["ssh8"] > 0).all()
 
 
 def test_solid_shell_blocks_sets_and_errors():
@@ -597,16 +633,52 @@ def test_solid_shell_blocks_sets_and_errors():
     assert np.allclose(e[:3], [0, 0, 0.1]) and np.allclose(e[3:], [0, 0, -0.1])
     with pytest.raises(ValueError, match="empty element selection"):
         solid_shell(box, np.array([], np.int64))
-    with pytest.raises(ValueError, match="hex8 elements only"):
-        solid_shell(twice, [0])
-    with pytest.raises(ValueError, match="hex8 elements only"):
-        solid_shell(box_mesh((2, 2, 1), type="hex20"), [0])
-    with pytest.raises(ValueError, match=r"element 0: thickness axis ambiguous"):
-        solid_shell(box_mesh((2, 1, 1)), direction=(1, 1, 0))
-    assert _voxel().voxel is not None and solid_shell(_voxel())[0].voxel is None
+    for bad in ([-1], [n]):
+        with pytest.raises(ValueError, match="hex8 elements only"):
+            solid_shell(box, bad)
+    dup, _ = solid_shell(box, [2, 0, 2], direction=(0, 0, 1))  # duplicates and order ignored
+    assert len(dup.blocks["ssh8"]) == 2
+    with pytest.raises(ValueError, match="per-element direction needs sorted, unique"):
+        solid_shell(box, [2, 0], direction=[(0, 0, 1), (0, 0, -1)])
+    for no_hex8 in (twice, box_mesh((2, 2, 1), type="hex20")):
+        with pytest.raises(ValueError, match="no hex8 elements"):
+            solid_shell(no_hex8)
+    with pytest.raises(ValueError, match="elements must be"):
+        solid_shell(box, np.array([0.0]))
+    assert voxel().voxel is not None and solid_shell(voxel())[0].voxel is None
 
 
-def _voxel():
+def test_solid_shell_cosine_margin():
+    """Per-element directions in the xz plane at angle a: |cos| x, z = cos a, sin a."""
+    box = box_mesh((3, 1, 1))  # unit cubes
+    for gap, raises in ((0.05, True), (0.15, False)):
+        a = np.pi / 4 + np.arcsin(gap / np.sqrt(2))  # sin a - cos a = gap
+        d = np.tile([0.0, 0.0, 1.0], (3, 1))
+        d[1] = [np.cos(a), 0, np.sin(a)]
+        assert abs(d[1, 2] - d[1, 0] - gap) < 1e-12
+        if raises:
+            with pytest.raises(ValueError, match=r"element 1: thickness axis ambiguous"):
+                solid_shell(box, direction=d)
+        else:
+            solid_shell(box, direction=d)
+
+
+def test_solid_shell_mixed_blocks():
+    from helpers import mixed_mesh
+
+    mesh = mixed_mesh(np.random.default_rng(15))  # hex8 + hex20
+    mesh = Mesh(mesh.points, mesh.blocks, mesh.node_sets, {"all": np.arange(mesh.n_el)},
+                mesh.material, mesh.orientation)  # fmt: skip
+    out, order = solid_shell(mesh, direction=(0, 0, 1))
+    assert list(out.blocks) == ["hex20", "ssh8"]
+    assert np.array_equal(order[:8], np.arange(8, 16)) and np.array_equal(order[8:], np.arange(8))
+    assert np.array_equal(out.material, mesh.material[order])
+    assert np.array_equal(out.element_sets["all"], np.arange(16))
+    with pytest.raises(ValueError, match="hex8 elements only"):
+        solid_shell(mesh, [8])
+
+
+def voxel():
     return voxel_mesh((4, 3, 1), spacing=(1.0, 1.0, 0.1))
 
 
@@ -646,9 +718,10 @@ def test_refusals():
         with pytest.raises(ValueError, match=msg):
             unstructured(box, lam, mode=mode)
     with pytest.raises(ValueError, match=msg):
-        stencil(_voxel(), lam)
-    with pytest.raises(ValueError, match="type"):
+        stencil(voxel(), lam)
+    with pytest.raises(ValueError, match="type") as err:
         box_mesh((2, 2, 1), type="ssh8")
+    assert "ssh8" not in str(err.value).split("got")[0]  # no error text lists ssh8
     for f in (unstructured, lambda m, mat, mode: unstructured_memory(m, 4, mode=mode)):
         with pytest.raises(ValueError, match="ssh8 operators arrive in PR 16b"):
             f(shells, mat, mode="stored")
@@ -662,14 +735,26 @@ def test_check_elements_thickness():
     X = (ref.VTK + 1) / 2 * [1, 1, 0.3]
     for a, s in ((6, 1), (2, -1), (4, -1), (0, 1)):
         X[a, :2] += s * 0.7  # twisted: det J > 0 at the Gauss points, < 0 near the faces
-    G = 1 / np.sqrt(3)
-    assert min(np.linalg.det(ref.jac(X, np.array(p) * 2 * G - G)) for p in np.ndindex(2, 2, 2)) > 0
+    gauss = itertools.product((-ref.G, ref.G), repeat=3)
+    assert min(np.linalg.det(ref.jac(X, np.array(p))) for p in gauss) > 0
     z = np.zeros(1, np.int64)
     mesh = Mesh(X, {"hex8": np.arange(8)[None]}, {}, {}, z, z)
     check_elements(mesh)  # hex8: Gauss points only
     shell = Mesh(X, {"ssh8": np.arange(8)[None]}, {}, {}, z, z)
     with pytest.raises(ValueError, match=r"element 0 \(ssh8\): det J"):
         check_elements(shell)
+
+
+def test_thickness_min():
+    """The minimum over zeta in [-1, 1] of the quadratic through det J at zeta = -1, 0, 1."""
+    det = np.array([[1, 0.01, 4], [1, 2, 3], [3, 1, 3], [-1, 5, 2]], float)  # (e, 3)
+    exact = []
+    for dm, d0, dp in det:
+        z = np.linspace(-1, 1, 200001)
+        exact.append(((dp + dm) / 2 - d0) * z**2 + (dp - dm) / 2 * z + d0)
+    got = _thickness_min(np.repeat(det[:, :, None], 4, 2))
+    assert np.allclose(got, np.min(exact, 1)[:, None], atol=1e-9)
+    assert got[0, 0] < 0 and np.isclose(got[0, 0], 0.01 - 1.5**2 / (4 * 2.49))
 
 
 def test_material_messages():

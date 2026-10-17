@@ -1,5 +1,6 @@
 """hex8 -> solid-shell (ssh8) conversion: thickness axis per element, node permutation (NumPy).
-See docs/mesh.md. Imports only mesh.model (elements imports mesh.model too)."""
+See docs/mesh.md. Imports only mesh.model, not elements: elements.registry imports mesh.model,
+so importing elements here would cycle."""
 
 import numpy as np
 
@@ -19,7 +20,7 @@ def _perm(Q):
     return [int(np.flatnonzero((CORNERS == c).all(1))[0]) for c in CORNERS @ Q]
 
 
-PERMS = np.array([[_perm(Q), _perm(_FLIP @ Q)] for Q in _TO_ZETA])  # (axis, sign +/-, 8)
+_PERMS = np.array([[_perm(Q), _perm(_FLIP @ Q)] for Q in _TO_ZETA])  # (axis, sign +/-, 8)
 
 
 def _neighbours(conn):
@@ -41,19 +42,16 @@ def _sweep(conn):
     for e, d in np.ndindex(n, 3):
         if count[e, d]:
             continue
-        chain, seen, ring = [(e, d)], {(e, d)}, False
-        for face in (2 * d + 1, 2 * d):  # forward, then backward unless the chain is a ring
+        chain, seen = [(e, d)], {(e, d)}
+        for face in (2 * d + 1, 2 * d):  # forward, then backward (a ring stops at once)
             cur, f = e, face
             while (k := nb[cur, f]) >= 0:
                 key = (k // 6, k % 6 // 2)  # entered through face k % 6; its axis
-                ring = key == (e, d)
-                if ring or key in seen:  # visited mark per (element, axis)
+                if key in seen:  # visited mark per (element, axis): a closed ring
                     break
                 chain.append(key)
                 seen.add(key)
-                cur, f = k // 6, k % 6 ^ 1  # leave through the opposite face
-            if ring:
-                break
+                cur, f = k // 6, (k % 6) ^ 1  # leave through the opposite face
         for c in chain:
             count[c] = len(chain)
     s = np.sort(count, 1)
@@ -72,8 +70,10 @@ def solid_shell(mesh, elements=None, direction=None):
     rotation) so reference zeta is the thickness; an emptied hex8 block is dropped. order is new
     -> old over all elements (like renumber's q, but it moves elements across blocks).
     """
-    off, hexes = mesh.offsets, mesh.blocks.get("hex8", np.zeros((0, 8), np.int64))
-    s0 = off.get("hex8", 0)
+    if "hex8" not in mesh.blocks:
+        raise ValueError("solid_shell: the mesh has no hex8 elements")
+    off, hexes = mesh.offsets, mesh.blocks["hex8"]
+    s0 = off["hex8"]
     if elements is None:
         sel = np.arange(s0, s0 + len(hexes))
     elif isinstance(elements, str):
@@ -81,14 +81,18 @@ def solid_shell(mesh, elements=None, direction=None):
             raise ValueError(f"no element set {elements!r}")
         sel = mesh.element_sets[elements]
     else:
-        sel = np.asarray(elements)
-        if sel.ndim != 1 or (len(sel) and sel.dtype.kind not in "iu"):
+        given = np.asarray(elements)
+        if given.ndim != 1 or (len(given) and given.dtype.kind not in "iu"):
             raise ValueError("elements must be a set name, a 1-D integer array or None")
-        sel = np.unique(sel).astype(np.int64)
+        sel = np.unique(given).astype(np.int64)
+        if np.ndim(direction) == 2 and not np.array_equal(given, sel):
+            raise ValueError("a per-element direction needs sorted, unique elements")
     if len(sel) == 0:
         raise ValueError("solid_shell: empty element selection")
     if sel[0] < s0 or sel[-1] >= s0 + len(hexes):
-        raise ValueError("solid_shell converts hex8 elements only")
+        raise ValueError(
+            f"solid_shell converts hex8 elements only (indices {s0}..{s0 + len(hexes) - 1})"
+        )
     conn = hexes[sel - s0]
     n, rows = len(sel), np.arange(len(sel))
     X = mesh.points[conn]
@@ -116,29 +120,21 @@ def solid_shell(mesh, elements=None, direction=None):
             )
         axis = cos.argmax(1)
         dot = proj[rows, axis]
-    new = conn[rows[:, None], PERMS[axis, (dot < 0).astype(int)]]
+    new = conn[rows[:, None], _PERMS[axis, (dot < 0).astype(int)]]
 
-    keep = np.setdiff1d(np.arange(s0, s0 + len(hexes)), sel)
-    blocks, order = {}, []
-    for t in TYPES:
-        if t == "hex8" and len(keep):
-            blocks[t], idx = hexes[keep - s0], keep
-        elif t == "ssh8":
-            old = mesh.blocks.get(t, np.zeros((0, 8), np.int64))
-            blocks[t] = np.concatenate([old, new])
-            idx = np.concatenate([np.arange(off.get(t, 0), off.get(t, 0) + len(old)), sel])
-        elif t != "hex8" and t in mesh.blocks:
-            blocks[t], idx = mesh.blocks[t], np.arange(off[t], off[t] + len(mesh.blocks[t]))
-        else:
-            continue
-        order.append(idx)
-    order = np.concatenate(order).astype(np.int64)
+    idx = {t: np.arange(off[t], off[t] + len(c)) for t, c in mesh.blocks.items()}
+    keep = np.setdiff1d(idx["hex8"], sel)
+    blocks = dict(mesh.blocks, hex8=hexes[keep - s0])
+    blocks["ssh8"] = np.concatenate([mesh.blocks.get("ssh8", np.zeros((0, 8), np.int64)), new])
+    idx = dict(idx, hex8=keep, ssh8=np.concatenate([idx.get("ssh8", sel[:0]), sel]))
+    blocks = {t: blocks[t] for t in TYPES if t in blocks and len(blocks[t])}
+    order = np.concatenate([idx[t] for t in blocks]).astype(np.int64)
     inv = np.empty_like(order)
     inv[order] = np.arange(len(order))
     out = Mesh(
         points=mesh.points,
         blocks=blocks,
-        node_sets=mesh.node_sets,
+        node_sets=dict(mesh.node_sets),
         element_sets={k: np.sort(inv[v]) for k, v in mesh.element_sets.items()},
         material=mesh.material[order],
         orientation=mesh.orientation[order],

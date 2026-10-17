@@ -3,7 +3,8 @@ See docs/elements.md.
 
 The element type is a static name; its tables are constants. X is (..., n, 3); C broadcasts as
 (6, 6) or (..., 6, 6), rho as () or (...); DOF 3a + i is component i of node a. Solid shells
-(ssh8) have their own kernels (shell.py): the kernels below raise for them, except jacobian.
+(ssh8) have their own kernels (shell.py): stiffness, mass, lumped_nodal and the forms raise
+for them; the geometry helpers (jacobian, gradients, bmatrix) do not.
 """
 
 import jax.numpy as jnp

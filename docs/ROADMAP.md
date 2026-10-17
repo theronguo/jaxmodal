@@ -770,9 +770,11 @@ Working assumptions, still open: topology optimization at ≤ 10M voxel elements
 | 15b Band-pass count | 14a, 15a |
 | 15c Slicing | 15a, 15b |
 | 15d Band strategy, `band=(f1, f2)` | 14b, 15c |
-| 16 Solid-shell | 3, 5, 8, 9 |
+| 16a Solid-shell element | 3, 4 |
+| 16b Solid-shell operator and API | 5, 9, 16a |
+| 16c Solid-shell accuracy suite | 8, 16b |
 | 17 Postprocessor | 9 |
-| 18 Performance | 11, 13, 15d, 16 |
+| 18 Performance | 11, 13, 15d, 16c |
 | 19 Multi-GPU | 18 |
 | 20 MMA | 0 |
 | 21 Sensitivities | 9 |

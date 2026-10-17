@@ -59,7 +59,7 @@ def _unit(v):
     return jnp.where(ok, v, 0) / jnp.sqrt(jnp.where(ok, n2, 1))
 
 
-def frame(X, R_o):
+def _frame(X, R_o):
     """Shell frame R_shell = [t1 t2 t3] at the element centre: t3 = g1 x g2 normalized, t1 = R_o
     axis 1 projected onto the shell plane; if that projection is shorter than 0.1, t2 = R_o axis 2
     projected and t1 = t2 x t3."""
@@ -74,11 +74,10 @@ def frame(X, R_o):
     return jnp.stack([t1, t2, t3], 1)
 
 
-def _ply_points(fraction):
-    """Per ply the 2 Gauss zetas and their weights (L, 2); a fraction-0 ply has weight 0."""
+def _ply_zeta(fraction):
+    """Per ply the 2 Gauss zetas (L, 2); their weight is the fraction (0 for a padded ply)."""
     z0 = -1 + 2 * (jnp.cumsum(fraction) - fraction)
-    zeta = (z0 + fraction)[:, None] + fraction[:, None] * jnp.asarray([-_G, _G], fraction.dtype)
-    return zeta, jnp.broadcast_to(fraction[:, None], zeta.shape)
+    return (z0 + fraction)[:, None] + fraction[:, None] * jnp.asarray([-_G, _G], fraction.dtype)
 
 
 def _element(X):
@@ -95,7 +94,7 @@ def _point(X, p, const):
     """w-free point terms: det J, the Cartesian ANS strain matrix TB (6, 24), the EAS matrix
     G (6, 5) and N (8,)."""
     detJ0, T0, b33 = const
-    xi, eta, zeta = p[0], p[1], p[2]
+    xi, eta, zeta = p
     J, B = _covariant(X, p)
     one, zero = jnp.ones_like(xi), jnp.zeros_like(xi)
     tie = [_covariant(X, jnp.stack(q))[1] for q in ((zero, -one, zeta), (zero, one, zeta))]
@@ -114,24 +113,20 @@ def _point(X, p, const):
 def _ply_coords(zeta):
     """The 8 reference points (8, 3) of a ply with Gauss zetas (2,): in-plane fastest."""
     ip = jnp.asarray(_INPLANE, zeta.dtype)
-    return jnp.concatenate([jnp.column_stack([ip, jnp.full(4, z)]) for z in (zeta[0], zeta[1])])
+    return jnp.concatenate([jnp.column_stack([ip, jnp.full(4, z)]) for z in zeta])
 
 
-def _ply(X, const, R_shell, C, angle, zeta, w):
+def _ply(X, const, R_shell, C, angle, fraction, zeta):
     """One ply's 8 points: w det J (8,), TB (8, 6, 24), G (8, 6, 5), N (8, 8), C' (6, 6)."""
     det, TB, G, N = jax.vmap(lambda q: _point(X, q, const))(_ply_coords(zeta))
-    return jnp.repeat(w, 4) * det, TB, G, N, rotate(C, R_shell @ _rz(angle))
+    return fraction * det, TB, G, N, rotate(C, R_shell @ _rz(angle))
 
 
 def _terms(X, table_e):
+    """Element constants, the shell frame and the per-ply scan inputs (C, angle, fraction, zeta)."""
     plies, R_o = table_e
-    zeta, w = _ply_points(plies.fraction)
-    return _element(X), frame(X, R_o), (plies.material.C, plies.angle, zeta, w)
-
-
-def _condense(Kuu, Kua, Kaa):
-    cho = jsl.cho_factor(Kaa)
-    return _sym(Kuu - Kua @ jsl.cho_solve(cho, Kua.T)), cho
+    xs = (plies.material.C, plies.angle, plies.fraction, _ply_zeta(plies.fraction))
+    return _element(X), _frame(X, R_o), xs
 
 
 def shell_stiffness(X, table_e):
@@ -146,22 +141,22 @@ def shell_stiffness(X, table_e):
         Kaa = jnp.einsum("q,qva,qvb->ab", wd, G, CG)
         return tuple(k + d for k, d in zip(K, (Kuu, Kua, Kaa), strict=True)), None
 
-    dt = X.dtype
+    dt = jnp.result_type(X, float)  # rotate works in the default float
     K0 = (jnp.zeros((24, 24), dt), jnp.zeros((24, 5), dt), jnp.zeros((5, 5), dt))
-    K, _ = lax.scan(step, K0, xs)
-    return _condense(*K)[0]
+    (Kuu, Kua, Kaa), _ = lax.scan(step, K0, xs)
+    return _sym(Kuu - Kua @ jsl.cho_solve(jsl.cho_factor(Kaa), Kua.T))
 
 
 def shell_mass(X, plies):
     """Scalar consistent mass block m_e (8, 8), rho included: M_e = m_e (x) I_3."""
-    zeta, w = _ply_points(plies.fraction)
+    zeta = _ply_zeta(plies.fraction)
 
     def at(q):
         N, dN = _shape(q)
         return N, jnp.linalg.det(X.T @ dN)
 
     N, det = jax.vmap(jax.vmap(at))(jax.vmap(_ply_coords)(zeta))  # (L, 8, 8), (L, 8)
-    rw = plies.material.rho[:, None] * jnp.repeat(w, 4, axis=1)
+    rw = (plies.material.rho * plies.fraction)[:, None]
     return _sym(jnp.einsum("lq,lqa,lqb->ab", rw * det, N, N))
 
 

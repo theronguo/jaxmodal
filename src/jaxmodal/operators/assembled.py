@@ -19,14 +19,11 @@ _KERNELS = {
 }
 
 
-def _shell_mass(X, plies):  # m_e (x) I_3, as kernels.mass
-    m = shell_mass(X, plies)
-    return (m[:, None, :, None] * jnp.eye(3, dtype=m.dtype)[:, None, :]).reshape(24, 24)
-
-
 _SHELL = {
     "stiffness": jax.jit(jax.vmap(shell_stiffness)),
-    "mass": jax.jit(jax.vmap(lambda X, table_e: _shell_mass(X, table_e[0]))),
+    "mass": jax.jit(
+        jax.vmap(lambda X, t: jnp.kron(shell_mass(X, t[0]), jnp.eye(3)))
+    ),  # m_e (x) I_3
 }
 
 

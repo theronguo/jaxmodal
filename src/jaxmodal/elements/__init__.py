@@ -16,7 +16,8 @@ from .registry import ELEMENTS, Element, gauss
 from .shell import shell_mass, shell_recover, shell_stiffness
 
 # Recovery per type: RECOVER[t](X, table_e, u) -> points (nq, 3), weights w det J (nq,), and global
-# Cartesian Voigt strain and stress (nq, 6); table_e is one element's slice of _build's table.
+# Cartesian Voigt strain and stress (nq, 6); table_e is one element's slice of
+# materials.ply_table's output (plies, R_o).
 RECOVER = {"ssh8": shell_recover}
 
 __all__ = [

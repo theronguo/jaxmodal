@@ -101,10 +101,10 @@ def phase_table(pairs, materials, orientations=None):
     """Rotated stiffness (P, 6, 6) and density (P,) per phase; pure jax.numpy. A Laminate
     phase gets ply 0's values, a placeholder read by no ssh8 code (see ply_table)."""
     orientations = {0: jnp.eye(3), **(orientations or {})}  # only label 0 defaults
-    first = [_plies(materials[m])[0].material for m, _ in pairs]
-    C = jnp.stack([jnp.asarray(f.C, float) for f in first])
+    ply0 = [_plies(materials[m])[0].material for m, _ in pairs]
+    C = jnp.stack([jnp.asarray(f.C, float) for f in ply0])
     R = jnp.stack([jnp.asarray(orientations[o], float) for _, o in pairs])
-    rho = jnp.stack([jnp.asarray(f.rho, float) for f in first])
+    rho = jnp.stack([jnp.asarray(f.rho, float) for f in ply0])
     return rotate(C, R), rho
 
 
