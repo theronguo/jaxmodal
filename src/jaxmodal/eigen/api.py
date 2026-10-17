@@ -320,7 +320,8 @@ def solve_modes(
         f1, f2 = check_band(band)
     if strategy not in STRATEGIES:
         raise ValueError(f"strategy must be one of {STRATEGIES}, got {strategy!r}")
-    budget_ok = isinstance(memory_budget, numbers.Real) and math.isfinite(memory_budget)
+    budget_ok = (isinstance(memory_budget, numbers.Real) and not isinstance(memory_budget, bool)
+                 and math.isfinite(memory_budget))  # fmt: skip
     if memory_budget is not None and not (budget_ok and memory_budget > 0):
         raise ValueError(f"memory_budget must be a finite number of bytes > 0, got {memory_budget}")
     if verify not in (None, True, False):
@@ -343,6 +344,10 @@ def solve_modes(
             raise ValueError(f"sigma must be a finite float >= 0, got {sigma}")
         sigma = float(sigma)
     free = dof_mask(mesh, bcs)  # before the build: bad bcs fail fast
+    from .. import memory as mem  # memory imports this module
+
+    # before the build: a GPU pool's bytes_in_use would count the operator a second time
+    budget, host_budget = mem._default_budget() if band is not None else (None, None)
     op = build(mesh, materials, orientations, mass=mass, nodal_mass=nodal_mass, **op_opts)
     t0 = time.perf_counter()
     aggs, R = None, jnp.asarray(rigid_modes(mesh, free))
@@ -386,11 +391,8 @@ def solve_modes(
         return lam, V, info
 
     # ---------------------------------------------------------------- a band (f1, f2)
-    from .. import memory as mem  # memory imports this module
-
     lam_lo, lam_hi = (2 * np.pi * f1) ** 2, (2 * np.pi * f2) ** 2
     n, n_avail = op.n_dof, int(free.sum()) - k
-    budget, host_budget = mem._default_budget()
     if memory_budget is not None:
         budget = float(memory_budget)
 
@@ -562,6 +564,7 @@ def solve_modes(
         )  # fmt: skip
         if no_count:
             info["count"]["reason"] = no_count
+        info["slice_reason"] = info.pop("reason")  # si_band's; reason is the strategy's
         i0, i1 = _keep(lam, info["r_acc"], lam_lo, len(lam))
         info["time"]["precond"] = t_p
         if t_lob is not None:

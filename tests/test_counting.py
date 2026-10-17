@@ -697,6 +697,21 @@ def test_band_steps():
     assert band_run(degree=20, n_probes=6, block=3, _steps=20)[0] == est
 
 
+def test_ortho_check_skipped(monkeypatch):
+    """Predictions (_predict) and calibrations (_steps) skip the W orthonormality check; the
+    full count and band_count run it."""
+    calls = []
+    real = counting._check_ortho
+    monkeypatch.setattr(counting, "_check_ortho", lambda *a: calls.append(1) or real(*a))
+    for f in (run, band_run):
+        calls.clear()
+        f(degree=20, n_probes=6, block=3, _steps=3)
+        f(degree=20, n_probes=6, block=3, _predict=True)
+        assert not calls
+        f(degree=20, n_probes=6, block=3)
+        assert calls == [1]
+
+
 def test_band_polynomial():
     """15b test 1: jackson_step(d, 0) is 14a's; the coefficients of x >= x0 against quad of
     the indicator's Chebyshev projection; the band-pass grid stays in [0, 1]."""

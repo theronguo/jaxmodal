@@ -4,6 +4,7 @@ come from the searches under the fit test."""
 
 import gc
 import importlib
+import inspect
 import math
 import sys
 import types
@@ -121,15 +122,19 @@ def fake_builds(monkeypatch):
     rec["name"]), honouring the builders' contract: SingularShiftError at s = 0 on a free body,
     return_aggregates / aggregates. rec["builds"]: (s, return_aggregates, aggregates given);
     rec["solves"]: per band-mode api._solve call its V's id, shape, F order, lowest Ritz value and
-    stopped (no reference to V)."""
-    rec = dict(name="short", builds=[], solves=[])
+    stopped (no reference to V); rec["aggs"]: weakrefs to the aggregates returned."""
+    rec = dict(name="short", builds=[], solves=[], aggs=[])
 
     def build(op, free, s, *a, return_aggregates=False, aggregates=None, **kw):
         rec["builds"].append((s, return_aggregates, aggregates is not None))
         if s == 0 and not MESHES[rec["name"]][1]:
             raise SingularShiftError("free body at s = 0")
         P = exact(rec["name"], s)
-        return (P, Aggs()) if return_aggregates else P
+        if not return_aggregates:
+            return P
+        aggs = Aggs()
+        rec["aggs"].append(weakref.ref(aggs))
+        return P, aggs
 
     real = api._solve
 
@@ -183,6 +188,7 @@ def test_capacity(fake_builds, monkeypatch):
             interval=(a, b),
             n_store=kw["n_store"],
             v_dead=seen["V"]() is None,
+            aggs_dead=[r() is None for r in fake_builds["aggs"]],
             basis=[x.shape for x in jax.live_arrays() if x.shape == (op.n_dof, 40)],
         )
         return real_band(op, free, a, b, make, **kw)
@@ -212,6 +218,7 @@ def test_capacity(fake_builds, monkeypatch):
     assert info["stopped"] == "capacity" and info["reason"] == "capacity"
     assert info["strategy"] == "shift_invert" and not info["from_zero"]
     assert seen["interval"] == (lo, hi) and seen["v_dead"] and not seen["basis"]
+    assert seen["aggs_dead"] and all(seen["aggs_dead"])
     assert info["mu1_ub"] <= s["lam0"] and info["mu1_ub"] == min(s["lam0"], info["sigma"])
     assert info["n_store"] == seen["n_store"] == 22 and calls == dict(pre=1, est=0)
     assert all(e < 0.5 for e in info["count"]["estimates"]) and info["count"]["passed"]
@@ -277,7 +284,8 @@ def test_capacity_store(fake_builds, monkeypatch, case):
     want = 38 if case == "zero" else 25
     assert info["n_store"] == seen["n_store"] == caps[0] == want
     assert info["from_zero"] == (case == "zero")
-    assert seen["interval"][0] == (0.0 if case == "zero" else (2 * np.pi * f1) ** 2)
+    assert seen["interval"] == (0.0 if case == "zero" else (2 * np.pi * f1) ** 2,
+                                (2 * np.pi * f2) ** 2)  # fmt: skip
 
 
 # ---------------------------------------------------------------- 3: memory and the ladder
@@ -630,6 +638,7 @@ def test_pre_estimate_free(fake_builds, monkeypatch, precond):
         assert [c for c, _ in calls] == ["pre", "est"] and calls[1][1]["maxit"] == 10
     else:
         assert [c for c, _ in calls] == ["est"] and "maxit" not in calls[0][1]
+        assert inspect.signature(lob.sigma_estimate).parameters["maxit"].default == 300
     assert mu <= info["mu1_ub"] <= 1.1 * mu and not info["from_zero"]
 
 
@@ -1165,7 +1174,9 @@ def test_slice_limits(fake_builds, monkeypatch):
     monkeypatch.setattr(api, "si_band", stub_band(seen))
     band = fband("voxel", 3, 12)
     kw = dict(strategy="shift_invert", n_modes=10)
-    _, _, info = run("voxel", band, memory_budget=1.0, slice_options={"capacity": 48}, **kw)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)  # the override: no "below 96" warning
+        _, _, info = run("voxel", band, memory_budget=1.0, slice_options={"capacity": 48}, **kw)
     assert info["capacity"] == seen["capacity"] == 48
     _, _, info = run("voxel", band, slice_options={"capacity": 5000}, **kw)
     assert info["capacity"] == 5000
@@ -1628,7 +1639,8 @@ def test_options(kw, match):
 
 def test_forced_lobpcg_no_fit(fake_builds):
     """Test 16: forced "lobpcg" with no chunk fitting raises before any build."""
-    with pytest.raises(ValueError, match="no LOBPCG chunk fits memory_budget.*levers|no LOBPCG"):
+    levers = "no LOBPCG chunk fits memory_budget.*low_memory=True.*strategy='shift_invert'"
+    with pytest.raises(ValueError, match=levers):
         run("short", fband("short", 15, 25), strategy="lobpcg", memory_budget=1e6)
     assert not fake_builds["builds"]
 
@@ -1691,19 +1703,59 @@ def test_options_reach(fake_builds, monkeypatch):
     assert kws and all(kw.get("max_coarse") == 200 for kw in kws)
 
 
+def test_budget_bool(fake_builds):
+    """Test 16: a bool memory_budget raises."""
+    with pytest.raises(ValueError, match="memory_budget"):
+        run("short", fband("short", 15, 25), memory_budget=True)
+
+
+def test_budget_before_build(fake_builds, monkeypatch):
+    """Test 16: the default budget is read before the operator build (a GPU pool's bytes in use
+    would count the operator twice)."""
+    order = []
+    monkeypatch.setattr(api, "si_band", stub_band({}))
+    real_b = mem._default_budget
+    monkeypatch.setattr(mem, "_default_budget", lambda: order.append("budget") or real_b())
+    for name in ("stencil", "unstructured"):
+        real = getattr(api, name)
+        monkeypatch.setattr(api, name, lambda *a, f=real, **kw: order.append("op") or f(*a, **kw))
+    run("short", fband("short", 15, 25), n_modes=12, verify=False)
+    assert order[:2] == ["budget", "op"]
+
+
+def test_slice_reason(fake_builds, monkeypatch):
+    """Test 16: on the slice path info["reason"] is the strategy's, si_band's is slice_reason."""
+    stub = stub_band({})
+
+    def band(*a, **kw):
+        lam, V, info = stub(*a, **kw)
+        return lam, V, info | {"reason": "si_band's"}
+
+    monkeypatch.setattr(api, "si_band", band)
+    _, _, info = run("short", fband("short", 15, 25), n_modes=12, strategy="shift_invert",
+                     verify=False)  # fmt: skip
+    assert info["reason"] == "forced" and info["slice_reason"] == "si_band's"
+
+
 def test_fp32_slices(fake_builds, monkeypatch):
     """Test 16: precond_dtype="float32" on voxel through a slice path: make builds fp64 and the
     slice searches model the fp64 multigrid."""
     fake_builds["name"] = "voxel"
-    monkeypatch.setattr(api, "si_band", stub_band({}))
-    kws, pcs = [], []
+    seen, kws, pcs = {}, [], []
+    stub = stub_band(seen)
+
+    def band(op, free, a, b, make, **kw):  # make(1.0): the slices' build
+        make(1.0)
+        return stub(op, free, a, b, make, **kw)
+
+    monkeypatch.setattr(api, "si_band", band)
     real_g, real_cap = api.gmg, mem._slice_capacity
     monkeypatch.setattr(api, "gmg", lambda *a, **kw: kws.append(kw) or real_g(*a, **kw))
     monkeypatch.setattr(mem, "_slice_capacity", lambda *a, **kw: pcs.append(a[1]) or
                         real_cap(*a, **kw))  # fmt: skip
     run("voxel", fband("voxel", 3, 12), n_modes=10, strategy="shift_invert",
         precond_dtype="float32")  # fmt: skip
-    assert all(kw.get("dtype", "float64") == "float64" for kw in kws)
+    assert seen and kws and all(kw.get("dtype", "float64") == "float64" for kw in kws)
     want = mem.gmg_memory(prob("voxel")[0], 6, dtype="float64")
     assert pcs and pcs[0](6) == want and want != mem.gmg_memory(prob("voxel")[0], 6, "float32")
 

@@ -164,12 +164,13 @@ def _calibrate(run, d, n_blocks):
 
 
 def _decide(verify, d, n_probes, block, m, t_ref, t_it, tau, n_free, run, prepare=None):
-    """(count?, record) of the completeness-count rule (docs/eigensolvers.md#frequency-band-0-f_max). d: the
-    degree (None above MAX_DEGREE); block: probes per block; m, t_it: the solver's block width
-    and warm iteration seconds (the a-priori bound); t_ref: the solve's seconds. verify True or
-    False: count = verify, with the bound recorded. None: skip above MAX_DEGREE or when the bound
-    exceeds t_ref, else prepare() (timed into build_s; e.g. the count's preconditioner), then
-    calibrate with run(s) (the count with _steps = s) and count iff the prediction <= t_ref."""
+    """(count?, record) of the completeness-count rule (docs/eigensolvers.md, "Frequency band"). d:
+    the degree (None above MAX_DEGREE); block: probes per block; m, t_it: the solver's block
+    width and warm iteration seconds (the a-priori bound); t_ref: the solve's seconds. verify
+    True or False: count = verify, with the bound recorded. None: skip above MAX_DEGREE or when
+    the bound exceeds t_ref, else prepare() (timed into build_s; e.g. the count's
+    preconditioner), then calibrate with run(s) (the count with _steps = s) and count iff the
+    prediction <= t_ref."""
     rec = dict(reason=None, predicted_steps=None, predicted_s=None, predicted_kind="unknown",
                build_s=0.0, calibration_s=0.0)  # fmt: skip
     n_blocks = -(-n_probes // block)
@@ -486,7 +487,8 @@ def count(
         raise ValueError(
             f"need 0 <= lam_last < lam_next <= max(lam), got {lam_last}, {lam_next}, {lam.max()}"
         )
-    _check_ortho(op, m, Ws, seed)
+    if not (_predict or _steps):  # predictions and calibrations: the full count checks W
+        _check_ortho(op, m, Ws, seed)
     lam_c = (lam_last + lam_next) / 2
     gap = (lam_next - lam_last) / lam_c
     return _run(op, free, m, Ws, R, MR, {}, None, gap, lam.max() / lam_c,
@@ -553,7 +555,8 @@ def band_count(
     c_lo, c_hi, g_lo, g_hi = band_edges(lam, lo, hi, lam_out)
     a, _, nb_lo, nb_hi = _edges(lam, lo, hi, lam_out)
     Ws = (*Vs, V_out)
-    _check_ortho(op, m, Ws, seed)
+    if not (_predict or _steps):
+        _check_ortho(op, m, Ws, seed)
     top, bot = nb_hi / c_hi, nb_lo / c_hi
     n_top = (len(lam) + 1) / (top**WEYL_A - bot**WEYL_A) * top**WEYL_A  # n - 1 intervals
     info = dict(edges=(c_lo, c_hi), gaps=(g_lo, g_hi))

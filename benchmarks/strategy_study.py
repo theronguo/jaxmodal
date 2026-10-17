@@ -138,7 +138,8 @@ def per_chunk(runs, deep):
     run), extrapolated to depth 1000 with the deep run's t_warm rise."""
     tw = [(np.cumsum([x["locked"] for x in deep["chunks"]])[i], x["t_warm"])
           for i, x in enumerate(deep["chunks"])]  # fmt: skip
-    rise = np.interp(1000, *zip(*tw)) / np.interp(200, *zip(*tw))
+    n_tw, t_tw = zip(*tw, strict=True)
+    rise = np.interp(1000, n_tw, t_tw) / np.interp(200, n_tw, t_tw)
     n, s = cumulative(deep)
     out = {40: float(np.interp(200, n, s) / 200)}
     out |= {r["chunk"]: r["per_mode"] for r in runs}
@@ -197,8 +198,9 @@ def reach_lost(mesh, budget, host_budget):
     """C_max at chunk 5 (9-block, fp64, stored) under the fit test against unit factors."""
     n = 3 * len(mesh.points)
     op, pc = mem._models(mesh, "consistent", "auto", "float64", None, None)
+    n_avail = int(dof_mask(mesh, BCS).sum())
     kw = dict(chunk=5, guards=None, low=False, basis_dtype="float64", n_rigid=0,
-              n_avail=int(dof_mask(mesh, BCS).sum()), budget=budget, host_budget=host_budget)
+              n_avail=n_avail, budget=budget, host_budget=host_budget)  # fmt: skip
     fitted = mem._c_max(op, pc, n, **kw)
     saved = mem.FIT_EXACT, mem.FIT_MODEL
     mem.FIT_EXACT = mem.FIT_MODEL = 1.0
