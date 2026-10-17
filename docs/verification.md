@@ -212,3 +212,24 @@ One element through the thickness stalls at 3.4% (ORTHO, $n = 12$): the thicknes
 | 40 | 112k | 1.0004 | 107 s | −0.60% | −0.01% | 0.60% |
 
 The test (`slow`) runs levels 8, 12, 16, 24, 32 with `n_modes = 18` and asserts the 5 + 5 classification, the recorded means to 0.02 percentage points (this pins the equal-volume radius: the nominal $a = 1$ moves them by 1.4 points at level 8 and still drops 5×), and the roadmap's criterion: the max error drops $\ge 2\times$ (measured 4.5×). The least-squares rate of the max is about 1.1 (reported, not tested): the staircase boundary limits convergence. No upper bound is checked, since the voxel geometry is not nested. With `n_modes = 18`, level 32 also guards the σ rule: under PR 8a's $-0.01\tilde\lambda_k$ it raises (172ε; [eigensolvers](eigensolvers.md)).
+
+## Solid-shell element (`ssh8`, PR 16a)
+
+Element-level checks of the solid shell ([elements](elements.md#solid-shell-ssh8)); the tests are in `tests/test_shell.py`, against the independent NumPy element in `tests/shell_ref.py` (point loops, explicit tensor transforms, dense condensation; $K_e$, $m_e$ and recovery agree to $10^{-12}$ on random distorted elements with 1–3 anisotropic plies at $h/t = 1, 2, 20$).
+
+**MacNeal–Harder beam** (MacNeal & Harder, *Finite Elem. Anal. Des.* 1, 3–20, 1985). Beam $6\times0.2\times0.1$, $E = 10^7$, $\nu = 0.3$, $6\times1\times1$ elements converted with `direction=(0, 0, 1)` (thickness along $z$, shell plane $xy$). The 45° parallelogram and the trapezoid distortions skew the interior element boundaries by $\pm0.1$ at $y = 0$ and $0.2$, in the shell plane. Root nodes fixed; unit tip loads split equally over the 4 tip nodes (the consistent traction on the rectangular end face). Result: mean tip displacement in the load direction over the reference.
+
+| load | reference | regular | parallelogram | trapezoid |
+|---|---|---|---|---|
+| extension | $3.0\cdot10^{-5}$ | 0.988 | 0.994 | 0.994 |
+| in-plane shear | 0.1081 | 0.972 | 0.620 | 0.047 |
+| out-of-plane shear | 0.4321 | 0.979 | 0.976 | 0.960 |
+| twist (unit couple, reported) | 0.03208 | 0.903 | 0.826 | 0.855 |
+
+Gated: regular $\ge 0.95$ for extension, in-plane and out-of-plane; parallelogram $\ge 0.9$ for extension and out-of-plane. The in-plane results on distorted elements show the known trapezoidal in-plane bending locking of the formulation (no in-plane incompatible modes beyond the 4 EAS membrane terms). The twist couple is applied as nodal forces $f = e_x\times r/\sum|r|^2$ on the tip nodes about the end-face centre; the rotation is the mean of $(r\times u)_x/|r|^2$.
+
+**Patch tests** (one layer, $t = 0.01$). Patches: (i) a flat $3\times3$ parallelogram grid of $0.08$ elements sheared by $0.3y$ (the size of patch (ii); at element size $1/3$, $h/t = 33$, $\mathrm{cond}(K_{II}) = 2\cdot10^6$ amplifies the round-off residual to $10^{-10}$); (ii) the MacNeal–Harder patch $0.24\times0.12$ with interior nodes $(0.04, 0.02)$, $(0.18, 0.03)$, $(0.16, 0.08)$, $(0.08, 0.08)$ (5 elements); (iii) patch (ii) rigidly tilted (ZXZ Euler angles 0.4, 0.9, −0.3) with $R_o$ the tilt, so $R_\text{shell}$ is the tilt; (iv) patch (ii) with the 4 interior nodes of both surfaces lifted by $0.1t$. Linear fields $u = Ax$ give the 6 unit stress states in the shell frame (on (iv) global, isotropic $C$), with $\varepsilon = C'^{-1}\sigma_0$ and anisotropic $C$ on (i)–(iii).
+
+- **Lift:** $Ax$ prescribed on the lateral-boundary nodes; the interior surface DOFs are loaded by the consistent traction $f_I = (K_\text{hex8}Ax)_I$ (`assemble` on the same mesh as hex8 with $C' = \mathrm{rotate}(C, R_\text{shell})$, exact since hex8 passes the patch test) and solved by `spsolve`. Gated at $10^{-10}$ (measured $\le 2\cdot10^{-13}$) for $u_I$ and the recovered $\sigma$: all 6 states on (i), the 4 states with $\sigma_{13} = \sigma_{23} = 0$ on (ii) and (iii).
+- **Recovery of the imposed field:** `shell_recover` returns $\sigma_0$ at every point for all 6 states on (i)–(iv), to $10^{-10}$; $\sigma = C'\varepsilon$ per point and $\sum$ weights = element volume to $10^{-12}$.
+- **Reported only:** the lift's transverse-shear states on (ii)–(iii) (stress errors 3–13); the lift on (iv), where only $\sigma_{33}$ passes and the membrane states give $3\cdot10^{-2}$–$0.34$ (shear 3–8); the warped patch, (ii) with interior node 4 of both surfaces moved out of plane by $0.1t$ (membrane and $\sigma_{33}$ $1.6\cdot10^{-2}$–$0.11$, shear 3–11). Bathe–Dvorkin ANS is not variationally consistent on non-parallelogram elements.

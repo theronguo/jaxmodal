@@ -19,7 +19,7 @@ from .eigen.shift_invert import _chunk, _up
 from .elements import ELEMENTS
 from .materials import phases
 from .operators import dof_mask, rigid_modes
-from .operators.common import is_count
+from .operators.common import check_shell, is_count
 from .operators.matfree import layout
 from .operators.voxel import grid_layout
 from .precond.gmg import _ell_rows, _islands
@@ -58,6 +58,7 @@ def unstructured_memory(
     total = overhead + storage + max(build, vectors + workspace). Later estimators add
     storage + workspace and count overhead once.
     """
+    check_shell(mesh, mode)
     lay = layout(mesh, path, chunk, range_nodes)
     n_dof, n_el = 3 * lay["n_nodes"], mesh.n_el
     gather = lay["path"] == "gather"
@@ -336,6 +337,8 @@ def amg_memory(mesh, m, max_coarse=1000, degree=2):
     count-recurrence bytes).
     Calibrated on box meshes at max_coarse 1000; the coarse term uses max(max_coarse, 1000) (an
     upper bound, loose above 1000)."""
+    if "ssh8" in mesh.blocks:
+        raise ValueError("ssh8 operators arrive in PR 16b")
     n_nodes = len(mesh.points)
     fam, n_c, tables = _amg_scan(mesh)
     n_dof = 3 * n_nodes

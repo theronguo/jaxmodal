@@ -1,7 +1,7 @@
 """Elastic stiffness constructors, checks and the per-phase table. See docs/materials.md.
 
-Constructors and phase_table are pure jax.numpy (traceable, differentiable); check_stiffness,
-check_materials and phases are host NumPy.
+Constructors, phase_table and ply_table are pure jax.numpy (traceable, differentiable);
+check_stiffness, check_materials and phases are host NumPy.
 """
 
 from typing import NamedTuple
@@ -20,6 +20,23 @@ _LAME_MU = np.diag([2.0, 2, 2, 1, 1, 1])
 class Material(NamedTuple):
     C: jax.Array  # (6, 6) local stiffness, Voigt [11, 22, 33, 23, 13, 12]
     rho: jax.Array  # () density
+
+
+class Ply(NamedTuple):
+    material: Material
+    angle: jax.Array  # () radians about the shell normal, from the shell frame's axis 1
+    fraction: jax.Array  # () thickness fraction
+
+
+class Laminate(NamedTuple):
+    """Plies listed bottom to top (along +zeta of ssh8 elements); fractions sum to 1."""
+
+    plies: tuple
+
+
+def _plies(mat):
+    """A Material is one ply at angle 0, fraction 1."""
+    return mat.plies if isinstance(mat, Laminate) else (Ply(mat, 0.0, 1.0),)
 
 
 def isotropic(E, nu):
@@ -81,12 +98,47 @@ def phases(mesh):
 
 
 def phase_table(pairs, materials, orientations=None):
-    """Rotated stiffness (P, 6, 6) and density (P,) per phase; pure jax.numpy."""
+    """Rotated stiffness (P, 6, 6) and density (P,) per phase; pure jax.numpy. A Laminate
+    phase gets ply 0's values, a placeholder read by no ssh8 code (see ply_table)."""
     orientations = {0: jnp.eye(3), **(orientations or {})}  # only label 0 defaults
-    C = jnp.stack([jnp.asarray(materials[m].C, float) for m, _ in pairs])
+    ply0 = [_plies(materials[m])[0].material for m, _ in pairs]
+    C = jnp.stack([jnp.asarray(f.C, float) for f in ply0])
     R = jnp.stack([jnp.asarray(orientations[o], float) for _, o in pairs])
-    rho = jnp.stack([jnp.asarray(materials[m].rho, float) for m, _ in pairs])
+    rho = jnp.stack([jnp.asarray(f.rho, float) for f in ply0])
     return rotate(C, R), rho
+
+
+def ply_table(pairs, materials, orientations=None):
+    """Per-phase plies for solid shells; pure jax.numpy.
+
+    Returns (Ply(Material(C, rho), angle, fraction), R_o): unrotated C (P, L, 6, 6), rho, angle
+    and fraction (P, L), orientation R_o (P, 3, 3). L is the largest ply count; shorter stacks
+    are padded with copies of ply 0 at fraction 0. Kernel input is one phase's slice.
+    """
+    orientations = {0: jnp.eye(3), **(orientations or {})}
+    stacks = [_plies(materials[m]) for m, _ in pairs]
+    L = max(len(s) for s in stacks)
+    stacks = [s + (s[0]._replace(fraction=0.0),) * (L - len(s)) for s in stacks]
+
+    def leaf(f):
+        return jnp.stack([jnp.stack([jnp.asarray(f(p), float) for p in s]) for s in stacks])
+
+    plies = Ply(
+        Material(leaf(lambda p: p.material.C), leaf(lambda p: p.material.rho)),
+        leaf(lambda p: p.angle),
+        leaf(lambda p: p.fraction),
+    )
+    return plies, jnp.stack([jnp.asarray(orientations[o], float) for _, o in pairs])
+
+
+def _check_material(where, mat):
+    try:
+        check_stiffness(mat.C)
+    except ValueError as e:
+        raise ValueError(f"{where}: {e}") from None
+    rho = np.asarray(mat.rho, float)
+    if rho.shape != () or not np.isfinite(rho) or rho <= 0:
+        raise ValueError(f"{where}: rho must be a finite positive scalar")
 
 
 def check_materials(pairs, materials, orientations=None):
@@ -95,10 +147,22 @@ def check_materials(pairs, materials, orientations=None):
     for m in sorted({m for m, _ in pairs}):
         if m not in materials:
             raise ValueError(f"material label {m} is in the mesh but not in materials")
-        check_stiffness(materials[m].C)
-        rho = np.asarray(materials[m].rho, float)
-        if rho.shape != () or not np.isfinite(rho) or rho <= 0:
-            raise ValueError(f"material {m}: rho must be a finite positive scalar")
+        mat = materials[m]
+        if not isinstance(mat, Laminate):
+            _check_material(f"material {m}", mat)
+            continue
+        if not isinstance(mat.plies, tuple) or not mat.plies:
+            raise ValueError(f"material {m}: a Laminate needs a non-empty tuple of Ply")
+        for k, ply in enumerate(mat.plies):
+            if not isinstance(ply, Ply):
+                raise ValueError(f"material {m} ply {k}: must be a Ply")
+            _check_material(f"material {m} ply {k}", ply.material)
+            angle = np.asarray(ply.angle, float)
+            if angle.shape != () or not np.isfinite(angle):
+                raise ValueError(f"material {m} ply {k}: angle must be a finite scalar (radians)")
+        f = np.array([np.asarray(ply.fraction, float) for ply in mat.plies])
+        if f.ndim != 1 or not np.isfinite(f).all() or (f <= 0).any() or abs(f.sum() - 1) > 1e-12:
+            raise ValueError(f"material {m}: ply fractions must be > 0 and sum to 1")
     for o in sorted({o for _, o in pairs}):
         if o not in orientations:
             raise ValueError(f"orientation label {o} is in the mesh but not in orientations")

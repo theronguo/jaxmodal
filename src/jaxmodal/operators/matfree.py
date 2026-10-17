@@ -13,7 +13,16 @@ from jax import lax
 
 from ..elements import ELEMENTS, check_elements, kernels
 from ..materials import check_materials, phase_table, phases
-from .common import check_nodal_mass, check_v, check_x64, node_cols, register, scaled
+from .common import (
+    check_laminates,
+    check_nodal_mass,
+    check_shell,
+    check_v,
+    check_x64,
+    node_cols,
+    register,
+    scaled,
+)
 from .dofmap import check_int32, conn_dofs
 
 DEFAULT_PATH = {"cpu": "scatter", "gpu": "scatter"}  # CPU from benchmarks/scatter_gather.py
@@ -233,9 +242,11 @@ def unstructured(
     """Matrix-free operator with apply_K, apply_M, diag_K, diag_M and scaled methods."""
     if mode not in ("stored", "otf"):
         raise ValueError(f"mode must be 'stored' or 'otf', got {mode!r}")
+    check_shell(mesh, mode)
     check_x64("unstructured")
     index, pairs = phases(mesh)
     check_materials(pairs, materials, orientations)
+    check_laminates(mesh, index, pairs, materials)
     check_elements(mesh, mass)
     n_nodes = len(mesh.points)
     nodal_mass = check_nodal_mass(nodal_mass, n_nodes)

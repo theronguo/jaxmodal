@@ -1,8 +1,11 @@
-"""Structured hex8/hex20/hex27 box mesh generator. See docs/mesh.md."""
+"""Structured hex8/hex20/hex27 box mesh generator (solid shells: mesh.solid_shell).
+See docs/mesh.md."""
 
 import numpy as np
 
 from .model import NODES, REFERENCE_NODES, Mesh, check_grid, face_sets
+
+BOX_TYPES = ("hex8", "hex20", "hex27")
 
 
 def box_mesh(shape, spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0), type="hex8", coords=None):
@@ -14,8 +17,8 @@ def box_mesh(shape, spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0), type="hex8"
     overrides spacing and origin. Midside and centre nodes sit at element midpoints.
     """
     check_grid(shape, spacing, origin)
-    if type not in NODES:
-        raise ValueError(f"type must be one of {tuple(NODES)}, got {type!r}")
+    if type not in BOX_TYPES:
+        raise ValueError(f"type must be one of {BOX_TYPES}, got {type!r}")
     shape = tuple(int(s) for s in shape)
     if coords is not None:
         coords = [np.asarray(c, float) for c in coords]

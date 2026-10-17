@@ -1,6 +1,6 @@
 # Elements
 
-`jaxmodal.elements` holds the element registry (hex8, hex20, hex27), batched element kernels and a host validity check.
+`jaxmodal.elements` holds the element registry (hex8, hex20, hex27, and the solid shell ssh8), batched element kernels, the one-element solid-shell kernels (see [Solid shell](#solid-shell-ssh8)) and a host validity check.
 
 ```python
 from jaxmodal.elements import ELEMENTS, check_elements, lumped_mass, mass, stiffness
@@ -141,7 +141,7 @@ check_elements(mesh, mass="consistent", chunk=65536)
 
 `check_elements` raises `ValueError`, naming the global element index and the type, for the first element with:
 
-- $\det J \le 0$ at any quadrature point, or
+- $\det J \le 0$ at any quadrature point (for `ssh8`: anywhere on the thickness lines through the 2×2 in-plane Gauss points, below), or
 - with `mass="lumped"`, a row-sum lumped nodal mass $\le 0$, computed with $\rho = 1$ (the sign does not depend on $\rho > 0$). HRZ needs no extra check.
 
 How it runs:
@@ -156,6 +156,8 @@ How it runs:
 - PR 4's assembly calls `check_elements(mesh, mass)`.
 - `unstructured` (and so `solve_modes`) calls it next to `check_materials`, before any build or trace.
 - The kernels themselves never raise.
+
+**`ssh8`:** $\det J$ is quadratic in $\zeta$ at fixed $(\xi, \eta)$, and ply points reach $\zeta \to \pm1$ (a thin outer ply). At each 2×2 in-plane Gauss point the quadratic is fitted through $\zeta = -1, 0, 1$ and its minimum over $[-1, 1]$ (the vertex when it lies inside) must be $> 0$. hex8's check at $\zeta = \pm1/\sqrt3$ alone would miss an element that inverts near a face. `mass="lumped"` raises for `ssh8` ("solid-shell elements are consistent-mass only").
 
 ## Faces
 
@@ -172,11 +174,46 @@ How it runs:
 
 The hex8 faces are prefixes of the hex20 faces, which are prefixes of the hex27 faces. PR 7 (face adjacency) and later surface work use them.
 
+## Solid shell (ssh8)
+
+`ssh8` is the solid shell of Klinkel, Gruttmann & Wagner (*Comput. Struct.* 71, 1999): hex8 topology (8 nodes, VTK order) with reference $\zeta$ as the thickness (corners 0–3 bottom, 4–7 top; $+\zeta$ orders plies bottom to top). Meshes get it from `solid_shell` (`docs/mesh.md`); laminates are `Laminate`s of `Ply`s (`docs/materials.md`).
+
+```python
+from jaxmodal.elements import shell_mass, shell_recover, shell_stiffness
+from jaxmodal.materials import ply_table
+
+plies, R_o = ply_table(pairs, materials, orientations)  # per phase, leading axis P
+table_e = (jax.tree.map(lambda a: a[p], plies), R_o[p])  # one element's slice (phase p)
+Ke = shell_stiffness(X, table_e)  # (24, 24), condensed
+me = shell_mass(X, table_e[0])  # (8, 8) scalar block, rho included: M_e = me (x) I_3
+points, weights, eps, sigma = shell_recover(X, table_e, u)  # (8L, 3), (8L,), (8L, 6), (8L, 6)
+```
+
+- **One element per call.** Unlike the batched `kernels.*`, the shell kernels take one element `X (8, 3)` and `table_e = (plies, R_o)`, with `plies` a `Ply` whose leaves have a leading ply axis `(L,)` and `R_o (3, 3)`; callers `vmap`. They are pure `jax.numpy`: `jit`, `vmap` and `grad` (in $X$, $C$, angle, fraction, $\rho$) work through them.
+- **Registry.** The `ssh8` entry copies hex8's (nodes, faces, 2×2×2 rule) with `lumping=None`; it serves node counts (`default_chunk`, `_chunk_temps`), `check_elements`, `jacobian` and the sampling width only. `stiffness`, `mass`, `lumped_mass`, `stiffness_form` and `mass_form` raise for `ssh8` (the forms arrive in PR 21).
+
+**Formulation.** With $g_j = \partial X/\partial\xi_j$, $J = [g_1\ g_2\ g_3]$ ($J_{ij} = \partial x_i/\partial\xi_j$) and $J_0$ at the centre:
+
+- Covariant strains $E_{ij} = \tfrac12(g_i\cdot u_{,j} + g_j\cdot u_{,i})$, in Voigt order with engineering shear, and $\varepsilon = TE$ with $T = \mathrm{bond\_strain}(J^{-\top})$.
+- **ANS, transverse shear** (Bathe–Dvorkin): $E_{13} = \tfrac12(1-\eta)E_{13}(0,-1,\zeta) + \tfrac12(1+\eta)E_{13}(0,1,\zeta)$, and $E_{23}$ likewise from $(\mp1, 0, \zeta)$, evaluated at each point's $\zeta$.
+- **ANS, thickness** (Betsch–Stein): $E_{33}$ bilinear from the 4 corner lines at $\zeta = 0$.
+- **EAS**, 5 covariant parameters: $\tilde E_{11} = \xi\alpha_1$, $\tilde E_{22} = \eta\alpha_2$, $2\tilde E_{12} = \xi\alpha_3 + \eta\alpha_4$, $\tilde E_{33} = \zeta\alpha_5$, so $\tilde\varepsilon = (\det J_0/\det J)\,T_0M\alpha$ with $T_0 = \mathrm{bond\_strain}(J_0^{-\top})$.
+- **Condensation:** $K_e = K_{uu} - K_{u\alpha}K_{\alpha\alpha}^{-1}K_{\alpha u}$ (5×5 Cholesky), symmetrized; $\alpha = -K_{\alpha\alpha}^{-1}K_{\alpha u}u_e$ in recovery.
+- **Quadrature:** 2×2 in-plane times 2 Gauss points per ply. Ply $k$ occupies $\zeta \in [-1 + 2\sum_{j<k}f_j,\ -1 + 2\sum_{j\le k}f_j]$; its points map linearly with weights scaled by $f_k$, so a padded fraction-0 ply has weight 0. Two points per ply are exact in $\zeta$ only on prismatic elements (top face = bottom face + a constant vector). `shell_stiffness` accumulates $K_{uu}, K_{u\alpha}, K_{\alpha\alpha}$ by `lax.scan` over plies.
+- **Mass:** $m_e = \sum_k\rho_k\int_{\text{ply }k}N^\top N\det J$ on the same points; one ply equals hex8's consistent block. Consistent mass only.
+- **Frame and plies:** ply $k$ uses $C_k' = \mathrm{rotate}(C_k, R_\text{shell}R_z(\theta_k))$, with $R_\text{shell}$ from $R_o$ and the element normal (`docs/materials.md`).
+
+**Locking.** Covered: transverse shear, curvature thickness, Poisson thickness (EAS on $E_{33}$), in-plane shear and parasitic bending. Not covered: membrane locking of curved elements and in-plane bending of trapezoidal elements (MacNeal–Harder trapezoid in-plane: 0.047 of the reference, `docs/verification.md`).
+
+**Patch tests** (`docs/verification.md`): every constant stress state is recovered exactly from the imposed linear field on flat, distorted, tilted and lifted patches. The Dirichlet lift (interior surface DOFs solved under the consistent traction) is exact for all 6 states on parallelogram patches and for the membrane and $\sigma_{33}$ states on distorted and tilted flat patches. Bathe–Dvorkin ANS is not variationally consistent on non-parallelogram elements, so the transverse-shear states fail the lift there (stress errors 3–13), as do the membrane states on curved (lifted, warped) patches (errors $10^{-2}$–$0.34$).
+
+**Zero modes:** 6 rigid modes, 7th eigenvalue $\ge 10^{-3}\lambda_\max$ at $h/t \le 2$, regular and distorted (measured $1.2\cdot10^{-2}$). At $h/t = 100$ (reported) it is $4\cdot10^{-9}$ (regular) and $7\cdot10^{-10}$ (distorted): bending stiffness scales with $(t/h)^2$, so the 7th eigenvalue of a thin element is small without being spurious.
+
+**Recovery and `RECOVER`.** `RECOVER = {"ssh8": shell_recover}` (`elements/__init__.py`) is the per-type recovery registry PR 17 extends. Contract: `RECOVER[t](X, table_e, u) -> (points (nq, 3), weights (nq,), eps (nq, 6), sigma (nq, 6))`, with `table_e` the per-element slice of the kernel input, weights $w\det J$, and `eps`, `sigma` global Cartesian in Voigt order with engineering shear, from the ANS strains plus the EAS strains with the condensed $\alpha$. For `ssh8`, $nq = 8L$ ($L$ padded); padded plies give weight-0 points, so sums need no mask, and $u^\top K_e u = \sum_q w_q\,\varepsilon_q\cdot\sigma_q$.
+
 ## Not covered
 
 - Wedges and tets: later, one registry entry each.
-- Solid-shell (PR 16):
-  - Its ANS/EAS formulation with condensation and through-ply quadrature does not fit $B^\top C B$, so its entry will carry its own kernels.
-  - It adds `lumping=None`, which makes `lumped_mass` and `check_elements(mass="lumped")` raise.
-- Stress recovery: PR 17 adds a per-type recovery function.
+- Solid-shell (PR 16): the matrix-free operator and `solve_modes` arrive in 16b (`unstructured` raises "ssh8 operators arrive in PR 16b"; otf mode is refused permanently), solid-shell AMG in PR 18, the forms in PR 21.
+- Stress recovery: `ssh8` has `RECOVER`; PR 17 adds the hex entries and the postprocessor.
 - The element-wise $M_e$ Cholesky for probes: PR 14.

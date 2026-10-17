@@ -1,4 +1,5 @@
-"""Element registry, hex8/hex20/hex27 kernels and the host element check. See docs/elements.md."""
+"""Element registry, hex8/hex20/hex27 and solid-shell (ssh8) kernels, the host element check and
+the recovery registry. See docs/elements.md."""
 
 from .check import check_elements
 from .kernels import (
@@ -12,9 +13,16 @@ from .kernels import (
     stiffness_form,
 )
 from .registry import ELEMENTS, Element, gauss
+from .shell import shell_mass, shell_recover, shell_stiffness
+
+# Recovery per type: RECOVER[t](X, table_e, u) -> points (nq, 3), weights w det J (nq,), and global
+# Cartesian Voigt strain and stress (nq, 6); table_e is one element's slice of
+# materials.ply_table's output (plies, R_o).
+RECOVER = {"ssh8": shell_recover}
 
 __all__ = [
     "ELEMENTS",
+    "RECOVER",
     "Element",
     "bmatrix",
     "check_elements",
@@ -24,6 +32,9 @@ __all__ = [
     "lumped_mass",
     "mass",
     "mass_form",
+    "shell_mass",
+    "shell_recover",
+    "shell_stiffness",
     "stiffness",
     "stiffness_form",
 ]

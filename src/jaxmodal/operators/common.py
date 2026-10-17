@@ -7,6 +7,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from ..materials import Laminate
+
 
 def register(cls, meta):
     """Register a frozen dataclass as a pytree; `meta` fields are static, the rest are leaves."""
@@ -32,6 +34,25 @@ def cast_floats(tree, dtype):
         return a.astype(dtype) if floating else a
 
     return jax.tree_util.tree_map(f, tree)
+
+
+def check_laminates(mesh, index, pairs, materials):
+    """Raise ValueError if a hex (non-ssh8) element uses a Laminate: laminates need solid
+    shells (phase_table holds only ply 0 for them)."""
+    lam = np.array([isinstance(materials[m], Laminate) for m, _ in pairs])
+    for t, s in mesh.offsets.items():
+        e = index[s : s + len(mesh.blocks[t])]
+        if t != "ssh8" and lam[e].any():
+            m = pairs[int(e[np.argmax(lam[e])])][0]
+            raise ValueError(f"material {m} is a Laminate on {t} elements; laminates need ssh8")
+
+
+def check_shell(mesh, mode):
+    """16a staging: solid-shell meshes have no matrix-free operator yet."""
+    if "ssh8" in mesh.blocks:
+        if mode == "otf":
+            raise ValueError("solid-shell elements support stored mode only (mode='otf')")
+        raise ValueError("ssh8 operators arrive in PR 16b")
 
 
 def check_x64(name):

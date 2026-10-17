@@ -29,7 +29,7 @@ from jaxmodal.elements import (
 from jaxmodal.elements.registry import _det3
 from jaxmodal.materials import from_euler, isotropic, orthotropic, rotate
 from jaxmodal.mesh import Mesh, corner_jacobians, read, voxel_mesh
-from tests.helpers import rel, tensor
+from tests.helpers import fd_rel, rel, tensor
 
 DATA = Path(__file__).parent / "data"
 TYPES = ("hex8", "hex20", "hex27")
@@ -321,19 +321,6 @@ def test_lumped_check_raises_on_negative_hex27_mass():
 
 
 # ---------------------------------------------------------------- 8: gradients
-
-
-def fd_rel(f, x, g):
-    best = np.inf
-    for h in (1e-4, 1e-5, 1e-6):
-        step = h * np.maximum(np.abs(x), 1)
-        fd = np.zeros_like(x)
-        for idx in np.ndindex(x.shape):
-            e = np.zeros_like(x)
-            e[idx] = step[idx]
-            fd[idx] = (f(x + e) - f(x - e)) / (2 * step[idx])
-        best = min(best, rel(g, fd))
-    return best
 
 
 @pytest.mark.parametrize("name", TYPES)

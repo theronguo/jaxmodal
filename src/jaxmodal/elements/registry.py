@@ -50,7 +50,7 @@ class Element:
     exponents: np.ndarray  # (n, 3) monomial space
     coef: np.ndarray  # (n, n) inverse Vandermonde: N(xi) = monomials(xi) @ coef
     order: int  # Gauss points per direction
-    lumping: str  # "rowsum" or "hrz"
+    lumping: str | None  # "rowsum", "hrz" or None (consistent mass only)
     faces: tuple  # per face: corners, then edge nodes, then the face centre (hex27)
     points: np.ndarray  # (nq, 3) quadrature points
     weights: np.ndarray  # (nq,)
@@ -90,4 +90,7 @@ ELEMENTS = {
     "hex8": _element("hex8", 8, 2, "rowsum"),
     "hex20": _element("hex20", 20, 3, "hrz"),
     "hex27": _element("hex27", 27, 3, "rowsum"),
+    # Solid shell: node count (default_chunk, _chunk_temps) and quadrature for check_elements,
+    # jacobian and the sampling width only; its kernels are in shell.py.
+    "ssh8": _element("ssh8", 8, 2, None),
 }
