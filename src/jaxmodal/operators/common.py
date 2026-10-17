@@ -48,11 +48,9 @@ def check_laminates(mesh, index, pairs, materials):
 
 
 def check_shell(mesh, mode):
-    """16a staging: solid-shell meshes have no matrix-free operator yet."""
-    if "ssh8" in mesh.blocks:
-        if mode == "otf":
-            raise ValueError("solid-shell elements support stored mode only (mode='otf')")
-        raise ValueError("ssh8 operators arrive in PR 16b")
+    """Solid-shell blocks are stored only."""
+    if "ssh8" in mesh.blocks and mode == "otf":
+        raise ValueError("solid-shell elements support stored mode only (mode='otf')")
 
 
 def check_x64(name):

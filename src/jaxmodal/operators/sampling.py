@@ -3,7 +3,8 @@ docs/operators.md.
 
 The consistent element mass is m_e = sum_q (w det J)_q N_q N_q^T = B_e B_e^T with
 B_e = N^T diag(sqrt(w det J)), so sqrt(rho s_M) B_e (x) I_3 is an exact factor of M_e: no
-Cholesky, padded elements (w det J = 0) give B_e = 0. Lumped masses are diagonal:
+Cholesky, padded elements (s_M = 0) give B_e = 0. ssh8 blocks store m_e itself (rho
+included), so their factor is sqrt(s_M) chol(m_e), also exact. Lumped masses are diagonal:
 g = sqrt(diag M) xi. The element inputs are drawn per chunk (unstructured) or per slab (voxel)
 inside the scatter loop, so they never exist for the whole mesh.
 """
@@ -13,13 +14,16 @@ import jax.numpy as jnp
 from jax import lax
 
 from ..elements import ELEMENTS, kernels
-from .matfree import Unstructured, _block_data, _m_scale, _wdet
+from .matfree import Unstructured, _block_data, _m_scale, _me, _wdet
 from .voxel import OFFSETS, _gather, _shifts
 
 
 def element_factor(op, block, chunk):
     """(c, n, nq) nodal factor F = sqrt(rho s_M) B_e for one chunk of an Unstructured block (a
-    slice of _block_data): (F F^T) (x) I_3 = M_e (consistent mass)."""
+    slice of _block_data): (F F^T) (x) I_3 = M_e (consistent mass). ssh8: F = sqrt(s_M)
+    chol(m_e), (c, 8, 8)."""
+    if block.type == "ssh8":
+        return jnp.sqrt(chunk["s_M"])[:, None, None] * jnp.linalg.cholesky(_me(chunk))
     N = jnp.asarray(ELEMENTS[block.type].N)  # (nq, n)
     w = jnp.sqrt(_m_scale(op, chunk))[:, None] * jnp.sqrt(_wdet(block, chunk))  # (c, nq)
     return N.T * w[:, None]
@@ -38,7 +42,7 @@ def xi_shapes(op):
     (n_steps, cells per step, nq, 3), one entry per scatter-loop step."""
     if op.mass == "lumped":
         return {"nodal": (op.n_dof,)}
-    if isinstance(op, Unstructured):
+    if isinstance(op, Unstructured):  # ssh8: the factor width 8 is its (hex8) weights' count
         elem = tuple(
             (b.dofs.shape[0] // b.chunk, b.chunk, len(ELEMENTS[b.type].weights), 3)
             for b in op.blocks

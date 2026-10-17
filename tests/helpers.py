@@ -6,6 +6,7 @@ import importlib
 import jax
 import jax.numpy as jnp
 import numpy as np
+import scipy.linalg as sl
 import scipy.sparse.linalg as spla
 
 from jaxmodal.elements import check_elements, kernels
@@ -180,3 +181,18 @@ def owned_bytes(P, op):
     shared = {id(x) for x in jax.tree_util.tree_leaves(op)}
     leaves = {id(x): x for x in jax.tree_util.tree_leaves(P) if isinstance(x, jax.Array)}
     return sum(x.nbytes for i, x in leaves.items() if i not in shared)
+
+
+def r_M(Kf, Mf, L, lam, X):
+    """lam-scaled residuals in the M^-1 norm of M-normalized columns X (free DOFs), dense; L the
+    dense lower Cholesky factor of Mf."""
+    X = X / np.sqrt(np.einsum("ij,ij->j", X, Mf @ X))
+    res = Kf @ X - (Mf @ X) * lam
+    return np.linalg.norm(sl.solve_triangular(L, res, lower=True), axis=0) / np.abs(lam)
+
+
+def max_sine(Mf, L, Q, Qr):
+    """Largest principal sine between M-orthonormal Q and Qr, stably: sigma_max(L^T (Q - Qr Qr^T
+    M Q)), never sqrt(1 - cos^2), which bottoms out near 1e-8."""
+    E = Q - Qr @ (Qr.T @ (Mf @ Q))
+    return np.linalg.norm(L.T @ E, 2)

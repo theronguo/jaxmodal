@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import scipy.linalg as sl
+from helpers import max_sine, r_M
 from jax.tree_util import Partial
 from scipy.sparse.linalg import eigsh
 
@@ -98,22 +99,6 @@ def clusters(lam, rel):
     return out
 
 
-def r_M(p_args, lam, X):
-    """lam-scaled residuals in the M^-1 norm of M-normalized columns X (free DOFs), dense."""
-    p, Lf = problem(*p_args), chol(p_args)
-    X = X / np.sqrt(np.einsum("ij,ij->j", X, p.Mf @ X))
-    res = p.Kf @ X - (p.Mf @ X) * lam
-    return np.linalg.norm(sl.solve_triangular(Lf, res, lower=True), axis=0) / np.abs(lam)
-
-
-def max_sine(p_args, Q, Qr):
-    """Largest principal sine between M-orthonormal Q and Qr, stably: sigma_max(L^T (Q - Qr Qr^T
-    M Q)), never sqrt(1 - cos^2), which bottoms out near 1e-8."""
-    p, Lf = problem(*p_args), chol(p_args)
-    E = Q - Qr @ (Qr.T @ (p.Mf @ Q))
-    return np.linalg.norm(Lf.T @ E, 2)
-
-
 def residuals(p, lam, V):
     """lam-scaled residuals with the solver's own masked operator."""
     m = jnp.asarray(p.free, float)[:, None]
@@ -137,7 +122,8 @@ def check_modes(p_args, lam, V, info, tol):
     assert np.allclose(info["residuals"], residuals(p, lam, jnp.asarray(V)), rtol=1e-5, atol=0)
     if p.R is not None:
         assert np.abs(np.asarray(p.R).T @ (p.M @ V)).max() <= 1e-10
-    rm, rm_ref = r_M(p_args, lam, Vf), r_M(p_args, lr[:n], Vr[:, :n])
+    Lf = chol(p_args)
+    rm, rm_ref = r_M(p.Kf, p.Mf, Lf, lam, Vf), r_M(p.Kf, p.Mf, Lf, lr[:n], Vr[:, :n])
     groups = clusters(lr, 1e-4)
     for g in groups:
         if g[0] >= n:
@@ -147,7 +133,7 @@ def check_modes(p_args, lam, V, info, tol):
         others = np.delete(lr, g)
         gap = np.abs(others[:, None] - lr[g][None]).min()
         bound = 10 * (rm[g] * lam[g]).max() / gap
-        assert max_sine(p_args, Vf[:, g], Vr[:, g]) <= bound
+        assert max_sine(p.Mf, Lf, Vf[:, g], Vr[:, g]) <= bound
         rel_gap = gap / lr[g].max()
         if rel_gap >= 1e-2:
             assert np.all(np.abs(lam[g] - lr[g]) / lr[g] <= f_lam(p, lr[g]))

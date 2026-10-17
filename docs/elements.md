@@ -214,6 +214,6 @@ points, weights, eps, sigma = shell_recover(X, table_e, u)  # (8L, 3), (8L,), (8
 ## Not covered
 
 - Wedges and tets: later, one registry entry each.
-- Solid-shell (PR 16): the matrix-free operator and `solve_modes` arrive in 16b (`unstructured` raises "ssh8 operators arrive in PR 16b"; otf mode is refused permanently), solid-shell AMG in PR 18, the forms in PR 21.
+- Solid-shell (PR 16): the matrix-free operator is stored mode only (otf is refused permanently, `docs/operators.md`); solid-shell AMG arrives in PR 18 (`solve_modes` uses Jacobi), the forms in PR 21.
 - Stress recovery: `ssh8` has `RECOVER`; PR 17 adds the hex entries and the postprocessor.
 - The element-wise $M_e$ Cholesky for probes: PR 14.

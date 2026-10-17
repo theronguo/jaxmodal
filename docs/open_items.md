@@ -200,6 +200,15 @@ Without user input (16a):
 - **Element tests:** zero modes gated at $h/t \le 2$ with the 7th $\ge 10^{-3}\lambda_\max$ (stricter than the roadmap's $10^{-8}$), $h/t = 100$ reported; MacNeal–Harder with tip loads split equally over the 4 tip nodes, `direction=(0, 0, 1)` and the distortions in the shell plane; the twist couple as nodal forces about the end-face centre (reported only). Patch (i) uses 0.08 elements (the size of the MacNeal–Harder patch): at element size $1/3$ ($h/t = 33$) $\mathrm{cond}(K_{II}) = 2\cdot10^6$ amplifies a round-off residual to $10^{-10}$, the gate.
 - **Measured limits (documented, not fixed):** MacNeal–Harder in-plane shear on the parallelogram 0.620 and on the trapezoid 0.047 (trapezoidal in-plane locking); membrane states on curved patches $10^{-2}$–0.34.
 
+Without user input (16b):
+
+- **Build envelope:** measured on the real kernel, the `ssh8` build temporaries are 44.6 KB per element at 1 ply, +0.3 KB per ply to 12 plies, then +3.5 KB per ply (62.5 KB at 16), not the plan prototype's flat $55.4 + 0.30L$ KB. `BUILD_BYTES["stored"]["ssh8"]` stays the plan's constant (1.02× the 16-ply value, 63.7 KB); the test's upper bound is relaxed from 1.15× to 1.45× measured (the 1-ply value), and the under-estimate starts above 16 plies (about 3.5 KB per extra ply; the plan expected about 22 plies, 0.2 KB per ply). A ply-aware estimator would need the materials, which the estimators do not take.
+- **One-phase tables doubled in the build:** with one phase, XLA turns the per-element ply gather into broadcasts that take 1.5× the temporaries at 16 plies (92.6 against 62.5 KB per element); `_build` concatenates the table with itself first (indices unchanged).
+- **`_chunk_temps` unchanged for `me`:** `apply_M`'s unpacked $8\times8$ $m_e$ is far below `apply_K`'s unpacked $K_e$ ($24^2$), and the two are never live together.
+- **Messages:** the `sigma_options` error appends "(precond: auto (resolved to jacobi))" (or the explicit name), so the Jacobi default on `ssh8` explains itself; the AMG sentence comes from one helper (`precond.pmg.no_shell`).
+- **README:** the laminate snippet's plate is 20 mm thick ($L/t = 20$, 134 Jacobi iterations) instead of 4 mm, where Jacobi stagnates.
+- **Band tests:** the M4 band runs check $\lambda$ to $10\,$tol (the band tests' rule), the count and the multiplicities, with `verify=True`.
+
 ### MINRES plateaus below $\|b\|$ (PR 15c)
 
 PR 15c's stagnation rule skips plateaus only while the best explicit residual is $\ge \|b\|$. A plateau below $\|b\|$ in the 2-norm (another norm ratio, a better preconditioner) would still stop the slice as "inner solves failed", and the band with it. Not measured so far. A later fallback: continue a stagnated column once from its best iterate. While a column plateaus above $\|b\|$, `minres` returns its best *checked* iterate, which can be worse than $x = 0$ ($1.22\,\|b\|$ in the test case); a capped column counts as bad for si_slice's σ-move and τ_eff rules either way. Revisit if a band stops with "inner solves failed".
