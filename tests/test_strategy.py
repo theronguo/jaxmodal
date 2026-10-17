@@ -904,3 +904,272 @@ def test_solve_refill(monkeypatch, dtype):
 def test_solve_needs_cap():
     with pytest.raises(ValueError, match="needs max_capacity"):
         band_solve(None, 1.0)
+
+
+# ---------------------------------------------------------------- 11: capacity and C_max
+
+
+def test_lobpcg_terms():
+    """Test 11: lobpcg_memory(capacity=C) on "short" (AMG): the basis exactly C columns, V the
+    expected modes plus a block, the exact parts, and host_total the max of the operator build,
+    V + AMG's host build and V + the refill's two chunks."""
+    op, pc = models("short")
+    n, C = prob("short")[2].n_dof, 120
+    e = mem.lobpcg_memory(op, n, 30, 5, None, False, "float64", 2, pc, True, capacity=C)
+    k, c = 10, 40
+    V = 8 * n * 30 + 8 * n * k
+    assert e["basis"] == 8 * n * C and e["host_exact"] == V and e["rigid"] == 2 * 8 * n * 2
+    assert e["device_exact"] == op(k)["storage"] + e["basis"] + e["rigid"]
+    assert pc(k)["host_build"] == pc(k)["build"]
+    assert e["host_total"] == max(op(k)["build"], V + pc(k)["host_build"], V + 16 * n * c)
+    assert e["host_total"] == V + pc(k)["host_build"]  # the AMG build binds here
+    assert e["device_total"] == (op(k)["overhead"] + op(k)["storage"] + e["precond"] + e["basis"]
+                                 + e["rigid"] + e["host"] - V + max(e["step"], 0))  # fmt: skip
+    op, pc = models("voxel")  # GMG builds on the device: the refill binds
+    n = prob("voxel")[2].n_dof
+    g = mem.lobpcg_memory(op, n, 30, 5, None, False, "float64", 0, pc, True, capacity=C)
+    assert g["host_total"] == 8 * n * (30 + k) + 16 * n * c > op(k)["build"]
+
+
+def test_count_si_terms():
+    """Test 11: count_memory all on the device; si_memory's device basis up(C, c) columns, the
+    window and the store host-only, the Gram matrix 8 capacity^2, the per-space exact parts."""
+    op, pc = models("voxel")
+    n = prob("voxel")[2].n_dof
+    v = 8 * n
+    e = mem.count_memory(op, n, 4, voxel=True, precond_memory=pc, n_rigid=3)
+    assert e["device_total"] == e["total"] and e["host_total"] == e["host_exact"] == 0
+    assert e["device_exact"] == op(4)["storage"] + 2 * v * 3
+
+    def si(C, **kw):
+        return mem.si_memory(op, n, C, kw.pop("n_modes", 20), 6, pc, 0, n_deflate=48, **kw)
+
+    a, b = si(48), si(47)
+    assert a == b and si(72)["storage"] - a["storage"] == v * 24
+    w = si(48, host_window=100)
+    assert w["storage"] == a["storage"] and w["host"] - a["host"] == v * 52
+    s = si(48, n_modes=30)
+    assert s["storage"] == a["storage"] and s["host"] - a["host"] == v * 10
+    assert a["host"] == v * 48 + v * 20 + 8 * 48**2 and a["end"] == v * (2 + 24)
+    assert a["device_exact"] == a["storage"] - pc(6)["storage"]
+    assert a["host_exact"] == a["host"] - 8 * 48**2
+    assert a["host_total"] == a["host"] + max(op(6)["build"], 0)  # GMG builds on the device
+
+
+def test_amg_scan_cached(monkeypatch):
+    """Test 11: amg_memory scans the mesh once per mesh."""
+    mem._amg_scan.cache_clear()
+    mesh = prob("short")[0]
+    for m in (6, 10, 15):
+        mem.amg_memory(mesh, m)
+    info = mem._amg_scan.cache_info()
+    mem._amg_scan.cache_clear()
+    assert info.misses == 1 and info.hits == 2
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(sys.platform != "darwin", reason="Mac peaks")
+@pytest.mark.parametrize("t, n", [("hex20", 16), ("hex20", 32), ("hex8", 32)])
+def test_amg_reuse_peak(t, n):
+    """Test 11: amg(..., aggregates=aggs) with aggs held (a fresh subprocess, the peak above
+    the built operator and aggregates) plus the aggregates' bytes <= amg_memory's build (ratios
+    0.63-0.83 measured in plan round 13)."""
+    from benchmarks import amg_study, harness
+
+    from jaxmodal.mesh import box_mesh
+
+    s = amg_study.SETUP.format(root=str(harness.RESULTS.parents[1]), t=t, n=n) + (
+        "P, agg = amg(op, free, 1e6, mesh.points, return_aggregates=True)\nP = None\n")
+    code = ("from jaxmodal.eigen.api import _nbytes\njax.block_until_ready(amg(op, free, 1e6,"
+            " mesh.points, aggregates=agg))\njson.dump(dict(agg=_nbytes(agg)), open('{out}', 'w'))")
+    r = harness.measure_json(code, s)
+    est = mem.amg_memory(box_mesh((n,) * 3, type=t), 15)["build"]
+    assert r["peak_bytes"] + r["agg"] <= est, (r, est)
+
+
+def test_models_cached(fake_builds, monkeypatch):
+    """Test 11: within one band call no estimator sees the same arguments twice (a "fits" run
+    with the count block given, and a slice path); a second call computes again."""
+    seen, real = [], mem._models
+
+    def models_(*a, **kw):
+        out = real(*a, **kw)
+
+        def wrap(f, tag):
+            def g(*x, **y):
+                seen.append((tag, x, tuple(sorted(y.items()))))
+                return f(*x, **y)
+
+            return g
+
+        return [f and wrap(f, (len(seen), i)) for i, f in enumerate(out)]
+
+    monkeypatch.setattr(mem, "_models", models_)
+    f1, f2 = fband("short", 15, 25)
+    for kw in (dict(count_options={"block": 4}), dict(strategy="shift_invert", verify=False)):
+        for _ in range(2):
+            seen.clear()
+            run("short", (f1, f2), n_modes=12, **kw)  # the band holds 12
+            calls = [(i, x, y) for (_, i), x, y in seen]
+            assert seen and len(calls) == len(set(calls)), kw
+
+
+def test_levers(fake_builds):
+    """Test 11: the "memory" warning names each lever's C_max at chunk 5 and the otf lever."""
+    fake_builds["name"] = "voxel"
+    B = voxel_budget(1.15)
+    op, pc = models("voxel")
+    kw = dict(chunk=5, guards=None, basis_dtype="float64", n_rigid=0, n_avail=n_avail("voxel"),
+              budget=B, host_budget=None)  # fmt: skip
+    n = prob("voxel")[2].n_dof
+    low = mem._c_max(op, pc, n, low=True, **kw)
+    f32 = mem._c_max(op, pc, n, low=False, **(kw | {"basis_dtype": "float32"}))
+    with pytest.warns(UserWarning) as w:
+        run("voxel", fband("voxel", 3, 12), n_modes=10, memory_budget=B, verify=False)
+    (msg,) = [str(x.message) for x in w if "levers" in str(x.message)]
+    assert f"low_memory=True (C_max {low})" in msg and f"'float32' (C_max {f32})" in msg
+    assert "operator_options={'mode': 'otf'}" in msg and (low or f32)
+
+
+def est(e, m, de=0, dm=0, he=0, hm=0):
+    """A crafted estimate: E = e exact, M = m modelled (CPU); per space de/dm, he/hm."""
+    return dict(device_exact=de or e, host_exact=he, total=e + m + he,
+                device_total=(de or e) + dm, host_total=he + hm)  # fmt: skip
+
+
+def test_fits():
+    """Test 11: 1.05 E + 1.2 M against the budget: one check on total (CPU), per space with a
+    host budget (GPU)."""
+    x = est(100, 50)
+    assert mem._fits(x, 165) and not mem._fits(x, 164.99)
+    assert mem._fits(x, 165 + 1.05 * 10, host_extra=10)
+    assert not mem._fits(x, 165 + 1.05 * 10 - 0.01, host_extra=10)
+    g = est(0, 0, de=100, dm=50, he=20, hm=10)
+    assert mem._fits(g, 165, 1.05 * 20 + 1.2 * 10)
+    assert not mem._fits(g, 164.99, 1e9) and not mem._fits(g, 1e9, 1.05 * 20 + 11.99)
+    assert mem._fits(g, 165, 1.05 * 25 + 12, host_extra=5)
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_largest(seed):
+    """Test 11: the bisection equals brute force over the multiples of step (a monotone fit with
+    a jump), None when nothing fits."""
+    rng = np.random.default_rng(seed)
+    step, lo, hi = int(rng.integers(1, 30)), int(rng.integers(0, 100)), int(rng.integers(100, 900))
+    top = int(rng.integers(0, 1000))
+    want = [x for x in range(0, hi + 1, step) if lo <= x <= top]
+    assert mem._largest(lambda x: x <= top, step, lo, hi) == (max(want) if want else None)
+    assert mem._largest(lambda x: False, step, lo, hi) is None
+
+
+def slice_brute(name, B, n_store, block=6):
+    op, pc = models(name)
+    n, c = prob(name)[2].n_dof, si._chunk(block)
+    ok = [C for C in range(c, 2000, c) if C >= mem._up(2 * c + 2 * block, c)
+          and C <= mem._up(math.ceil(1.25 * (1.8 * n_store + 84)) + 2 * c, c)
+          and mem._fits(mem.si_memory(op, n, C - 2 * c, n_store, block, pc, 0, n_deflate=2 * c,
+                                      host_window=2 * (C - 2 * block)), B)]  # fmt: skip
+    return max(ok) if ok else None
+
+
+@pytest.mark.parametrize("name", ["tiny", "voxel"])
+def test_slice_capacity(name):
+    """Test 11: _slice_capacity against brute force (on "tiny" the Gram term and the end phase
+    matter), the floor 72 at c = 24 when only it fits, the need cap binding, None below."""
+    op, pc = models(name)
+    n = prob(name)[2].n_dof
+
+    def cap(B, n_store=20):
+        return mem._slice_capacity(op, pc, n, n_store=n_store, block=6, n_rigid=0, budget=B,
+                                   host_budget=None)  # fmt: skip
+
+    floor = slice_budget(name, 72, 20)
+    for B in np.linspace(floor, 3 * floor, 7):
+        assert cap(B) == slice_brute(name, B, 20)
+    assert cap(floor) == 72 and cap(floor * (1 - 1e-6)) is None
+    need_cap = mem._up(math.ceil(1.25 * (1.8 * 20 + 84)) + 48, 24)
+    assert cap(1e12) == need_cap and cap(1e12, n_store=200) > need_cap
+    with pytest.raises(ValueError, match="below one probe"):
+        mem.probe_block(1.0, 50, op, n, precond_memory=pc)
+
+
+def test_c_max_caps():
+    """Test 11: C_max is the free-space cap (a multiple of c_L) at a large budget, the budget's
+    largest fit below it, None below the initial basis."""
+    na = n_avail("short")
+    cap = mem._up(na + 10, 40)
+    assert c_max("short", 5, 1e12) == cap and cap % 40 == 0
+    B = need(lob_est("short", 5, 400))
+    got = c_max("short", 5, B)
+    assert got == mem._largest(lambda C: mem._fits(lob_est("short", 5, C), B), 40, 40, cap)
+    assert 40 <= got < cap and c_max("short", 5, need(lob_est("short", 5, 40)) - 1) is None
+
+
+def test_c_max_host():
+    """Test 11 (GPU accounting): a tight host budget (V binds) lowers C_max at the same device
+    budget; AMG's host build counts in the host max."""
+    op, pc = models("short")
+    n = prob("short")[2].n_dof
+    kw = dict(chunk=5, guards=None, low=False, basis_dtype="float64", n_rigid=0,
+              n_avail=n_avail("short"), budget=1e12)  # fmt: skip
+    free_ = mem._c_max(op, pc, n, host_budget=1e12, **kw)
+    host = mem.lobpcg_memory(op, n, 400, 5, None, False, "float64", 0, pc, True, capacity=400)
+    tight = 1.05 * host["host_exact"] + 1.2 * (host["host_total"] - host["host_exact"])
+    got = mem._c_max(op, pc, n, host_budget=tight, **kw)
+    assert got == 400 < free_
+    small = 1.05 * 8 * n * 40 + 1.2 * (pc(10)["host_build"]) - 1
+    assert mem._c_max(op, pc, n, host_budget=small, **kw) is None  # V + the AMG build binds
+
+
+def test_slice_limits(fake_builds, monkeypatch):
+    """Test 11, the slice limits in order: an override skips the search and its checks; below
+    the floor raises naming the budget; below 96 warns; an override above the need is kept."""
+    fake_builds["name"] = "voxel"
+    seen = {}
+    monkeypatch.setattr(api, "si_band", stub_band(seen))
+    band = fband("voxel", 3, 12)
+    kw = dict(strategy="shift_invert", n_modes=10)
+    _, _, info = run("voxel", band, memory_budget=1.0, slice_options={"capacity": 48}, **kw)
+    assert info["capacity"] == seen["capacity"] == 48
+    _, _, info = run("voxel", band, slice_options={"capacity": 5000}, **kw)
+    assert info["capacity"] == 5000
+    floor = slice_budget("voxel", 72, 10)
+    with pytest.raises(ValueError, match="smallest shift-invert slice does not fit memory_budget"):
+        run("voxel", band, memory_budget=floor * 0.999, **kw)
+    with pytest.warns(UserWarning, match="slice capacity 72 is below 96"):
+        run("voxel", band, memory_budget=floor, **kw)
+
+
+def test_count_block_fit():
+    """Test 11: the slice count block is the largest passing the fit with the store and window
+    as exact host bytes, per space."""
+    op, pc = models("voxel")
+    n = prob("voxel")[2].n_dof
+    for B, H in ((60e6, None), (40e6, 30e6)):
+        got = mem._count_block(op, pc, n, voxel=True, n_rigid=0, n_store=50, window=100,
+                               n_probes=50, budget=B, host_budget=H)  # fmt: skip
+        ok = [b for b in range(1, 51) if mem._fits(mem.count_memory(
+            op, n, b, voxel=True, precond_memory=pc), B, H, 8 * n * 150)]  # fmt: skip
+        assert got == (max(ok) if ok else None)
+
+
+@pytest.mark.parametrize("verify", [True, None, False])
+def test_count_block_none(fake_builds, monkeypatch, verify):
+    """Test 11: no probe fits beside the store and window: the counts are off (a warning under
+    True only), the reason recorded."""
+    fake_builds["name"] = "voxel"
+    seen = {}
+    monkeypatch.setattr(api, "si_band", stub_band(seen))
+    monkeypatch.setattr(mem, "_count_block", lambda *a, **kw: None)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        _, _, info = run("voxel", fband("voxel", 3, 12), strategy="shift_invert", n_modes=10,
+                         verify=verify)  # fmt: skip
+    msgs = [str(x.message) for x in w if "no counts run" in str(x.message)]
+    assert len(msgs) == (verify is True) and seen["verify"] is False
+    assert "one probe" in info["count"]["reason"]
+
+
+def test_solve_modes_memory_band():
+    with pytest.raises(ValueError, match="needs band=\\(0, f_max\\)"):
+        mem.solve_modes_memory(prob("short")[0], MESHES["short"][1], band=(1.0, 2.0))
