@@ -128,7 +128,8 @@ info["count"]["passed"]  # when the count ran: no mode below the cut is missing
 
 ```python
 lam, V, info = solve_modes(mesh, materials, {"xmin": "xyz"}, band=(200.0, 400.0), n_modes=30)
-info["strategy"], info["reason"]  # ("lobpcg", "fits") or ("shift_invert", "memory" | "capacity" | "forced")
+# ("lobpcg", "fits") or ("shift_invert", "memory" | "capacity" | "forced")
+info["strategy"], info["reason"]
 ```
 
 `band=(f1, f2)` (PR 15d; Hz for SI inputs, $0 \le f_1 < f_2$, finite) returns every elastic mode with $f_1 \le f \le f_2$, possibly none, plus whole clusters reaching into the band (relative gaps $< 100\,t$ at either edge). `n_modes` is optional: for $f_1 = 0$ the expected count, a depth (it sizes the initial basis, capped at $C_{max}$, the ladder's top chunk and its known depth); for $f_1 > 0$ the expected band count, the floor of the slice store $N_s$ (below). `strategy` chooses how:

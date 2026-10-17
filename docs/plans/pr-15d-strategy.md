@@ -308,9 +308,14 @@ Out of scope (deferred, listed in `docs/open_items.md`):
 ### API
 
 ```python
-lam, V, info = solve_modes(mesh, materials, bcs, band=(f1, f2))           # auto
-solve_modes(..., band=(f1, f2), strategy="shift_invert", memory_budget=8e9,
-            slice_options=dict(tau=1e-8, block=6, verbose=True))
+lam, V, info = solve_modes(mesh, materials, bcs, band=(f1, f2))  # auto
+solve_modes(
+    ...,
+    band=(f1, f2),
+    strategy="shift_invert",
+    memory_budget=8e9,
+    slice_options=dict(tau=1e-8, block=6, verbose=True),
+)
 ```
 
 - `band=(f1, f2)`: $0 \le f_1 < f_2$ finite (Hz); `check_band` accepts $f_1 > 0$. $f_1 = 0$ runs
