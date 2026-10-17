@@ -149,7 +149,7 @@ def shell_stiffness(X, table_e):
 
 def shell_mass(X, plies):
     """Scalar consistent mass block m_e (8, 8), rho included: M_e = m_e (x) I_3; plies
-    accumulated by lax.scan (all plies at once cost about 3 KB per ply per element in a build)."""
+    accumulated by lax.scan (all plies at once cost about 3.5 KB per ply per element in a build)."""
 
     def at(q):
         N, dN = _shape(q)

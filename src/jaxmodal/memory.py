@@ -27,8 +27,8 @@ from .precond.gmg import _ell_rows, _islands
 from .precond.pmg import _w8, no_shell
 
 # XLA temporaries of the build kernel per element (memory_analysis, exactly linear in chunk).
-# ssh8: an envelope, 1.02 x the 32-ply value (44.6 KB at 1 ply, about +0.38 KB per ply; above
-# about 36 plies it underestimates).
+# ssh8: an envelope, 1.02 x the 32-ply value (44.6 KB at 1 ply, 56.4 KB at 32; above about 35
+# plies it underestimates by about 0.32 KB per ply).
 BUILD_BYTES = {
     "stored": {"hex8": 29.95e3, "hex20": 241.06e3, "hex27": 322.70e3, "ssh8": 57.5e3},
     "otf": {"hex8": 1.22e3, "hex20": 4.10e3, "hex27": 4.10e3},

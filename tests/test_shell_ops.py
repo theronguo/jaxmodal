@@ -234,6 +234,8 @@ def test_refusals():
         pmg(op, free, 1.0)
     with pytest.raises(ValueError, match="consistent-mass only"):
         solve_modes_memory(mesh, bcs, 2, mass="lumped")
+    with pytest.raises(ValueError, match="consistent-mass only"):
+        unstructured(mesh, mats, ori, mass="lumped")
     with pytest.raises(ValueError, match="needs a voxel mesh"):
         solve_modes(mesh, mats, bcs, 2, ori, precond="gmg")
     with pytest.raises(ValueError, match="no LOBPCG chunk fits") as err:
@@ -278,7 +280,7 @@ def test_solve_modes_memory():
 
 def test_build_envelope():
     """BUILD_BYTES["stored"]["ssh8"] >= the build kernel's temporaries (memory_analysis) at 1-32
-    plies and one or two phases, and <= 1.30 x (the 1-ply value); fitted at 32 plies + 2%."""
+    plies and one or two phases, and <= 1.30 x each measured value; fitted at 32 plies + 2%."""
     S = jax.ShapeDtypeStruct
     c = mf.default_chunk("ssh8", 10**6)
     plies = ply_table([(0, 0)], {0: Material(C_ORT, 1.0)})[0]

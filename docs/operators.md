@@ -192,11 +192,11 @@ Call it on the mesh that will be used (after `rcm`, if any), with the same keywo
 
   | | hex8 | hex20 | hex27 | ssh8 |
   |---|---|---|---|---|
-  | stored build $t$ | 29.95 KB | 241.06 KB | 322.70 KB | 63.7 KB |
+  | stored build $t$ | 29.95 KB | 241.06 KB | 322.70 KB | 57.5 KB |
   | otf build $t$ | 1.22 KB | 4.10 KB | 4.10 KB | – |
   | otf apply_K $a_t$, $b_t$ | 6.1, 1.28 KB | 41.0, 3.17 KB | 54.6, 2.55 KB | – |
 
-  The estimators take no materials, so the `ssh8` value is an envelope: 1.02× the 32-ply measurement. Measured: 44.6 KB at 1 ply, about +0.38 KB per ply (51.3 KB at 16, 56.4 at 32; both shell kernels scan the plies, so the build stays nearly flat in the ply count). It over-estimates by up to 1.29× and under-estimates above about 36 plies (by about 0.38 KB per extra ply). `storage` counts 336 floats per `ssh8` element. The slow 4M-DOF test checks storage and vectors; the build term is below its 20% tolerance, so `test_build_envelope` checks the build.
+  The estimators take no materials, so the `ssh8` value is an envelope: 1.02× the 32-ply measurement. Measured: 44.6 KB at 1 ply, 51.3 KB at 16 plies, 56.4 KB at 32 (both shell kernels scan the plies, so the build stays nearly flat in the ply count). It over-estimates by up to 1.29× and under-estimates above about 35 plies (by about 0.32 KB per extra ply). `storage` counts 336 floats per `ssh8` element. The slow 4M-DOF test checks storage and vectors; the build term is below its 20% tolerance, so `test_build_envelope` checks the build.
 
 - `overhead`: 10 MB, the only constant fitted to measured peaks ($t$, $a$, $b$ come from `memory_analysis`; measured on hex20 $30^3$ and hex8 $60^3$; the formulas match `memory_analysis` without factors).
 - `total = overhead + storage + max(build, vectors + workspace)`.
