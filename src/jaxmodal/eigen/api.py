@@ -4,6 +4,7 @@ import dataclasses
 import functools
 import gc
 import math
+import numbers
 import time
 import warnings
 
@@ -319,7 +320,8 @@ def solve_modes(
         f1, f2 = check_band(band)
     if strategy not in STRATEGIES:
         raise ValueError(f"strategy must be one of {STRATEGIES}, got {strategy!r}")
-    if memory_budget is not None and not (math.isfinite(memory_budget) and memory_budget > 0):
+    budget_ok = isinstance(memory_budget, numbers.Real) and math.isfinite(memory_budget)
+    if memory_budget is not None and not (budget_ok and memory_budget > 0):
         raise ValueError(f"memory_budget must be a finite number of bytes > 0, got {memory_budget}")
     if verify not in (None, True, False):
         raise ValueError(f"verify must be None, True or False, got {verify!r}")

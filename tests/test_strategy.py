@@ -31,7 +31,6 @@ from test_shift_invert import (
 )
 
 from jaxmodal.eigen import counting, solve_modes
-from jaxmodal.eigen.lobpcg import _band_count
 from jaxmodal.precond import SingularShiftError
 
 api = importlib.import_module("jaxmodal.eigen.api")
@@ -39,8 +38,10 @@ lob = importlib.import_module("jaxmodal.eigen.lobpcg")
 si = importlib.import_module("jaxmodal.eigen.shift_invert")
 mem = importlib.import_module("jaxmodal.memory")
 
-pytestmark = [pytest.mark.filterwarnings("error:returned modes copied"),
-              pytest.mark.filterwarnings("error:si_band. [0-9]+ stored modes exceed")]
+pytestmark = [
+    pytest.mark.filterwarnings("error:returned modes copied"),
+    pytest.mark.filterwarnings("error:si_band. [0-9]+ stored modes exceed"),
+]
 TOL = 1e-8
 
 
@@ -177,8 +178,12 @@ def test_capacity(fake_builds, monkeypatch):
 
     def band(op, free, a, b, make, **kw):
         gc.collect()
-        seen.update(interval=(a, b), n_store=kw["n_store"], v_dead=seen["V"]() is None,
-                    basis=[x.shape for x in jax.live_arrays() if x.shape == (op.n_dof, 40)])
+        seen.update(
+            interval=(a, b),
+            n_store=kw["n_store"],
+            v_dead=seen["V"]() is None,
+            basis=[x.shape for x in jax.live_arrays() if x.shape == (op.n_dof, 40)],
+        )
         return real_band(op, free, a, b, make, **kw)
 
     real_solve = api._solve
@@ -195,7 +200,8 @@ def test_capacity(fake_builds, monkeypatch):
     monkeypatch.setattr(api, "_solve", solve)
     monkeypatch.setattr(api, "si_band", band)
     monkeypatch.setattr(api, "_precond_sigma", pre)
-    monkeypatch.setattr(api, "sigma_estimate", lambda *a, **kw: calls.update(est=1) or real_est(*a, **kw))
+    monkeypatch.setattr(api, "sigma_estimate",
+                        lambda *a, **kw: calls.update(est=1) or real_est(*a, **kw))  # fmt: skip
     kw = dict(n_modes=22, chunk=5, memory_budget=budget, slice_options={"capacity": 96},
               verify=True)  # fmt: skip
     with pytest.warns(UserWarning, match="35 modes locked"):
@@ -236,8 +242,15 @@ def stub_band(seen):
 
     def band(op, free, a, b, make, **kw):
         seen.update(kw, interval=(a, b))
-        info = dict(converged=True, reason=None, r_acc=TOL, residuals=np.zeros(0),
-                    thresholds=np.zeros(0), count=dict(ran=False, reason=None), time={})
+        info = dict(
+            converged=True,
+            reason=None,
+            r_acc=TOL,
+            residuals=np.zeros(0),
+            thresholds=np.zeros(0),
+            count=dict(ran=False, reason=None),
+            time={},
+        )
         return np.zeros(0), np.zeros((op.n_dof, 0), order="F"), info
 
     return band
@@ -252,8 +265,9 @@ def test_capacity_store(fake_builds, monkeypatch, case):
     real_cap = mem._slice_capacity
     monkeypatch.setattr(api, "_solve", capacity_stop("short", list(range(30))))
     monkeypatch.setattr(api, "si_band", stub_band(seen))
-    monkeypatch.setattr(mem, "_slice_capacity",
-                        lambda *a, **kw: caps.append(kw["n_store"]) or real_cap(*a, **kw))
+    monkeypatch.setattr(
+        mem, "_slice_capacity", lambda *a, **kw: caps.append(kw["n_store"]) or real_cap(*a, **kw)
+    )
     lr = prob("short")[6]
     f1 = 0.0 if case == "zero" else freq((lr[9] + lr[10]) / 2)
     f2 = freq((lr[30] + lr[31]) / 2)
@@ -520,8 +534,13 @@ def test_below_mu1(fake_builds, monkeypatch, name):
 
 
 @pytest.mark.parametrize(
-    "rel, tol, want", [(0.9e-2, TOL, True), (1.1e-2, TOL, False), (2.9e-2, 1e-4, True),
-                       (3.1e-2, 1e-4, False)]  # fmt: skip
+    "rel, tol, want",
+    [
+        (0.9e-2, TOL, True),
+        (1.1e-2, TOL, False),
+        (2.9e-2, 1e-4, True),
+        (3.1e-2, 1e-4, False),
+    ],  # fmt: skip
 )
 def test_mu1_margin(monkeypatch, rel, tol, want):
     """Test 7: from 0 when lam_lo < mu1_ub (1 + max(1e-2, 300 tol)), mu1_ub >= mu_1 patched."""
@@ -880,7 +899,7 @@ def test_solve_capped_start():
     """Test 12: a band ending in the first chunk: no growth, the capped basis and n_modes."""
     lam, V, info = band_solve(40, prob("short")[6][3], n_modes=60)
     assert info["capacity"] == 40 and info["n_modes"] == 30 and "stopped" not in info
-    assert V.shape[1] == 50 and len(lam) >= 4 and not V[:, len(lam):].any()
+    assert V.shape[1] == 50 and len(lam) >= 4 and not V[:, len(lam) :].any()
 
 
 @pytest.mark.parametrize("dtype", ["float64", "float32"])
@@ -989,13 +1008,15 @@ def test_amg_reuse_peak(t, n):
     the built operator and aggregates) plus the aggregates' bytes <= amg_memory's build (ratios
     0.63-0.83 measured in plan round 13)."""
     from benchmarks import amg_study, harness
-
     from jaxmodal.mesh import box_mesh
 
     s = amg_study.SETUP.format(root=str(harness.RESULTS.parents[1]), t=t, n=n) + (
-        "P, agg = amg(op, free, 1e6, mesh.points, return_aggregates=True)\nP = None\n")
-    code = ("from jaxmodal.eigen.api import _nbytes\njax.block_until_ready(amg(op, free, 1e6,"
-            " mesh.points, aggregates=agg))\njson.dump(dict(agg=_nbytes(agg)), open('{out}', 'w'))")
+        "P, agg = amg(op, free, 1e6, mesh.points, return_aggregates=True)\nP = None\n"
+    )
+    code = (
+        "from jaxmodal.eigen.api import _nbytes\njax.block_until_ready(amg(op, free, 1e6,"
+        " mesh.points, aggregates=agg))\njson.dump(dict(agg=_nbytes(agg)), open('{out}', 'w'))"
+    )
     r = harness.measure_json(code, s)
     est = mem.amg_memory(box_mesh((n,) * 3, type=t), 15)["build"]
     assert r["peak_bytes"] + r["agg"] <= est, (r, est)
@@ -1051,7 +1072,7 @@ def est(e, m, de=0, dm=0, he=0, hm=0):
                 device_total=(de or e) + dm, host_total=he + hm)  # fmt: skip
 
 
-def test_fits():
+def test_fit_rule():
     """Test 11: 1.05 E + 1.2 M against the budget: one check on total (CPU), per space with a
     host budget (GPU)."""
     x = est(100, 50)
@@ -1267,8 +1288,11 @@ def clocked_slice(monkeypatch, lo, hi, *, move=False, fail=False, capacity=96):
         clock.t += dt
         calls.append((dt, its))
         if len(calls) == 1 and (move or fail):
-            info = dict(info, stagnated=jnp.ones_like(info["stagnated"]),
-                        residuals=jnp.full_like(info["residuals"], np.nan if fail else 1.0))
+            info = dict(
+                info,
+                stagnated=jnp.ones_like(info["stagnated"]),
+                residuals=jnp.full_like(info["residuals"], np.nan if fail else 1.0),
+            )
         return x, info
 
     monkeypatch.setattr(si, "minres", minres)
@@ -1530,3 +1554,172 @@ def test_store_warning(monkeypatch):
     with pytest.warns(UserWarning, match="stored modes exceed n_store = 5") as w:
         tsi.fband("short", lo, hi, edges=[(lo + hi) / 2], n_store=5)
     assert sum("exceed n_store" in str(x.message) for x in w) == 1
+
+
+# ---------------------------------------------------------------- 15: the capacity error
+
+LOW, HIGH = "lo may be below lambda_1", "hi above the spectrum"
+TAU_HINT, MARGIN = "slice_options tau may be too loose", "within the lambda_lo margin"
+
+
+@pytest.mark.parametrize(
+    "a, why, closed, has, lacks",
+    [
+        (1.0, "nothing converged", (True, False), [HIGH], [LOW, TAU_HINT]),  # lower side closed
+        (1.0, "nothing converged", (False, True), [LOW], [HIGH]),  # upper side closed
+        (0.0, "nothing converged", (False, False), [HIGH], [LOW, MARGIN]),  # lo = 0
+        (0.0, "no progress", (False, True), [TAU_HINT, MARGIN], [LOW, HIGH]),  # from 0
+        (1.0, "no progress", (False, False), [LOW, HIGH, TAU_HINT], [MARGIN]),
+    ],
+)
+def test_cap_error(a, why, closed, has, lacks):
+    """Test 15: the hints of the capacity error per closed side, lo = 0 and no progress."""
+    msg = str(si._cap_error(a, 2.0, 96, why, closed))
+    assert f"({why})" in msg and "raise capacity" in msg
+    assert all(h in msg for h in has) and not any(h in msg for h in lacks)
+
+
+@pytest.mark.parametrize("zero", [False, True])
+def test_cap_error_band(monkeypatch, zero):
+    """Test 15 through si_band (fake_band): a rerun with nothing new after the lower side closed
+    (interior) names the upper side and tau; from 0 also the lambda_lo margin."""
+    lr = prob("short")[6]
+    lo, hi = edges(lr, 3, 16)
+    lo = 0.0 if zero else lo
+    keep = [0] if zero else [3]
+    first = (keep, "capacity full", tsi.rz(([] if zero else [2]) + keep, [4, 5]), None)
+    fake_band(
+        monkeypatch,
+        lambda j, *_: (
+            first
+            if j == 1
+            else ([], "capacity full", tsi.rz(([] if zero else [2]) + keep, [4, 5]), None)
+        ),
+    )
+    with pytest.raises(ValueError, match=r"\(no progress\)") as e:
+        tsi.fband("short", lo, hi)
+    msg = str(e.value)
+    assert HIGH in msg and TAU_HINT in msg and LOW not in msg and (MARGIN in msg) == zero
+
+
+# ---------------------------------------------------------------- 16: options
+
+
+@pytest.mark.parametrize(
+    "kw, match",
+    [
+        (dict(strategy="lobpcg"), "need band"),
+        (dict(memory_budget=1e9), "need band"),
+        (dict(slice_options={"tau": 1e-6}), "need band"),
+        (dict(band=(0, 10), strategy="slices"), "strategy"),
+        (dict(band=(0, 10), memory_budget=-1.0), "memory_budget"),
+        (dict(band=(0, 10), memory_budget="1GB"), "memory_budget"),
+        (dict(band=(0, 10), slice_options={"capcity": 96}), "capcity"),
+        (dict(band=(10, 10)), "f1 < f2"),
+        (dict(band=(-1, 10)), "f1 >= 0"),
+    ],
+)
+def test_options(kw, match):
+    """Test 16: the band options without band, bad values, unknown slice_options keys."""
+    with pytest.raises(ValueError, match=match):
+        solve_modes(prob("tiny")[0], MAT, MESHES["tiny"][1], **({"n_modes": 3} | kw))
+
+
+def test_forced_lobpcg_no_fit(fake_builds):
+    """Test 16: forced "lobpcg" with no chunk fitting raises before any build."""
+    with pytest.raises(ValueError, match="no LOBPCG chunk fits memory_budget.*levers|no LOBPCG"):
+        run("short", fband("short", 15, 25), strategy="lobpcg", memory_budget=1e6)
+    assert not fake_builds["builds"]
+
+
+def test_given_chunk_no_fit(fake_builds, monkeypatch):
+    """Test 16: a given chunk that does not fit under "auto": "memory" (slices)."""
+    seen = {}
+    monkeypatch.setattr(api, "si_band", stub_band(seen))
+    B = chunk_need("short", 20) - 1
+    assert c_max("short", 10, B) is not None  # a smaller chunk would fit: no ladder
+    with pytest.warns(UserWarning, match="no LOBPCG chunk fits"):
+        _, _, info = run("short", fband("short", 15, 25), chunk=20, memory_budget=B,
+                         slice_options={"capacity": 96})  # fmt: skip
+    assert info["reason"] == "memory" and info["c_max"] == {20: None}
+
+
+def fake_gpu(monkeypatch):
+    """memory.jax.devices()[0]: a GPU with 7e9 free bytes (10e9 limit, 3e9 in use)."""
+    stats = dict(bytes_limit=10e9, bytes_in_use=3e9)
+    gpu = types.SimpleNamespace(platform="gpu", memory_stats=lambda: stats)
+    monkeypatch.setattr(mem, "jax", types.SimpleNamespace(devices=lambda: [gpu]))
+
+
+def test_default_budget(monkeypatch):
+    """Test 16: the default budgets: 0.8 x RAM on the CPU; a GPU's free pool and 0.8 x RAM."""
+    pages = {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 2**20}  # 4 GiB
+    monkeypatch.setattr(mem.os, "sysconf", lambda k: pages[k])
+    ram = 0.8 * 2**32
+    assert mem._default_budget() == (ram, None)
+    fake_gpu(monkeypatch)
+    assert mem._default_budget() == (7e9, ram)
+
+
+def test_budget_recorded(fake_builds, monkeypatch):
+    """Test 16: info["budget"]: (budget, None) on the CPU, (memory_budget, 0.8 x RAM) under a
+    fake GPU (the host budget then binds per space)."""
+    monkeypatch.setattr(api, "si_band", stub_band({}))
+    band = fband("short", 15, 25)
+    _, _, info = run("short", band, n_modes=12, verify=False)
+    assert info["budget"] == mem._default_budget()
+    fake_gpu(monkeypatch)
+    ram = 0.8 * mem.os.sysconf("SC_PAGE_SIZE") * mem.os.sysconf("SC_PHYS_PAGES")
+    _, _, info = run("short", band, n_modes=12, verify=False, memory_budget=5e9)
+    assert info["budget"] == (5e9, ram)
+
+
+def test_options_reach(fake_builds, monkeypatch):
+    """Test 16: slice_options, tol, count_options (a user block kept) and precond_options reach
+    si_band and make."""
+    seen, kws = {}, []
+    spy_band(monkeypatch, seen)
+    real = api.amg
+    monkeypatch.setattr(api, "amg", lambda *a, **kw: kws.append(kw) or real(*a, **kw))
+    sl = dict(tau=1e-7, maxit_inner=5000, block=4, max_slices=20, verbose=False)
+    run("short", fband("short", 15, 25), n_modes=12, strategy="shift_invert", tol=1e-7,
+        slice_options=sl | {"capacity": 120}, count_options={"block": 3, "n_probes": 9},
+        precond_options={"max_coarse": 200})  # fmt: skip
+    assert all(seen[k] == x for k, x in sl.items()) and seen["capacity"] == 120
+    assert seen["tol"] == 1e-7 and seen["count_options"] == {"block": 3, "n_probes": 9}
+    assert kws and all(kw.get("max_coarse") == 200 for kw in kws)
+
+
+def test_fp32_slices(fake_builds, monkeypatch):
+    """Test 16: precond_dtype="float32" on voxel through a slice path: make builds fp64 and the
+    slice searches model the fp64 multigrid."""
+    fake_builds["name"] = "voxel"
+    monkeypatch.setattr(api, "si_band", stub_band({}))
+    kws, pcs = [], []
+    real_g, real_cap = api.gmg, mem._slice_capacity
+    monkeypatch.setattr(api, "gmg", lambda *a, **kw: kws.append(kw) or real_g(*a, **kw))
+    monkeypatch.setattr(mem, "_slice_capacity", lambda *a, **kw: pcs.append(a[1]) or
+                        real_cap(*a, **kw))  # fmt: skip
+    run("voxel", fband("voxel", 3, 12), n_modes=10, strategy="shift_invert",
+        precond_dtype="float32")  # fmt: skip
+    assert all(kw.get("dtype", "float64") == "float64" for kw in kws)
+    want = mem.gmg_memory(prob("voxel")[0], 6, dtype="float64")
+    assert pcs and pcs[0](6) == want and want != mem.gmg_memory(prob("voxel")[0], 6, "float32")
+
+
+@pytest.mark.parametrize("depth, risk", [(999, False), (1000, True)])
+def test_stagnation_risk(fake_builds, monkeypatch, depth, risk):
+    """Test 16: a capacity stop at 1000 locked modes sets stagnation_risk (999 does not)."""
+    harness(monkeypatch, np.linspace(1.0, 2.0, depth), depth, stopped="capacity")
+    with pytest.warns(UserWarning, match=f"{depth} modes locked") as w:
+        _, _, info = fake_run(1.5, 3.0)
+    assert info["stagnation_risk"] is risk
+    assert any("MINRES may stagnate" in str(x.message) for x in w) is risk
+
+
+def test_not_converged(fake_builds, monkeypatch):
+    """Test 16: LOBPCG not converged under "auto": no fallback, converged False."""
+    rec = harness(monkeypatch, [1, 2, 3, 4, 7], 4, converged=False)
+    _, _, info = fake_run(1.5, 5.0)
+    assert not info["converged"] and not rec["band"] and info["strategy"] == "lobpcg"
+    assert info["count"]["reason"] == "solve not converged"
