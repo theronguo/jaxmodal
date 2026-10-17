@@ -254,6 +254,16 @@ mub, Vb, binfo = solve_modes(
 assert len(mub) == 2 and binfo["count"]["passed"]  # the two bending modes, none missing
 ```
 
+`band=(f1, f2)` returns the modes in an interior band (PR 15d). The default `strategy="auto"` runs LOBPCG from 0 with its basis capped by `memory_budget` (default: 0.8 × RAM on the CPU, the free device pool on a GPU) and keeps the modes in the band; when no LOBPCG chunk fits, or the basis cap stops it below $f_2$, the band is solved by shift-invert slices (`strategy="shift_invert"` forces them). `info["strategy"]` and `info["reason"]` record the choice:
+
+```python
+f14 = solve_modes(hbox, materials, {"xmin": "xyz"}, 14)[2]["frequencies"]
+band = ((f14[2] + f14[3]) / 2, (f14[12] + f14[13]) / 2)  # modes 4-13, gaps of 44-48%
+mui, Vi, iinfo = solve_modes(hbox, materials, {"xmin": "xyz"}, band=band, n_modes=10)
+assert iinfo["strategy"] == "lobpcg" and iinfo["reason"] == "fits" and len(mui) == 10
+assert np.allclose(iinfo["frequencies"], f14[3:13], rtol=1e-6) and Vi.shape[1] == 10
+```
+
 See [`docs/preconditioners.md`](docs/preconditioners.md) for the solvers' stopping rules, the preconditioners, block-ELL, the measured h-study, the voxel GMG (fp32 V-cycle, memory estimator), p-MG and AMG.
 
 The scripts in [`examples/`](examples) walk through each milestone (`m0_foundations.py`: meshes, VTU, materials; `m1_operators.py`: element matrices and operators against the assembled matrices; `m2_modes.py`: a cantilever against Euler–Bernoulli and a free voxel cube); each ends with a check and runs as a smoke test.
