@@ -25,7 +25,8 @@ lob = importlib.import_module("jaxmodal.eigen.lobpcg")
 si = importlib.import_module("jaxmodal.eigen.shift_invert")
 mem = importlib.import_module("jaxmodal.memory")
 
-pytestmark = pytest.mark.filterwarnings("error:returned modes copied")
+pytestmark = [pytest.mark.filterwarnings("error:returned modes copied"),
+              pytest.mark.filterwarnings("error:si_band. [0-9]+ stored modes exceed")]
 TOL = 1e-8
 
 
@@ -401,3 +402,198 @@ def test_ladder_tiny():
                      n_rigid=0, n_avail=na, budget=1e12, host_budget=None)  # fmt: skip
     assert got == mem._up(na + k, cl)
     assert api._halvings(4) == [4] and api._halvings(40) == [40, 20, 10, 5]
+
+
+# ---------------------------------------------------------------- 4-7: shift-invert bands
+
+
+def slice_budget(name, C, n_store, block=6):
+    """The smallest budget (to 1e-9 relative) whose searched slice capacity is >= C."""
+    op, pc = models(name)
+    n = prob(name)[2].n_dof
+
+    def cap(B):
+        return mem._slice_capacity(op, pc, n, n_store=n_store, block=block, n_rigid=0, budget=B,
+                                   host_budget=None) or 0  # fmt: skip
+
+    lo, hi = 1e6, 1e11
+    while hi - lo > 1e-9 * hi:
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if cap(mid) < C else (lo, mid)
+    assert cap(hi) == C
+    return hi
+
+
+def spy_ids(monkeypatch, ids):
+    """api.si_band wrapped: the id of every V it returns."""
+    real = api.si_band
+
+    def band(*a, **kw):
+        lam, V, info = real(*a, **kw)
+        ids.append(id(V))
+        return lam, V, info
+
+    monkeypatch.setattr(api, "si_band", band)
+
+
+def shift_invert_run(monkeypatch):
+    """Test 4's run: 15c test 2(a)'s band (modes 5-28, block 6, seed 0) forced to slices at the
+    budget whose searched capacity is 96 (>= 2 runs), n_modes 26 (the store; edges widens the
+    band to 25 modes)."""
+    f1, f2 = fband("short", 5, 29)
+    blocks = []
+    real = mem._count_block
+    monkeypatch.setattr(mem, "_count_block", lambda *a, **kw: blocks.append(real(*a, **kw))
+                        or blocks[-1])  # fmt: skip
+    lam, V, info = run("short", (f1, f2), n_modes=26, strategy="shift_invert", verify=True,
+                       memory_budget=slice_budget("short", 96, 26))  # fmt: skip
+    assert blocks[0] is not None and info["capacity"] == 96 and info["reason"] == "forced"
+    assert sum(s["kind"] == "run" for s in info["slices"]) >= 2
+    c = info["count"]
+    assert c["passed"] and len(c["estimates"]) == sum(s["leaf"] for s in info["slices"])
+    assert all(e < 0.5 for e in c["estimates"])
+    check("short", f1, f2, lam, V, info)
+    ref, _, _ = run("short", (f1, f2), n_modes=26, strategy="lobpcg", verify=False)
+    assert len(ref) == len(lam) and np.allclose(ref, lam, rtol=1e-6)
+
+
+def test_shift_invert(fake_builds, monkeypatch):
+    """Test 4 with the exact preconditioner."""
+    shift_invert_run(monkeypatch)
+
+
+@pytest.mark.slow
+def test_shift_invert_amg(monkeypatch):
+    """Test 4 with real AMG."""
+    shift_invert_run(monkeypatch)
+
+
+@pytest.mark.parametrize("strategy", ["lobpcg", "shift_invert"])
+def test_empty_band(fake_builds, strategy):
+    """Test 5: a band strictly inside the cube's 4.85 -> 8.86 gap (relative 0.45): no modes, the
+    count < 0.5, not from 0."""
+    fake_builds["name"] = "cube"
+    lr = prob("cube")[6]
+    assert lr[1] < 5.5 and lr[2] > 8.0 and lr[2] - lr[1] > 0.4 * lr[2]
+    lam, V, info = run("cube", (freq(5.5), freq(8.0)), strategy=strategy, verify=True)
+    assert len(lam) == 0 and V.shape == (prob("cube")[2].n_dof, 0) and not info["from_zero"]
+    assert info["count"]["ran"] and info["count"]["estimate"] < 0.5
+
+
+def test_from_zero_band(fake_builds, monkeypatch):
+    """Test 6: band=(0, f) on the clamped box under "shift_invert": from 0, eigsh's modes, V is
+    si_band's V (i0 = 0, all its columns kept)."""
+    ids = []
+    spy_ids(monkeypatch, ids)
+    f2 = fband("short", 0, 10)[1]
+    lam, V, info = run("short", (0.0, f2), strategy="shift_invert")
+    assert info["from_zero"] and ids == [id(V)] and info["sigma"] is None
+    check("short", 0.0, f2, lam, V, info)
+
+
+@pytest.mark.parametrize("name", ["short", "free"])
+def test_below_mu1(fake_builds, monkeypatch, name):
+    """Test 7: lam_lo = lam_1 (1 + 0.5e-2) < mu1_ub (1 + 1e-2) under "shift_invert": from 0,
+    the modes below lam_lo filtered (i0 > 0: the resize shrinks si_band's own V in place)."""
+    fake_builds["name"] = name
+    lr, ids = prob(name)[6], []
+    spy_ids(monkeypatch, ids)
+    f1, f2 = freq(lr[0] * (1 + 0.5e-2)), fband(name, 2, 10)[1]
+    lam, V, info = run(name, (f1, f2), strategy="shift_invert")
+    assert info["from_zero"] and ids == [id(V)] and info["mu1_ub"] >= lr[0]
+    assert lam[0] > lr[0] * (1 + 0.5e-2)  # the filter ran (i0 > 0)
+    check(name, f1, f2, lam, V, info)
+
+
+@pytest.mark.parametrize(
+    "rel, tol, want", [(0.9e-2, TOL, True), (1.1e-2, TOL, False), (2.9e-2, 1e-4, True),
+                       (3.1e-2, 1e-4, False)]  # fmt: skip
+)
+def test_mu1_margin(monkeypatch, rel, tol, want):
+    """Test 7: from 0 when lam_lo < mu1_ub (1 + max(1e-2, 300 tol)), mu1_ub >= mu_1 patched."""
+    mu, seen = prob("short")[6][0], {}
+    monkeypatch.setattr(api, "_precond_sigma", lambda *a, **kw: (mu, 1))
+    monkeypatch.setattr(api, "si_band", stub_band(seen))
+    _, _, info = run("short", (freq(mu * (1 + rel)), fband("short", 5, 10)[1]), tol=tol,
+                     strategy="shift_invert")  # fmt: skip
+    assert info["from_zero"] == want and info["mu1_ub"] == mu
+    assert (seen["interval"][0] == 0) == want
+
+
+def test_mu1_inflated(fake_builds, monkeypatch):
+    """Test 7: an inflated mu1_ub (1.5 lam_1) above lam_lo = 1.2 lam_1: from 0, still eigsh's
+    modes (the filter drops the two below lam_lo)."""
+    lr = prob("short")[6]
+    monkeypatch.setattr(api, "_precond_sigma", lambda *a, **kw: (1.5 * lr[0], 1))
+    f1, f2 = freq(1.2 * lr[0]), fband("short", 2, 10)[1]
+    lam, V, info = run("short", (f1, f2), strategy="shift_invert")
+    assert info["from_zero"]
+    check("short", f1, f2, lam, V, info)
+
+
+def spy_pre(monkeypatch, calls):
+    """api._precond_sigma and api.sigma_estimate wrapped: their kwargs per call."""
+    real_pre, real_est = api._precond_sigma, api.sigma_estimate
+
+    def pre(*a, **kw):
+        calls.append(("pre", kw))
+        return real_pre(*a, **kw)
+
+    def est(*a, **kw):
+        calls.append(("est", kw))
+        return real_est(*a, **kw)
+
+    monkeypatch.setattr(api, "_precond_sigma", pre)
+    monkeypatch.setattr(api, "sigma_estimate", est)
+
+
+def test_pre_estimate_hint(monkeypatch):
+    """Test 7: a slice path with f1 > 0 and a sigma hint of 0.5 mu_1 on voxel 16^3 (real GMG),
+    lam_lo ~ 3 mu_1: the pre-estimate runs once from 0 (the hint never enters it), mu_1 <=
+    mu1_ub <= mu_1 (1 + 1e-3), sigma = mu1_ub, not from 0."""
+    from scipy.sparse.linalg import eigsh
+
+    from jaxmodal.mesh import voxel_mesh
+    from jaxmodal.operators import assemble, dof_mask
+
+    mesh = voxel_mesh((16,) * 3, (1 / 16,) * 3)
+    K, M = assemble(mesh, MAT)
+    f = np.flatnonzero(dof_mask(mesh, {"zmin": "xyz"}))
+    mu = eigsh(K[f][:, f].tocsc(), 1, M[f][:, f].tocsc(), sigma=0, which="LM")[0][0]
+    calls, seen = [], {}
+    spy_pre(monkeypatch, calls)
+    monkeypatch.setattr(api, "si_band", stub_band(seen))
+    _, _, info = solve_modes(mesh, MAT, {"zmin": "xyz"}, band=(freq(3 * mu), freq(4 * mu)),
+                             strategy="shift_invert", sigma=0.5 * mu)  # fmt: skip
+    assert [c for c, _ in calls] == ["pre"]
+    assert mu * (1 - 1e-12) <= info["mu1_ub"] <= mu * (1 + 1e-3)
+    assert info["sigma"] == info["mu1_ub"] and info["sigma_iterations"] > 0
+    assert not info["from_zero"] and seen["interval"][0] == (2 * np.pi * freq(3 * mu)) ** 2
+
+
+def test_pre_estimate_zero(monkeypatch):
+    """Test 7: a slice path with f1 = 0 runs no pre-estimate."""
+    calls, seen = [], {}
+    spy_pre(monkeypatch, calls)
+    monkeypatch.setattr(api, "si_band", stub_band(seen))
+    _, _, info = run("short", (0.0, fband("short", 0, 5)[1]), strategy="shift_invert")
+    assert not calls and info["sigma"] is None and info["sigma_iterations"] == 0
+
+
+@pytest.mark.parametrize("precond", ["auto", "jacobi"])
+def test_pre_estimate_free(fake_builds, monkeypatch, precond):
+    """Test 7 on the free hex8 at lam_lo ~ 3 mu_1: "auto" (sigma=0 given) falls back from the
+    singular s = 0 build to sigma_estimate inside _precond_sigma; Jacobi calls sigma_estimate at
+    its default maxit (300); mu_1 <= mu1_ub <= 1.1 mu_1, not from 0."""
+    fake_builds["name"] = "free"
+    mu, calls, seen = prob("free")[6][0], [], {}
+    spy_pre(monkeypatch, calls)
+    monkeypatch.setattr(api, "si_band", stub_band(seen))
+    kw = dict(sigma=0.0) if precond == "auto" else {}
+    _, _, info = run("free", (freq(3 * mu), freq(4 * mu)), strategy="shift_invert",
+                     precond=precond, **kw)  # fmt: skip
+    if precond == "auto":
+        assert [c for c, _ in calls] == ["pre", "est"] and calls[1][1]["maxit"] == 10
+    else:
+        assert [c for c, _ in calls] == ["est"] and "maxit" not in calls[0][1]
+    assert mu <= info["mu1_ub"] <= 1.1 * mu and not info["from_zero"]
