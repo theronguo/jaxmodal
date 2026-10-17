@@ -282,7 +282,7 @@ assert np.allclose(iinfo["frequencies"], f14[3:13], rtol=1e-6) and Vi.shape[1] =
 
 See [`docs/preconditioners.md`](docs/preconditioners.md) for the solvers' stopping rules, the preconditioners, block-ELL, the measured h-study, the voxel GMG (fp32 V-cycle, memory estimator), p-MG and AMG.
 
-The scripts in [`examples/`](examples) walk through each milestone (`m0_foundations.py`: meshes, VTU, materials; `m1_operators.py`: element matrices and operators against the assembled matrices; `m2_modes.py`: a cantilever against Euler–Bernoulli and a free voxel cube; `m3b_bands.py`: bands from 0 and interior, by LOBPCG and by slices, against SciPy); each ends with a check and runs as a smoke test.
+The scripts in [`examples/`](examples) walk through each milestone (`m0_foundations.py`: meshes, VTU, materials; `m1_operators.py`: element matrices and operators against the assembled matrices; `m2_modes.py`: a cantilever against Euler–Bernoulli and a free voxel cube; `m3b_bands.py`: bands from 0 and interior, by LOBPCG and by slices, against SciPy; `m4_shell.py`: a simply supported `ssh8` plate against Kirchhoff and the SciPy reference); each ends with a check and runs as a smoke test.
 
 See [`docs/eigensolvers.md`](docs/eigensolvers.md) for `solve_modes`, its options and their defaults, its Mac acceptance budgets, the frequency band mode and `verify`, interior bands and the strategy (memory budget, slices), the completeness count, LOBPCG (algorithm, chunks and locking, low-memory mode, memory model, convergence, measured floor and cost), the reference solver, its certification and size limits, and [`docs/verification.md`](docs/verification.md) for the exact solutions and measured convergence.
 

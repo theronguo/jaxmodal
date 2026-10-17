@@ -27,10 +27,10 @@ from .precond.gmg import _ell_rows, _islands
 from .precond.pmg import _w8, no_shell
 
 # XLA temporaries of the build kernel per element (memory_analysis, exactly linear in chunk).
-# ssh8: an envelope, 1.02 x the 16-ply value (44.6 kB at 1 ply, about +0.3 kB per ply to 12,
-# then +3.5 kB per ply; above 16 plies it underestimates).
+# ssh8: an envelope, 1.02 x the 32-ply value (44.6 KB at 1 ply, about +0.38 KB per ply; above
+# about 36 plies it underestimates).
 BUILD_BYTES = {
-    "stored": {"hex8": 29.95e3, "hex20": 241.06e3, "hex27": 322.70e3, "ssh8": 63.7e3},
+    "stored": {"hex8": 29.95e3, "hex20": 241.06e3, "hex27": 322.70e3, "ssh8": 57.5e3},
     "otf": {"hex8": 1.22e3, "hex20": 4.10e3, "hex27": 4.10e3},
 }
 GATHER_FLOATS = 15  # stencil: per-cell slab buffers besides the 24 k m GEMM ones (memory_analysis)
@@ -73,7 +73,7 @@ def unstructured_memory(
     for b in lay["blocks"]:
         n, k, c, n_pad = b["k"] // 3, b["k"], b["chunk"], b["n_pad"]
         nq = len(ELEMENTS[b["type"]].weights)
-        per_el = 300 + 36 if b["type"] == "ssh8" else k * (k + 1) // 2 + nq
+        per_el = k * (k + 1) // 2 + (36 if b["type"] == "ssh8" else nq)  # Ke + (me or wdet)
         per_el = per_el if mode == "stored" else 10 * nq
         storage += n_pad * (4 * k + 4 + 8 * per_el)  # dofs, phase, Ke + (wdet or me) or geo
         host += 8 * n_pad * (n + 1)  # padded connectivity and phase, alive during the build
@@ -424,9 +424,10 @@ def solve_modes_memory(
 # Count (docs/eigensolvers.md#completeness-count). Recurrence step with Jacobi (memory_analysis
 # temporaries of _recurrence): workspace + 8 n (a b + c), and on the stencil at least
 # 2 workspace + 8 n a_dup b (the slab workspace appears twice while a slab covers most of the
-# grid); upper envelope of hex20 12^3-28^3 and voxel 16^3-64^3, b = 4-32 (hex20 below about
-# 20k DOF, where one chunk holds the whole mesh, is outside it). Plus w0 and u (2 blocks).
-COUNT_STEP = {"unstructured": (10.2, 3.0, 0.0), "stencil": (10.2, 1.0, 2.2)}
+# grid); upper envelope of hex20 12^3-28^3, ssh8 120^2-200^2 and voxel 16^3-64^3, b = 4-32
+# (meshes below about 20k DOF, where one chunk holds the whole mesh, are outside it). Plus w0
+# and u (2 blocks).
+COUNT_STEP = {"unstructured": (10.3, 3.0, 0.0), "stencil": (10.2, 1.0, 2.2)}
 # Sampling: the y PCG on M_P, workspace + 6 vectors per probe (memory_analysis, hex20 20^3,
 # voxel 64^3), plus g and y.
 COUNT_SAMPLE = 8.0

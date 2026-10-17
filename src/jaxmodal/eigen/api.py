@@ -313,8 +313,8 @@ def solve_modes(
     or at the refined lam_1 pre-estimate; precond_dtype "float32" runs the GMG V-cycle in fp32.
     X0 (n_dof, j <= block size) seeds lobpcg's first chunk. operator_options, precond_options
     and sigma_options are dicts forwarded to the operator builder, the preconditioner builder
-    and the pre-estimate
-    (allowed keys: OPERATOR_OPTIONS, PRECOND_OPTIONS, SIGMA_OPTIONS; docs/eigensolvers.md#options).
+    and the pre-estimate (allowed keys: OPERATOR_OPTIONS, PRECOND_OPTIONS, SIGMA_OPTIONS;
+    docs/eigensolvers.md#options).
     Returns lam (ascending), V (n_dof, n_modes; with band one column per band mode) and
     lobpcg's info plus operator, n_rigid, rigid, frequencies (sqrt(lam) / 2 pi), precond,
     sigma, sigma_iterations and time["precond"].

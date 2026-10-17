@@ -192,7 +192,7 @@ User decisions (2026-10-17): the patch test is a Dirichlet lift loaded by the co
 
 Without user input (16a):
 
-- **Process:** the split into 16a (element), 16b (operator and API), 16c (accuracy suite, its own plan after the sizing study). 16a staging: one up-front check in `unstructured` and `unstructured_memory` ("ssh8 operators arrive in PR 16b"; the otf message is permanent) and an `amg_memory` raise.
+- **Process:** the split into 16a (element), 16b (operator and API), 16c (accuracy suite, its own plan after the sizing study). 16a staging: one up-front check in `unstructured` and `unstructured_memory` ("ssh8 operators arrive in PR 16b"; the otf message is permanent) and an `amg_memory` raise (removed in 16b).
 - **Type and producer:** type `ssh8`, last in `TYPES`; the registry entry copies hex8's with `lumping=None`; `solid_shell` returns `order` and appends on a second call; `box_mesh(type="ssh8")` is refused; hand-built blocks are the user's responsibility, with `check_elements` checking $\det J$ over $\zeta \in [-1, 1]$ at the 2×2 in-plane points; the VTU type field is deferred (`ssh8` reads back as hex8).
 - **Thickness rules:** a per-element `direction` array; cosine margin 0.1; the unique smallest chain count (rings counted once, chains stop at unselected elements and boundaries); the sweep sign by a tolerant `argmax`; proper permutations only; no edge-length check; `direction` required (documented, not enforced) for off-axis, non-orthotropic or unsymmetric laminates.
 - **Laminates and frame:** `Laminate`/`Ply` in `materials`, angles in radians; 2 points per ply, fixed; the reference-$\zeta$ ply mapping; a placeholder `phase_table` entry for a `Laminate` phase; the frame from $R_o$ axis 1 with the axis-2 fallback below a projection of 0.1; hex8 and `ssh8` parts with one label on a tilted plate are oriented differently (documented).
@@ -202,12 +202,13 @@ Without user input (16a):
 
 Without user input (16b):
 
-- **Build envelope:** measured on the real kernel, the `ssh8` build temporaries are 44.6 KB per element at 1 ply, +0.3 KB per ply to 12 plies, then +3.5 KB per ply (62.5 KB at 16), not the plan prototype's flat $55.4 + 0.30L$ KB. `BUILD_BYTES["stored"]["ssh8"]` stays the plan's constant (1.02× the 16-ply value, 63.7 KB); the test's upper bound is relaxed from 1.15× to 1.45× measured (the 1-ply value), and the under-estimate starts above 16 plies (about 3.5 KB per extra ply; the plan expected about 22 plies, 0.2 KB per ply). A ply-aware estimator would need the materials, which the estimators do not take.
-- **One-phase tables doubled in the build:** with one phase, XLA turns the per-element ply gather into broadcasts that take 1.5× the temporaries at 16 plies (92.6 against 62.5 KB per element); `_build` concatenates the table with itself first (indices unchanged).
+- **Build envelope:** `shell_mass` now scans the plies like `shell_stiffness` (vectorized over all plies it cost about 3 KB per ply per element in a build: 62.5 KB at 16 plies, 118 KB at 32). The build is then 44.6 KB per element at 1 ply plus about 0.38 KB per ply (56.4 KB at 32). `BUILD_BYTES["stored"]["ssh8"]` is fitted at 32 plies instead of the plan's 16 (1.02×, 57.5 KB), so it holds to about 36 plies; the test checks 1–32 plies with the upper bound relaxed from 1.15× to 1.30× measured (the 1-ply value). A ply-aware estimator would need the materials, which the estimators do not take.
+- **One-phase tables doubled in the build:** with one phase, XLA turns the per-element ply gather into broadcasts (60.1 against 44.6 KB per element at 1 ply); `_build` concatenates the table with itself first (indices unchanged).
+- **Reader:** only `SC8R` maps to `ssh8` (the plan's `SC8` is not an Abaqus element name); stack directions from `*SHELL SECTION` are not read (documented). `COUNT_STEP`'s unstructured $a$ goes from 10.2 to 10.3 (an `ssh8` mesh measured 1.01× the old model).
 - **`_chunk_temps` unchanged for `me`:** `apply_M`'s unpacked $8\times8$ $m_e$ is far below `apply_K`'s unpacked $K_e$ ($24^2$), and the two are never live together.
 - **Messages:** the `sigma_options` error appends "(precond: auto (resolved to jacobi))" (or the explicit name), so the Jacobi default on `ssh8` explains itself; the AMG sentence comes from one helper (`precond.pmg.no_shell`).
 - **README:** the laminate snippet's plate is 20 mm thick ($L/t = 20$, 134 Jacobi iterations) instead of 4 mm, where Jacobi stagnates.
-- **Band tests:** the M4 band runs check $\lambda$ to $10\,$tol (the band tests' rule), the count and the multiplicities, with `verify=True`.
+- **Band tests:** the M4 band runs check $\lambda$ to 10 tol (the band tests' rule), the count and the multiplicities, with `verify=True`.
 
 ### MINRES plateaus below $\|b\|$ (PR 15c)
 

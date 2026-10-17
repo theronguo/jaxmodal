@@ -148,16 +148,21 @@ def shell_stiffness(X, table_e):
 
 
 def shell_mass(X, plies):
-    """Scalar consistent mass block m_e (8, 8), rho included: M_e = m_e (x) I_3."""
-    zeta = _ply_zeta(plies.fraction)
+    """Scalar consistent mass block m_e (8, 8), rho included: M_e = m_e (x) I_3; plies
+    accumulated by lax.scan (all plies at once cost about 3 KB per ply per element in a build)."""
 
     def at(q):
         N, dN = _shape(q)
         return N, jnp.linalg.det(X.T @ dN)
 
-    N, det = jax.vmap(jax.vmap(at))(jax.vmap(_ply_coords)(zeta))  # (L, 8, 8), (L, 8)
-    rw = (plies.material.rho * plies.fraction)[:, None]
-    return _sym(jnp.einsum("lq,lqa,lqb->ab", rw * det, N, N))
+    def step(m, x):
+        rho, fraction, zeta = x
+        N, det = jax.vmap(at)(_ply_coords(zeta))  # (8, 8), (8,)
+        return m + jnp.einsum("q,qa,qb->ab", rho * fraction * det, N, N), None
+
+    xs = (plies.material.rho, plies.fraction, _ply_zeta(plies.fraction))
+    m, _ = lax.scan(step, jnp.zeros((8, 8), jnp.result_type(X, float)), xs)
+    return _sym(m)
 
 
 def shell_recover(X, table_e, u):

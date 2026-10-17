@@ -1,8 +1,8 @@
 """Matrix-free K and M on unstructured hex8/hex20/hex27 and ssh8 meshes. See docs/operators.md.
 
 The operator is a pytree: every array is a jit argument, only sizes and flags are static.
-ssh8 (solid-shell) blocks are stored only: the condensed K_e and the 8x8 nodal mass m_e (rho
-included, so op.rho is not read; M_e = s_M m_e (x) I_3).
+ssh8 (solid-shell) blocks are stored only: the condensed K_e and the 8x8 nodal mass m_e with
+rho included (op.rho is not read); M_e = s_M m_e (x) I_3.
 """
 
 import dataclasses
@@ -216,10 +216,12 @@ def _packed_index(k):
 @partial(jax.jit, static_argnums=(0, 1))
 def _build(t, mode, points, conn, phase, C):
     """Per-element leaves for one block; conn (n_chunks, c, n), so the output is the padded leaf.
-    C is phase_table's C, or for ssh8 ply_table's (plies, R_o): leaves (Ke, me)."""
-
-    if t == "ssh8" and len(C[1]) == 1:  # XLA turns a size-1 gather into broadcasts that take
-        C = jax.tree.map(lambda a: jnp.concatenate([a, a]), C)  # 1.5x the temporaries at 16 plies
+    C is phase_table's C, or for ssh8 (always stored) ply_table's (plies, R_o): leaves (Ke,
+    me)."""
+    if t == "ssh8" and len(C[1]) == 1:
+        # one phase: XLA turns the size-1 gather into broadcasts (1.35x the temporaries at 1
+        # ply); the doubled table has the same entries at the same indices
+        C = jax.tree.map(lambda a: jnp.concatenate([a, a]), C)
 
     def f(args):
         cn, ph = args
@@ -271,8 +273,7 @@ def unstructured(
         sizes |= {"inv": lay["inv"].size, "window": lay["window"] + 1}
     check_int32(**sizes)
     C, rho = phase_table(pairs, materials, orientations)
-    if "ssh8" in mesh.blocks:
-        plies = ply_table(pairs, materials, orientations)
+    plies = ply_table(pairs, materials, orientations) if "ssh8" in mesh.blocks else None
     points = jnp.asarray(mesh.points)
     blocks = []
     for b in lay["blocks"]:

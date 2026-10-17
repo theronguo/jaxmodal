@@ -3,7 +3,7 @@ docs/operators.md.
 
 The consistent element mass is m_e = sum_q (w det J)_q N_q N_q^T = B_e B_e^T with
 B_e = N^T diag(sqrt(w det J)), so sqrt(rho s_M) B_e (x) I_3 is an exact factor of M_e: no
-Cholesky, padded elements (s_M = 0) give B_e = 0. ssh8 blocks store m_e itself (rho
+Cholesky, padded elements (s_M = 0) give a zero factor. ssh8 blocks store m_e itself (rho
 included), so their factor is sqrt(s_M) chol(m_e), also exact. Lumped masses are diagonal:
 g = sqrt(diag M) xi. The element inputs are drawn per chunk (unstructured) or per slab (voxel)
 inside the scatter loop, so they never exist for the whole mesh.
@@ -42,7 +42,7 @@ def xi_shapes(op):
     (n_steps, cells per step, nq, 3), one entry per scatter-loop step."""
     if op.mass == "lumped":
         return {"nodal": (op.n_dof,)}
-    if isinstance(op, Unstructured):  # ssh8: the factor width 8 is its (hex8) weights' count
+    if isinstance(op, Unstructured):  # ssh8: factor width 8 = its (hex8) weights' count (tested)
         elem = tuple(
             (b.dofs.shape[0] // b.chunk, b.chunk, len(ELEMENTS[b.type].weights), 3)
             for b in op.blocks
