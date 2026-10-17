@@ -248,3 +248,156 @@ def test_capacity_store(fake_builds, monkeypatch, case):
     assert info["n_store"] == seen["n_store"] == caps[0] == want
     assert info["from_zero"] == (case == "zero")
     assert seen["interval"][0] == (0.0 if case == "zero" else (2 * np.pi * f1) ** 2)
+
+
+# ---------------------------------------------------------------- 3: memory and the ladder
+
+
+def voxel_budget(s):
+    """Test 3's budgets: the chunk-5 fit at C = 40 on voxel 10^3 with factor s on the model."""
+    return need(lob_est("voxel", 5, 40), s=s)
+
+
+def spy_band(monkeypatch, seen):
+    """api.si_band wrapped: its interval and kwargs recorded, the real slices run."""
+    real = api.si_band
+
+    def band(op, free, a, b, make, **kw):
+        seen.update(kw, interval=(a, b))
+        return real(op, free, a, b, make, **kw)
+
+    monkeypatch.setattr(api, "si_band", band)
+
+
+def test_memory_bracket(fake_builds):
+    """Test 3: 1.15x and 1.25x the chunk-5 fit at C = 40 bracket the 1.2 model factor: LOBPCG
+    chunk 5 (C_max 40, a band in the first 30 modes: "fits") above, "memory" below with the
+    slice floor of 72 searched."""
+    fake_builds["name"] = "voxel"
+    f1, f2 = fband("voxel", 3, 12)
+    _, _, info = run("voxel", (f1, f2), n_modes=10, memory_budget=voxel_budget(1.25))
+    assert info["reason"] == "fits" and info["chunk"] == 5 and info["c_max"][5] == 40
+    with pytest.warns(UserWarning, match=r"no LOBPCG chunk fits.*levers: low_memory=True"):
+        _, _, info = run("voxel", (f1, f2), n_modes=10, memory_budget=voxel_budget(1.15))
+    assert info["reason"] == "memory" and info["strategy"] == "shift_invert"
+    assert info["capacity"] >= 72 and set(info["c_max"].values()) == {None}
+
+
+@pytest.mark.parametrize("case", ["below", "above", "zero"])
+def test_memory(fake_builds, monkeypatch, case):
+    """Test 3, "memory" at 1.15x: lam_lo < mu_1 counts from 0 ("below"; band=(0, f) under
+    "auto": "zero"), lam_lo well above mu_1 slices (lam_lo, lam_hi) and its counts pass; the
+    capacity is the search's, the count block si_band receives the searched one (< n_probes)."""
+    fake_builds["name"] = "voxel"
+    lr, B = prob("voxel")[6], voxel_budget(1.15)
+    f2 = fband("voxel", 0, 10)[1]
+    f1 = dict(below=freq(0.5 * lr[0]), above=fband("voxel", 3, 12)[0], zero=0.0)[case]
+    if case == "above":
+        f2 = fband("voxel", 3, 12)[1]
+    seen, blocks, caps = {}, [], []
+    spy_band(monkeypatch, seen)
+    real_block, real_cap = mem._count_block, mem._slice_capacity
+    monkeypatch.setattr(mem, "_count_block", lambda *a, **kw: blocks.append(real_block(*a, **kw))
+                        or blocks[-1])  # fmt: skip
+    monkeypatch.setattr(mem, "_slice_capacity", lambda *a, **kw: caps.append(real_cap(*a, **kw))
+                        or caps[-1])  # fmt: skip
+    with pytest.warns(UserWarning, match="no LOBPCG chunk fits"):
+        lam, V, info = run("voxel", (f1, f2), n_modes=10, memory_budget=B, verify=case == "above")
+    assert info["reason"] == "memory" and info["from_zero"] == (case != "above")
+    lo, hi = (2 * np.pi * f1) ** 2, (2 * np.pi * f2) ** 2
+    assert seen["interval"] == ((lo, hi) if case == "above" else (0.0, hi))
+    assert len(caps) == 1 and caps[0] >= 72 and info["capacity"] == seen["capacity"] == caps[0]
+    assert blocks[0] is not None and blocks[0] < 50 and seen["count_options"]["block"] == blocks[0]
+    if case == "above":  # from 0 the count's degree is 1912 here (147 s)
+        assert info["count"]["passed"] and all(e < 0.5 for e in info["count"]["estimates"])
+    check("voxel", f1, f2, lam, V, info)
+
+
+def test_memory_block_sentinel(fake_builds, monkeypatch):
+    """Test 3: a sentinel block from the search reaches si_band's counts."""
+    fake_builds["name"] = "voxel"
+    seen = {}
+    spy_band(monkeypatch, seen)
+    monkeypatch.setattr(mem, "_count_block", lambda *a, **kw: 3)
+    f1, f2 = fband("voxel", 3, 12)
+    with pytest.warns(UserWarning, match="no LOBPCG chunk fits"):
+        run("voxel", (f1, f2), n_modes=10, memory_budget=voxel_budget(1.15))
+    assert seen["count_options"]["block"] == 3
+
+
+@pytest.mark.parametrize("f1", [0.0, "interior"])
+def test_memory_no_lobpcg_build(fake_builds, monkeypatch, f1):
+    """Test 3: on "memory" no LOBPCG preconditioner is built ("short", a budget below chunk 5's
+    need, the slice capacity given): f1 = 0 builds nothing before si_band and never asks for
+    aggregates; f1 > 0 builds only inside _precond_sigma."""
+    seen, inside = {}, []
+    real_band, real_pre = api.si_band, api._precond_sigma
+
+    def band(*a, **kw):
+        seen["before"] = len(fake_builds["builds"])
+        return real_band(*a, **kw)
+
+    def pre(op, free, R, build, **kw):
+        n0 = len(fake_builds["builds"])
+        out = real_pre(op, free, R, build, **kw)
+        inside.append(len(fake_builds["builds"]) - n0)
+        return out
+
+    monkeypatch.setattr(api, "si_band", band)
+    monkeypatch.setattr(api, "_precond_sigma", pre)
+    f1, f2 = (0.0, fband("short", 0, 6)[1]) if f1 == 0 else fband("short", 3, 9)
+    B = need(lob_est("short", 5, 40)) - 1e6
+    with pytest.warns(UserWarning, match="no LOBPCG chunk fits"):
+        run("short", (f1, f2), n_modes=6, memory_budget=B, verify=False,
+            slice_options={"capacity": 96})  # fmt: skip
+    assert seen["before"] == sum(inside) and (f1 == 0) == (not inside)
+    assert not any(ra for _, ra, _ in fake_builds["builds"])
+
+
+def chunk_need(name, c):
+    """The budget at which chunk c's initial basis just fits."""
+    k = lob._block_size(c, c, None)[2]
+    cl = lob._capacity(0, c, k, False)[0]
+    return need(lob_est(name, c, min(mem._up(4 * c + k, cl), mem._up(n_avail(name) + k, cl))))
+
+
+def test_ladder_real(fake_builds):
+    """Test 3: an interior band on "short" at a budget between chunk 20's and chunk 40's needs:
+    the chunk is the reach rule's on the searched C_max table, below the top chunk (measured:
+    C_max 960 / 1320 / 1360 at chunks 20 / 10 / 5, so chunk 10)."""
+    B = (chunk_need("short", 20) + chunk_need("short", 40)) / 2
+    reach = {c: c_max("short", c, B) for c in (40, 20, 10, 5)}
+    assert reach[40] is None and reach[20] is not None
+    f1, f2 = fband("short", 15, 25)
+    _, _, info = run("short", (f1, f2), n_modes=10, memory_budget=B, verify=False)
+    assert info["c_max"] == reach and info["chunk"] == api._ladder(reach, None) < 20
+
+
+@pytest.mark.parametrize(
+    "reach, need, want",
+    [
+        ({40: None, 20: 800, 10: 1000, 5: 1100}, None, 10),  # 1000 >= 0.9 x 1100
+        ({40: None, 20: 800, 10: 980, 5: 1100}, None, 5),  # 980 < 990
+        ({40: 300, 20: 800, 10: 1000, 5: 1100}, None, 10),  # the largest fitting misses 0.9 best
+        ({40: 300, 20: 800, 10: 1000}, {40: 400, 20: 600, 10: 500}, 20),  # known depth reached
+        ({40: 300, 20: 400}, {40: 500, 20: 450}, 20),  # no chunk reaches it: the 0.9 rule
+        ({4: 120}, None, 4),  # a top chunk below 5
+        ({40: None, 20: None}, None, None),
+    ],
+)
+def test_ladder(reach, need, want):
+    assert api._ladder(reach, need) == want
+
+
+def test_ladder_tiny():
+    """Test 3: a mesh whose free space is below up(4 chunk + k, c_L): C_max is capped at the free
+    space (the window starts there), and _halvings keeps a top chunk below 5 alone."""
+    op, pc = models("tiny")
+    n, na = prob("tiny")[2].n_dof, n_avail("tiny")
+    k = lob._block_size(40, 40, None)[2]
+    cl = lob._capacity(0, 40, k, False)[0]
+    assert mem._up(na + k, cl) < mem._up(4 * 40 + k, cl)
+    got = mem._c_max(op, pc, n, chunk=40, guards=None, low=False, basis_dtype="float64",
+                     n_rigid=0, n_avail=na, budget=1e12, host_budget=None)  # fmt: skip
+    assert got == mem._up(na + k, cl)
+    assert api._halvings(4) == [4] and api._halvings(40) == [40, 20, 10, 5]
