@@ -244,7 +244,7 @@ est, cinfo = count(hop, hfree, V, mu, mu[1], mu[2], n_probes=10)  # cut between 
 assert cinfo["verifiable"] and cinfo["passed"] and est < 0.5
 ```
 
-`band=(0, f_max)` returns every elastic mode up to $f_{max}$ (PR 14b) without knowing their number: chunked LOBPCG from 0 stops at the first chunk with a converged Ritz value beyond the edge, then `count` checks the cut between the last mode inside and the first beyond. `verify=True` always counts (unless the solve failed or the count cannot fit its memory; then it warns), `verify=None` (the default) only when its predicted cost is below the solve, `verify=False` never:
+`band=(0, f_max)` returns every elastic mode up to $f_{max}$ (PR 14b) without knowing their number: when its basis fits the memory budget (else shift-invert slices, PR 15d), chunked LOBPCG from 0 stops at the first chunk with a converged Ritz value beyond the edge, then `count` checks the cut between the last mode inside and the first beyond. `verify=True` always counts (unless the solve failed or the count cannot fit its memory; then it warns), `verify=None` (the default) only when its predicted cost is below the solve, `verify=False` never:
 
 ```python
 f = info["frequencies"]

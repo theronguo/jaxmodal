@@ -502,7 +502,9 @@ def si_checked(
     the nearest pair above. W (host), lam_W: the caller's known M-orthonormal modes (e.g.
     adjacent slices'), deflated by si_slice (and converged candidates of its stop rule). verify
     False: the slice alone, no count and no restarts (info["count"] then holds the predicted
-    degree and gap, reason "not requested"). count_precond: the count's preconditioner (default
+    degree and gap, reason "not requested"); None: counted when counting._decide predicts it
+    costs no more than the first run (decided once per call on the first count; restarts
+    follow). count_precond: the count's preconditioner (default
     precond, the slice's). count_options: count's options (verbose defaults to verbose).
     slice_options: si_slice's.
 
@@ -515,8 +517,11 @@ def si_checked(
     ran) plus ran, reason, estimate, estimates, flagged (some verifiable count >= 0.5) and
     restarts. reason: None (passed), "slice not converged", "restart capacity", "degree above
     MAX_DEGREE: the gap is too small to count", "count unverifiable: an inner solve failed" or
-    "count >= 0.5 after RESTARTS restarts" ("not requested" without verify). A failed check is
-    not passed; only a verifiable count >= 0.5 flags it."""
+    "count >= 0.5 after RESTARTS restarts" ("not requested" without verify; under None also
+    "predicted cost (a lower bound) above the solve" or "predicted cost above the solve"). The
+    count records carry t_leaf, t_minres and _decide's record (predicted_*, build_s,
+    calibration_s, calibrated_*). A failed check is not passed; only a verifiable count >= 0.5
+    flags it."""
     n = op.n_dof
     if (W is None) != (lam_W is None):
         raise ValueError("W and lam_W must be given together")

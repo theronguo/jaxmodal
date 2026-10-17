@@ -333,11 +333,11 @@ def test_memory(fake_builds, monkeypatch, case):
     f1 = dict(below=freq(0.5 * lr[0]), above=fband("voxel", 3, 12)[0], zero=0.0)[case]
     if case == "above":
         f2 = fband("voxel", 3, 12)[1]
-    seen, blocks, caps = {}, [], []
+    seen, blocks, caps, kws = {}, [], [], []
     spy_band(monkeypatch, seen)
     real_block, real_cap = mem._count_block, mem._slice_capacity
-    monkeypatch.setattr(mem, "_count_block", lambda *a, **kw: blocks.append(real_block(*a, **kw))
-                        or blocks[-1])  # fmt: skip
+    monkeypatch.setattr(mem, "_count_block", lambda *a, **kw: kws.append(kw) or
+                        blocks.append(real_block(*a, **kw)) or blocks[-1])  # fmt: skip
     monkeypatch.setattr(mem, "_slice_capacity", lambda *a, **kw: caps.append(real_cap(*a, **kw))
                         or caps[-1])  # fmt: skip
     with pytest.warns(UserWarning, match="no LOBPCG chunk fits"):
@@ -347,6 +347,7 @@ def test_memory(fake_builds, monkeypatch, case):
     assert seen["interval"] == ((lo, hi) if case == "above" else (0.0, hi))
     assert len(caps) == 1 and caps[0] >= 72 and info["capacity"] == seen["capacity"] == caps[0]
     assert blocks[0] is not None and blocks[0] < 50 and seen["count_options"]["block"] == blocks[0]
+    assert kws[0]["window"] == 2 * (caps[0] - 12) and kws[0]["n_store"] == info["n_store"]
     if case == "above":  # from 0 the count's degree is 1912 here (147 s)
         assert info["count"]["passed"] and all(e < 0.5 for e in info["count"]["estimates"])
     check("voxel", f1, f2, lam, V, info)
@@ -390,6 +391,7 @@ def test_memory_no_lobpcg_build(fake_builds, monkeypatch, f1):
         run("short", (f1, f2), n_modes=6, memory_budget=B, verify=False,
             slice_options={"capacity": 96})  # fmt: skip
     assert seen["before"] == sum(inside) and (f1 == 0) == (not inside)
+    assert f1 == 0 or sum(inside) > 0
     assert not any(ra for _, ra, _ in fake_builds["builds"])
 
 
@@ -829,7 +831,7 @@ def test_filter_capacity_sorted(fake_builds, monkeypatch):
     with pytest.warns(UserWarning, match="4 modes locked"):
         _, _, info = fake_run(1.5, 9.0)
     assert len(rec["band"]) == 1 and not rec["verify"] and info["reason"] == "capacity"
-    assert info["mu1_ub"] == 1.0
+    assert info["mu1_ub"] == 1.0 and info["stopped"] == "capacity"
 
 
 # ---------------------------------------------------------------- 9, 10: clusters, the top
@@ -874,15 +876,15 @@ def band_solve(cap, lam_stop, n_modes=30, chunk=5, dtype="float64", maxit=200):
 
 
 def test_solve_capacity_sequence(monkeypatch):
-    """Test 12: every basis width a multiple of c_L = 40 (chunk 5, k = 10), growing straight to
-    the cap 120 (40 -> 80 -> 120), then the capacity stop below lam_stop: 110 + k = 120 locks,
-    115 stops."""
+    """Test 12: every basis width a multiple of c_L = 40 (chunk 5, k = 10), growing by 3/2 and
+    clamped at the cap 160 (40 -> 80 -> 120 -> 160, not 180), then the capacity stop below
+    lam_stop: 150 + k = 160 locks, 155 stops."""
     news, real = [], lob._grow
     monkeypatch.setattr(lob, "_grow", lambda V, count, new, c, dt: news.append(new)
                         or real(V, count, new, c, dt))  # fmt: skip
-    lam, V, info = band_solve(120, 10 * prob("short")[6][-1])
-    assert news == [80, 120] and info["capacity"] == 120 and info["stopped"] == "capacity"
-    assert len(lam) == 115 and V.shape == (V.shape[0], 130)
+    lam, V, info = band_solve(160, 10 * prob("short")[6][-1])
+    assert news == [80, 120, 160] and info["capacity"] == 160 and info["stopped"] == "capacity"
+    assert len(lam) == 155 and V.shape == (V.shape[0], 170)
 
 
 def test_solve_boundary(monkeypatch):
@@ -1319,16 +1321,17 @@ def test_decide_table(monkeypatch):
 
 
 def clocked_slice(monkeypatch, lo, hi, *, move=False, fail=False, capacity=96):
-    """si_slice on "short" (exact preconditioner) under a fake clock: MINRES call 1 takes 10 s,
-    later calls 1e-3 s per iteration; move: call 1 reports stagnation (sigma moves); fail: call
-    1 returns non-finite residuals. Returns info and the per-call (seconds, iterations)."""
+    """si_slice on "short" (exact preconditioner) under a fake clock: MINRES call 1 (calls 1 and
+    2 with move) takes 10 s, later calls 1e-3 s per iteration; move: call 1 reports stagnation
+    (sigma moves); fail: call 1 returns non-finite residuals. Returns info and the per-call
+    (seconds, iterations)."""
     clock, calls = Clock(), []
     real = si.minres
 
     def minres(A, b, P, **kw):
         x, info = real(A, b, P, **kw)
         its = int(np.asarray(info["iterations"]).max())
-        dt = 10.0 if not calls else 1e-3 * its
+        dt = 10.0 if len(calls) < 1 + move else 1e-3 * its
         clock.t += dt
         calls.append((dt, its))
         if len(calls) == 1 and (move or fail):
@@ -1594,11 +1597,12 @@ def test_leaf_calibration(monkeypatch):
 
 
 def test_store_warning(monkeypatch):
-    """Test 14: the store warning once, when the store passes n_store."""
+    """Test 14: the store warning once, when the store passes n_store (1: every slice passes
+    it)."""
     fake_band(monkeypatch, tsi.found)
     lo, hi = edges(prob("short")[6], 3, 16)
-    with pytest.warns(UserWarning, match="stored modes exceed n_store = 5") as w:
-        tsi.fband("short", lo, hi, edges=[(lo + hi) / 2], n_store=5)
+    with pytest.warns(UserWarning, match="stored modes exceed n_store = 1") as w:
+        tsi.fband("short", lo, hi, edges=[(lo + hi) / 2], n_store=1)
     assert sum("exceed n_store" in str(x.message) for x in w) == 1
 
 
@@ -1665,6 +1669,9 @@ def test_cap_error_band(monkeypatch, zero):
         (dict(band=(0, 10), slice_options={"edges": [2.0, 1.0]}), "edges must be sorted"),
         (dict(band=(0, 10), n_modes=-3), "n_modes must be an int"),
         (dict(band=(1, 10), n_modes=2.5), "n_modes must be an int"),
+        (dict(band=(1, 10), chunk=0), "chunk must be an int"),
+        (dict(band=(0, 10), slice_options={"edges": "a"}), "edges must be sorted"),
+        (dict(band=(0, 10), slice_options={"edges": 5}), "edges must be sorted"),
         (dict(band=(10, 10)), "f1 < f2"),
         (dict(band=(-1, 10)), "f1 >= 0"),
     ],
@@ -1673,6 +1680,15 @@ def test_options(kw, match):
     """Test 16: the band options without band, bad values, unknown slice_options keys."""
     with pytest.raises(ValueError, match=match):
         solve_modes(prob("tiny")[0], MAT, MESHES["tiny"][1], **({"n_modes": 3} | kw))
+
+
+def test_numpy_slice_ints(fake_builds, monkeypatch):
+    """Test 16: NumPy integers in slice_options reach si_band as Python ints."""
+    seen = {}
+    monkeypatch.setattr(api, "si_band", stub_band(seen))
+    run("short", fband("short", 15, 25), strategy="shift_invert", verify=False,
+        slice_options={"capacity": np.int64(96), "block": np.int64(4)})  # fmt: skip
+    assert type(seen["capacity"]) is int and type(seen["block"]) is int
 
 
 def test_forced_lobpcg_no_fit(fake_builds):

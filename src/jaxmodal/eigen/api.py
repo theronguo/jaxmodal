@@ -127,15 +127,22 @@ def _check_slice_options(opts):
     for key in ("maxit_inner", "block", "max_slices", "capacity"):
         if key in opts and not is_count(opts[key]):
             raise ValueError(f"slice_options {key} must be an int >= 1, got {opts[key]!r}")
+        if key in opts:
+            opts[key] = int(opts[key])  # si_band takes Python ints only
     if "tau" in opts and not opts["tau"] > 0:
         raise ValueError(f"slice_options tau must be > 0, got {opts['tau']!r}")
     if "verbose" in opts and not isinstance(opts["verbose"], bool):
         raise ValueError(f"slice_options verbose must be a bool, got {opts['verbose']!r}")
     if opts.get("capacity", math.inf) < 2 * opts.get("block", 6):
         raise ValueError(f"slice_options capacity must be >= 2 block, got {opts['capacity']}")
-    edges = [float(x) for x in opts.get("edges", [])]
-    if edges != sorted(set(edges)) or any(not x > 0 for x in edges):
-        raise ValueError(f"slice_options edges must be sorted, distinct and > 0, got {edges}")
+    try:
+        edges = [float(x) for x in opts.get("edges") or []]
+    except (TypeError, ValueError):
+        edges = None
+    if edges is None or edges != sorted(set(edges)) or any(not x > 0 for x in edges):
+        raise ValueError(
+            f"slice_options edges must be sorted, distinct and > 0, got {opts['edges']!r}"
+        )
 
 
 def _nbytes(x):
@@ -151,9 +158,11 @@ def _nbytes(x):
     return 0
 
 
-def _verify(verify, opts, op, free, R, lam, V, n_band, lam_stop, m, t_it, solve_s, build, budget):
+def _verify(
+    verify, opts, op, free, R, lam, V, n_band, lam_stop, m, t_it, solve_s, build, probe_block
+):
     """info["count"] of a band solve: the predicted counting cost, and the count itself unless
-    verify is False or (verify None) predicted to cost more than the solve. budget() -> the
+    verify is False or (verify None) predicted to cost more than the solve. probe_block() -> the
     probe block (or a ValueError: the count does not fit the solve's memory); build(lam_c) -> the
     preconditioner at lam_c."""
     out = dict(ran=False, reason=None, predicted_steps=None, predicted_s=None,
@@ -168,7 +177,7 @@ def _verify(verify, opts, op, free, R, lam, V, n_band, lam_stop, m, t_it, solve_
     n_probes = opts.get("n_probes", 50)
     out.update(lam_c=lam_c, gap=gap, degree=d)
     try:
-        b = min(opts["block"], n_probes) if "block" in opts else budget(n_probes)
+        b = min(opts["block"], n_probes) if "block" in opts else probe_block(n_probes)
     except ValueError as e:
         out["reason"] = (f"count does not fit the solve's memory ({e}); pass "
                          "count_options={'block': 1} to run it with a larger peak")  # fmt: skip
@@ -297,9 +306,9 @@ def solve_modes(
     size) seeds lobpcg's first chunk. operator_options, precond_options and sigma_options are
     dicts forwarded to the operator builder, the preconditioner builder and the pre-estimate
     (allowed keys: OPERATOR_OPTIONS, PRECOND_OPTIONS, SIGMA_OPTIONS; docs/eigensolvers.md#options).
-    Returns lam (ascending),
-    V (n_dof, n_modes) and lobpcg's info plus operator, n_rigid, rigid, frequencies
-    (sqrt(lam) / 2 pi), precond, sigma, sigma_iterations and time["precond"].
+    Returns lam (ascending), V (n_dof, n_modes; with band one column per band mode) and
+    lobpcg's info plus operator, n_rigid, rigid, frequencies (sqrt(lam) / 2 pi), precond,
+    sigma, sigma_iterations and time["precond"].
 
     band=(f1, f2) (Hz, 0 <= f1 < f2) instead returns every elastic mode with f1 <= f <= f2 (and
     whole clusters reaching into the band), possibly none: solve_modes(mesh, materials, bcs,
@@ -323,8 +332,9 @@ def solve_modes(
             raise ValueError("strategy, memory_budget and slice_options need band")
     else:
         f1, f2 = check_band(band)
-        if n_modes is not None and not is_count(n_modes):
-            raise ValueError(f"n_modes must be an int >= 1, got {n_modes!r}")
+        for name, x in (("n_modes", n_modes), ("chunk", chunk)):
+            if x is not None and not is_count(x):
+                raise ValueError(f"{name} must be an int >= 1, got {x!r}")
     if strategy not in STRATEGIES:
         raise ValueError(f"strategy must be one of {STRATEGIES}, got {strategy!r}")
     if memory_budget is not None and not (
@@ -458,7 +468,7 @@ def solve_modes(
         sigma = sigma or 0.0
         P, aggs = lobpcg_precond(sigma)
         t_p = time.perf_counter() - t0
-        n_m, ch = band_defaults(n_modes if f1 == 0 else None, ch, guards, n_avail)
+        n_m = band_defaults(n_modes if f1 == 0 else None, ch, guards, n_avail)[0]
         lam, V, info = _solve(
             op, free, n_m, tol, Rd, P, X0, maxit, seed, chunk=ch, guards=guards,
             basis_dtype=basis_dtype, low=low_memory, lam_stop=lam_hi, max_capacity=reach[ch],
@@ -482,14 +492,15 @@ def solve_modes(
                     f" {levers(ch)}, or strategy='shift_invert' or 'auto'"
                 )  # fmt: skip
             L = depth - _keep(lam, info["thresholds"], lam_lo, depth)
-            out["mu1_ub"] = min([float(lam[0])] + ([pre] if pre is not None else []))
+            out["mu1_ub"] = min(float(lam[0]), math.inf if pre is None else pre)
             t_lob = info["time"]
             V = lam = info = aggs = None  # LOBPCG's modes and aggregates freed before the slices
-            out.update(reason="capacity", stagnation_risk=depth >= STAGNATION_DEPTH)
+            risk = depth >= STAGNATION_DEPTH
+            out.update(reason="capacity", stagnation_risk=risk)
             warnings.warn(
                 f"LOBPCG stopped at its basis cap C_max = {reach[ch]} with {depth} modes locked"
                 f" below f2: the band continues with shift-invert slices"
-                + (" (MINRES may stagnate at this depth)" if depth >= STAGNATION_DEPTH else "")
+                + (" (MINRES may stagnate at this depth)" if risk else "")
                 + f"; levers: {levers(ch)}", stacklevel=2,
             )  # fmt: skip
     if ch is not None and stopped != "capacity":  # LOBPCG reached the band's end

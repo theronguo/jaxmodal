@@ -392,8 +392,9 @@ def solve_modes_memory(
     operator_options and precond_options as in solve_modes (coarse_degree and ratio change no
     memory). n_rigid=None counts the rigid modes left by bcs on the host (builds the dense rigid
     modes: about 20 GB at 100M DOF; pass n_rigid for large meshes). band=(0, f_max): the band
-    solve expecting n_modes modes (n_modes and chunk default as in solve_modes); its count fits
-    by construction (solve_modes sizes the probe block from this estimate)."""
+    solve expecting n_modes modes (n_modes and chunk default as band_defaults gives them, not
+    the ladder's possibly halved chunk); its count fits by construction (solve_modes sizes the
+    probe block from this estimate)."""
     if band is not None and check_band(band)[0] > 0:
         raise ValueError("solve_modes_memory needs band=(0, f_max): no estimate of f1 > 0 yet")
     if band is None and n_modes is None:
