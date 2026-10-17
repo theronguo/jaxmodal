@@ -237,6 +237,16 @@ def _lock(B, count, X, j):
     return _insert(B, X * (jnp.arange(X.shape[1]) < j), jnp.asarray(count, jnp.int32))
 
 
+def _grow(V, count, new, c, dtype):
+    """A zero (n, new) basis of dtype holding the host V's first up(count, c) columns, copied in
+    chunks of c (each synchronised before the next, so transfers do not pile up)."""
+    B = jnp.zeros((V.shape[0], new), dtype)
+    for i in range(0, -(-count // c) * c, c):
+        B = _insert(B, jnp.asarray(V[:, i : i + c]), jnp.int32(i))
+        B.block_until_ready()
+    return B
+
+
 @functools.partial(jax.jit, static_argnames="c")
 def _reortho(X, j, op, m, B, count, c):
     """X[:, :j] M-orthogonalized twice against B[:, :count], then M-orthonormalized by
@@ -455,15 +465,20 @@ def _explicit(state, op, m, consts, low):
 
 def _solve(
     op, free, n_modes, tol, R, precond, X0, maxit, seed, chunk=None, guards=None,
-    basis_dtype="float64", low=False, stop=None, lam_stop=None,
+    basis_dtype="float64", low=False, stop=None, lam_stop=None, max_capacity=None,
 ):  # fmt: skip
     """lobpcg's solve; stop: a callback on the Ritz-sum history ending a chunk (sigma_estimate).
     lam_stop (band mode, solve_modes(band=...)): every chunk is lockable and the solve stops at
     the first chunk with a converged mode beyond the band [0, lam_stop] (_band_count); n_modes is
-    the expected count (the basis and the host V grow past it) and chunk may exceed it. Returns
-    every converged mode, info["n_band"] of them in the band."""
+    the expected count (the basis grows past it, up to max_capacity columns, required) and chunk
+    may exceed it. A lock needing more than max_capacity columns stops the solve
+    (info["stopped"] = "capacity", the stopping chunk dropped). Returns every converged mode,
+    info["n_band"] of them in the band; band mode returns its preallocated (n_dof, max_capacity
+    + block) F-order V, of which the first len(lam) columns are valid."""
     check_x64("lobpcg")
     band = lam_stop is not None
+    if band and max_capacity is None:
+        raise ValueError("band mode (lam_stop) needs max_capacity")
     t0 = time.perf_counter()
     n = op.n_dof
     free = np.asarray(free)
@@ -492,15 +507,18 @@ def _solve(
             raise ValueError(f"X0 must have shape ({n}, j) with j <= {k}, got {X0.shape}")
     precond = jacobi(op, free) if precond is None else precond
     c, cap = _capacity(n_modes, chunk, k, low)
+    if band and cap > max_capacity:  # n_modes = capacity - k, as after a growth
+        cap, n_modes = max_capacity, max_capacity - k
     fp32 = basis_dtype == "float32"
     B = jnp.zeros((n, cap), basis_dtype)
     key, sub = jax.random.split(jax.random.key(seed))
     nK, nM = map(float, _norms(op, m, m * jax.random.normal(sub, (n, 1))))
     t1 = time.perf_counter()
-    # filled at each lock: the only host copy of the modes (band: room for the final block)
-    V = np.empty((n, n_modes + (k if band else 0)))
+    # filled at each lock: the only host copy of the modes (band: room for the final block;
+    # zeros are paged lazily, so the untouched columns cost nothing)
+    V = np.zeros((n, max_capacity + k), order="F") if band else np.empty((n, n_modes))
     n_avail = int(free.sum()) - R.shape[1]
-    count, lams, res, thr, chunks, hist = 0, [], [], [], [], []
+    count, lams, res, thr, chunks, hist, stopped = 0, [], [], [], [], [], None
     drops = refills = iterations = 0
     while True:
         if band and count + k > n_avail:
@@ -509,8 +527,6 @@ def _solve(
                 f"the band needs more modes than the mesh provides at block size {k} (f_max = "
                 f"{f:.6g} Hz, {count} modes locked, {n_avail} free DOFs minus the rigid modes)"
             )
-        if band and count + k > V.shape[1]:
-            V = np.concatenate([V[:, :count], np.empty((n, max(V.shape[1] // 2, k)))], axis=1)
         want = chunk if band else min(chunk, n_modes - count)
         key, sub = jax.random.split(key)
         X = jax.random.normal(sub, (n, k))
@@ -546,21 +562,30 @@ def _solve(
         if band and i < j:  # the final chunk, re-orthonormalized for the count: not locked
             state = (X,) + state[1:]
             break
+        if band and count + k > max_capacity:  # the lock does not fit: stop, chunk dropped
+            chunks[-1]["locked"] = 0
+            jj = i = 0
+            stopped = "capacity"
+            break
         V[:, count : count + j] = np.asarray(X[:, :j])
-        if count + k > B.shape[1]:  # band: grow the basis (new zeros, copy, old freed)
+        X0, state, args = state[0][:, j:], None, None  # free the old state before the next start
+        if count + k > B.shape[1]:  # band: grow the basis (old freed, new zeros, refill from V)
             # room for the next lock too; the + 1 keeps n_modes > chunk (a modelled basis)
             # when count + j + k is a multiple of c
-            new = -(-max(3 * B.shape[1] // 2, count + j + k + 1) // c) * c
-            B = _insert(jnp.zeros((n, new), B.dtype), B, jnp.asarray(0, jnp.int32))
+            new = min(-(-max(3 * B.shape[1] // 2, count + j + k + 1) // c) * c, max_capacity)
+            # nothing reading B is queued: the V write and _confirm's residuals waited for
+            # _reortho, its only reader, so dropping the last reference frees it now
+            dtype, B = B.dtype, None
+            B = _grow(V, count, new, c, dtype)
             n_modes = new - k  # the expected count this capacity serves (_capacity -> new)
         B = _lock(B, count, X, j)
         count += j
-        X0, state = state[0][:, j:], None  # free the old state before the next start
     end = count + jj if band else min(count + jj, n_modes)
     V[:, count:end] = np.asarray(state[0][:, : end - count])
     cap = B.shape[1]
-    B = state = args = X = X0 = None  # free the device blocks before the copy
-    V = np.ascontiguousarray(V[:, :end]) if band else V[:, :end]  # band: free the buffer
+    B = state = args = X = X0 = None  # free the device blocks
+    if not band:
+        V = V[:, :end]
     info = dict(
         iterations=iterations,
         converged=all(ch["converged"] for ch in chunks),
@@ -578,6 +603,8 @@ def _solve(
     )
     if band:
         info.update(n_band=count + i, chunk=chunk, block=k, capacity=cap, n_modes=n_modes)
+        if stopped:
+            info["stopped"] = stopped
     return np.concatenate(lams)[:end], V, info
 
 

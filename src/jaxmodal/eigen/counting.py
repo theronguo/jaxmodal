@@ -144,7 +144,6 @@ def count_degree(gap, lam_top, n_top, n_free, lower=None):
     return best if best[0] <= MAX_DEGREE else (None, np.nan)
 
 
-
 def _bound(steps, b, m, t_iteration, tau, rule):
     """A-priori lower bound on the count's seconds: a step runs >= 7 PCG iterations at width
     b, a LOBPCG iteration costs at most about 3 of their applies at width m (factor 2; 0.3, one

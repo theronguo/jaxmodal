@@ -1,6 +1,8 @@
 """solve_modes: the public modal-analysis entry point. See docs/eigensolvers.md."""
 
 import dataclasses
+import functools
+import gc
 import math
 import time
 import warnings
@@ -14,7 +16,16 @@ from ..operators.common import is_count
 from ..precond import SingularShiftError, amg, gmg, jacobi
 from . import counting
 from .counting import count, count_degree
-from .lobpcg import _solve, band_defaults, lobpcg, sigma_estimate
+from .lobpcg import (
+    _band_count,
+    _block_size,
+    _capacity,
+    _solve,
+    band_defaults,
+    lobpcg,
+    sigma_estimate,
+)
+from .shift_invert import si_band
 
 
 def resolve_precond(mesh, precond, precond_dtype):
@@ -47,6 +58,11 @@ PRECOND_OPTIONS = {
 }
 SIGMA_OPTIONS = ("tol", "maxit", "rounds", "drop", "estimate_maxit")
 COUNT_OPTIONS = ("n_probes", "seed", "tau", "degree", "block", "maxit", "verbose")
+SLICE_OPTIONS = ("tau", "maxit_inner", "block", "max_slices", "capacity", "edges", "verbose")
+STRATEGIES = ("auto", "lobpcg", "shift_invert")
+MU1_MARGIN = 1e-2  # the lam_lo < mu_1 rule's margin: max(MU1_MARGIN, 300 tol)
+STAGNATION_DEPTH = 1000  # locked modes at a capacity stop above which MINRES may stagnate
+SLICE_MIN = 96  # PR 15c's measured slice minimum at block 6: a smaller capacity warns
 # Builder parameters solve_modes sets itself or through its own keywords (dtype: precond_dtype).
 RESERVED = {
     "unstructured": {"mesh", "materials", "orientations", "mass", "nodal_mass"},
@@ -92,18 +108,28 @@ def _check_count_options(opts):
 
 
 def check_band(band):
-    """(0, f_max) as floats, or the error: interior bands (f1 > 0) are PR 15."""
+    """(f1, f2) as floats with 0 <= f1 < f2, finite, or the error."""
     try:
         f1, f2 = map(float, band)
     except (TypeError, ValueError):
-        raise ValueError(f"band must be a pair (0, f_max), got {band!r}") from None
+        raise ValueError(f"band must be a pair (f1, f2), got {band!r}") from None
     if not (math.isfinite(f1) and math.isfinite(f2)):
         raise ValueError(f"band must be finite, got {band!r}")
-    if f1 > 0:
-        raise NotImplementedError("interior bands (f1 > 0) come with PR 15d; pass band=(0, f_max)")
-    if f1 != 0 or not f2 > 0:
-        raise ValueError(f"band must be (0, f_max) with f_max > 0, got {band!r}")
+    if not f1 >= 0:
+        raise ValueError(f"band needs f1 >= 0, got {band!r}")
+    if not f1 < f2:
+        raise ValueError(f"band needs f1 < f2, got {band!r}")
     return f1, f2
+
+
+def _check_slice_options(opts):
+    for key in ("maxit_inner", "block", "max_slices", "capacity"):
+        if key in opts and not is_count(opts[key]):
+            raise ValueError(f"slice_options {key} must be an int >= 1, got {opts[key]!r}")
+    if "tau" in opts and not opts["tau"] > 0:
+        raise ValueError(f"slice_options tau must be > 0, got {opts['tau']!r}")
+    if "verbose" in opts and not isinstance(opts["verbose"], bool):
+        raise ValueError(f"slice_options verbose must be a bool, got {opts['verbose']!r}")
 
 
 def _nbytes(x):
@@ -196,12 +222,64 @@ def _precond_sigma(
         P = build(sigma)
 
 
+def _halvings(top):
+    """The ladder's chunks: top, then halved while >= 5."""
+    out, c = [top], top // 2
+    while c >= 5:
+        out.append(c)
+        c //= 2
+    return out
+
+
+def _ladder(reach, need):
+    """The ladder's chunk from reach = {chunk: C_max or None (does not fit)} and need = {chunk:
+    the columns of the known depth} or None: the largest fitting chunk reaching its need, else the
+    largest whose C_max is >= 0.9 x the best; None when no chunk fits."""
+    fit = {c: r for c, r in reach.items() if r is not None}
+    if not fit:
+        return None
+    ok = [c for c in fit if need and fit[c] >= need[c]]
+    if ok:
+        return max(ok)
+    best = max(fit.values())
+    return max(c for c, r in fit.items() if r >= 0.9 * best)
+
+
+def _keep(lam, t, lam_lo, n_band):
+    """(i0, n_band): the band filter's range of the ascending lam (thresholds t, per mode or one
+    value): from the first mode >= lam_lo (1 - 100 t) (len(lam) if none), extended down over
+    chains (relative gaps < 100 t) below n_band; i0 = 0 for lam_lo = 0."""
+    if lam_lo == 0:
+        return 0, n_band
+    t = np.broadcast_to(np.asarray(t, float), np.shape(lam))
+    ok = np.flatnonzero(lam >= lam_lo * (1 - 100 * t))
+    i0 = int(ok[0]) if len(ok) else len(lam)
+    while 0 < i0 < n_band and lam[i0] - lam[i0 - 1] < 100 * t[i0 - 1] * lam[i0 - 1]:
+        i0 -= 1
+    return min(i0, n_band), n_band
+
+
+def _permute(V, order):
+    """V[:, :len(order)] = V[:, order] in place, along the permutation's cycles with one column
+    buffer (fixed columns untouched; V[:, order] would copy, np.take loses the F order)."""
+    done = order == np.arange(len(order))
+    for s in range(len(order)):
+        if done[s]:
+            continue
+        tmp, j = V[:, s].copy(), s
+        while order[j] != s:
+            V[:, j] = V[:, order[j]]
+            done[j], j = True, order[j]
+        V[:, j], done[j] = tmp, True
+
+
 def solve_modes(
     mesh, materials, bcs, n_modes=None, orientations=None, *, mass="consistent",
     nodal_mass=None, tol=1e-6, maxit=500, seed=0, chunk=None, guards=None,
     basis_dtype="float64", low_memory=False, precond="auto", sigma=None,
     precond_dtype="float64", X0=None, operator_options=None, precond_options=None,
-    sigma_options=None, band=None, verify=None, count_options=None,
+    sigma_options=None, band=None, verify=None, count_options=None, strategy="auto",
+    memory_budget=None, slice_options=None,
 ):  # fmt: skip
     """Lowest n_modes elastic modes of mesh under the Dirichlet sets bcs (see dof_mask).
 
@@ -217,25 +295,38 @@ def solve_modes(
     V (n_dof, n_modes) and lobpcg's info plus operator, n_rigid, rigid, frequencies
     (sqrt(lam) / 2 pi), precond, sigma, sigma_iterations and time["precond"].
 
-    band=(0, f_max) (Hz) instead returns every elastic mode with f <= f_max (and whole
-    clusters reaching into the band), possibly none: solve_modes(mesh, materials, bcs,
-    band=(0, f_max)). n_modes is then the expected count (the basis capacity; default 4 chunk,
-    chunk default min(40, ceil(1.25 n_modes) + 2)). verify: True runs the completeness count at
-    the cut after the band, False only predicts its cost, None (default) runs it when predicted
-    to cost no more than the solve; count_options (COUNT_OPTIONS) go to count. info adds band,
-    n_beyond, chunk, capacity, t_iteration and count
-    (docs/eigensolvers.md#frequency-band-0-f_max)."""
+    band=(f1, f2) (Hz, 0 <= f1 < f2) instead returns every elastic mode with f1 <= f <= f2 (and
+    whole clusters reaching into the band), possibly none: solve_modes(mesh, materials, bcs,
+    band=(f1, f2)). strategy: "auto" (LOBPCG from 0 with its basis capped by memory_budget,
+    falling back to shift-invert slices at the cap or when no chunk fits), "lobpcg" (raises
+    instead of falling back) or "shift_invert" (si_band). memory_budget: bytes (default the free
+    GPU pool, or 0.8 x RAM on the CPU). slice_options (SLICE_OPTIONS) go to si_band. n_modes is
+    the expected count (f1 = 0: the basis and the ladder's top chunk, chunk default min(40,
+    ceil(1.25 n_modes) + 2); f1 > 0: the slice store, chunk default 40). verify: True runs the
+    completeness count(s), False only predicts the cost, None (default) counts when predicted to
+    cost no more than the solve; count_options (COUNT_OPTIONS) go to count. V is the solver's
+    own array compacted in place. info adds band, strategy, reason, chunk, c_max, budget, mu1_ub,
+    n_store, from_zero, stagnation_risk, count, and LOBPCG's n_beyond, capacity, t_iteration
+    or si_band's slices (docs/eigensolvers.md#frequency-bands)."""
     if band is None:
         if n_modes is None:
             raise ValueError("pass n_modes or band")
         if verify is not None or count_options:
             raise ValueError("verify and count_options need band")
+        if strategy != "auto" or memory_budget is not None or slice_options:
+            raise ValueError("strategy, memory_budget and slice_options need band")
     else:
-        f_max = check_band(band)[1]
+        f1, f2 = check_band(band)
+    if strategy not in STRATEGIES:
+        raise ValueError(f"strategy must be one of {STRATEGIES}, got {strategy!r}")
+    if memory_budget is not None and not (math.isfinite(memory_budget) and memory_budget > 0):
+        raise ValueError(f"memory_budget must be a finite number of bytes > 0, got {memory_budget}")
     if verify not in (None, True, False):
         raise ValueError(f"verify must be None, True or False, got {verify!r}")
     cn_opts = _check_options("count", count_options, COUNT_OPTIONS)
     _check_count_options(cn_opts)
+    sl_opts = _check_options("slice", slice_options, SLICE_OPTIONS)
+    _check_slice_options(sl_opts)
     precond = resolve_precond(mesh, precond, precond_dtype)
     voxel = mesh.voxel is not None
     name, build = ("stencil", stencil) if voxel else ("unstructured", unstructured)
@@ -258,6 +349,7 @@ def solve_modes(
         R = m_orthonormalize(R, op.apply_M(R))  # consumes its first argument
     Rd = R if k else None
     its = 0
+    base = dict(operator=name, n_rigid=k, rigid=np.asarray(R), precond=precond)
 
     def make(s, **kw):  # the preconditioner at shift s (fp64 unless kw says otherwise)
         if precond == "jacobi":
@@ -268,57 +360,228 @@ def solve_modes(
         # s_K, so A_P(0) is nonsingular
         return amg(op, free, s, mesh.points, nonsingular=k == 0, **pc_opts, **kw)
 
-    if sigma is None and precond != "jacobi":
-        sigma, its = _precond_sigma(op, free, Rd, make, seed=seed, **sg_opts)
-    sigma = sigma or 0.0
-    if precond == "gmg":
-        P = make(sigma, dtype=precond_dtype)
-    elif precond == "amg" and band is not None:  # the aggregates are reused at lam_c (exact)
-        P, aggs = make(sigma, return_aggregates=True)
-    else:
-        P = make(sigma)
-    t_p = time.perf_counter() - t0
+    def lobpcg_precond(s):  # LOBPCG's preconditioner (and AMG's aggregates in band mode)
+        if precond == "gmg":
+            return make(s, dtype=precond_dtype), None
+        if precond == "amg" and band is not None:  # the aggregates are reused at lam_c (exact)
+            return make(s, return_aggregates=True)
+        return make(s), None
+
     if band is None:
+        if sigma is None and precond != "jacobi":
+            sigma, its = _precond_sigma(op, free, Rd, make, seed=seed, **sg_opts)
+        sigma = sigma or 0.0
+        P = lobpcg_precond(sigma)[0]
+        t_p = time.perf_counter() - t0
         lam, V, info = lobpcg(
             op, free, n_modes, tol, Rd, P, X0, maxit=maxit, seed=seed, chunk=chunk,
             guards=guards, basis_dtype=basis_dtype, low_memory=low_memory,
         )  # fmt: skip
-    else:
-        n_modes, chunk = band_defaults(n_modes, chunk, guards, int(free.sum()) - k)
-        lam_stop = (2 * np.pi * f_max) ** 2
+        P = None
+        info["time"]["precond"] = t_p
+        info.update(base, sigma=sigma, sigma_iterations=its)
+        info["frequencies"] = np.sqrt(np.maximum(lam, 0)) / (2 * np.pi)
+        return lam, V, info
+
+    # ---------------------------------------------------------------- a band (f1, f2)
+    from .. import memory as mem  # memory imports this module
+
+    lam_lo, lam_hi = (2 * np.pi * f1) ** 2, (2 * np.pi * f2) ** 2
+    n, n_avail = op.n_dof, int(free.sum()) - k
+    budget, host_budget = mem._default_budget()
+    if memory_budget is not None:
+        budget = float(memory_budget)
+
+    def models(dtype):  # the estimators, cached per call (only distinct widths cost anything)
+        return [f and functools.cache(f) for f in
+                mem._models(mesh, mass, precond, dtype, op_opts, pc_opts)]  # fmt: skip
+
+    op_memory, pc = models(precond_dtype)
+    pc64 = models("float64")[1] if precond == "gmg" and precond_dtype == "float32" else pc
+
+    def c_max(c, low=low_memory, dtype=basis_dtype):
+        return mem._c_max(op_memory, pc, n, chunk=c, guards=guards, low=low, basis_dtype=dtype,
+                          n_rigid=k, n_avail=n_avail, budget=budget,
+                          host_budget=host_budget)  # fmt: skip
+
+    def levers(c):  # the memory levers not set, with their C_max at chunk c
+        out = [f"low_memory=True (C_max {c_max(c, low=True)})"] if not low_memory else []
+        if basis_dtype != "float32":
+            out.append(f"basis_dtype='float32' (C_max {c_max(c, dtype='float32')})")
+        return ", ".join(out + ["on-the-fly Ke (operator_options={'mode': 'otf'})"])
+
+    reach, ch = {}, None
+    if strategy != "shift_invert":
+        top = band_defaults(n_modes if f1 == 0 else None, chunk, guards, n_avail)[1]
+        reach = {c: c_max(c) for c in ([chunk] if chunk is not None else _halvings(top))}
+        need = None
+        if f1 == 0 and n_modes is not None:  # the known depth: n_modes, at most the free space
+            need = {}
+            for c in reach:
+                kc = _block_size(c, c, guards)[2]
+                cl = _capacity(0, c, kc, low_memory)[0]
+                need[c] = min(math.ceil(1.25 * n_modes) + kc, -(-(n_avail + kc) // cl) * cl)
+        ch = _ladder(reach, need)
+        if ch is None and strategy == "lobpcg":
+            raise ValueError(
+                f"no LOBPCG chunk fits memory_budget = {budget:.4g} bytes (C_max {reach}): raise"
+                f" memory_budget, or pass {levers(min(reach))}, or strategy='shift_invert'"
+            )
+    out = dict(band=(f1, f2), strategy="lobpcg", reason="forced" if strategy != "auto" else "fits",
+               chunk=ch, c_max=reach, stagnation_risk=False, budget=(budget, host_budget),
+               mu1_ub=None, n_store=None, from_zero=False)  # fmt: skip
+    pre, L, t_lob, stopped = None, 0, None, None  # the pre-estimate, the locked depth kept
+    if ch is not None:
+        if sigma is None and precond != "jacobi":
+            sigma, its = _precond_sigma(op, free, Rd, make, seed=seed, **sg_opts)
+            pre = sigma
+        P, aggs = lobpcg_precond(sigma or 0.0)
+        t_p = time.perf_counter() - t0
+        n_m, ch = band_defaults(n_modes if f1 == 0 else None, ch, guards, n_avail)
         lam, V, info = _solve(
-            op, free, n_modes, tol, Rd, P, X0, maxit, seed, chunk=chunk, guards=guards,
-            basis_dtype=basis_dtype, low=low_memory, lam_stop=lam_stop,
+            op, free, n_m, tol, Rd, P, X0, maxit, seed, chunk=ch, guards=guards,
+            basis_dtype=basis_dtype, low=low_memory, lam_stop=lam_hi, max_capacity=reach[ch],
         )  # fmt: skip
-    solve_s = time.perf_counter() - t0
-    P = None  # one hierarchy alive at a time
-    info["time"]["precond"] = t_p
-    info.update(operator=name, n_rigid=k, rigid=np.asarray(R), precond=precond, sigma=sigma,
-                sigma_iterations=its)  # fmt: skip
-    if band is not None:
+        solve_s = time.perf_counter() - t0
+        P = None  # one hierarchy alive at a time
+        stopped = info.get("stopped")
+        if (np.diff(lam) < 0).any():  # a mode an earlier chunk missed, back in a later one
+            order = np.argsort(lam, kind="stable")
+            lam = lam[order]
+            info.update(residuals=info["residuals"][order], thresholds=info["thresholds"][order])
+            _permute(V, order)
+            if stopped is None:
+                info["n_band"] = _band_count(lam, info["thresholds"], lam_hi)
+        if stopped == "capacity":
+            depth = len(lam)
+            if strategy == "lobpcg":
+                raise ValueError(
+                    f"LOBPCG reached its basis cap C_max = {reach[ch]} at {depth} locked modes"
+                    f" below f2: raise memory_budget (now {budget:.4g} bytes), or pass"
+                    f" {levers(ch)}, or strategy='shift_invert' or 'auto'"
+                )  # fmt: skip
+            L = depth - _keep(lam, info["thresholds"], lam_lo, depth)[0]
+            out["mu1_ub"] = min([float(lam[0])] + ([pre] if pre is not None else []))
+            t_lob = info["time"]
+            V = lam = info = aggs = None  # LOBPCG's modes and aggregates freed before the slices
+            out.update(reason="capacity", stagnation_risk=depth >= STAGNATION_DEPTH)
+            warnings.warn(
+                f"LOBPCG stopped at its basis cap C_max = {reach[ch]} with {depth} modes locked"
+                f" below f2: the band continues with shift-invert slices"
+                + (" (MINRES may stagnate at this depth)" if depth >= STAGNATION_DEPTH else "")
+                + f"; levers: {levers(ch)}", stacklevel=2,
+            )  # fmt: skip
+    if ch is not None and stopped != "capacity":  # LOBPCG reached the band's end
         nb, n_eff, m = info.pop("n_band"), info.pop("n_modes"), info.pop("block")
         if not info["converged"]:
             info["count"] = dict(ran=False, reason="solve not converged")
             if verify:
                 warnings.warn("band solve not converged: count not run", stacklevel=2)
+        elif nb == len(lam):  # a sort moved the cut to the end: no mode above it bounds it
+            info.update(converged=False, stopped="sorted cut at the end")
+            info["count"] = dict(ran=False, reason="sorted cut at the end")
         else:
-            from ..memory import band_probe_block  # memory imports this module
 
-            def budget(n_probes):  # n_eff: the expected count, or the one the grown basis serves
-                return band_probe_block(
-                    mesh, bcs, n_eff, n_probes, 8 * op.n_dof * len(lam) + _nbytes(aggs),
+            def probe_budget(n_probes):  # n_eff: the count the grown basis serves
+                return mem.band_probe_block(
+                    mesh, bcs, n_eff, n_probes, 8 * n * len(lam) + _nbytes(aggs),
                     n_rigid=k, mass=mass, chunk=info["chunk"], guards=guards,
                     basis_dtype=basis_dtype, low_memory=low_memory, precond=precond,
                     precond_dtype=precond_dtype, operator_options=op_opts,
-                    precond_options=pc_opts, band=band,
+                    precond_options=pc_opts, band=(0.0, f2),
                 )  # fmt: skip
 
             info["count"] = _verify(
-                verify, cn_opts, op, free, Rd, lam, V, nb, lam_stop, m, info["t_iteration"],
-                solve_s, lambda s: make(s) if aggs is None else make(s, aggregates=aggs), budget,
+                verify, cn_opts, op, free, Rd, lam, V[:, : len(lam)], nb, lam_hi, m,
+                info["t_iteration"], solve_s,
+                lambda s: make(s) if aggs is None else make(s, aggregates=aggs), probe_budget,
             )  # fmt: skip
-        info.update(band=(0.0, f_max), n_beyond=len(lam) - nb, residuals=info["residuals"][:nb],
-                    thresholds=info["thresholds"][:nb])  # fmt: skip
-        lam, V = lam[:nb], V[:, :nb].copy()  # not a view of all converged
+        aggs = None
+        i0, i1 = _keep(lam, info["thresholds"], lam_lo, nb)
+        info["n_beyond"] = len(lam) - nb
+        info["time"]["precond"] = t_p
+        info.update({**base, **out}, sigma=sigma, sigma_iterations=its)
+    else:  # shift-invert slices: forced, no chunk fits ("memory") or after a capacity stop
+        if ch is None:
+            t_p = 0.0
+            out.update(strategy="shift_invert",
+                       reason="forced" if strategy == "shift_invert" else "memory")  # fmt: skip
+            if out["reason"] == "memory":
+                warnings.warn(
+                    f"no LOBPCG chunk fits memory_budget = {budget:.4g} bytes: the band is solved"
+                    f" by shift-invert slices; levers: {levers(min(reach))}", stacklevel=2,
+                )  # fmt: skip
+        out["strategy"] = "shift_invert"
+        if f1 > 0 and out["mu1_ub"] is None:  # no LOBPCG bound: the pre-estimate
+            t = time.perf_counter()
+            if precond == "jacobi":
+                pre, its = sigma_estimate(op, free, Rd, seed=seed)
+            else:
+                pre, its = _precond_sigma(op, free, Rd, make, seed=seed, **sg_opts)
+            sigma, out["mu1_ub"], t_p = pre, pre, time.perf_counter() - t
+        out["from_zero"] = f1 == 0 or lam_lo < out["mu1_ub"] * (1 + max(MU1_MARGIN, 300 * tol))
+        n_store = max(n_modes or 200, math.ceil(1.25 * L))
+        b = sl_opts.get("block", 6)
+        C = sl_opts.get("capacity")
+        if C is None:
+            C = mem._slice_capacity(op_memory, pc64, n, n_store=n_store, block=b, n_rigid=k,
+                                    budget=budget, host_budget=host_budget)  # fmt: skip
+            if C is None:
+                raise ValueError(
+                    f"the smallest shift-invert slice does not fit memory_budget = {budget:.4g}"
+                    " bytes: raise memory_budget"
+                )
+            if C < SLICE_MIN:
+                warnings.warn(
+                    f"slice capacity {C} is below {SLICE_MIN} columns (memory_budget"
+                    f" {budget:.4g} bytes): slices may fill without converging", stacklevel=2,
+                )  # fmt: skip
+        v_si, cn, no_count = verify, cn_opts, None
+        if "block" not in cn_opts:
+            bp = mem._count_block(
+                op_memory, pc64, n, voxel=voxel, n_rigid=k, n_store=n_store,
+                window=2 * (C - 2 * b), n_probes=cn_opts.get("n_probes", 50), budget=budget,
+                host_budget=host_budget,
+            )  # fmt: skip
+            if bp is None:  # one probe does not fit beside the store and window
+                no_count = (
+                    "the slice counts do not fit memory_budget (one probe); pass"
+                    " count_options={'block': 1} to run them with a larger peak"
+                )
+                if verify:
+                    warnings.warn(f"{no_count}: no counts run", stacklevel=2)
+                v_si = False
+            else:
+                cn = {**cn_opts, "block": bp}
+        lam, V, info = si_band(
+            op, free, 0.0 if out["from_zero"] else lam_lo, lam_hi, make, capacity=C, R=Rd,
+            verify=v_si, count_options=cn, tol=tol, seed=seed, n_store=n_store,
+            **{key: x for key, x in sl_opts.items() if key != "capacity"},
+        )  # fmt: skip
+        if no_count:
+            info["count"]["reason"] = no_count
+        i0, i1 = _keep(lam, info["r_acc"], lam_lo, len(lam))
+        info["time"]["precond"] = t_p
+        if t_lob is not None:
+            info["time"]["lobpcg"] = t_lob
+        info.update({**base, **out}, capacity=C, n_store=n_store, sigma=sigma, sigma_iterations=its)
+        if stopped:
+            info["stopped"] = stopped
+        info["thresholds"] = np.broadcast_to(info["thresholds"], lam.shape)
+    info.update(residuals=info["residuals"][i0:i1], thresholds=info["thresholds"][i0:i1])
+    # compacted in place (the destination never runs ahead of the source), then shrunk: V must
+    # have no other reference. jaxlib holds the last host view it transferred (the count's W
+    # chunks) until a collection, so no jax op runs between _verify and the resize
+    if i0:
+        for j in range(i1 - i0):
+            V[:, j] = V[:, i0 + j]
+    gc.collect()
+    try:
+        V.resize((V.shape[0], i1 - i0))
+    except ValueError:  # another holder now sees shifted columns
+        warnings.warn("returned modes copied: another reference to V exists", RuntimeWarning,
+                      stacklevel=2)  # fmt: skip
+        V = np.array(V[:, : i1 - i0], order="F")
+    lam = lam[i0:i1]
     info["frequencies"] = np.sqrt(np.maximum(lam, 0)) / (2 * np.pi)
     return lam, V, info

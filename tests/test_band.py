@@ -71,7 +71,7 @@ def spy(monkeypatch):
 
     def count(op, free, W, lam, *a, **kw):
         keep = np.setdiff1d(np.arange(W.shape[1]), rec["drop"])
-        rec["count"].append((W, lam, a, kw))
+        rec["count"].append((np.array(W), lam, a, kw))  # a copy: no reference to the result
         return real_count(op, free, W[:, keep], lam[keep], *a, **kw)
 
     def amg(op, free, s, *a, **kw):
@@ -148,7 +148,8 @@ def check_band(name, f_max, spy, expect, **kw):
     lam_stop = (2 * math.pi * f_max) ** 2
     assert len(lam) == expect == len(info["residuals"]) == len(info["frequencies"])
     assert info["converged"] and info["n_beyond"] >= 1
-    assert V.shape == (3 * len(mesh.points), expect) and V.base is None  # a copy, not the buffer
+    assert V.shape == (3 * len(mesh.points), expect) and V.base is None  # owning, compacted
+    assert V.flags.f_contiguous and V.nbytes == 8 * V.shape[0] * expect
     if expect:
         assert np.abs(lam / lr[:expect] - 1).max() <= 10 * TOL
     c = info["count"]
@@ -470,10 +471,10 @@ def test_probe_block(monkeypatch, budgets):
     "kw,err,match",
     [
         ({}, ValueError, "pass n_modes or band"),
-        ({"band": (1.0, 2.0)}, NotImplementedError, "interior bands"),
-        ({"band": (0.0, 0.0)}, ValueError, "f_max > 0"),
-        ({"band": (0.0, -1.0)}, ValueError, "f_max > 0"),
-        ({"band": (-1.0, 2.0)}, ValueError, "f_max > 0"),
+        ({"band": (2.0, 1.0)}, ValueError, "f1 < f2"),
+        ({"band": (0.0, 0.0)}, ValueError, "f1 < f2"),
+        ({"band": (0.0, -1.0)}, ValueError, "f1 < f2"),
+        ({"band": (-1.0, 2.0)}, ValueError, "f1 >= 0"),
         ({"band": (0.0, np.inf)}, ValueError, "finite"),
         ({"band": 3.0}, ValueError, "pair"),
         ({"band": (0.0, 1.0), "verify": "yes"}, ValueError, "verify must be"),

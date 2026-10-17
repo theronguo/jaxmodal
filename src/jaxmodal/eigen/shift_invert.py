@@ -5,6 +5,7 @@ restarts. See docs/eigensolvers.md#shift-invert-slices."""
 
 import functools
 import time
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -14,6 +15,7 @@ import scipy.linalg as sla
 from ..linalg.krylov import minres
 from ..operators import ap_operator
 from ..operators.common import check_x64
+from . import counting
 from .counting import _check_ortho, band_count, count
 from .lobpcg import _K, _M, C_FLOOR, _deflate, _insert, _norms, _resid, _svqb_t
 
@@ -222,10 +224,12 @@ def si_slice(
     Returns lam (ascending: the converged pairs in [lo, hi] widened by 100 r_acc and over
     clusters straddling an edge), V (host fp64, M-orthonormal) and info:
     converged, reason, sigma, sigma_moved, move_iterations (of the discarded solve, or None),
-    steps, basis, minres_iterations, inner_cap, inner_maxit, tau_eff, tau_raised, r_acc,
-    delta_max, residuals, thresholds, neighbours ({"lo": (lam, v) or None, "hi": ...}; Ritz
-    neighbours only), capacity_full, edge_unreached, ritz ((values, converged) of the last
-    step's Ritz values and lam_W merged, ascending; None before the first step), time."""
+    steps, basis, minres_iterations, t_minres (warm seconds per MINRES iteration: the steps after
+    the first; one step: its cold mean; None without a step), inner_cap, inner_maxit, tau_eff,
+    tau_raised, r_acc, delta_max, residuals, thresholds, neighbours ({"lo": (lam, v) or None, "hi":
+    ...}; Ritz neighbours only), capacity_full, edge_unreached, ritz ((values, converged) of the
+    last step's Ritz values and lam_W merged, ascending; None before the first step), time (setup,
+    minres, ortho, ritz, total)."""
     check_x64("si_slice")
     t0 = time.perf_counter()
     n = op.n_dof
@@ -301,6 +305,8 @@ def si_slice(
     A = ap_operator(op, free, -sigma)
     tau_eff, r = tau, tol
     iters, cap, moved, inner_maxit, reason = [], maxit_inner, None, False, None
+    t_its = []  # each kept step's MINRES seconds (the discarded move solve in t_move)
+    t_move = 0.0
     seen = {"lo": lo == 0, "hi": False}
     times = dict(setup=time.perf_counter() - t0, minres=0.0, ortho=0.0, ritz=0.0)
     done, last, ritz = False, None, None
@@ -315,7 +321,8 @@ def si_slice(
         its = int(np.asarray(inf["iterations"]).max())
         capped = ~np.asarray(inf["converged"]) & ~np.asarray(inf["stagnated"])
         bad = np.asarray(inf["stagnated"]) | capped
-        times["minres"] += time.perf_counter() - t
+        dt = time.perf_counter() - t
+        times["minres"] += dt
         if not np.isfinite(res).all():
             reason = "inner solves failed"
             break
@@ -323,10 +330,12 @@ def si_slice(
         if not iters and moved is None and bad.any() and res[bad].max() > stag:
             sigma += SIGMA_MOVE * (hi - lo)  # sigma on an eigenvalue: move once, repeat
             A, moved = ap_operator(op, free, -sigma), its  # the discarded solve's iterations
+            t_move = dt
             if verbose:
                 print(f"si_slice: sigma moved to {sigma:.6g} ({its} its discarded)", flush=True)
             continue
         iters.append(its)
+        t_its.append(dt)
         if len(iters) == 1:
             cap = min(maxit_inner, INNER_GROWTH * its)
         inner_maxit |= bool(capped.any())
@@ -378,6 +387,13 @@ def si_slice(
             nb[name] = (float(mu[i]), Vs[:, na + j].copy())  # info must not hold Vs
     unreached = [e for e in ("lo", "hi") if not seen[e]]
     delta = np.abs(lam_out - sigma) / np.abs(lam_out) if len(lam_out) else np.zeros(0)
+    if len(iters) > 1 and sum(iters[1:]):  # warm: without the first step's compile
+        t_minres = sum(t_its[1:]) / sum(iters[1:])
+    elif iters:  # one step: the cold mean, the discarded move solve included
+        t_minres = (t_its[0] + t_move) / max(iters[0] + (moved or 0), 1)
+    else:
+        t_minres = None
+    times["total"] = time.perf_counter() - t0
     info = dict(
         converged=converged,
         reason=reason,
@@ -387,6 +403,7 @@ def si_slice(
         steps=len(iters),
         basis=k,
         minres_iterations=iters,
+        t_minres=t_minres,
         inner_cap=cap,
         inner_maxit=inner_maxit,
         tau_eff=tau_eff,
@@ -451,6 +468,19 @@ def _unverified(ci):
     return "count unverifiable: an inner solve failed"
 
 
+def _decide_slice(op, free, V_c, lam_c, lo, hi, nb_lo, nb_hi, kw, verify, b, run):
+    """(count?, predicted count info, record) of a slice leaf: the degree from _count_slice's
+    prediction (nothing run), then counting._decide against the leaf's time run["time"]["total"]
+    with its warm MINRES iteration time run["t_minres"] (block b)."""
+    _, ci = _count_slice(op, free, V_c, lam_c, lo, hi, nb_lo, nb_hi, _predict=True, **kw)
+    cal = lambda s: _count_slice(op, free, V_c, lam_c, lo, hi, nb_lo, nb_hi,  # noqa: E731
+                                 **{**kw, "n_probes": ci["block"], "_steps": s})  # fmt: skip
+    go, rec = counting._decide(verify, None if ci["capped"] else ci["degree"],
+                               kw.get("n_probes", 50), ci["block"], b, run["time"]["total"],
+                               run["t_minres"], kw.get("tau"), int(np.sum(free)), cal)  # fmt: skip
+    return go, ci, rec
+
+
 def _count_out(ci, ran, reason, est, estimates, flagged, restarts):
     """si_checked's info["count"]: the count's info plus the outcome."""
     return {"passed": False, "verifiable": False, **ci, "ran": ran, "reason": reason,
@@ -499,7 +529,7 @@ def si_checked(
     b = slice_options.get("block", 6)
     c, nw = _chunk(b), len(lam_W)
     lam_f, V_f, res, thr = np.zeros(0), np.zeros((n, 0)), np.zeros(0), np.zeros(0)
-    runs, estimates, ci, est, reason, flagged = [], [], {}, np.nan, None, False
+    runs, estimates, ci, est, reason, flagged, rec = [], [], {}, np.nan, None, False, {}
     for j in range(RESTARTS + 1):
         # the restart's Q (n, L0 + capacity) within the first run's (capacity rounded to c)
         # (the first run takes capacity as given, so si_slice raises on a bad one)
@@ -545,12 +575,14 @@ def si_checked(
         nb_lo, nb_hi = _count_nbs(lam_c, lo, hi, nbs, W, lam_W, g)
         P = precond if count_precond is None else count_precond
         kw = dict(R=slice_options.get("R"), precond=P, seed=c0 + j, **opts)
-        est, ci = _count_slice(op, free, V_c, lam_c, lo, hi, nb_lo, nb_hi, _predict=not verify,
-                               **kw)  # fmt: skip
+        if j == 0:  # decided once, on the first count (the restarts follow it)
+            go, ci, rec = _decide_slice(op, free, V_c, lam_c, lo, hi, nb_lo, nb_hi, kw, verify,
+                                        b, runs[0])  # fmt: skip
+            if not go:
+                reason = rec["reason"] or "not requested"
+                break
+        est, ci = _count_slice(op, free, V_c, lam_c, lo, hi, nb_lo, nb_hi, **kw)
         V_c = W_in = None  # not kept through a restart
-        if not verify:
-            reason = "not requested"
-            break
         estimates.append(est)
         miss = ci["verifiable"] and est >= 0.5
         flagged |= miss
@@ -572,20 +604,28 @@ def si_checked(
         residuals=res,
         thresholds=thr,
         runs=runs,
-        count=_count_out(ci, bool(estimates), reason, est, estimates, flagged, len(runs) - 1),
-    )
+        count={**_count_out({**ci, **rec}, bool(estimates), reason, est, estimates, flagged,
+                            len(runs) - 1), "t_leaf": runs[0]["time"]["total"],
+               "t_minres": runs[0]["t_minres"]},
+    )  # fmt: skip
     return lam_f, V_f, out
 
 
 # ---------------------------------------------------------------- slicing a band (si_band)
 
 
-def _cap_error(a, b, capacity, why):
+def _cap_error(a, b, capacity, why, closed=(False, False)):
+    """The capacity error of a full slice [a, b]; closed: (lower, upper) side done."""
+    hints = (["lo may be below lambda_1"] if not closed[0] and a > 0 else []) + (
+        [] if closed[1] else ["hi above the spectrum"])  # fmt: skip
+    if why == "no progress":  # r_acc ~ tau delta widens the window over the next modes
+        hints.append("slice_options tau may be too loose (r_acc grows with tau)")
+        if a == 0:
+            hints.append("from 0, lambda_1 may lie within the lambda_lo margin of the band")
     return ValueError(
         f"slice [{a:.6g}, {b:.6g}] fills capacity {capacity} without converging a gap >= 100"
         f" r_acc on either side ({why}): raise capacity (measured: a slice needs about 50-85"
-        " columns before it converges anything); lo may be below lambda_1 or hi above the"
-        " spectrum"
+        " columns before it converges anything)" + "".join(f"; {h}" for h in hints)
     )
 
 
@@ -702,12 +742,14 @@ def _merge(op, m, groups, consts, c):
     return theta, X, r, t, drop
 
 
-def _span_count(op, free, P, lam_s, cols, x0, x1, r, nbs, R, verify, opts):
+def _span_count(op, free, P, lam_s, cols, x0, x1, r, nbs, R, verify, opts, *, block, t_leaf,
+                t_minres):  # fmt: skip
     """info["count"] of a span leaf [x0, x1]: its pairs are the stored ones inside, extended over
     chains (relative gaps < 100 r, as si_checked's widened set), the nearest stored pair (or the
     parent's last run's Ritz neighbour nbs, beyond the chain gap) beyond each end its out-of-band
     pairs; P the parent's preconditioner. A verifiable count >= 0.5 is flagged (si_band reruns
-    the span at most RESTARTS times in its lineage)."""
+    the span at most RESTARTS times in its lineage). verify as si_checked's, decided against the
+    parent run's t_leaf and t_minres (slice block width block)."""
     o = np.argsort(lam_s, kind="stable")
     ls = lam_s[o]
     i0, i1 = _extend_chain(ls, np.searchsorted(ls, x0), np.searchsorted(ls, x1, "right"), 100 * r)
@@ -715,14 +757,17 @@ def _span_count(op, free, P, lam_s, cols, x0, x1, r, nbs, R, verify, opts):
     near = o[[i for i in (i0 - 1, i1) if 0 <= i < len(ls)]]
     nb = {k: [p] for k, p in nbs.items()}
     nb_lo, nb_hi = _count_nbs(lam_c, x0, x1, nb, cols(near), lam_s[near], 100 * r)
-    est, ci = _count_slice(op, free, (cols(inb),), lam_c, x0, x1, nb_lo, nb_hi, R=R, precond=P,
-                           _predict=not verify, **opts)  # fmt: skip
-    if not verify:
-        return _count_out(ci, False, "not requested", est, [], False, 0)
+    V_c, kw = (cols(inb),), dict(R=R, precond=P, **opts)
+    run = dict(time=dict(total=t_leaf), t_minres=t_minres)
+    go, ci, rec = _decide_slice(op, free, V_c, lam_c, x0, x1, nb_lo, nb_hi, kw, verify, block, run)
+    if not go:
+        return _count_out({**ci, **rec}, False, rec["reason"] or "not requested", np.nan, [], False,
+                          0)  # fmt: skip
+    est, ci = _count_slice(op, free, V_c, lam_c, x0, x1, nb_lo, nb_hi, **kw)
     miss = bool(ci["verifiable"] and est >= 0.5)
     reason = (None if ci["passed"] else "count >= 0.5: the span is rerun" if miss
               else _unverified(ci))  # fmt: skip
-    return _count_out(ci, True, reason, est, [est], miss, 0)
+    return _count_out({**ci, **rec}, True, reason, est, [est], miss, 0)
 
 
 def _band_count(leaves):
@@ -743,7 +788,7 @@ def _band_count(leaves):
 
 def si_band(
     op, free, lo, hi, make, *, capacity, R=None, verify=True, edges=None, count_options=None,
-    tol=1e-6, block=6, seed=0, verbose=False, max_slices=64, **slice_options,
+    tol=1e-6, block=6, seed=0, verbose=False, max_slices=64, n_store=None, **slice_options,
 ):  # fmt: skip
     """Eigenpairs of the masked pencil (K_m, M_m) in the band [lo, hi] (0 <= lo < hi) by si_checked
     slices, each within a device basis of capacity columns, deflation included. make(sigma): the SPD
@@ -760,8 +805,10 @@ def si_band(
     merged: duplicates (projected M-norm < 0.5) dropped, Rayleigh-Ritz, the window widened once if a
     Ritz residual fails (edge_rr_failed if it still fails). edges: provisional interior edges, used
     as given (default one slice). verify: count every leaf (False: none, the predicted degree and
-    gap recorded). Slice i uses seed + (RESTARTS + 1) i, the count's seed likewise. slice_options:
-    si_checked's and si_slice's (tau, maxit_inner, ...; not sigma or count_precond).
+    gap recorded; None: each leaf counted when predicted to cost no more than its slice,
+    counting._decide). n_store: the store columns reserved by the caller (a warning, once, when the
+    stored modes pass it). Slice i uses seed + (RESTARTS + 1) i, the count's seed likewise.
+    slice_options: si_checked's and si_slice's (tau, maxit_inner, ...; not sigma or count_precond).
 
     Returns lam (ascending), V (host fp64; M-orthonormal within a window, to residual level across
     runs that deflate neither the other: |x_i^T M x_j| <= (||x_j|| ||r_i|| + ||x_i|| ||r_j||) /
@@ -784,8 +831,8 @@ def si_band(
         raise ValueError(f"block must be an int >= 1, got {block!r}")
     if not isinstance(capacity, int) or capacity < 2 * block:
         raise ValueError(f"capacity must be an int >= 2 block = {2 * block}, got {capacity!r}")
-    if not isinstance(verify, bool):
-        raise ValueError(f"verify must be True or False, got {verify!r}")
+    if not (verify is None or isinstance(verify, bool)):
+        raise ValueError(f"verify must be True, False or None, got {verify!r}")
     if bad := sorted({"sigma", "count_precond"} & set(slice_options)):
         raise ValueError(f"si_band sets {bad} per slice (sigma the midpoint, make(sigma))")
     b, c = block, _chunk(block)
@@ -796,7 +843,7 @@ def si_band(
     # (a, e, edges done before, span reruns in the lineage)
     work = [(x0, x1, set(), 0) for x0, x1 in zip([lo, *cuts], [*cuts, hi], strict=True)]
     slices, leaves = [], []  # leaves: (interval, count info)
-    r_s, tau_eff, converged, reason, i = 0.0, 0.0, True, None, 0
+    r_s, tau_eff, converged, reason, i, warned = 0.0, 0.0, True, None, 0, False
 
     def cols(idx):  # F order: a column touches only its own pages, no transposing copies
         U = np.empty((n, len(idx)), order="F")
@@ -837,6 +884,11 @@ def si_band(
         lam_s, run_s = np.r_[lam_s, lam], np.r_[run_s, np.full(len(lam), i)]
         res_s, thr_s = np.r_[res_s, inf["residuals"]], np.r_[thr_s, inf["thresholds"]]
         vecs.extend(V[:, q] for q in range(V.shape[1]))
+        if n_store is not None and len(vecs) > n_store and not warned:
+            warned = True
+            warnings.warn(f"si_band: {len(vecs)} stored modes exceed n_store = {n_store} (the"
+                          " reserved store memory); pass n_modes (the expected band count)",
+                          stacklevel=2)  # fmt: skip
         r_s, tau_eff = max(r_s, inf["r_acc"]), max(tau_eff, inf["tau_eff"])
         n_new = int(((lam >= a) & (lam <= e)).sum())
         strip = ("neighbours", "ritz", "runs")
@@ -869,7 +921,7 @@ def si_band(
         s_lo, s_hi, done_lo, done_hi = sp
         whole = s_lo is None and s_hi is None and not (done_lo and done_hi)  # requeued whole
         if whole and not n_new and not ((done_lo and a not in done) or (done_hi and e not in done)):
-            raise _cap_error(a, e, capacity, "no progress")
+            raise _cap_error(a, e, capacity, "no progress", (done_lo, done_hi))
         if not (done_lo or s_lo or done_hi or s_hi):  # new pairs only: requeued, them deflated
             work.append((a, e, done, k))
             continue
@@ -885,7 +937,9 @@ def si_band(
         if (done_lo or s_lo) and (done_hi or s_hi):
             x0, x1 = a if done_lo else s_lo, e if done_hi else s_hi
             cnt = _span_count(op, free, P, lam_s, cols, x0, x1, r_l, inf["neighbours"], R,
-                              verify, {**opts, "seed": c0 + sd})  # fmt: skip
+                              verify, {**opts, "seed": c0 + sd}, block=b,
+                              t_leaf=inf["count"]["t_leaf"],
+                              t_minres=inf["count"]["t_minres"])  # fmt: skip
             rerun = cnt["flagged"] and k < RESTARTS  # at most RESTARTS, as si_checked
             cnt["restarts"] = k  # the span reruns in its lineage
             if cnt["flagged"] and not rerun:
