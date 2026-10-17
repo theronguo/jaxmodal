@@ -5,7 +5,7 @@ Branch `pr-15d-strategy` from `main` (PR 15c merged). Roadmap: PR 15 (the [15d] 
 the PR 15c plan's split (15d = the cost model, the memory budget, the strategy choice,
 `verify=None` for bands and `solve_modes(..., band=(f1, f2))`).
 
-Revision 12. Rounds 1–8:
+Revision 13. Rounds 1–8:
 - one decision, no seeding;
 - memory-driven, no time crossover;
 - no hybrid junction;
@@ -70,6 +70,27 @@ Round 11:
   - 17a2's jump bound is new·8n, plus an entry check that the free happened;
   - rows were added to tests 8 and 12;
   - the docs gaps (preconditioners.md, the Errors bullet, open_items line 139) are fixed.
+
+Round 12:
+- **Memory and search:**
+  - the operator's whole `storage` is exact in all estimators;
+  - the estimators are cached per call (`functools.cache` on `_models`' results), about 11
+    distinct widths per band call;
+  - the AMG count-time rebuild is measured with aggs held, with a fitted term as the
+    fallback.
+- **Refill:** in whole chunks through `_insert(B, jnp.asarray(...))`, with no recompile.
+  `_precond_sigma(rounds=1)` gives μ₁^ub; there is one `_fits` helper; the ladder's fit goes
+  through `_largest`'s lo.
+- **The capacity stop** sits before the V write. The lower-end rule is defined for per-mode t.
+- **`verify=None`:**
+  - a warm $t_\text{minres}$ (`minres_first_s`);
+  - `counting._degree`;
+  - the decision carried over si_band's reruns.
+- **Tests:**
+  - 17a1 asserts on the minimum over runs, and its untestable mutant is dropped;
+  - test 12's boundary row is reachable;
+  - test 6 checks the view.
+- **Docs:** si_checked, the "Edge above the spectrum" bullet, and smaller passages.
 
 ## Scope
 
@@ -185,7 +206,7 @@ solve_modes(..., band=(f1, f2), strategy="shift_invert", memory_budget=8e9,
   - The GPU host budget is 0.8 × physical RAM.
   - **The fit test:** the estimate's exact part E and modelled part M pass when 1.05 E + 1.2 M ≤
     budget.
-    - E is the column arrays: basis, V, the slice window and store, R and M R, stored Ke. Its
+    - E is the column arrays: basis, V, the slice window and store, R and M R, the operator's `storage`. Its
       1.05 covers allocator growth proportional to the columns. Test 17a2 measures it as each
       growth's jump under the preallocated V. The 0.15 × 8n × n_modes in eigensolvers.md was
       measured on a plain chunked solve.
@@ -235,8 +256,12 @@ solve_modes(..., band=(f1, f2), strategy="shift_invert", memory_budget=8e9,
         `info["stopped"] = "sorted cut at the end"`. `_verify` is not called, since it reads
         `lam[n_band]`; `count` gets `ran` False with that reason.
     - **The upper end** comes from LOBPCG's `n_band` (after the sort) or si_band's set.
-    - **The lower end** keeps λ ≥ λ_lo(1 − 100t), extended down over chains with relative gaps
-      < 100t (si_band's `_extend_chain`). t is LOBPCG's per-mode threshold or r_acc.
+    - **The lower end.** t is LOBPCG's per-mode threshold or r_acc.
+      - i0 is the smallest index with λ_i ≥ λ_lo(1 − 100 t_i). With per-mode t the mask
+        need not be monotone, so the smallest index is used.
+      - Then extend down while λ[i0] − λ[i0−1] < 100 t[i0−1] λ[i0−1], with per-mode t as in
+        `lobpcg._band_count`. With a scalar t this is si_band's `_extend_chain`.
+      - Everything in [i0, n_band) is kept.
     - **The view.** The kept set of ascending λ is one range [i0, i1). Both strategies return
       the F-contiguous view `V[:, i0:i1]` of their F-order output; no copy is made. The columns
       below i0 stay resident behind the view; they were resident during the run, so the peak
@@ -262,10 +287,10 @@ Every slice path makes this check.
   - after LOBPCG ran, its lowest converged elastic Ritz value.
 - **Refinement.** When neither exists ($f_1 > 0$ with a `sigma=` hint or Jacobi), one is
   computed directly:
-  - multigrid: `lobpcg(op, free, 1, 0.1, R, P, maxit=20)` with the P built at the hint (as
-    `_precond_sigma`; measured within about 5e-6 relative of μ₁). P is dropped before
-    si_band's `make(σ)`. A hint whose `make` raises `SingularShiftError` (σ = 0 on a free
-    body) falls back to `sigma_estimate`, as `_precond_sigma` does;
+  - multigrid: `_precond_sigma(op, free, R, make, rounds=1)` itself. It builds at 0, falls
+    back to `sigma_estimate` on `SingularShiftError` (a free body), and runs one 1-mode
+    LOBPCG, which returns an upper bound (measured within about 5e-6 relative of μ₁). The hint
+    is not used for the bound. P is dropped before si_band's `make(σ)`;
   - Jacobi: `sigma_estimate` run to its stop rule (≤ 8% high measured).
 - **The rule.** If $\lambda_{lo} < \mu_1^{ub}(1 + m)$ with $m = \max(10^{-2}, 300\,\text{tol})$,
   si_band runs on $[0, \lambda_{hi}]$ and the result is filtered.
@@ -289,10 +314,11 @@ Every slice path makes this check.
 ### Strategy ("auto")
 
 1. **Ladder.**
-   - Candidates: the top chunk (`band_defaults`' chunk), halved while ≥ 5, always containing
-     the top chunk.
-   - For each, compute $C_{max}$ (below). A chunk fits if $C_{max} \ge \min$(up(4·chunk + k,
-     $c_L$), the free-space cap); 4·chunk is `band_defaults`' initial basis.
+   - Candidates: the top chunk (`band_defaults`' chunk), halved with `//` while ≥ 5, always
+     containing the top chunk.
+   - For each, compute $C_{max}$ (below) with `_largest`'s lo = min(up(4·chunk + k, $c_L$), the
+     free-space cap); 4·chunk is `band_defaults`' initial basis. None means the chunk does not
+     fit, and `info["c_max"]` records None for it.
    - The choice:
      - with a known depth ($f_1 = 0$ and `n_modes` given): the largest fitting chunk with
        $C_{max} \ge \min$(up(⌈1.25 n_modes⌉ + k, $c_L$), the free-space cap);
@@ -304,17 +330,22 @@ Every slice path makes this check.
      On small meshes $C_{max}$ is capped at the free space, so every chunk reaches it and the top
      chunk wins. Below the top chunk's need, the rule picks a small chunk (5 or 10) in practice:
      the reach gap between chunks is a few hundred columns at every mesh size (documented). The
-     searches run on every band call, with about 12–15 estimator calls per call. `amg_memory`'s
+     searches run on every band call. Each bisection is 14–20 `fits` calls (log₂ of the range),
+     about 70–90 per band call. Inside solve_modes, the estimators from `_models` are wrapped
+     in `functools.cache`, so only the distinct widths cost anything: about 4 ladder k's, block
+     6 and about 6 count blocks, so about 11. `amg_memory`'s
      mesh scan (corner nodes, the parent/child tables) moves into `_amg_scan(mesh)` with
      `functools.lru_cache(maxsize=1)`, returning (family, n_c, the p-level table bytes).
      - It is keyed on the mesh only, since `max_coarse` enters only the arithmetic after the
        scan. `Mesh` hashes by identity, and `maxsize=1` keeps at most one mesh alive.
      - A search therefore costs one scan, 2.3 s at 10.2M hex20 (measured), and milliseconds
-       after it. The other estimators take 4–22 ms at 1–2M (measured) and are not cached.
+       after it. The other estimators take 4–22 ms at 1–2M (measured) and are cached only
+       per call (above).
      - The exception is `operator_options={"path": "gather"}`: its `layout` inverse map
        costs 3.2 s per `unstructured_memory` call at 10.2M. A band call then spends about
-       20–30 s on estimates. This is documented, not cached; the gather path is not the
-       default.
+       35 s on estimates (about 11 distinct widths × 3.2 s with the per-call cache), plus
+       the levers' warning. This is documented; `layout` is not cached separately, and the
+       gather path is not the default.
    - No fitting chunk: "memory". si_band runs on the whole band, and a warning names the levers
      and their $C_{max}$ from the cached estimators.
    - A given `chunk` is used if it fits, else "memory".
@@ -327,42 +358,46 @@ Every slice path makes this check.
      the cap. Every width stays a multiple of $c_L$, which `_project`'s chunked slices need.
    - **At a growth,** `B = _grow(V, count, new, c_L, dtype)`. `_grow` never receives the old
      B.
-     - **The caller frees first.** It keeps `dtype = B.dtype` and `X0 = state[0][:, j:]`. It
-       then sets `B = state = args = None`, dropping every other reference to the old B. This
+     - **The caller frees first.** It keeps `dtype = B.dtype` and `X0 = state[0][:, j:]`.
+       X0 is now taken before the drop, where today it is taken after `_lock` (lobpcg.py:558).
+       It then sets `B = state = args = None`, dropping every other reference to the old B. This
        holds for the 9-block step too, so only X0 and X are alive during the refill.
      - **A synchronous free.** XLA CPU frees a dropped buffer only once every queued
        computation that reads it has finished. Round 11 measured about 62 ms late with a step
        in flight, and about 1 µs with nothing queued. So before the drop, the caller calls
-       `block_until_ready` on the last outputs that read B: `_reortho`'s X and the `_confirm`
-       results. The free is then synchronous (0.05 ms measured), and `_grow` has no wait, no
-       sleep and no footprint poll.
-       - Under the default macOS allocator the freed block stays in the malloc cache and is
-         reused by the next allocation, so the footprint does not fall; this is inside the
-         0.2 × RAM headroom (documented).
+       `block_until_ready` on `_reortho`'s outputs (keeping the free synchronous;
+       `float(g)` and `np.asarray(rl[:j])` already wait today), B's only reader (`_confirm` does not take
+       B). These are usually synchronised already by the `g > 0.5` check and the V write, so
+       this is one belt-and-braces line with a comment. The free is then synchronous (0.05 ms
+       measured), and `_grow` has no wait, no sleep and no footprint poll.
+       - Under the default macOS allocator the old B stays in the malloc cache. It is not
+         reused, since the new B is 1.5× larger, so old and new are both in the footprint. The
+         cache plateaus at about 8 GB on the 64 GB Mac (round 12), inside the 0.2 × RAM
+         headroom (documented).
        - The GPU BFC allocator's behaviour is a deferred GPU check.
-     - **Refill.** B is reallocated with zeros (XLA CPU writes them eagerly) and refilled with
-       exactly V's first `count` columns, in chunks of $c_L$ (the last chunk truncated at
-       `count`):
-       - `device_put(V[:, i:i+c].T)` is C-contiguous: zero-copy when 64-byte aligned, else one
-         chunk copied;
-       - the existing donated `_insert(B, jax.device_put(V[:, i:i+c].T).T, jnp.int32(i))`
-         writes it. The `.T` outside jit materialises a $c_L$-column chunk on the device.
-         The transient is up to 2 chunks: on GPU the device copy of the chunk and its
-         transpose, and on CPU an unaligned chunk copied once. Both fit under the dropped
-         step. There is no separate `_refill`.
-       - A truncated last chunk has a different shape, so `_insert` compiles once more per
-         growth (milliseconds; documented). It is not padded, because `dynamic_update_slice`
-         clamps the start index and would shift a padded chunk.
+     - **Refill.** B is reallocated with zeros (XLA CPU writes them eagerly) and refilled from
+       V in whole chunks of $c_L$ up to up(count, $c_L$), by the existing donated
+       `_insert(B, jnp.asarray(V[:, i:i+c]), jnp.int32(i))`. There is no separate `_refill`.
+       - i + $c_L$ ≤ new always holds (new is a multiple of $c_L$ ≥ up(count, $c_L$)), so
+         `dynamic_update_slice` never clamps.
+       - The padding columns [count, count + j) hold the X that `_lock` rewrites, since V is
+         written before the growth. The columns after them are V's zeros.
+       - With one chunk shape, `_insert` never recompiles.
+       - The transient is one chunk copied on the host, and on GPU its device copy, plus half
+         a chunk for an fp32 basis's `astype`: up to 2.5 chunks, about 13 GB at 10M with
+         $c_L$ = 64. That fits well under the dropped 9-block step, about 61 GB at k = 48.
      - **Synchronised.** Each chunk is synchronised (`block_until_ready`) and dropped before the
        next, so queued transfers do not pile up.
-     - The refilled B equals the old B exactly.
+     - After the lock, B equals the old B with the lock applied, exactly.
    - The host V is `np.zeros((n, C_max + k), order="F")`, allocated once. Its calloc is lazy:
      untouched columns cost no pages. It is never concatenated. The k extra columns are
-     deliberate slack: they are never paged, and they keep E conservative.
+     needed: after the last lock count ≤ $C_{max}$, and a band-end final chunk writes up to
+     count + chunk.
    - **Band mode returns the view `V[:, :end]`.** Today's `np.ascontiguousarray(V[:, :end])`
      (lobpcg.py:565) is removed, since it would make a C-order copy.
-   - **At a capacity stop** (checked after the band-end check, before the growth and the
-     lock):
+   - **At a capacity stop** (checked right after the band-end break, lobpcg.py:546–548, and
+     before line 549's V write):
+     - `chunks[-1]["locked"] = 0`;
      - the stopping chunk's entries are removed from `lams`, `res` and `thr`;
      - `end = count`, so the final chunk is not written to V;
      - `n_band` is `count`, and the caller does not use it;
@@ -429,10 +464,15 @@ memory-driven rule.
     - `host_total` = max(operator host build, V + the AMG build), where V is exact.
       - pyamg runs on the host before `_solve` allocates V. `_verify`'s `build(lam_c)`
         rebuilds the hierarchy while V is held.
-      - `amg_memory` has no aggregates term; the AMG build peak bounds the aggregates it
-        creates. Test 11 checks this against `_nbytes(aggs)` on the calibration meshes;
+      - `_verify`'s rebuild is `make(s, aggregates=aggs)` and runs with the first build's
+        aggs held. `amg_memory` has no aggregates term; its `build` is taken to bound
+        `_nbytes(aggs)` + the rebuild's peak. Test 11 measures this on hex20 $16^3$ and
+        $32^3$ and hex8 $32^3$ (`harness.measure`). If it fails at implementation, an
+        `aggregates` term fitted on those meshes is added to `amg_memory` and to the host
+        max;
     - `host` stays a component; `host_total` is the host-space peak (one docstring line);
-    - `device_total` = basis, R and stored Ke (exact), plus the preconditioner's storage, the
+    - `device_total` = basis, R, M R and the operator's whole `storage` (exact: layout
+      arithmetic, not a fit), plus the preconditioner's storage, the
       overhead, the step, start, seed and slack blocks, and the kernel temporaries (all
       modelled).
   - `si_memory(op_memory, n_dof, capacity, n_modes, ..., n_deflate, host_window=None)`:
@@ -440,13 +480,17 @@ memory-driven rule.
       chunk, since a slice's host V lands in the store: one store term;
     - device storage = operator + preconditioner + $v$·Q + R, M R, with Q = up(n_deflate, c) +
       capacity, as today;
-    - `host_total` = $8n\,$(host_window, default n_deflate) + $8 Q^2$ (an upper bound of
-      si_slice's G, modelled) + $8n\,$n_modes + max(the operator's host build, the
-      preconditioner's host build). The builds run one at a time, while the window and
-      store are held.
+    - `host` = $8n\,$(host_window, default n_deflate) + $8n\,$n_modes + $8 Q^2$ (an upper
+      bound of si_slice's G, modelled), and `end` = $8n\,(2 + c)$, so `total` (CPU) and
+      `host_total` (GPU) carry the same store and window terms;
+    - `host_total` = `host` + max(the operator's host build, the preconditioner's host
+      build). The builds run one at a time, while the window and store are held.
   - `count_memory`: operator storage, R, M R exact; the rest modelled; all device (W stays on
     the host in chunks).
-- **One helper,** `_largest(fits, step, lo, hi)`: the largest multiple of `step` in [lo, hi]
+- **One fit helper,** `_fits(est, budget, host_budget, host_extra=0)`: the fit test on one
+  estimate, with `host_extra` exact host bytes added (the count block's store and window).
+  $C_{max}$, the slice capacity and the count block all use it.
+- **One search helper,** `_largest(fits, step, lo, hi)`: the largest multiple of `step` in [lo, hi]
   with `fits(C)` True, by bisection (each `fits` is monotone), as a Python `int`, or None when
   nothing fits.
   - `probe_block`, $C_{max}$ and the slice capacity all use it. `probe_block` still raises
@@ -464,7 +508,9 @@ memory-driven rule.
       never exceeds C − 2b columns, including a slice requeued whole.
     - The store reservation:
       - $N_s$ = `n_modes` if given, else 200, the roadmap's assumed band size;
-      - after a capacity stop, at least 1.25 L.
+      - after a capacity stop, at least 1.25 L. On a slice from 0 by the μ₁ rule, the store
+        also holds the few modes in [μ₁, λ_lo(1 − 100t)), which L excludes. They lie within
+        m of μ₁, and $N_s$ only drives a warning (documented).
   - The need cap: up(1.25 (1.8 $N_s$ + 84) + W, c).
   - si_slice already stops at the free space.
 - **Slice counts.** si_band's counts (leaf, span, verification) run with `count_options["block"]`
@@ -498,19 +544,26 @@ memory-driven rule.
 `verify` ∈ {True, False, None}. None applies PR 14b's rule per leaf:
 - skip above `MAX_DEGREE`;
 - skip when the a-priori bound $2\,n_\text{blocks}\,d\,(b_p/b)\,t_\text{minres}$ exceeds the
-  leaf's time (0.3 instead of 2 when τ_c is looser than the rule, as `_bound`). $t_\text{minres}$
-  is warm: (MINRES time − the first step's) / (iterations − the first step's), so the first
-  solve's compile does not inflate the bound;
+  leaf's time (0.3 instead of 2 when τ_c is looser than the rule, as `_bound`).
+  - $t_\text{minres}$ is warm: (MINRES time − the first step's) / (iterations − the first
+    step's), so the first solve's compile does not inflate the bound.
+  - si_slice gains an info field `minres_first_s`, the first step's MINRES seconds. A
+    discarded σ-move solve counts in the first step.
+  - With one step, the cold mean is used;
 - otherwise calibrate (PR 14b's `_calibrate`, with the leaf's count closure and preconditioner)
   and count iff the prediction ≤ the leaf's time.
 
 The details:
-- **Order.** The degree comes from λ only. Both skips happen before the column gathers
-  (`cols(...)`, `W[:, i]`).
+- **Order.** The degree comes from λ only, through a new
+  `counting._degree(lam_c, lo, hi, lam_nb, n_rigid, n_free)`. It holds the band edges, the
+  Weyl `n_top` and `count_degree`, factored out of `count`/`band_count`. `_run`'s callers and
+  the None skips share it. Both skips happen before the column gathers (`cols(...)`,
+  `W[:, i]`).
 - **Restarts.** The rule is decided once per leaf, on its first count. si_checked's restarts
   follow that decision. The falsy-verify sites (`_predict=not verify` and `if not verify:`
   at shift_invert.py:548, 551, 719, 720) become explicit three-way tests, so None never acts
-  as False.
+  as False. si_band's widen-and-rerun loop (shift_invert.py:816–836) calls si_checked again
+  for the same leaf, and that call carries the first call's decision over.
 - **Times.** A run leaf's time is its slice's; a span's is its parent run's. This reads the
   roadmap's "no more than the solve" per leaf, so a run and its span may each spend up to the
   run's time (logged). $t_\text{minres}$ is the leaf's slice's measured seconds per MINRES
@@ -544,7 +597,9 @@ si_band's `_cap_error` is worded per case:
   - V is a preallocated zeroed F-order array;
   - non-band mode is unchanged.
 - `si_band`: `verify=None`, `n_store` and its warning, the `_cap_error` wording.
-- `counting.py`: `_bound` and `_calibrate` moved from `api.py`; `band_count(_steps=)`.
+- `si_checked`/`_span_count`: three-way `verify`; `si_slice`: `minres_first_s`.
+- `counting.py`: `_bound` and `_calibrate` moved from `api.py`; `band_count(_steps=)`;
+  `_degree` factored out.
 - `api.py`:
   - `solve_modes`:
     - `band=(f1, f2)`, `strategy`, `memory_budget`, `slice_options`;
@@ -586,7 +641,7 @@ si_band's `_cap_error` is worded per case:
      against chunk, extrapolated to depth with the first run's $t_\text{warm}$ rise.
 3. **[15d] memory record** (estimators only). `_amg_scan`'s cache (above) is shared across
    part 3, which runs mesh by mesh, since the scan does not depend on stored/on-the-fly Ke,
-   the basis dtype or m. About 4 s per mesh at 10M. Every estimator call passes `n_rigid` (0 clamped, 6 free), so
+   the basis dtype or m. About 2.3 s per mesh at 10M. Every estimator call passes `n_rigid` (0 clamped, 6 free), so
    no rigid-mode computation runs at 10M.
    - The ladder (chunk 40 → 5: fits, $C_{max}$ under the fit test and the default budget, the
      slice capacity after a capacity stop) × {9-block, low} × {fp64, fp32 basis} × {stored,
@@ -680,7 +735,7 @@ Method:
    - One real-AMG copy, marked slow.
 5. **Empty band:** strictly between two well-separated modes of the voxel "cube" (named gap).
    0 modes and count < 0.5 under both strategies; `from_zero` False.
-6. **Clamped box**, `band=(0, f)`, "shift_invert": matches eigsh, `from_zero` True.
+6. **Clamped box**, `band=(0, f)`, "shift_invert": matches eigsh, `from_zero` True; the returned V is a view (`V.base is not None`, F-contiguous).
 7. **$\lambda_{lo} < \mu_1$**, clamped and free, "shift_invert":
    - `from_zero` True, filtered, matches eigsh;
    - the margin, with μ₁^ub monkeypatched ≥ the true μ₁:
@@ -718,9 +773,10 @@ Method:
     - **Estimator terms:**
       - one hand-computed device and host term per estimator;
       - `lobpcg_memory(capacity=C)`'s basis exactly C, and its `host_total` the max of the
-        operator's host build and V + the AMG build; `amg_memory`'s build ≥ `_nbytes(aggs)`
-        on the calibration meshes;
-      - `_amg_scan` runs once per mesh (spy);
+        operator's host build and V + the AMG build; on hex20 $16^3$, $32^3$ and hex8 $32^3$, the
+        measured peak of `amg(..., aggregates=aggs)` with aggs held, plus `_nbytes(aggs)`, ≤
+        `amg_memory(...)["build"]`;
+      - `_amg_scan` runs once per mesh (spy; tests touching it call `_amg_scan.cache_clear()`);
       - si_memory's device basis exactly up(C, c)·8n, with `host_window` and the store only in
         the host term, and the Gram term $8Q^2$;
       - the per-space exact parts;
@@ -747,10 +803,13 @@ Method:
     - **`solve_modes_memory`** with $f_1 > 0$ still raises `ValueError`.
 12. **`_solve(max_capacity=...)`** directly:
     - the capacity sequence: every width a multiple of $c_L$, growth straight to the cap;
-    - a lock with count + k = $C_{max}$ is allowed, count + k = $C_{max}$ + 1 stops;
+    - the boundary: at chunk 5, $C_{max}$ = 40, count 30 (count + k = $C_{max}$) locks to 35,
+      which catches a `>=` mutant, and the next lock stops. A monkeypatched `_iterate`
+      returning one j = 1 chunk reaches count + k = $C_{max}$ + 1, which stops;
     - the initial allocation capped, with n_modes = $C_{max} - k$;
     - V F-order zeros of C_max + k columns;
-    - after a refill, B's first `count` columns equal V's cast, and the rest are 0;
+    - after a refill and the lock, B's first count + j columns equal V's cast, and the rest
+      are 0;
     - the state freed before a growth, under the 9-block step. A spy on `_grow`'s entry
       asserts that no live array (`jax.live_arrays()`) has the old B's shape. The spy holds
       no reference to B, and the configuration is chosen so that the old width is > 0 and no
@@ -764,6 +823,10 @@ Method:
     `shift_invert_study.json`'s rows (frac 0.5, non-floor, `recheck_1005`), with ratios in
     [0.75, 1.3]. The crossover and per-chunk entries are present.
 14. **`si_band(verify=None)`:**
+    - `counting._degree` equals `count`'s and `band_count`'s `_predict` degree on a table of
+      (lam_c, lo, hi) cases;
+    - `minres_first_s` recorded, and the one-step fallback to the cold mean;
+    - a None decision carried across si_band's widen-and-rerun call (spy);
     - with `fake_band`, each branch: MAX_DEGREE skip; bound skip with 2 and with 0.3; calibrated
       and dear, skip; calibrated and cheap, count (`counting._calibrate` spied), on a leaf with
       lo > 0 (band_count's `_steps`). A span leaf's time is its parent's, and the skips come
@@ -800,32 +863,36 @@ Method:
       - The order is pinned: while B is still alive, the test reads "footprint before" and
         resets the interval footprint (`proc_reset_footprint_interval`). It then drops B,
         keeping only `dtype`, as `_solve` does, and calls `_grow`, then reads the interval max.
-        The growth runs ≥ 10 times (B regrown each time), and the assertion is on the maximum
-        over the runs.
+        The growth runs ≥ 10 times (B regrown each time). The assertion is on the minimum
+        over the runs: spurious interval spikes reached about 9 $c_L$ (round 12), and noise
+        only adds, while a kept-B bug shows in every run.
       - Asserts: interval max − footprint before < (new − old + old/2)·8n.
         - A correct refill pages new − old columns (XLA CPU zeros are eager; asserted as a
-          precondition), plus one $c_L$ chunk of transient and allocator slack (2–4.4 $c_L$
-          measured), against a slack of 7 $c_L$.
+          precondition), plus the transient: a clean 2 $c_L$ (120 columns total, measured
+          with reads per chunk), against a slack of 7 $c_L$.
         - The bug it guards against is B kept alive across the allocation, which adds old =
-          14 $c_L$ columns. The test runs that mutant once (a held reference) and asserts that
-          it exceeds the threshold.
-        - Each run also leaves a step reading B in flight before the drop, so the caller's
-          `block_until_ready` is exercised. A mutant without it would overlap for about 62 ms
-          (round 11), which the interval max sees.
+          14 $c_L$ columns. The test runs that mutant ≥ 3 times (a held reference) and asserts
+          that its minimum exceeds the threshold (340–352 measured).
+        - The `block_until_ready` in `_solve` is protocol, not tested here: `_solve`'s V
+          write and residual reads already synchronise B's readers, so the in-flight case
+          does not arise there. The test does its own `block_until_ready` before the drop.
     - **(a2) The fit test** on a short real run: `_solve(max_capacity=...)` on a non-cubic voxel
       $52\times48\times44$ (no cube multiplicities at the chunk boundary), low-memory, chunk 10,
       to about 100 modes. The growth sequence 60 → 90 → 135 is asserted as a precondition.
       A ≥ 2 GB estimate is a precondition too. Run time 94–181 s measured.
-      - **Per-growth jump.** A spy on `_grow` reads the footprint at its entry, after the caller's drop, and again
-        at its return. Asserts:
+      - **Per-growth jump.** A spy on `_grow` reads the footprint at its entry, after the
+        caller's drop, and again at its return. This checks that B is allocated at exactly new
+        columns; the refill transient is 17a1's. Asserts:
         - jump ≤ 1.05 × new·8n;
         - the entry footprint ≤ the previous post-lock footprint − 0.9 × old·8n (the free
-          happened). The post-lock footprint is read by a spy on `_lock`.
+          happened). The post-lock footprint is read by a spy on `_lock`. Expected: about
+          −old − k (the state dropped, X0 and ≤ j V columns added), so the 0.1·old allowance
+          also covers compile-time host retention.
         A slope over the whole run is not used: residual noise of about ±100 columns gave
         slopes of 2.1–2.5 in round 10's measurements.
       - **Whole-run peak,** with the baseline read after setup (mesh, operator, preconditioner
         built). Asserts: peak − baseline ≤ 1.05 E + 1.2 M − (the setup terms with their own
-        factors: stored Ke, R and M R at 1.05; operator and preconditioner storage and
+        factors: operator storage, R and M R at 1.05; preconditioner storage and
         overhead at 1.2), at the final capacity and locked count (V is lazily paged).
     - **(b)** `solve_modes(strategy="shift_invert", band=..., memory_budget=B, verify=False,
       n_modes=3, sigma=...)` on lumped voxel $80^3$. The band is pinned to the lowest 2–3
@@ -862,7 +929,7 @@ measured):
     - the signature line with `strategy`, `memory_budget`, `slice_options`;
     - step 1's band checks;
     - step 5's strategy dispatch;
-    - the Errors bullet (line 41): the band, strategy and budget argument errors, forced
+    - the Errors bullet (line 39): the band, strategy and budget argument errors, forced
       "lobpcg" with no chunk fitting or at the cap, si_band's per-case capacity errors,
       `solve_modes_memory`'s $f_1 > 0$ error;
     - the Returns bullet with the new `info` fields.
@@ -883,10 +950,17 @@ measured):
   - **§Measured MINRES cost:** the $\alpha D(1 + D/D_0)$ constants per family.
   - **§Frequency band [0, f_max],** rewritten:
     - the Capacity bullet: capped growth, free-and-refill (the `block_until_ready` before
-      the drop that makes XLA CPU's free synchronous, the `_insert` recompile on a truncated
-      chunk), preallocated V;
+      the drop that makes XLA CPU's free synchronous, whole-chunk refill), preallocated V;
     - the sort right after `_solve` with the in-place column permutation;
-    - the Returns bullet (line 108): a view, not a compact copy.
+    - the Returns bullet (line 108): a view, not a compact copy;
+    - the "Edge above the spectrum" bullet (line 106): LOBPCG raises only when $C_{max}$ is
+      the free-space cap; otherwise a capacity stop, then si_band's late "hi above the
+      spectrum" error, or the forced-"lobpcg" cap error;
+    - line 320 ("V is a preallocated fp64 host array (n, n_modes)"): outside band mode; in
+      band mode (n, $C_{max}$ + k), zeroed, F-order.
+  - **§Checked slices** (lines 627, 633): `verify` three-way (None decided once per leaf,
+    restarts follow it), the new skip reasons, `predicted_s` / `predicted_kind`.
+  - **The intro** (line 3): `band=(f1, f2)` and the interior-band section.
   - **The Validation list,** including line 829's "a copy, not a view".
   - **"Edge above the spectrum"** (near line 664): late errors only, with their cost on slice
     paths.
@@ -927,6 +1001,9 @@ measured):
     - the Status paragraph; PR 15d status; PR 15 complete and milestone M3b done (with
       `examples/m3b_bands.py`);
     - the dependency table (PR 18 gains 15d);
+    - line 512 (PR 13c: slicing settings in the Options table): done through `slice_options`;
+    - line 16 (PR 14b status: "No strategy selection yet", "grows 1.5×"): a "(done in 15d;
+      growth capped at $C_{max}$)" note;
     - the PR 14 contents note "PR 15 adds the shift-invert branch" as done;
     - PR 15 Contents (line 545, "Slicing with the cost model … 15d: the cost model and
       strategy") and PR 15 Docs (line 550, "15d the memory model and calibration") as built;
@@ -956,7 +1033,8 @@ measured):
     the depth-1000 remedies and the up-front spectrum bound.
   - **Deferred GPU checks:** the items in Out of scope.
 - `docs/open_items.md`:
-  - **Closed:**
+  - **Closed** (each moved to the Resolved entries at the end, with its 15d resolution, per
+    open_items.md line 3):
     - 14b's "no strategy selection or basis-fit check";
     - 15a "`capacity` is required; 15d sets it";
     - 15c "`sigma` and `count_precond` are rejected … 15d exposes `make`'s options" (through
@@ -1030,7 +1108,8 @@ measured):
   - frees the state first;
   - synchronises the last outputs reading B before dropping it, so the free is synchronous;
   - rebuilds B from the zeroed host V by zero-copy chunks through `_insert`, synchronised
-    (PCIe about 3 s for 1000 columns at 10M), instead of copying;
+    (PCIe about 3 s per 1000 columns per refill at 10M with pinned memory, about 2× for
+    pageable V; about 15–20 s per solve over all growths), instead of copying;
   - allocating B at $C_{max}$ up front on GPU, against fragmentation, is left to the GPU checks.
 - **The initial allocation** is 14b's, capped, with n_modes = capacity − k.
 - **LOBPCG's λ order:** when out of order (rare), sorted right after `_solve`, together with
