@@ -245,6 +245,10 @@ A slice whose first solve stagnates moves σ once and repeats the solve; when th
 
 Asked whether `solve_modes` should support `jax.grad` end to end (a custom VJP wrapping PR 21's sensitivities) or eigenvector sensitivities. User: "No idea. Just follow the roadmap". Default: the roadmap as written (principle 5: eigenvalue sensitivities by a separate element-kernel pass in PR 21; solvers and preconditioners never differentiated; no eigenvector gradients). Revisit if an optimization use case needs mode-shape objectives.
 
+### Scale target and checkpoint/restart (user, 2026-10-17)
+
+User: topology optimization "as large scale as possible", multi-GPU and multi-node; first hardware is 2× A100, possibly on different nodes. HPC runs have time limits, so checkpoint/restart is wanted "eventually". Recorded in the roadmap: PR 19 adds multi-node (`jax.distributed`, distributed setup, coarse-level agglomeration), sharded checkpoints and an optional wall-clock budget; PR 23 now depends on PR 19 (sharded filter, sensitivities and MMA, optimizer checkpoints). The earlier ≤ 10M voxel-element working assumption is dropped. Sizes beyond ~100M DOF (about 1.7 TB at 1B voxel elements) need multi-node and are verified only on hardware.
+
 ### GMG restriction on the GPU (PR 11 deferred GPU checks)
 
 Restriction is the transpose of gathers, i.e. scatter-adds (6× the prolongation time on CPU at $87^3$). Default: keep; listed in the deferred GPU checks with "rewrite as gathers if it dominates".
