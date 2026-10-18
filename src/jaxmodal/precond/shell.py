@@ -56,7 +56,7 @@ def _columns(op, group):
     blocks = np.full((len(g), size.max()), -1, np.int32)
     blocks[pr, np.arange(len(pr)) - (np.cumsum(size) - size)[pr]] = node
     lone = np.setdiff1d(np.arange(op.n_nodes), E)
-    pad = np.full((len(lone), blocks.shape[1]), -1)
+    pad = np.full((len(lone), blocks.shape[1]), -1, np.int32)
     pad[:, 0] = lone
     return np.concatenate([blocks, pad])
 

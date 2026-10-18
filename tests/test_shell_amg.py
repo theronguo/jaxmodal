@@ -678,7 +678,7 @@ def test_setup_dense():
         rho = np.abs(np.linalg.eigvals(Dinv[:, None] * Ad)).max()
         assert 0.9 * rho <= info["rho"][i] <= 1.1 * rho
         Pd = T
-        for _ in range(SH.STEPS[min(i, 1)]):
+        for _ in range((1, 2)[min(i, 1)]):  # the designed d_l, not SH.STEPS
             Pd = Pd - AM.OMEGA / info["rho"][i] * Dinv[:, None] * (Ad @ Pd)
         assert np.abs(Pl.toarray() - Pd).max() <= 1e-12 * np.abs(Pd).max()
         zero = np.abs(T).sum(0) == 0

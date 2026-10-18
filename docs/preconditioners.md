@@ -52,7 +52,7 @@ Both approximate $A_P$ of $K + \sigma M$ with $\sigma \ge 0$, are pytree callabl
   $$B_n = K_{nn} + \sigma\,\mathrm{diag}(M)_n I_3,$$
   constrained rows and columns replaced by the identity. On the free entries $B_n$ is the 3×3 diagonal block of $A_P$. The blocks are inverted by a batched Cholesky (a non-SPD block gives NaN, which then shows up as NaN in the solver's `residuals`). Storage: 9 values per node.
 - A concrete $\sigma < 0$ or NaN raises `ValueError` in both (a traced σ is not checked). For the indefinite $K - \sigma_b M$, build the preconditioner at $+\sigma_b$.
-- **Solid shells:** `jacobi` is the `solve_modes` default on `ssh8` meshes until PR 18b (iterations grow about like $(L/t)^2$: 57, 232, 1644 at $L/t$ = 10, 20, 50, `docs/eigensolvers.md`; 1289 PCG iterations on the $32^2$ plate at $L/t = 50$, `benchmarks/results/shell_amg_study.json`). `amg` works on them since PR 18a ([below](#amg-on-solid-shells-pr-18a)); `pmg` raises.
+- **Solid shells:** `jacobi` is the `solve_modes` default on `ssh8` meshes until PR 18b (LOBPCG iterations grow about like $(L/t)^2$: 57, 232, 1644 at $L/t$ = 10, 20, 50, `docs/eigensolvers.md`; 1289 PCG iterations on the $32^2$ plate at $L/t = 50$, `benchmarks/results/shell_amg_study.json`). `amg` works on them since PR 18a ([below](#amg-on-solid-shells-pr-18a)); `pmg` raises.
 - **Internal entry for level blocks:** `precond.jacobi._inverse_blocks(B, free)` masks and inverts any `(n, b, b)` SPD blocks with an `(n·b,)` mask and returns `(inv, mask)`; PRs 11 and 13 feed it their coarse-level 3×3 and 6×6 blocks, and PR 18a its Schwarz patch matrices (padded slots the identity).
 
 ## Chebyshev
@@ -471,7 +471,7 @@ On the filtered fields at their own $\lambda_1$ AMG is far behind: GMG deflates 
 
 ### AMG on solid shells (PR 18a)
 
-`amg()` takes the solid-shell path when any block of the operator is `ssh8`: `ssh8` alone or with `hex8` (T-junctions, L-folds, stiffeners and hex8 solids glued to shells). A mesh with `ssh8` and `hex20`/`hex27` blocks raises `ValueError` ("solid-shell AMG supports ssh8 and hex8 blocks"; the meshes are nonconforming). Hex-only meshes run the code above unchanged. The signature, `return_aggregates` and `aggregates=` are the same; `solve_modes` and `amg_memory` still refuse AMG on `ssh8` until PR 18b (`jacobi` stays `solve_modes`' choice there). Code: `precond/shell.py` (host setup), `precond/schwarz.py` (the smoother).
+`amg()` takes the solid-shell path when any block of the operator is `ssh8`: `ssh8` alone (also T-junctions and L-folds) or with `hex8` (stiffeners, hex8 solids glued to shells). A mesh with `ssh8` and `hex20`/`hex27` blocks raises `ValueError` ("solid-shell AMG supports ssh8 and hex8 blocks"; the meshes are nonconforming). Hex-only meshes run the code above unchanged. The signature, `return_aggregates` and `aggregates=` are the same; `solve_modes` and `amg_memory` still refuse AMG on `ssh8` until PR 18b (`jacobi` stays `solve_modes`' choice there). Code: `precond/shell.py` (host setup), `precond/schwarz.py` (the smoother).
 
 **Why the hex8 path fails.** Measured in the 18a prototypes (plan measurements, not in the JSON; SS plate $n^2\times1$, PCG to $10^{-6}$ at σ = $\lambda_1$):
 1. *Near-null space:* rigid modes do not represent plate bending on coarse aggregates.
@@ -491,7 +491,7 @@ On the filtered fields at their own $\lambda_1$ AMG is far behind: GMG deflates 
 
 Free groups left alone (separate parts, coarse leftovers) become singleton aggregates; fully constrained groups stay out (empty tentative rows). The graphs depend on the mask, not the values.
 
-**Candidates.** Per level, 9 columns of $B^{(\ell)}_\text{fine}$ on the corner DOFs: the masked rigid modes and three constant-curvature Kirchhoff fields of each node's level-$(\ell+1)$ aggregate, in the aggregate's frame $(t_1, t_2, n)$ with local coordinates $(X, Y, Z)$ of $x - \bar x$:
+**Candidates.** Per level, 9 columns of $B^{(\ell)}_\text{fine}$ on the corner DOFs: the masked rigid modes and three constant-curvature Kirchhoff fields (also masked) of each node's level-$(\ell+1)$ aggregate, in the aggregate's frame $(t_1, t_2, n)$ with local coordinates $(X, Y, Z)$ of $x - \bar x$:
 $$\kappa_{11}: w = \tfrac{X^2}{2},\ u_1 = -ZX; \qquad \kappa_{22}: w = \tfrac{Y^2}{2},\ u_2 = -ZY; \qquad \kappa_{12}: w = XY,\ u_1 = -ZY,\ u_2 = -ZX,$$
 with $w$ along $n$ and $u_\alpha$ along $t_\alpha$.
 - **Sign-free frame:** per node $T_a = \sum v v^\top$ over the thickness edges $v$ of its `ssh8` elements; $n$ is the dominant eigenvector of $\sum_{a \in \text{agg}} T_a$ (batched `eigh`), $t_1 = n\times e/\|n\times e\|$ with $e$ the axis least aligned with $n$, $t_2 = n\times t_1$. The span of the three fields does not depend on the sign of $n$, so flipped element orientations (the sweep on curved shells) do not matter. Aggregates without `ssh8` nodes get zero curvature columns.
@@ -529,8 +529,8 @@ which is SPD (principal submatrices of an SPD matrix), so the V-cycle stays symm
 | 90° panel $32^2$, $L/t = 50$ | 6,534 | 1,089 / 144 / 36 | 14 | 1.4 |
 | free 270° cylinder 24×8 (sweep-built), $R/t = 50$ | 1,350 | 243 / 27 | 46 | 0.8 |
 | T-junction $24^2$, $L/t = 50$ (clamped edges) | 5,700 | 864 / 108 / 9 | 13 | 1.5 |
-| L-fold $24^2$ | 5,700 | 864 / 108 / 18 | 11 | 1.3 |
-| T-junction, 3-layer skin and web | 12,000 | 864 / 108 / 9 | 18 | 1.7 |
+| L-fold $24^2$, $L/t = 50$ (clamped edges) | 5,700 | 864 / 108 / 18 | 11 | 1.3 |
+| T-junction $24^2$, 3-layer skin and web, $L/t = 50$ (clamped edges) | 12,000 | 864 / 108 / 9 | 18 | 1.7 |
 | flat $32^2$, $L/t = 300$ | 6,534 | 1,089 / 144 / 36 | 17 | 1.4 |
 | $32^2$ plate with a hex8 rib, $L/t = 50$ | 7,128 | 1,188 / 153 / 36 | 19 | 1.6 |
 | hex8 $16^3$ block with an `ssh8` skin ($L/t$ = 100), base clamped | 15,606 | 1,944 / 72 | 14 | 1.3 |
