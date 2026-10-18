@@ -79,7 +79,7 @@ Km, Mm = masked(K, free), masked(M, free)  # constrained rows and columns zero
 AP = a_p(K + 1e3 * M, free)  # SPD: constrained diagonal = mean free diagonal
 ```
 
-Thin walls and laminates use the solid shell `ssh8` (PR 16): convert hex8 elements so that reference $\zeta$ is the thickness and give them a `Laminate` of plies (bottom to top; angles in radians about the normal). `assemble`, the stored matrix-free operator and `solve_modes` (with the solid-shell AMG by default on `ssh8` and `ssh8` + `hex8` meshes since PR 18b, PR 18a's `amg`; Jacobi with `ssh8` + `hex20`/`hex27`; `docs/preconditioners.md`, `docs/eigensolvers.md`) take them:
+Thin walls and laminates use the solid shell `ssh8` (PR 16): convert hex8 elements so that reference $\zeta$ is the thickness and give them a `Laminate` of plies (bottom to top; angles in radians about the normal). `assemble`, the stored matrix-free operator and `solve_modes` (by default with PR 18a's solid-shell `amg` on `ssh8` and `ssh8` + `hex8` meshes since PR 18b, with Jacobi on `ssh8` + `hex20`/`hex27`; `docs/preconditioners.md`, `docs/eigensolvers.md`) take them:
 
 ```python
 from jaxmodal.eigen import solve_modes
@@ -239,7 +239,7 @@ mu, V, info = lobpcg(hop, hfree, 4, tol=1e-8, precond=P)
 assert info["converged"] and info["iterations"] <= 40
 ```
 
-`solve_modes` uses this AMG automatically on unstructured meshes (PR 13b), with the same σ pre-estimate as GMG (started at σ = 0 when the BCs leave no rigid modes); `solve_modes_memory` models it too. `amg(..., return_aggregates=True)` and `amg(..., aggregates=...)` reuse the setup's aggregates for new materials or densities on the same mesh:
+`solve_modes` uses this AMG automatically on unstructured meshes (PR 13b) and solid shells (PR 18b), with the same σ pre-estimate as GMG (started at σ = 0 when the BCs leave no rigid modes); `solve_modes_memory` models it too. `amg(..., return_aggregates=True)` and `amg(..., aggregates=...)` reuse the setup's aggregates for new materials or densities on the same mesh:
 
 ```python
 mu, V, info = solve_modes(hbox, materials, {"xmin": "xyz"}, 4)
@@ -249,7 +249,7 @@ P, agg = amg(hop, hfree, 1e5, hbox.points, max_coarse=100, return_aggregates=Tru
 P2 = amg(hop.scaled(s_K=0.5 * hop.s_K), hfree, 1e5, hbox.points, aggregates=agg)
 ```
 
-The defaults are the robust choice; every option of the operator, the preconditioner, the σ pre-estimate, the count (`count_options`) and the slices (`slice_options`) is reachable from `solve_modes` through dicts (PR 13c, 15d), and `X0` warm-starts from earlier modes:
+The defaults are the robust choice; every option of the operator, the preconditioner, the σ pre-estimate, the polish (`polish_options`), the count (`count_options`) and the slices (`slice_options`) is reachable from `solve_modes` through dicts (PR 13c, 15d), and `X0` warm-starts from earlier modes:
 
 ```python
 mu2, V2, info = solve_modes(
@@ -298,7 +298,7 @@ See [`docs/preconditioners.md`](docs/preconditioners.md) for the solvers' stoppi
 
 The scripts in [`examples/`](examples) walk through each milestone (`m0_foundations.py`: meshes, VTU, materials; `m1_operators.py`: element matrices and operators against the assembled matrices; `m2_modes.py`: a cantilever against Euler–Bernoulli and a free voxel cube; `m3b_bands.py`: bands from 0 and interior, by LOBPCG and by slices, against SciPy; `m4_shell.py`: a simply supported `ssh8` plate against Kirchhoff and the SciPy reference); each ends with a check and runs as a smoke test.
 
-See [`docs/eigensolvers.md`](docs/eigensolvers.md) for `solve_modes`, its options and their defaults, its Mac acceptance budgets, the frequency band mode and `verify`, interior bands and the strategy (memory budget, slices), the completeness count, LOBPCG (algorithm, chunks and locking, low-memory mode, memory model, convergence, measured floor and cost), the reference solver, its certification and size limits, and [`docs/verification.md`](docs/verification.md) for the exact solutions and measured convergence.
+See [`docs/eigensolvers.md`](docs/eigensolvers.md) for `solve_modes`, its options and their defaults, its Mac acceptance budgets, the frequency band mode and `verify`, interior bands and the strategy (memory budget, slices), the completeness count, LOBPCG (algorithm, chunks and locking, low-memory mode, the low-memory switch, the polish and the Rayleigh–Ritz on failed exits, memory model, convergence, measured floor and cost), the reference solver, its certification and size limits, and [`docs/verification.md`](docs/verification.md) for the exact solutions and measured convergence.
 
 ## Development
 

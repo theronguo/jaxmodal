@@ -470,7 +470,7 @@ chunk's start `X0 = Xi[:, j:]` is taken before `X, g = _reortho(...)`, which zer
   (p-MG temps 191 → 98 blocks), Jacobi bitwise equal; the recurrence temps of
   `test_step_memory`'s cases bitwise unchanged, elsewhere ≤ the count model (voxel GMG
   $32^3$ $b$ = 16 +1.9%, ratio to `GMG_COUNT` ≤ 0.97 up to $64^3$).
-- **Cost:** one PCG solve at width $m$ (113–224 V-cycles measured, each about one LOBPCG step);
+- **Cost:** one PCG solve at width $m$ (47–118 PCG iterations measured, each about one LOBPCG step);
   at most `maxit` = 500. The `STALL` = 50 iterations before it stay (an earlier trigger logged,
   not built).
 
