@@ -592,6 +592,7 @@ def test_amg_step_tight(t, n):
         assert model - 1 <= extra <= model, (low, extra, model)
 
 
+@pytest.mark.peak
 @pytest.mark.slow
 def test_amg_build_peak():
     """13b test 12: amg_memory's build >= the whole amg's host peak and <= 1.3x it (fresh
@@ -617,6 +618,7 @@ def test_benchmark_smokes():
         assert all(x["gmg"]["converged"]) and all(x["amg max_coarse=100"]["converged"])
 
 
+@pytest.mark.peak  # its time budget has a 10x margin
 @pytest.mark.slow
 @pytest.mark.skipif(sys.platform != "darwin", reason="Mac acceptance")
 def test_mac_acceptance():

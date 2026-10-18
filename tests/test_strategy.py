@@ -1029,6 +1029,7 @@ def test_amg_scan_cached(monkeypatch):
     assert info.misses == 1 and info.hits == 2
 
 
+@pytest.mark.peak
 @pytest.mark.slow
 @pytest.mark.skipif(sys.platform != "darwin", reason="Mac peaks")
 @pytest.mark.parametrize("t, n", [("hex20", 16), ("hex20", 32), ("hex8", 32)])
@@ -1562,6 +1563,7 @@ def test_solve_modes_records(fake_builds):
                           for x in leaves)  # fmt: skip
 
 
+@pytest.mark.serial
 @pytest.mark.slow
 def test_leaf_calibration(monkeypatch):
     """Test 14 (as 14b's test_calibration): one leaf on hex20 12^3 with real AMG under None,
@@ -1905,6 +1907,7 @@ def main():
 """
 
 
+@pytest.mark.peak
 @pytest.mark.slow
 @MAC
 def test_mac_growth_peak():
@@ -1969,6 +1972,7 @@ def bisect_budget(ok, lo=1e8, hi=1e11):
     return hi
 
 
+@pytest.mark.peak
 @pytest.mark.slow
 @MAC
 def test_mac_slice_peak():
@@ -2022,6 +2026,7 @@ def main(degree, b):
 """
 
 
+@pytest.mark.peak
 @pytest.mark.slow
 @MAC
 def test_mac_count_peak():

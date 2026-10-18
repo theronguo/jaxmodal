@@ -12,7 +12,11 @@ dynamic = ["version"]
 dependencies = ["jax>=0.11.2", "numpy", "scipy", "meshio", "pyamg"]
 
 [dependency-groups]
-dev = ["pytest", "ruff"]
+dev = [
+    "pytest",
+    "pytest-xdist>=3.8.0",
+    "ruff",
+]
 
 [tool.hatch.version]
 path = "src/jaxmodal/__init__.py"
@@ -32,5 +36,10 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-markers = ["slow: long-running", "gpu: needs a CUDA device"]
+markers = [
+    "slow: long-running",
+    "gpu: needs a CUDA device",
+    "serial: asserts wall time or must run without other load; scripts/test.sh runs it alone",
+    "peak: asserts a process memory peak; scripts/test.sh runs 3 at a time",
+]
 addopts = "--strict-markers"

@@ -10,6 +10,7 @@ import pytest
 import jaxmodal
 from benchmarks import harness
 
+pytestmark = pytest.mark.serial  # measures process peaks and wall time
 darwin = pytest.mark.skipif(sys.platform != "darwin", reason="peak_bytes is macOS-only in PR 0")
 GB = 1e9
 RNG = "rng = np.random.default_rng(0)"
