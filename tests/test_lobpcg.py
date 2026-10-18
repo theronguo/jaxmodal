@@ -962,7 +962,7 @@ def stalled(monkeypatch, polish=None, n=6, tol=1e-10, **kw):
 
 @pytest.mark.parametrize("low", [False, True], ids=["9-block", "low"])
 def test_polish_accepts(monkeypatch, low):
-    lam0, V0, info0 = stalled(monkeypatch, low_memory=low)
+    *_, info0 = stalled(monkeypatch, low_memory=low)
     assert not info0["converged"] and info0["stagnated"]
     assert info0["chunks"][0]["polish"] is None
     calls = []
@@ -976,7 +976,7 @@ def test_polish_accepts(monkeypatch, low):
     assert np.abs(Vf.T @ (p.Mf @ Vf) - np.eye(6)).max() <= 1e-12
 
 
-@pytest.mark.parametrize("bad", ["noise", "rank"])
+@pytest.mark.parametrize("bad", ["noise", "rank", "nan"])
 def test_polish_reverts(monkeypatch, bad):
     """A polish that does not pass leaves the result bitwise equal to no polish."""
     lam0, V0, info0 = stalled(monkeypatch)
@@ -986,6 +986,8 @@ def test_polish_reverts(monkeypatch, bad):
         Y, its = exact(X)
         if bad == "noise":
             return X + jax.random.normal(jax.random.key(3), X.shape) * (X != 0), its
+        if bad == "nan":
+            return Y * jnp.nan, its
         return Y.at[:, 1].set(Y[:, 0]), its
 
     lam, V, info = stalled(monkeypatch, polish)
@@ -1001,16 +1003,23 @@ def test_polish_not_on_maxit(monkeypatch):
     assert info["chunks"][0]["polish"] is None
 
 
-def test_polish_guard_check(monkeypatch):
-    """Locked chunks (12 modes, chunks of 6): the failed-exit guard check (_extent with
-    failed=True) runs after a polish that did not accept, never after one that did."""
-    extent, failed = lob._extent, []
+@pytest.fixture
+def extent_calls(monkeypatch):
+    """The failed= flag of every _extent call."""
+    extent, calls = lob._extent, []
 
     def spy(*a, **kw):
-        failed.append(kw.get("failed", False))
+        calls.append(kw.get("failed", False))
         return extent(*a, **kw)
 
     monkeypatch.setattr(lob, "_extent", spy)
+    return calls
+
+
+def test_polish_guard_check(monkeypatch, extent_calls):
+    """Locked chunks (12 modes, chunks of 6): the failed-exit guard check (_extent with
+    failed=True) runs after a polish that did not accept, never after one that did."""
+    failed = extent_calls
     _, _, info = stalled(monkeypatch, lambda X: (X, 1), n=12, chunk=6)
     assert not info["converged"] and True in failed
     failed.clear()
@@ -1020,7 +1029,7 @@ def test_polish_guard_check(monkeypatch):
 
 
 @pytest.mark.parametrize("want", [1, 4])
-def test_polish_extends_cluster(monkeypatch, want):
+def test_polish_extends_cluster(monkeypatch, extent_calls, want):
     """The cube's clusters [0, 1] and [2, 3, 4]: noise on the whole multiplet, so only the
     polish (here an oracle returning the exact block) shows the cluster and extends j."""
     monkeypatch.setattr(lob, "STALL", 3)
@@ -1028,13 +1037,7 @@ def test_polish_extends_cluster(monkeypatch, want):
     k = lob._block_size(want, None, None)[2]
     cols = [0, 1] if want == 1 else [2, 3, 4]
     X0 = near_start(CUBE, k, 1e-2, cols)
-    extent, calls = lob._extent, []
-
-    def spy(*a, **kw):
-        calls.append(kw.get("failed", False))
-        return extent(*a, **kw)
-
-    monkeypatch.setattr(lob, "_extent", spy)
+    calls = extent_calls
     kw = dict(R=p.R, precond=ZERO, X0=X0)
     _, _, info = lobpcg(p.op, p.free, want, 1e-6, **kw)
     assert not info["converged"] and False not in calls
@@ -1082,6 +1085,9 @@ def test_final_rr(monkeypatch):
 
 
 def test_no_rr_or_switch_with_stop(monkeypatch):
+    """sigma_estimate (a stop callback) neither switches nor runs _final_rr, also on maxit;
+    SWITCH = 1 so that any iteration without progress would switch."""
+    monkeypatch.setattr(lob, "SWITCH", 1)
     calls = []
     for name in ("_final_rr", "_to_low"):
         real = getattr(lob, name)
@@ -1090,8 +1096,13 @@ def test_no_rr_or_switch_with_stop(monkeypatch):
         )
     p = problem(*PENCIL)
     sigma_estimate(p.op, p.free)
-    sigma_estimate(p.op, p.free, maxit=10)  # a maxit exit
-    assert not calls
+    assert sigma_estimate(p.op, p.free, maxit=10)[1] == 10  # a maxit exit
+    # a stop that never fires: without the guard this run switches (at 147) and its maxit
+    # exit gets _final_rr
+    info = lob._solve(p.op, p.free, 1, 1e-6, None, None, None, 170, 0, stop=lambda s: False)[2]
+    assert info["iterations"] == 170 and not calls
+    lob.lobpcg(p.op, p.free, 1, 1e-6, maxit=170)
+    assert calls == ["_to_low", "_final_rr"]  # the same run without stop
 
 
 def test_project_clamp():
@@ -1121,7 +1132,7 @@ def test_project_clamp():
 
 
 def test_to_low():
-    """_to_low removes a locked-basis component from X and P."""
+    """_to_low removes a locked-basis component from X and P and keeps the rest."""
     p = problem(*PENCIL)
     n = p.op.n_dof
     m = jnp.asarray(p.free, float)[:, None]
@@ -1135,8 +1146,9 @@ def test_to_low():
     P = jnp.asarray(Q[:, ::-1]) + 1e-6 * B[:, 1:2]
     R = jnp.zeros((n, 0))
     X, P = lob._to_low(X, P, p.op, m, R, R, B, jnp.int32(4), c=4)
-    for Y in (X, P):
+    for Y, Z in ((X, Q), (P, Q[:, ::-1])):
         assert np.abs(np.asarray(B).T @ np.asarray(p.op.apply_M(Y))).max() <= 1e-13
+        assert np.abs(np.asarray(Y) - Z).max() <= 1e-12
 
 
 def test_polish_live_bytes(monkeypatch):

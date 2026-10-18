@@ -23,6 +23,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import ShapeDtypeStruct as S
+from scipy.optimize import linprog
 
 from benchmarks import harness
 
@@ -34,13 +35,18 @@ from test_lobpcg import step_args
 
 from jaxmodal.eigen import counting, reference_modes, solve_modes
 from jaxmodal.linalg import krylov
-from jaxmodal.memory import STEP_FIT, _shell_scan, unstructured_memory
+from jaxmodal.memory import (
+    COUNT_STEP,
+    SI_MINRES,
+    STEP_FIT,
+    _shell_scan,
+    solve_modes_memory,
+    unstructured_memory,
+)
 from jaxmodal.operators import ap_operator, assemble, dof_mask, unstructured
 from jaxmodal.precond import amg, gmg, schwarz
 
-lobpcg = importlib.import_module(
-    "jaxmodal.eigen.lobpcg"
-)  # the module (the package exports the function)
+LOB = importlib.import_module("jaxmodal.eigen.lobpcg")  # the module, as the tests name it
 PARTS = ("accuracy", "steps", "count", "storage", "peaks", "solve_peak", "fit")
 MESHES = {
     "flat": lambda n: T.plate(n, 100)[0],
@@ -56,6 +62,8 @@ MESHES = {
 FIT = [("flat", 64), ("flat", 128), ("flat", 256), ("web", 64), ("block", 32), ("stack10", 64),
        ("stack3", 128)]  # fmt: skip
 MS = (6, 8, 15, 25, 60, 120)
+# compile-only extras (case, size, m, degree): T, degree 3 and the 791k plate
+EXTRA = (("T", 48, 15, 2), ("flat", 128, 15, 3), ("flat", 362, 6, 2), ("flat", 362, 120, 2))
 COUNT = [("flat", 64), ("flat", 128), ("stack3", 128)]
 STORAGE = FIT + [("T", 48), ("L", 48), ("cylinder", 0), ("flat", 48), ("block", 64),
                  ("flat", 362)]  # fmt: skip
@@ -74,8 +82,8 @@ def build(case, n, degree=2):
 
 def step(op, P, low, k, cap=0):
     """Temporaries + aliased state of the compiled LOBPCG step (block k, basis capacity cap)."""
-    c, _ = lobpcg._capacity(100, 1, k, low)
-    f = lobpcg.lobpcg_step_low if low else lobpcg.lobpcg_step
+    c, _ = LOB._capacity(100, 1, k, low)
+    f = LOB.lobpcg_step_low if low else LOB.lobpcg_step
     args = list(step_args(op, op.n_dof, k, low, cap))
     args[1], args[3] = op, P
     mem = f.lower(*args, c=c).compile().memory_analysis()
@@ -89,22 +97,27 @@ def polish(op, free, P, k):
     return mem.temp_size_in_bytes + mem.output_size_in_bytes + 2 * 8 * op.n_dof * k
 
 
-def steps(cases=FIT, ms=MS, extra=(("T", 48, 15, 2), ("flat", 128, 15, 3), ("flat", 362, 6, 2),
-                                   ("flat", 362, 120, 2))):  # fmt: skip
-    """Per case and block width: the 9-block and low steps (max over no basis and a basis of
-    capacity c ceil(2m / c)), the polish and the operator workspace, in bytes."""
+def measure(op, free, P, m):
+    """The 9-block and low steps (max over no basis and a basis of capacity c ceil(2m / c)) and
+    the polish at block width m, in bytes."""
+    out = {"polish": polish(op, free, P, m)}
+    for low in (False, True):
+        c = m if low else max(m, min(4 * m, 64))
+        out["low" if low else "9-block"] = max(
+            step(op, P, low, m), step(op, P, low, m, c * -(-2 * m // c))
+        )
+    return out
+
+
+def steps(cases=FIT, ms=MS, extra=EXTRA):
+    """Per case and block width: measure's entries and the operator workspace, in bytes."""
     out, todo = [], [(c, n, ms, 2) for c, n in cases] + [(c, n, (m,), d) for c, n, m, d in extra]
     for case, n, widths, degree in todo:
         mesh, op, free, P = build(case, n, degree)
         for m in widths:
             ws = unstructured_memory(mesh, m)["workspace"]
-            r = dict(case=case, size=n, degree=degree, n_dof=op.n_dof, m=m, ws=ws,
-                     polish=polish(op, free, P, m))  # fmt: skip
-            for low in (False, True):
-                c = m if low else max(m, min(4 * m, 64))
-                r["low" if low else "9-block"] = max(
-                    step(op, P, low, m), step(op, P, low, m, c * -(-2 * m // c))
-                )
+            r = dict(case=case, size=n, degree=degree, n_dof=op.n_dof, m=m, ws=ws)
+            r |= measure(op, free, P, m)
             print(json.dumps(r), flush=True)
             out.append(r)
         jax.clear_caches()
@@ -208,9 +221,8 @@ def peaks(cases=PEAKS):
 def solve_peak(case="flat", n=362, n_modes=20):
     """One cold solve_modes (tol 1e-6) in a fresh subprocess: its info, time and process peak
     above the built operator, next to solve_modes_memory's total."""
-    from jaxmodal.memory import solve_modes_memory
-
     root = str(harness.RESULTS.parents[1])
+    # replace, not format: measure_json formats the code once more (its {out})
     code, setup = SOLVE.replace("N_MODES", str(n_modes)), SETUP.format(root=root, case=case, n=n)
     r = harness.measure_json(code, setup)
     est = solve_modes_memory(MESHES[case](n), SS, n_modes)["total"]
@@ -272,7 +284,7 @@ def simp():
     op, free, mesh = G.case((32,) * 3, "clamped", None, "simp")
     s = G.lam1(op, free, mesh)
     t = time.perf_counter()
-    _, _, info = lobpcg.lobpcg(op, free, 10, 1e-6, precond=gmg(op, free, s))
+    _, _, info = LOB.lobpcg(op, free, 10, 1e-6, precond=gmg(op, free, s))
     r = dict(case="simp32-gmg", time_s=time.perf_counter() - t, iterations=info["iterations"],
              converged=info["converged"], stagnated=info["stagnated"],
              switched=info["chunks"][0]["switched"])  # fmt: skip
@@ -283,8 +295,6 @@ def simp():
 def _envelope(F, y):
     """Least-sum upper envelope x of y over the rows F (F x >= y), a free first coefficient,
     the others >= 0."""
-    from scipy.optimize import linprog
-
     F, y = np.asarray(F, float), np.asarray(y, float)
     bounds = [(None, None)] + [(0, None)] * (F.shape[1] - 1)
     return linprog(F.sum(0), A_ub=-F, b_ub=-y, bounds=bounds).x
@@ -294,8 +304,6 @@ def fit(data):
     """The shell constants from the steps and count entries: pc terms net of STEP_FIT /
     COUNT_STEP, in blocks of 8 n m as a + c / m + K0 / (8 n m) (K0 bytes), and the slack of
     the composed model at the large-n gate points."""
-    from jaxmodal.memory import COUNT_STEP, SI_MINRES
-
     rows, out = [r for r in data["steps"] if r["degree"] == 2], {}
     for key, fk in (("9-block", "9-block"), ("low", "low"), ("polish", "low")):
         A, f = STEP_FIT[fk]

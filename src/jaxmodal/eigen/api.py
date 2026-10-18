@@ -23,6 +23,7 @@ from ..operators import (
 )
 from ..operators.common import is_count
 from ..precond import SingularShiftError, amg, gmg, jacobi
+from ..precond.amg import SHELL_BLOCKS, unsupported_shell
 from . import counting
 from .counting import count, count_degree
 from .lobpcg import (
@@ -40,14 +41,13 @@ from .shift_invert import si_band
 def resolve_precond(mesh, precond, precond_dtype):
     """The preconditioner name solve_modes uses for these options; raises on bad options."""
     voxel = mesh.voxel is not None
-    # ssh8 with hex20 / hex27 (nonconforming): no solid-shell AMG
-    mixed = "ssh8" in mesh.blocks and bool(set(mesh.blocks) - {"ssh8", "hex8"})
+    mixed = unsupported_shell(mesh.blocks)  # ssh8 with hex20 / hex27: no solid-shell AMG
     if precond == "auto":
         precond = "gmg" if voxel else "jacobi" if mixed else "amg"
     if precond not in ("gmg", "amg", "jacobi"):
         raise ValueError(f"precond must be 'auto', 'gmg', 'amg' or 'jacobi', got {precond!r}")
     if precond == "amg" and mixed:
-        raise ValueError("solid-shell AMG supports ssh8 and hex8 blocks")
+        raise ValueError(SHELL_BLOCKS)
     if precond == "gmg" and not voxel:
         raise ValueError("precond 'gmg' needs a voxel mesh (voxel_mesh)")
     if precond == "amg" and voxel:
@@ -427,13 +427,13 @@ def solve_modes(
         # s_K, so A_P(0) is nonsingular
         return amg(op, free, s, mesh.points, nonsingular=k == 0, **pc_opts, **kw)
 
-    def polish(P, s):  # LOBPCG's polish closure: PCG on A_P(s) with its preconditioner P
+    def polish(P):  # LOBPCG's polish closure: PCG on A_P(sigma) with its preconditioner P
         if precond != "amg" or not po_opts.get("on", True):
             return None
-        A, mf = ap_operator(op, free, s), jnp.asarray(free, jnp.float64)[:, None]
         ptol, pmax = po_opts.get("tol", min(1e-7, 0.1 * tol)), po_opts.get("maxit", 500)
 
-        def run(X):
+        def run(X):  # A_P built on first use: most solves never polish
+            A, mf = ap_operator(op, free, sigma), jnp.asarray(free, jnp.float64)[:, None]
             Y, inf = pcg(A, mf * op.apply_M(mf * X), P, ptol, pmax)
             return Y, int(inf["iterations"].max())
 
@@ -455,7 +455,7 @@ def solve_modes(
         lam, V, info = lobpcg(
             op, free, n_modes, tol, Rd, P, X0, maxit=maxit, seed=seed, chunk=chunk,
             guards=guards, basis_dtype=basis_dtype, low_memory=low_memory,
-            polish=polish(P, sigma),
+            polish=polish(P),
         )  # fmt: skip
         P = None
         info["time"]["precond"] = t_p
@@ -525,7 +525,7 @@ def solve_modes(
         lam, V, info = _solve(
             op, free, n_m, tol, Rd, P, X0, maxit, seed, chunk=ch, guards=guards,
             basis_dtype=basis_dtype, low=low_memory, lam_stop=lam_hi, max_capacity=reach[ch],
-            polish=polish(P, sigma),
+            polish=polish(P),
         )  # fmt: skip
         solve_s = time.perf_counter() - t0
         P = None  # one hierarchy alive at a time
@@ -574,7 +574,7 @@ def solve_modes(
                     n_rigid=k, mass=mass, chunk=info["chunk"], guards=guards,
                     basis_dtype=basis_dtype, low_memory=low_memory, precond=precond,
                     precond_dtype=precond_dtype, operator_options=op_opts,
-                    precond_options=pc_opts, band=(0.0, f2),
+                    precond_options=pc_opts, band=(0.0, f2), polish_options=po_opts,
                 )  # fmt: skip
 
             info["count"] = _verify(

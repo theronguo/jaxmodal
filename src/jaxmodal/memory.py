@@ -25,6 +25,7 @@ from .operators.common import check_shell, is_count
 from .operators.matfree import layout
 from .operators.voxel import grid_layout
 from .precond import schwarz
+from .precond.amg import SHELL_BLOCKS, unsupported_shell
 from .precond.gmg import _ell_rows, _islands
 from .precond.pmg import _w8
 from .precond.shell import _columns, _fibers
@@ -150,7 +151,8 @@ def lobpcg_memory(
     estimate (e.g. lambda m: gmg_memory(mesh, m)), None for the default Jacobi. capacity: the
     basis columns (default _capacity's for n_modes).
 
-    Returns step, basis, rigid, host, precond (its storage),
+    step = max(9-block, low, polish) (low_memory: max(low, polish); polish for the shell AMG
+    family only). Returns step, basis, rigid, host, precond (its storage),
     total = overhead + storage + precond + basis + rigid + host + max(build, precond build, step)
     and per memory space (a GPU; the CPU uses total): device_total (the device terms and the
     device builds), host_total (the host peak: max(operator build, V + AMG build, V + 2 chunks
@@ -357,8 +359,8 @@ def _shell_scan(mesh):
 
 
 def _shell_amg_memory(mesh, m, max_coarse, degree):
-    if set(mesh.blocks) - {"ssh8", "hex8"}:
-        raise ValueError("solid-shell AMG supports ssh8 and hex8 blocks")
+    if unsupported_shell(mesh.blocks):
+        raise ValueError(SHELL_BLOCKS)
     sizes, n_s, n_h, n_f = _shell_scan(mesh)
     n = 3 * len(mesh.points)
     a = SHELL_STORAGE
@@ -562,6 +564,7 @@ def band_probe_block(mesh, bcs, n_modes, n_probes, host_bytes, *, n_rigid, **opt
     op_memory, pc = _models(
         mesh, options.get("mass", "consistent"), options.get("precond", "auto"), "float64",
         options.get("operator_options"), options.get("precond_options"),
+        options.get("polish_options"),
     )  # fmt: skip
     return probe_block(
         total - host_bytes, n_probes, op_memory, 3 * len(mesh.points),

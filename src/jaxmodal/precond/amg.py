@@ -26,6 +26,12 @@ from .pmg import Hex8Pattern, _check, _hex8_galerkin, _p_level
 OMEGA = 4 / 3  # Jacobi prolongation smoothing weight (over the spectral radius estimate)
 STALL = 0.9  # stop coarsening when a level would keep more than this fraction of its DOFs
 CAP = 4  # the coarsest matrix may exceed max_coarse by this factor before amg raises
+SHELL_BLOCKS = "solid-shell AMG supports ssh8 and hex8 blocks"
+
+
+def unsupported_shell(types):
+    """True for ssh8 meshes with blocks other than ssh8 and hex8 (nonconforming)."""
+    return "ssh8" in types and bool(set(types) - {"ssh8", "hex8"})
 
 
 @dataclasses.dataclass(frozen=True)
@@ -191,8 +197,8 @@ def amg(
     pattern = aggregates.pattern if aggregates is not None else None
     types = {b.type for b in op.blocks}
     if "ssh8" in types:
-        if types - {"ssh8", "hex8"}:
-            raise ValueError("solid-shell AMG supports ssh8 and hex8 blocks")
+        if unsupported_shell(types):
+            raise ValueError(SHELL_BLOCKS)
         shell = aggregates.shell if aggregates is not None else None
         P, pattern, shell = _shell_amg(
             op, free, sigma, points, degree, ratio, max_coarse, pattern, shell

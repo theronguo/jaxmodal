@@ -239,10 +239,7 @@ def test_refusals():
         unstructured_memory(mesh, 4, mode="otf")
     with pytest.raises(ValueError, match=otf):
         solve_modes(mesh, mats, bcs, 2, ori, operator_options={"mode": "otf"})
-    two = hex20_skin()  # ssh8 with hex20: solid-shell AMG refuses, also up front
-    for f in (solve_modes, lambda m, mt, b, n, **kw: solve_modes_memory(m, b, n, **kw)):
-        with pytest.raises(ValueError, match=AMG):
-            f(two, STEEL, {}, 2, precond="amg")
+    two = hex20_skin()  # ssh8 with hex20 (solve_modes: test_shell_solve.py)
     with pytest.raises(ValueError, match=AMG):
         amg_memory(two, 4)
     op = unstructured(two, STEEL)

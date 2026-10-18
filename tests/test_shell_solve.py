@@ -9,10 +9,12 @@ import sys
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import scipy.linalg as sl
+import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 import test_shell_amg as T
 from exact import SIMPLY_SUPPORTED as SS
-from helpers import STEEL, max_sine_sparse, owned_bytes, r_M_sparse
+from helpers import STEEL, max_sine, max_sine_sparse, owned_bytes, r_M, r_M_sparse
 from test_api import check_lam
 from test_shell import C_ORT, laminate, three_plies
 from test_shell_ops import hex20_skin
@@ -316,7 +318,7 @@ def test_polish_chunks(mode):
         basis = "float32" if mode == "fp32" else "float64"
         lam, V, info = solve_modes(mesh, STEEL, SS, 30, basis_dtype=basis, **kw)
     assert info["converged"] and len(lam) == n
-    assert all(c["polish"] is None or c["polish"] <= 500 for c in info["chunks"])
+    assert all(c["polish"] is not None and c["polish"] <= 500 for c in info["chunks"])
     K, M = assemble(mesh, STEEL)
     G = V.T @ (M @ V)
     assert np.abs(G - np.eye(n)).max() <= (1e-6 if mode == "fp32" else 1e-10)
@@ -346,7 +348,23 @@ def test_band(monkeypatch):
     assert info["count"]["passed"]
     assert np.abs(lam / lr[:n] - 1).max() <= 1e-7
     fresh = [c for c in calls if not c[0]]
-    assert fresh[-1][1] and calls[-1][0]
+    assert fresh[-1][1] and calls[-1][0] and sum(c[1] for c in calls) == 1
+
+
+def test_sparse_helpers():
+    """r_M_sparse and max_sine_sparse match the dense r_M and max_sine on a small SPD pencil."""
+    rng = np.random.default_rng(0)
+    A = rng.standard_normal((40, 40))
+    Kf, Mf = A @ A.T + 40 * np.eye(40), np.diag(rng.uniform(1, 2, 40))
+    lam, Q = sl.eigh(Kf, Mf)
+    X = Q[:, :4] + 1e-3 * rng.standard_normal((40, 4))
+    L = np.linalg.cholesky(Mf)
+    lu = spla.splu(sp.csc_matrix(Mf))
+    np.testing.assert_allclose(r_M_sparse(Kf, Mf, lu, lam[:4], X), r_M(Kf, Mf, L, lam[:4], X),
+                               rtol=1e-10)  # fmt: skip
+    Qx = sl.qr(np.linalg.cholesky(Mf).T @ X, mode="economic")[0]
+    Qx = sl.solve_triangular(L.T, Qx)  # M-orthonormal
+    assert np.isclose(max_sine_sparse(Mf, Qx, Q[:, :4]), max_sine(Mf, L, Qx, Q[:, :4]), rtol=1e-10)
 
 
 # ---------------------------------------------------------------- 6: memory
@@ -375,16 +393,8 @@ def modelled(mesh, m, pc):
 
 
 def measured(case, n, m, degree=2):
-    """memory_analysis of the 9-block and low steps (with and without a basis) and the polish."""
-    S = study()
-    _, op, free, P = built(case, n, degree)
-    out = {"polish": S.polish(op, free, P, m)}
-    for low in (False, True):
-        c = m if low else max(m, min(4 * m, 64))
-        out["low" if low else "9-block"] = max(
-            S.step(op, P, low, m), S.step(op, P, low, m, c * -(-2 * m // c))
-        )
-    return out
+    """The benchmark's measure on the cached build."""
+    return study().measure(*built(case, n, degree)[1:], m)
 
 
 GATE = 1.3  # model <= GATE x measured at large n (see test_shell_steps)
@@ -456,6 +466,7 @@ def test_lobpcg_memory_max():
     on = solve_modes_memory(mesh, SS, 10)
     no = functools.partial(MEM._no_polish, pc)
     assert off == lobpcg_memory(om, n, 10, precond_memory=no) and off["total"] < on["total"]
+    assert solve_modes_memory(mesh, SS, 10, precond="jacobi") == lobpcg_memory(om, n, 10)
     box = box_mesh((32, 32, 32), (1 / 32,) * 3)  # hex8, 107k DOF
     nb = 3 * len(box.points)
     hp = amg_memory(box, 60)

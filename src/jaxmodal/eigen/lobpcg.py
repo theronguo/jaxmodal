@@ -20,7 +20,7 @@ C_FLOOR = 10.0  # c of the floor term in the acceptance threshold
 TAU = 1e-14  # SVQB drop tolerance, relative to the largest Gram eigenvalue
 TAU_P = 1e-8  # P noise rule: drop a column whose norm falls below TAU_P of its norm before
 PIVOT = 1e-10  # Rayleigh-Ritz pivot test: min diag(L)^2 of the Gram Cholesky
-STALL = 50  # iterations without progress before the stagnation exit
+STALL = 50  # iterations without progress before the stagnation exit (then the polish, if any)
 # iterations without progress before a 9-block chunk switches to the low-memory step (every
 # product explicit: on stiff pencils, e.g. thin shells, the implicit updates drift and leak
 # rigid components; docs/eigensolvers.md)
@@ -427,39 +427,40 @@ def _accept(lam, r, t, want, j, guards, lock):
     return j if (r[:j] <= t[:j]).all() else None
 
 
-def _final_rr(X, lam, args, consts, c):
-    """A failed exit's block: X deflated, M-orthonormalized and Rayleigh-Ritz rotated, lam its
-    Ritz values (each an upper bound of its index past the locked modes) and explicit (r, t);
-    X and lam unchanged if SVQB drops a column."""
+def _rr_block(X, args, consts, c):
+    """X deflated, M-orthonormalized and Rayleigh-Ritz rotated, with its Ritz values and
+    explicit (r, t) as NumPy; None if SVQB drops a column."""
     op, m, _, R, MR, B, cnt = args
-    Xs, KX, MX, keep = _start(X, op, m, R, MR, B, cnt, c=c)
-    if keep.all():
-        X, _, _, lam = _rr_start(Xs, KX, MX)
-    Xs = KX = MX = None
+    X, KX, MX, keep = _start(X, op, m, R, MR, B, cnt, c=c)
+    if not keep.all():
+        return None
+    X, KX, MX, lam = _rr_start(X, KX, MX)
+    KX = MX = None
     r, t = _confirm(X, lam, op, m, consts)[2:]
     return X, np.asarray(lam), np.asarray(r), np.asarray(t)
 
 
+def _final_rr(X, lam, args, consts, c):
+    """A failed exit's block: _rr_block of X (lam each an upper bound of its index past the
+    locked modes); X and lam unchanged, with explicit (r, t), if SVQB drops a column."""
+    if (out := _rr_block(X, args, consts, c)) is not None:
+        return out
+    r, t = _confirm(X, lam, args[0], args[1], consts)[2:]
+    return X, np.asarray(lam), np.asarray(r), np.asarray(t)
+
+
 def _polish(polish, X, lam, r, t, j, rec, args, consts, want, guards, lock, c):
-    """One inverse-iteration step Y = polish(X) on a stalled chunk, then deflation, SVQB and
-    Rayleigh-Ritz: (X, lam, r, t, j) of Y if its explicit residuals pass (rec converged), else
-    the inputs unchanged. rec["polish"]: the polish's iterations."""
-    op, m, _, R, MR, B, cnt = args
+    """One inverse-iteration step Y = polish(X) on a stalled chunk, then _rr_block: (X, lam,
+    r, t, j) of Y if its explicit residuals pass (rec converged), else the inputs unchanged.
+    rec["polish"]: the polish's iterations."""
     Y, its = polish(X)
     rec["polish"] = int(its)
-    if not jnp.isfinite(Y).all():
-        return X, lam, r, t, j
-    Y, KY, MY, keep = _start(Y, op, m, R, MR, B, cnt, c=c)
-    if not keep.all():
-        return X, lam, r, t, j
-    Y, _, _, mu = _rr_start(Y, KY, MY)
-    KY = MY = None
-    rn, tn = (np.asarray(a) for a in _confirm(Y, mu, op, m, consts)[2:])
-    mu = np.asarray(mu)
-    if (jn := _accept(mu, rn, tn, want, j, guards, lock)) is None:
+    out = _rr_block(Y, args, consts, c) if jnp.isfinite(Y).all() else None
+    Y = None
+    if out is None or (jn := _accept(*out[1:], want, j, guards, lock)) is None:
         return X, lam, r, t, j
     rec.update(converged=True, locked=jn)
-    return Y, mu, rn, tn, jn
+    return (*out, jn)
 
 
 def _iterate(state, args, consts, want, lock, guards, tol, maxit, low, c, stop):
@@ -519,8 +520,7 @@ def _iterate(state, args, consts, want, lock, guards, tol, maxit, low, c, stop):
         if not (low or switched or stop) and it - it_best >= SWITCH:
             X, P, actP, lam_s = state[0], state[3], state[6], state[7]
             state = None  # the other 9-block buffers die before the switch
-            state = (*_to_low(X, P, op, m, *args[3:], c=c), actP, lam_s)
-            X = P = None
+            state = (*_to_low(X, P, op, m, *args[3:], c=c), actP, lam_s)  # X, P donated
             switched, best, best_l, it_best = it + 1, np.inf, np.inf, it
     X, lam = state[0], np.asarray(state[-1])
     state = None
