@@ -47,6 +47,30 @@ PR 16 rule "until PR 18, `solve_modes` on solid-shell meshes uses Jacobi".
     - extraction keys are built per chunk;
     - the deferred GPU check has a pass criterion.
 
+- **Revision 9** (round 8: correctness, simplicity, performance satisfied; docs and tests not):
+  - **Docs:** `eigensolvers.md:41` and `preconditioners.md:53` are rewritten in 18a, not only
+    retagged; ROADMAP :632 is split (its `solve_modes` test goes to 18b); the unassigned
+    mentions are assigned (ROADMAP :18, :493, :579; `eigensolvers.md` :79, :88;
+    `elements.md:218`; `preconditioners.md:479`; README :5; `tests/test_shell_ops.py:32`).
+  - **Tests:** a new test 4 checks the group graph, the aggregation, the one-ring and the
+    coarse patch sets against an independent NumPy build. The old tests 3 and 4 merge into
+    test 3, a single dense-reference check, which also checks `schwarz.nbytes` against the built layout and the
+    size-class rule against a brute-force version. New checks: the one-level shell case, σ = 0
+    with `nonsingular=True`, options at `degree=3, ratio=20`.
+  - **Simplicity:**
+    - extraction keys are built once per level, as in `pmg._pattern`;
+    - size classes follow one merge rule;
+    - `nbytes` returns only what the build uses.
+  - **Correctness:**
+    - excluded identity DOFs of ring neighbours become pad slots;
+    - the level-0 Schwarz is unmasked (stated);
+    - $D$ is the point diagonal on every level;
+    - "SPD when $P$ has full column rank".
+  - **Performance:**
+    - the inversion is a module-level jit, with one finiteness check per class;
+    - its device transient is about 7 × `chunk_bytes`;
+    - the GPU check gets a defined measurement, its expected remedy and that remedy's cost.
+
 Line numbers in this plan refer to `main` (identical to this branch outside `docs/plans/`). The
 implementation finds each entry by `grep "PR 18"` and treats the lists as checklists.
 
@@ -93,15 +117,27 @@ part.
 - **Deferred GPU checks** (ROADMAP list): "XLA kernel temporaries" (:187). The measured time
   crossover stays under the PR 15d deferred GPU checks.
 
-**Generic "PR 18" mentions** elsewhere are retagged in 18a:
-- 18b:
+**Generic "PR 18" mentions** elsewhere are handled in 18a:
+- **rewritten by 18a**, because 18a makes them false:
+  - `docs/preconditioners.md:53` and `docs/eigensolvers.md:41`:
+    - `amg()` supports `ssh8` and `ssh8` + `hex8` and raises on `ssh8` + `hex20`/`hex27`;
+    - `pmg` raises "pmg does not support ssh8 blocks; use amg";
+    - `precond="amg"` in `solve_modes` and `amg_memory` raise `no_shell`'s message until PR
+      18b, and Jacobi stays the default until PR 18b.
+  - `docs/elements.md:218`: `amg()` on `ssh8` from PR 18a, `solve_modes` with AMG from PR 18b.
+  - `docs/preconditioners.md:479` (the flat-element remedy): solid-shell elements with the
+    PR 18a AMG.
+  - README :5: the status line names the 18a–18e split and 18a's status.
+  - ROADMAP :493: `amg()` on solid shells from 18a, the `solve_modes` dispatch from 18b.
+- **retagged 18b** (18b rewrites them):
   - the `no_shell` message (`pmg.py:216`: "solid-shell AMG arrives in PR 18b");
-  - `docs/preconditioners.md:53` (until PR 18b);
-  - `docs/eigensolvers.md` :40, :41;
+  - `docs/eigensolvers.md` :40, :79, :88;
   - README :82;
-  - ROADMAP :18's forward-looking "M4 / PR 18" mention.
-
-  18b rewrites these statements. 18a only retags them.
+  - ROADMAP :18's two forward-looking mentions ("M4 / PR 18" and "`"amg"` refused until
+    PR 18");
+  - ROADMAP :579 (Jacobi until PR 18b);
+  - `tests/test_shell_ops.py:32`: the `AMG` constant becomes `no_shell`'s new message, "…
+    PR 18b".
 - 18c:
   - `docs/operators.md` :204, :251 (roofline);
   - `docs/mesh.md:38`;
@@ -121,7 +157,10 @@ part.
 - ROADMAP :183 names the estimator parts: 18b (the shell `amg_memory`), 18c (fp32 p-MG/AMG),
   18d (the `COUNT_STEP` refit).
 - The ROADMAP PR 18 section (:625–:640) is split into 18a–18e subsections:
-  - :632 and :640 go to 18a, and :640's fallback names the configuration that ships (test 6);
+  - :632 is split. "AMG on the assembled $A_P$ for solid-shell meshes, and iteration counts
+    vs $L/t$" goes to 18a, and its test ("`solve_modes` with AMG … matches the PR 8 `eigsh`")
+    goes to 18b. :640 goes to 18a, and its fallback names the configuration that ships
+    (test 6);
   - :589 (Jacobi `solve_modes` on M4) gets "(Jacobi in 16b; `"auto"`, AMG, from 18b)";
   - the `COUNT_STEP` bullet goes to 18d;
   - roofline, fp32, Morton, compile time and `docs/performance.md` go to 18c;
@@ -181,7 +220,12 @@ The code commits follow it.
   - the Jacobi wall-time comparison (`serial`, with a stated final fallback);
   - Jacobi stagnation at $L/t = 50$;
   - M4 under `"auto"`;
-  - the `test_shell_ops` refusal and label changes.
+  - in `test_shell_ops`, the `solve_modes`/`amg_memory` refusals and the "auto (resolved to …)"
+    label (18a changes the `amg`/`pmg` blocks, test 13).
+- **build factors from 18a:** the Schwarz inversion's device transient is about 7 ×
+  `chunk_bytes`. The Schwarz apply temporaries are $2\,\texttt{chunk\_bytes}\cdot k/24$, which
+  grow with the block width $k$ (about 0.56 GB at $k = 200$ and 32 MiB). The host setup
+  temporaries are listed under the deferred "host setup peak" check.
 
 ## Goal (18a)
 
@@ -350,15 +394,18 @@ On level $\ell$, after aggregation:
 ### Prolongator and coarse matrices
 
 - **Smoothing:** $P_\ell = (I - \tfrac{\omega}{\rho} D^{-1} A)^{d_\ell}\, T_\ell$, with
-  $\omega = 4/3$, $D$ the diagonal, $d_0 = 1$ and $d_\ell = 2$ for $\ell \ge 1$.
+  $\omega = 4/3$, $d_0 = 1$ and $d_\ell = 2$ for $\ell \ge 1$.
+  - $D$ is the point diagonal on every level, level 0 included (PR 13 weights level 0 by
+    blocks). The prototypes used the same.
   - It is the shell path's own few lines: $P \leftarrow P - \tfrac{\omega}{\rho} D^{-1}(A P)$,
     applied $d_\ell$ times. It never forms $D^{-1}A$ or $S^2$.
-  - ρ is pyamg's `approximate_spectral_radius` under the local seed. Its argument is a
-    `LinearOperator` $x \mapsto D^{-1}Ax$ if pyamg accepts one (checked in implementation),
-    otherwise a scaled copy freed before the smoothing.
+  - ρ is pyamg's `approximate_spectral_radius` of the `LinearOperator` $x \mapsto D^{-1}Ax$,
+    under the local seed. Pyamg accepts it and gives the scaled copy's ρ to 1e-15 (review).
   - `_shell_levels` returns ρ per level for test 5. It is not stored on `GMG` or
     `AMGAggregates`.
-- **Galerkin:** $A_{\ell+1} = P^\top A P$, symmetrized.
+- **Galerkin:** $A_{\ell+1} = P^\top A P$, symmetrized. It is SPD on the non-identity DOFs when
+  $P$ has full column rank there; the non-finite inverse checks raise otherwise (a standard SA
+  caveat).
 - **Identity rows:**
   - The zero columns of $T_\ell$ (aggregates with fewer than 9 independent candidates: hex
     groups, or constrained) give zero rows and columns of $A_{\ell+1}$. They are detected by
@@ -389,17 +436,24 @@ SPD matrix, so $D^{-1}$ is SPD and the V-cycle stays symmetric.
   - patches deduplicated across the elements of one column, keyed by the sorted set of
     distinct group ids (at junctions an element's 4 fibers can fall into fewer groups);
   - one layer gives the element's 24 DOFs, and $k$ layers give $12(k+1)$;
-  - per `hex8` corner node, a node patch (3 DOFs).
+  - per singleton (hex-only) group, a node patch (3 DOFs).
+  - The level-0 Schwarz is unmasked, as the $A_P$ apply. Constrained DOFs are decoupled in
+    $A_b$, so their output is $r/d$ times their patch multiplicity, which is 0 on the masked
+    residual. Their eigenvalue equals that multiplicity, which is at most the patch overlap,
+    and so below $\lambda_\max$.
 - **Level $\ell \ge 1$ patches:**
   - per shell group (one with an `ssh8` node, $\sum T_a \ne 0$): its 9 DOFs plus the
     non-identity DOFs of those one-ring neighbour groups that are shell groups too;
   - per hex group, its own 9 DOFs (block Jacobi, still stronger than PR 13's scalar Jacobi).
   - So identity DOFs lie only in their own group's patch.
+  - The excluded identity DOFs of a neighbour block become pad slots (index $n$, identity in
+    the inversion, zeroed rows and columns), the same padding as the size classes. Patch sizes
+    are counted without them.
   - Why: a one-ring in hex regions has about 22 neighbours ($s \approx 210$–243, about 3.2 kB
     per DOF on level 1, review), against 7.7 on plates, and skin aggregates would pull in 9–17
     hex neighbours. Shell-only rings keep every shell patch at plate size ($s \le 81$ on a
-    single layer), and hex neighbours are covered by their own patches. Test 9 checks the
-    counts.
+    single layer), and hex neighbours are covered by their own patches. Test 4 checks the patch
+    sets, test 9 the counts.
   - **Bound:** a coarse patch with $s > \sqrt{\texttt{chunk\_bytes}/8}$ (2048 at the default)
     raises `ValueError`. Ring patches have no fiber guard and can grow at hubs (radially meshed
     disk centres, fans).
@@ -410,11 +464,11 @@ SPD matrix, so $D^{-1}$ is SPD and the V-cycle stays symmetric.
   - A patch is a list of block indices: nodes in $A_b$ as BSR(3) on level 0 (built on the
     `Hex8Pattern`'s `indptr`/`indices`, `pmg.py:210`), groups in $A_\ell$ as BSR(9) below.
   - Coarse BSR matrices get `sort_indices()`; the `Hex8Pattern` is already sorted.
-  - For each chunk, the keys of the chunk's patch rows are built as int64
-    `indptr[row] + searchsorted` within the row. No whole-matrix key array is built (it would
-    be about 72 B per DOF).
-  - Hits are clipped and checked for equality, then `data` is read and expanded to DOFs by
-    `b * blk + arange(b)`.
+  - The keys are built once per level, as in `pmg._pattern`: int64 `rows * nb + indices`,
+    which is sorted. The array is about 72 B per DOF on the host, about 10% of $A_b$'s host
+    copy, and is freed after the level.
+  - Per chunk, the patch pairs' keys are looked up by `np.searchsorted`. Hits are clipped and
+    checked for equality, then `data` is read and expanded to DOFs by `b * blk + arange(b)`.
   - Padded block slots skip the lookup, so a pad never aliases a real pair.
   - Missing pairs are 0, and explicit zero blocks extract as zeros.
   - There is no CSR copy and no in-place compaction of $A_b$ on the shell path.
@@ -424,16 +478,22 @@ SPD matrix, so $D^{-1}$ is SPD and the V-cycle stays symmetric.
   inverse. Padded slots get the identity, and the mask zeroes their cross terms.
   - The padded rows and columns of the inverse are then zeroed.
   - The result is packed and written into a preallocated per-class buffer by a donated update.
-  - There is one jitted inversion per (level, class) shape, with the buffer offset as a traced
-    `dynamic_update_slice` argument, so balanced chunks never recompile.
-  - A non-finite inverse raises `ValueError`, as `_level`.
+  - The inversion is one module-level jit, with static (chunk, $s$, buffer length) and the
+    buffer offset as a traced `dynamic_update_slice` argument. Balanced chunks never
+    recompile, and reuse hits the cache.
+  - The jit accumulates an `all(isfinite)` flag, which is checked once per class (not per
+    chunk, which would sync the host every chunk). A non-finite inverse raises `ValueError`,
+    as `_level`.
+  - The device transient of one inversion step is about 7 × `chunk_bytes`: $B$, masked $B$,
+    $L$, the identity, $L^{-1}$, the product and the packed gather. That is about 220 MB at
+    the default.
 - **Storage:** the upper triangle, packed (`matfree._packed_index`), $s(s+1)/2$ floats per
   patch: 300 per single-layer element.
-- **Size classes:**
-  - Sizes are sorted descending. A class opens at the largest remaining size and takes smaller
-    sizes while its padded bytes stay ≤ 1.1× its unpadded bytes.
-  - At most 4 classes per level: above that, the adjacent pair with the least added padding is
-    merged. Each class costs one compile and one scan per apply.
+- **Size classes (one rule):**
+  - Start with one class per distinct size. Repeatedly merge the adjacent pair (in size order)
+    with the least added padding bytes, while there are more than 4 classes or that merge adds
+    ≤ 10% to the level's bytes.
+  - Each class costs one compile and one scan per apply.
   - Each class is padded to its maximum. Padded slots carry index $n$ (gather `mode="fill"`
     with 0, scatter `mode="drop"`) and zero inverse rows, so no mask is stored.
   - Examples: the plate's level 0 is one class ($s = 24$); its level 1 (27/45/63/81, 95% at
@@ -449,10 +509,10 @@ SPD matrix, so $D^{-1}$ is SPD and the V-cycle stays symmetric.
   - Level 0 at $s = 24$ gets about 7280 patches per step (the hex8 Ke chunk is 4096).
   - `chunk_bytes` is an argument of the internal Schwarz build only (test 3 calls it with small
     values). `amg`'s signature is unchanged.
-- **One layout rule:** `schwarz.nbytes(sizes, dtype, chunk_bytes)` covers the classes, the
-  balanced-chunk padding and the packed `inv` plus `idx`. It also returns each level's maximum
-  chunk·$s^2$ and chunk·$s$. The `Schwarz` build uses it for its layout, and 18b's
-  `amg_memory` will use it too.
+- **One layout rule:** `schwarz.layout(sizes, chunk_bytes)` returns the classes (padded size,
+  patch count, chunk). `schwarz.nbytes(sizes, dtype, chunk_bytes)` sums the packed `inv` plus
+  `idx` over that layout. The `Schwarz` build uses the layout, and 18b's `amg_memory` will use
+  `nbytes` (18b adds what its step term needs).
 
 ### `Schwarz` (device)
 
@@ -471,7 +531,7 @@ Temporaries, both independent of $n$:
 
 At $n = 256$ (396k DOF), $t_A$ = 59.6 ms (stored-Ke $A_P$), per fine DOF:
 
-| component | storage | apply ($t_A$) |
+| component (rev. 2 layout) | storage | apply ($t_A$) |
 |---|---|---|
 | level-0 Schwarz ($s = 24$, packed, with `idx`) | 463 B | 0.45 |
 | $P_0$ / $P_0^\top$ ($b = 3$, ELL padding 1.45) | 306 / 223 B | 0.42 / 0.25 |
@@ -490,7 +550,8 @@ At $n = 256$ (396k DOF), $t_A$ = 59.6 ms (stored-Ke $A_P$), per fine DOF:
   128 / 256.
 - **Packed against full inverses:**
   - On CPU, the unpack costs about 11% of the patch apply.
-  - On a bandwidth-bound GPU the packed apply moves about 2.5× the bytes of full inverses.
+  - On a bandwidth-bound GPU the packed apply writes the unpacked chunk and reads it again, so
+    it moves about 2.5× the bytes of reading full inverses.
   - "Packed vs full inverses (fp32 full = fp64 packed bytes)" joins the deferred GPU check and
     18c's fp32 Schwarz item.
 - **Host setup** without the per-patch loop: about 4 s at 396k DOF.
@@ -498,10 +559,22 @@ At $n = 256$ (396k DOF), $t_A$ = 59.6 ms (stored-Ke $A_P$), per fine DOF:
   - The case: a single-layer plate has about 1.67M level-0 patches (229 steps per apply) and
     about 192k level-1 patches ($s = 81$, $c = 639$, about 300 steps), plus about 40 below.
     That is about 570 steps per apply and 2300 per V-cycle at degree 2.
-  - Pass criterion: the scan-step overhead (steps × per-step latency) stays below 25% of the
-    V-cycle time. It is recorded against `chunk_bytes` so that 18c's public option is decided
-    by a measurement.
+  - Measurement: time the Schwarz apply at `chunk_bytes` CB and 8·CB. The overhead is about
+    $(t(\text{CB}) - t(8\,\text{CB})) \cdot 8/7$.
+  - Pass criterion: the scan-step overhead stays below 25% of the V-cycle time.
+  - Expected outcome: at 32 MiB it likely fails on an A100. The estimate is 2300 steps at
+    15–25 µs, against a V-cycle of 25–45 ms. The remedy is a larger platform-specific
+    `chunk_bytes` (256 MiB–1 GiB) in 18c.
+  - Cost of the remedy: the apply temporaries $2\,\texttt{chunk\_bytes}\cdot k/24$ (about
+    4.5 GB at 256 MiB and $k = 200$) and the inversion transient of about 7 × `chunk_bytes`.
+    Both are recorded.
   - The same check records packed vs full inverses.
+  - The **host setup peak** check lists the host temporaries outside extraction:
+    - the level-0 group graph (int8 data);
+    - $B^{(\ell)}_\text{fine}$, 72 B per DOF;
+    - the patch `idx`;
+    - the keys, 72 B per DOF per level;
+    - the stored $T_0$, about 108 B per DOF.
 - **Benchmark:** `benchmarks/shell_amg_study.py` → `benchmarks/results/shell_amg_study.json`
   (≤ 1 h). It records:
   - the counts of tests 6, 7, 9–11;
@@ -582,11 +655,14 @@ the V-cycle; `solve_modes` checks are 18b's.
    - the 5/5-layer T-junction builds. Its largest patch equals 3 × the distinct nodes of each
      element's groups, maximized over elements, from an independent NumPy union-find (252 by
      the review's count);
-   - a mesh with an `ssh8` and a `hex20` block raises the mixed-type `ValueError`.
+   - meshes with an `ssh8` and a `hex20` block, and with an `ssh8` and a `hex27` block, raise
+    the mixed-type `ValueError`. They are disjoint blocks, built as the helper at
+    `tests/test_post.py:587`.
 2. **Candidates:**
    - **Flat plate:** $\|(I - T_0 T_0^\top) B^{(1)}_\text{fine}\|$ ≤ 1e-10 relative (rigid and
      curvature columns). Per aggregate, the level-0 span equals the global
-     $[\text{rigid}, \kappa]$ span (principal angles ≤ 1e-10). Same on the 3-layer stack.
+     $[\text{rigid}, \kappa]$ span (principal angles ≤ 1e-10). The global fields use the
+     midplane, $Z = z - t/2$, and are masked like $B$. Same on the 3-layer stack.
    - **Level 2:** on a $16^2$ plate with `max_coarse` 20 (levels about 1734 / 324 / 36 / 9):
      - assert `len(P.levels) ≥ 3` (smoothing levels, so $A_2$ exceeds `max_coarse` and $T_2$
        exists);
@@ -596,33 +672,55 @@ the V-cycle; `solve_modes` checks are 18b's.
      - the vectorized normals equal a per-aggregate NumPy `eigh` of $\sum v v^\top$ up to sign,
        to 1e-12;
      - no NaN;
-     - $|n \cdot \hat r(\bar x)| \ge \cos$ of the aggregate's full angular span (both lie inside
-       it, with different weights);
+     - on level-1 aggregates with angular span below 90° (asserted), $|n \cdot \hat r(\bar x)|
+       \ge \cos$ of that span (both lie inside it, with different weights);
      - the same cylinder built with consistent orientations gives the same curvature span
        (principal angles ≤ 1e-12).
-3. **Schwarz apply** equals a dense NumPy $\sum_i R_i^\top A_i^{-1} R_i r$ to 1e-12:
-   - on level 0 of the `hex8`-web mesh, the stack, the T-junction, and a coarse level;
-   - symmetric to 1e-12;
-   - balanced multi-chunk (small `chunk_bytes`) against single chunk to 1e-14 relative (the
-     scatter order differs);
-   - a padded class against an unpadded one to 1e-14 relative;
-   - padded slots inert (exactly 0 contribution);
-   - the class cap: a level with more than 4 natural classes is built with 4;
-   - a coarse patch above the bound raises (small `chunk_bytes`).
-4. **Extraction:** the reference is `A[s][:, s]` of `assemble(mesh, mats)`, i.e. $K + \sigma M$
-   with the constrained diagonal $s$, as `amg.py:150`.
-   - It is independent of the `Hex8Pattern` source, so it also checks $A_b = A_P$ on `ssh8`.
-   - It equals the extracted patches to 1e-12 on every class, on a clamped plate (zero blocks)
-     and the T-junction.
-   - Level $\ell \ge 1$ against SciPy's $A_\ell$ to 1e-14.
+3. **Schwarz extraction and apply**, one parametrized dense-reference check, built with a small
+   `chunk_bytes` (multi-chunk, padded classes, more than 4 natural classes):
+   - **References:**
+     - level-0 patches are built independently, from the element fibers of test 1's
+       union-find, deduplicated per column;
+     - level-0 $A_i$ is `A[s][:, s]` of `assemble(mesh, mats)`, that is $K + \sigma M$ with
+       the constrained diagonal $s$, as `amg.py:150`. It is independent of the `Hex8Pattern`
+       source, so it also checks $A_b = A_P$ on `ssh8`;
+     - coarse $A_i$ comes from SciPy's $A_\ell$, with the patches of test 4.
+   - **Meshes:** the `hex8`-web mesh, the stack, the T-junction, a clamped plate (zero blocks),
+     and one coarse level with a ring patch that excludes a neighbour's identity DOF.
+   - **Asserts:**
+     - the apply equals a dense NumPy $\sum_i R_i^\top A_i^{-1} R_i r$ to 1e-12;
+     - the apply is symmetric to 1e-12;
+     - padded and constrained slots give exactly 0;
+     - `nbytes` equals the built `idx.nbytes + inv.nbytes`;
+     - fewer than `n_chunks` pad slots per class.
+   - **One-liners:**
+     - the size-class rule equals a brute-force NumPy version on synthetic sizes, including the
+       cap at 4;
+     - a coarse patch above the bound raises.
+4. **Groups, aggregation and coarse patches**, against an independent NumPy build on the
+   $8^2$ `hex8`-web mesh and a clamped plate:
+   - the level-0 group graph, built from element connectivity and the test-1 fibers, without
+     fully constrained groups, equals the stored graph;
+   - the stored group → aggregate map equals `pyamg.standard_aggregation` of that graph;
+   - the level-1 one-ring $\mathrm{Agg}^\top S\,\mathrm{Agg}$ in NumPy equals the stored
+     level-1 graph;
+   - each level-1 patch is {own 9} ∪ {non-identity DOFs of the shell ring neighbours} for a
+     shell group, and {own 9} for a hex group;
+   - no identity DOF appears outside its own patch.
+
 5. **Setup against references**, on the $8^2$ `hex8`-web mesh (levels [486+, 81+, 9+]; identity
    rows present: assert their count > 0) with `max_coarse` 20:
    - $P_\ell$ equals a dense NumPy $(I - \tfrac{\omega}{\rho} D^{-1} A)^{d_\ell} T_\ell$, with ρ
      from `_shell_levels`, to 1e-12; ρ lies within [0.9, 1.1]× the dense $\rho(D^{-1}A)$;
-   - $A_{\ell+1}$ equals $P^\top A P$ with the identity rows to 1e-12;
-   - the device V-cycle equals a NumPy V-cycle (SciPy levels, dense Schwarz, NumPy Chebyshev
-     with the build's λ_max, dense Cholesky) to 1e-10. `cheb` and `vcycle` move from
-     `tests/test_amg.py:195-235` to `tests/helpers.py`; only a dense-Schwarz helper is new;
+   - $A_{\ell+1}$ equals $P^\top A P$ with the identity rows to 1e-12. The reference identity
+     flags come from the zero columns of $T_\ell$ in the test, and their diagonal equals the
+     mean of the other rows' diagonal;
+   - the device V-cycle at `degree=3, ratio=20` equals a NumPy V-cycle (SciPy levels, dense
+     Schwarz, NumPy Chebyshev with the build's λ_max, dense Cholesky) to 1e-10. `cheb` and
+     `vcycle` move from `tests/test_amg.py:195-235` to `tests/helpers.py`; only a dense-Schwarz
+     helper is new;
+   - one level (the M4 $8^2$ plate, 486 DOF, nothing coarsens): the V-cycle equals the dense
+     $A_P^{-1}$ from `assemble` to 1e-10;
    - the V-cycle is symmetric to 1e-12, positive on the free DOFs, exactly 0 on constrained
      ones;
    - on every level of this mesh and of a clamped $8^2$ plate, the dense
@@ -638,11 +736,12 @@ the V-cycle; `solve_modes` checks are 18b's.
      3, then the gate on $256^2$. The docs record the shipped one.
    - The margin is thin (device 21–22 against about 12), so both device counts are measured
      before the gates are fixed, and the ratio and the seed are recorded.
-7. **Refinement:**
+7. **Refinement** (`max_coarse=1000`, as the prototypes):
    - `slow` (about 20 s): flat $L/t = 100$, $64^2$ against $128^2$ count ≤ 1.3× (counts flat at
      $h/t \le 1.6$).
-   - Slow (in conftest `LONG`, not `peak`, about 3 min and 4 GB): flat $L/t = 1000$, the
-     $256^2$ count ≤ 1.3× the $128^2$ count (prototype 18 vs 21).
+   - Slow (about 3 min and 4 GB, not `peak`): flat $L/t = 1000$, the $256^2$ count ≤ 1.3× the
+     $128^2$ count (prototype 18 vs 21). Its name is added to conftest `LONG`, and its 4 GB is
+     checked against the other slow tests in the 8-worker stage.
 8. **Shell cases**, counts gated at $L/t = 50$ ($32^2$ unless stated):
    - flat plate;
    - one element with 3 plies (0/90/0, Srinivas–Rao-type ply table);
@@ -651,7 +750,8 @@ the V-cycle; `solve_modes` checks are 18b's.
    - T-junction and L-fold ($24^2$), and the 3/3-layer T;
    - the flat plate at $L/t = 300$.
 
-   On the flat plate, Jacobi's PCG count is reported next to AMG's.
+   On the flat plate, Jacobi's PCG count is reported next to AMG's, with `maxit=2000` (it
+   stagnates at $L/t = 50$).
 9. **Mixed meshes:**
    - the $32^2$ `hex8`-web mesh;
    - the hex-dominant $16^3$ block with an `ssh8` skin (about 15k DOF; hex groups get their own
@@ -668,7 +768,9 @@ the V-cycle; `solve_modes` checks are 18b's.
       large one keeps coarsening (the value is stated in the test): a singleton aggregate
       appears in the stored group → aggregate map, and the count is gated. Equal plates reach
       isolation together, so CAP or STALL stops first (review);
-    - a free $24^2$ plate at σ = $\lambda_7$ from `eigsh` (above the 6 rigid modes): V-cycle
+    - a free $24^2$ plate at σ = $\lambda_7$ from `eigsh` (a realistic shift): V-cycle SPD,
+      count gated;
+    - a clamped plate at σ = 0 with `nonsingular=True`: the build succeeds, the V-cycle is
       SPD, count gated.
 11. **Stacks:** the 3-layer $32^2$ at $L/t$ 10 / 100, counts gated (prototype 11 / 15); 300 /
     1000 reported (40 / 117).
@@ -679,11 +781,16 @@ the V-cycle; `solve_modes` checks are 18b's.
     - two fresh builds are equal exactly.
 13. **Hex path unchanged:**
     - `test_amg.py` passes, unmodified except for importing `cheb`/`vcycle` from helpers;
-    - a spy (monkeypatch `_shell_levels` and `Schwarz` to raise) runs a hex20 and a hex8 `amg`
-      build and their PCG;
-    - `test_shell_ops.py`'s `amg` refusal block becomes the mixed-type refusal on an `ssh8` +
-      `hex20` mesh, its `pmg` block checks the new message, and the `solve_modes`/`amg_memory`
-      refusals stay (18b).
+    - a spy runs a hex20 and a hex8 `amg` build and their PCG, the hex8 one with
+      `return_aggregates=True` plus `aggregates=` reuse. It monkeypatches the names `amg()`
+      looks up (`amg._shell_levels`, and `Schwarz` where `shell` imports it) to raise;
+    - in `test_shell_ops.py`:
+      - the `AMG` constant becomes "… PR 18b";
+      - the `amg` refusal block becomes the mixed-type refusal on an `ssh8` + `hex20` mesh;
+      - the `pmg` match (:233) checks the new message;
+      - the `solve_modes`/`amg_memory` refusals stay (18b).
+Count tests also assert `info["converged"].all()`. The junction glue key is
+`np.round(pts / (1e-3 * t))`, which keeps the key away from a .5 rounding boundary.
 
 **Runtime:**
 - Slow: tests 6 (including about 10 s of $64^2$ `eigsh` for the panel σ, about 2–3 min) and 7
@@ -816,8 +923,8 @@ counts by ±1 (review).
 - **Element flatness:** counts grow with $h/t$ (18 / 21 / 25 at 3.9 / 7.8 / 15.6, $L/t$ 1000).
   The roadmap gate is taken on $128^2$, and the docs state this.
 - **Curved panel:** ratio 2.6× against the roadmap's 2×, which the flat plate meets. It is
-  reported, and its counts are gated. The documented fallback is
-  `precond_options={"degree": 3}`, measured in implementation.
+  reported, and its counts are gated. The fallback is `amg(..., degree=3)`, measured in 18a;
+  18b documents its `precond_options={"degree": 3}` form.
 - **Stacks and junctions:** stacks at $L/t \ge 300$ (40 / 117) and junctions at
   $L/t = 1000$ (about 80 against 39) stay above flat single layers.
   - That is a documented limitation.
