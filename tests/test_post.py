@@ -26,6 +26,7 @@ from jaxmodal.elements import ELEMENTS, gauss
 from jaxmodal.materials import Material, isotropic, rotate
 from jaxmodal.mesh import Mesh, box_mesh, read, solid_shell, voxel_mesh
 from jaxmodal.operators import assemble, dof_mask, rigid_modes, stencil, unstructured
+from jaxmodal.post import stress
 from jaxmodal.post.modal import _gram
 
 ROOT = Path(__file__).parents[1]
@@ -80,8 +81,8 @@ def test_sum_rule_and_formulas(bcs, kind):
     MV = M @ Vs
     mu = np.einsum("ij,ij->j", Vs, MV)
     b = MV.T @ r
-    for Mx in (M, op):
-        gamma, m_eff, total = post.participation(Vs, Mx, r)
+    for Mx, Vx in ((M, Vs), (op, jnp.asarray(Vs))):
+        gamma, m_eff, total = post.participation(Vx, Mx, r)
         assert rel(total, expect) <= 1e-12
         assert rel(m_eff.sum(0), expect) <= 1e-10
         assert rel(gamma, b / mu[:, None]) <= 1e-12
@@ -119,7 +120,7 @@ def test_free_box_totals():
     a, b, c = L
     expect = m * np.array([1, 1, 1, (b**2 + c**2) / 12, (a**2 + c**2) / 12, (a**2 + b**2) / 12])
     assert rel(total, expect) <= 1e-12
-    assert np.abs(m_eff[:6].sum(0) - total).max() <= 1e-12 * total.max()
+    assert (np.abs(m_eff[:6].sum(0) - total) <= 1e-12 * total).all()
     assert (m_eff[6:] <= 1e-20 * total).all()
 
 
@@ -173,11 +174,11 @@ def test_recipe(tmp_path, monkeypatch):
     m_d = (V.T @ (M @ r)) ** 2
     cl = post.clusters(lam, 1e-4)
     n = info["n_rigid"] + len(ns["lam"])
-    whole = [c for c in cl if c[-1] < n][:-1]  # clusters wholly inside, the last may be cut
+    whole = [c for c in cl if c[-1] < n]  # dense clusters wholly inside the computed set
     assert [list(c) for c in table["clusters"][: len(whole)]] == [list(c) for c in whole]
     assert 1e-4 < (lam[9] - lam[8]) / lam[9] <= 3e-4  # elastic modes 6-7: apart in both partitions
     for i, c in enumerate(whole):
-        assert np.abs(table["m_eff"][i] - m_d[c].sum(0)).max() <= 1e-8 * total.max()
+        assert (np.abs(table["m_eff"][i] - m_d[c].sum(0)) <= 1e-8 * total).all()
     elastic = sum(table["fraction"][i] for i in range(1, len(whole)))
     assert (elastic[[2, 3, 4]] >= 0.5).all(), elastic  # not vacuous: z, Rx, Ry
     assert rel(ns["m_rigid"].sum(0)[[0, 1, 5]], total[[0, 1, 5]]) <= 1e-12
@@ -243,15 +244,35 @@ def test_mac():
     assert np.abs(post.mac(A, A, op, batch=2) - exact_mac(A, A, M)).max() <= 1e-13
 
 
+class Spy:
+    """An operator wrapper recording the widths apply_M receives."""
+
+    def __init__(self, op):
+        self.op, self.widths = op, []
+
+    def apply_M(self, x):
+        self.widths.append(x.shape[1])
+        return self.op.apply_M(x)
+
+
 def test_gram_batches():
     mesh = two_phase()
     _, M = assemble(mesh, MATS, {1: R})
     op = unstructured(mesh, MATS, {1: R})
     B = np.random.default_rng(5).standard_normal((M.shape[0], 130))
     A = B[:, :9]
-    G = _gram(A, op, B)
+    spy = Spy(op)
+    G, d = _gram(A, spy, B)
+    assert spy.widths == [64, 64, 64]  # 130 columns: two batches and a padded one
     assert G.dtype == np.float64 and rel(G, A.T @ (M @ B)) <= 1e-13
-    G32 = _gram(A.astype(np.float32), op, B.astype(np.float32), batch=7)
+    assert rel(d, np.einsum("ij,ij->j", B, M @ B)) <= 1e-13
+    spy = Spy(op)
+    post.participation(B, spy, B[:, :6])
+    assert spy.widths == [6, 64, 64, 64]  # M r: 6 columns, not 64
+    spy = Spy(op)
+    post.mac(A, B, spy)
+    assert spy.widths == [64, 64, 64, 9]  # M once per column of B and of A
+    G32 = _gram(A.astype(np.float32), op, B.astype(np.float32), batch=7)[0]
     assert G32.dtype == np.float64 and rel(G32, A.T @ (M @ B)) <= 1e-6
 
 
@@ -320,7 +341,7 @@ def test_cluster_invariance():
             W[:, c] = V[:, c] @ Q
     _, m_rot, _ = post.participation(W, M, r)
     sums = [np.array([m[c].sum(0) for c in cl]) for m in (m_eff, m_rot)]
-    assert np.abs(sums[0] - sums[1]).max() <= 1e-12 * total.max()
+    assert (np.abs(sums[0] - sums[1]) <= 1e-12 * total).all()
     change = (np.abs(m_rot - m_eff) / total)[:, [0, 1, 3, 4]].max()
     assert change >= 1e-3, change  # per-mode values do change: not vacuous
 
@@ -330,6 +351,8 @@ def test_clusters():
     got = [list(c) for c in post.clusters(lam)]
     assert got == [[0, 1, 2], [3, 4], [5], [6], [7]]
     assert [list(c) for c in post.clusters(lam, atol=1e-3)][-3:] == [[3, 4], [5, 6], [7]]
+    edge = [list(c) for c in post.clusters([1.0, 1.5, 2.0], rtol=0.25)]  # gaps 0.5: <= 0.25 * 2.0
+    assert edge == [[0], [1, 2]]  # |lam[i+1]| and <= : 1.5 - 1.0 > 0.375, 2.0 - 1.5 <= 0.5
     with pytest.raises(ValueError, match="ascending"):
         post.clusters([1.0, 0.5])
     assert post.cluster_rtol({"thresholds": np.array([1e-6, 3e-6])}) == pytest.approx(3e-4)
@@ -415,7 +438,8 @@ def test_laminate_recovery():
             assert rel(s[key][i, :n], a) <= 1e-12, key
         assert np.linalg.norm(alpha) >= 1e-4 * np.linalg.norm(eps)
         assert (s["weights"][i, n:] == 0).all() and np.isfinite(s["sigma"][i]).all()
-    assert any(len(mats[k].plies) < 3 for k in mesh.material[off:])  # padded plies present
+    n_ply = {len(mats[k].plies) for k in mesh.material[off:]}
+    assert n_ply == {2, 3}  # padded and full stacks
     h = out["hex8"]
     C = np.asarray(rotate(C_ANI, TILT))
     assert np.abs(h["sigma"] - h["eps"] @ C.T).max() <= 1e-12 * np.abs(h["sigma"]).max()
@@ -424,7 +448,7 @@ def test_laminate_recovery():
 def test_chunks():
     mesh, mats = mixed()
     u = np.random.default_rng(9).standard_normal(3 * len(mesh.points))
-    a, b = post.recover(mesh, mats, u, chunk=5), post.recover(mesh, mats, u)
+    a, b = post.recover(mesh, mats, u, chunk=5), post.recover(mesh, mats, jnp.asarray(u))
     for t in a:
         for k in a[t]:
             assert np.abs(a[t][k] - b[t][k]).max() <= 1e-13 * np.abs(b[t][k]).max()
@@ -459,27 +483,44 @@ def test_energy(case):
 # ---------------------------------------------------------------- 7: element stress, von Mises
 
 
-def test_element_stress():
+@pytest.mark.parametrize("t", ["hex8", "hex20", "hex27"])
+def test_element_stress_linear(t):
     rng = np.random.default_rng(13)
-    mesh = hex_mixed("hex20", True, rng)
+    mesh = hex_mixed(t, True, rng)
     A = rng.standard_normal((3, 3))
-    eps, sig = post.element_stress(mesh, MATS, (mesh.points @ A.T).ravel(), {1: R})
+    eps, sig = post.element_stress(mesh, MATS, jnp.asarray((mesh.points @ A.T).ravel()), {1: R})
     assert eps.shape == sig.shape == (mesh.n_el, 6)
+    assert np.abs(eps - voigt(A)).max() <= 1e-12 * np.abs(A).max()
     for e in range(mesh.n_el):
         C = np.asarray(rotate(MATS[mesh.material[e]].C, R if mesh.orientation[e] else np.eye(3)))
         assert rel(sig[e], C @ voigt(A)) <= 1e-10
-    for m, mats, ori in ((mesh, MATS, {1: R}), (*mixed(), {0: TILT})):
-        mesh = m
-        U = rng.standard_normal((3 * len(mesh.points), 70))
-        eps, sig = post.element_stress(mesh, mats, U, ori)
-        assert eps.shape == (mesh.n_el, 70, 6)
-        out = post.recover(mesh, mats, U[:, 3], ori)
-        for t, b in out.items():
-            e = slice(mesh.offsets[t], mesh.offsets[t] + len(mesh.blocks[t]))
-            w = b["weights"][..., None]
-            for key, got in (("eps", eps), ("sigma", sig)):
-                mean = (w * b[key]).sum(1) / w.sum(1)
-                assert np.abs(got[e, 3] - mean).max() <= 1e-13 * np.abs(mean).max()
+
+
+@pytest.mark.parametrize("case", ["hex20", "mixed"])
+def test_element_stress(case, monkeypatch):
+    rng = np.random.default_rng(13)
+    if case == "hex20":
+        mesh, mats, ori = hex_mixed("hex20", True, rng), MATS, {1: R}
+    else:
+        (mesh, mats), ori = mixed(), {0: TILT}
+    t0, widths = next(iter(mesh.blocks)), []
+    kernel = stress._MEAN[t0]
+
+    def spy(X, p, U):
+        widths.append(U.shape[1])
+        return kernel(X, p, U)
+
+    monkeypatch.setitem(stress._MEAN, t0, spy)
+    U = rng.standard_normal((3 * len(mesh.points), 70))
+    eps, sig = post.element_stress(mesh, mats, U, ori)
+    assert eps.shape == (mesh.n_el, 70, 6) and set(widths) == {64}  # 64 + padded 6
+    out = post.recover(mesh, mats, U[:, 3], ori)
+    for t, b in out.items():
+        e = slice(mesh.offsets[t], mesh.offsets[t] + len(mesh.blocks[t]))
+        w = b["weights"][..., None]
+        for key, got in (("eps", eps), ("sigma", sig)):
+            mean = (w * b[key]).sum(1) / w.sum(1)
+            assert np.abs(got[e, 3] - mean).max() <= 1e-13 * np.abs(mean).max()
     single = np.stack([post.element_stress(mesh, mats, U[:, j], ori)[1] for j in range(70)], 1)
     assert np.abs(single - sig).max() <= 1e-13 * np.abs(sig).max()
 
@@ -538,6 +579,9 @@ def test_write_modes(tmp_path):
     for j in range(4):
         for i in range(3):
             assert np.array_equal(m.point_data[f"mode_{j:03d}"][:, i], V[i::3, j])
+    post.write_modes(tmp_path / "b.vtu", mesh, jnp.asarray(V[:, 1]))  # one device column
+    one = meshio.vtu.read(tmp_path / "b.vtu").point_data
+    assert list(one) == ["mode_000"] and np.array_equal(one["mode_000"], V[:, 1].reshape(-1, 3))
 
 
 def test_write_modes_tensor_order(tmp_path):
@@ -573,6 +617,7 @@ def test_write_modes_names_and_merge(tmp_path):
     back = read(tmp_path / "m.vtu")
     assert list(back.blocks) == ["hex8"] and np.array_equal(back.points, mesh.points)
     assert np.array_equal(back.material, mesh.material)
+    assert np.array_equal(back.orientation, mesh.orientation)
 
 
 # ---------------------------------------------------------------- 9: frequency table
@@ -602,7 +647,7 @@ def test_frequency_table():
     lam = np.r_[np.zeros(6), lam[6:]]
     lam[1] = -1e-12  # tiny negative rigid value
     lam = np.sort(lam)
-    m_eff = post.participation(V, M, post.influence(mesh, free))[1]
+    _, m_eff, total = post.participation(V, M, post.influence(mesh, free))
     t = post.frequency_table(lam, m_eff, total, atol=1e-9)  # atol for dense rigid values
     assert t["f"][0] == 0 and list(t["clusters"][0]) == list(range(6))
 
@@ -647,7 +692,11 @@ def test_errors(tmp_path):
             lambda: post.write_modes(tmp_path / "a.vtu", mesh, V, {"x": np.zeros(12, bool)}),
             "numeric",
         ),
-        (lambda: post.recover(mesh, MATS, V, {1: R}), "one field"),
+        (lambda: post.recover(mesh, MATS, V, {1: R}), r"\(108,\) array"),
+        (lambda: post.normalize(V[:-1], kind="max"), "shape"),
+        (lambda: post.influence(mesh, free, np.zeros((len(mesh.points), 3))), "origin"),
+        (lambda: post.frequency_table([1.0, 2.0], np.ones((5, 6)), np.ones(6)), "len"),
+        (lambda: post.frequency_table([0.0, np.nan, 1.0], np.ones((3, 6)), np.ones(6)), "finite"),
         (lambda: post.recover(mesh, MATS, V[:-3, 0], {1: R}), "expected"),
         (lambda: post.recover(mesh, MATS, V[:, 0], chunk=0), "chunk"),
         (lambda: post.element_stress(mesh, MATS, V, batch=0), "batch"),

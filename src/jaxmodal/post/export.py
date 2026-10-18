@@ -10,7 +10,9 @@ from ..mesh.io import write_vtu
 def write_modes(path, mesh, V, cell_data=None):
     """Write a .vtu with point data mode_000, mode_001, ... = V[:, i] as (n_nodes, 3) and
     cell_data {name: (n_el,) or (n_el, c), element order}, plus material/orientation. Data is
-    written unchanged; VTK reads 6 components as tensors in the order XX, YY, ZZ, XY, YZ, XZ."""
+    written unchanged; VTK reads 6 components as tensors XX, YY, ZZ, XY, YZ, XZ with tensor
+    shear, so pass Voigt (11, 22, 33, 23, 13, 12) arrays as a[..., [0, 1, 2, 5, 3, 4]], strains
+    with the shear halved first (docs/postprocessing.md)."""
     if Path(path).suffix.lower() != ".vtu":
         raise ValueError("only .vtu can be written")
     n_nodes = len(mesh.points)

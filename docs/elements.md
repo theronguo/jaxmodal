@@ -65,6 +65,7 @@ lumped_mass(name, X, rho) -> diagonal of the lumped Me (..., 3n)
 kernels.lumped_nodal(name, wdet) -> lumped nodal masses per unit density (..., n)  # PR 5 reuses it
 stiffness_form(name, X, C, u, w) -> u^T Ke w (...)   # u, w: (..., 3n)
 mass_form(name, X, rho, u, w) -> u^T Me w (...)
+kernels.hex_recover(name, X, C, u) -> (points (..., nq, 3), wdet (..., nq), eps, sigma (..., nq, 6))  # RECOVER, PR 17
 ```
 
 At each quadrature point $q$ with weight $w_q$:
@@ -190,7 +191,7 @@ points, weights, eps, sigma = shell_recover(X, table_e, u)  # (8L, 3), (8L,), (8
 ```
 
 - **One element per call.** Unlike the batched `kernels.*`, the shell kernels take one element `X (8, 3)` and `table_e = (plies, R_o)`, with `plies` a `Ply` whose leaves have a leading ply axis `(L,)` and `R_o (3, 3)`; callers `vmap`. They are pure `jax.numpy`: `jit`, `vmap` and `grad` (in $X$, $C$, angle, fraction, $\rho$) work through them.
-- **Registry.** The `ssh8` entry copies hex8's (nodes, faces, 2×2×2 rule) with `lumping=None`; it serves node counts (`default_chunk`, `_chunk_temps`), `check_elements`, `jacobian` and the sampling width only. `stiffness`, `mass`, `lumped_mass`, `stiffness_form` and `mass_form` raise for `ssh8` (the forms arrive in PR 21).
+- **Registry.** The `ssh8` entry copies hex8's (nodes, faces, 2×2×2 rule) with `lumping=None`; it serves node counts (`default_chunk`, `_chunk_temps`), `check_elements`, `jacobian` and the sampling width only. `stiffness`, `mass`, `lumped_mass`, `stiffness_form`, `mass_form` and `hex_recover` raise for `ssh8` (the forms arrive in PR 21).
 
 **Formulation.** With $g_j = \partial X/\partial\xi_j$, $J = [g_1\ g_2\ g_3]$ ($J_{ij} = \partial x_i/\partial\xi_j$) and $J_0$ at the centre:
 

@@ -4,7 +4,7 @@
 normalization, the M-weighted MAC, participation factors and effective modal mass, clusters and a
 frequency table, strain and stress recovery, and VTU export. Everything here is single-host NumPy
 around jitted kernels; outputs are NumPy float64. Every function except `influence`, `clusters`,
-`frequency_table`, `format_table`, `von_mises` and `write_modes` needs x64
+`cluster_rtol`, `frequency_table`, `format_table`, `von_mises` and `write_modes` needs x64
 (`jaxmodal.config.enable_x64()`).
 
 ## Conventions
@@ -86,8 +86,8 @@ $$\lambda_{i+1} - \lambda_i \le \text{rtol}\,|\lambda_{i+1}| + \text{atol}.$$
   \text{tol}/\text{gap}$, Davis–Kahan), so a split there would not be meaningful. Merging
   distinct modes only coarsens a row; it never makes it wrong.
 - The solver merges at $\lambda_i - \lambda_{i-1} < 100\,t_{i-1}|\lambda_{i-1}|$, with
-  $t_j \ge$ tol its per-mode acceptance threshold (or $100\,r_\text{acc}$ in shift-invert
-  slices). `cluster_rtol(info)` $= 100\max(10^{-6}, \max_j t_j, r_\text{acc})$ reproduces that
+  $t_j \ge$ tol its per-mode acceptance threshold ($r_\text{acc}$ in place of $t_j$ in
+  shift-invert slices). `cluster_rtol(info)` $= 100\max(10^{-6}, \max_j t_j, r_\text{acc})$ reproduces that
   from a converged `solve_modes` info, and the recipe passes `max(1e-4, cluster_rtol(info))`.
   The looser $|\lambda_{i+1}|$ and $\le$ never split a solver cluster.
 - **Basis invariance.** Per cluster $C$, $\sum_{i\in C} m^\text{eff}_{ik} = r_k^\top MP_Cr_k$,
@@ -127,7 +127,11 @@ $u^\top K_e u = \sum_q w_q\,\varepsilon_q\cdot\sigma_q$.
 - `element_stress(mesh, materials, U, orientations=None, chunk=1024, batch=64)` returns the
   volume averages $\bar\sigma_e = \sum_q w_q\sigma_q/\sum_q w_q$ and $\bar\varepsilon_e$,
   `(n_el, k, 6)` in element order (1-D `U`: `(n_el, 6)`). On laminates the average mixes the
-  plies.
+  plies. For hex elements the kernel averages the gradients first, $\bar\varepsilon_e =
+  S(\bar G_e^\top u_e)$ with $\bar G_e = \sum_q w_q G_q/\sum_q w_q$, and $\bar\sigma_e =
+  C_e\bar\varepsilon_e$ ($\varepsilon$ is linear in $u$ and $C_e$ constant), which equals the
+  weighted mean of `hex_recover` without the per-point work per column; `ssh8` averages
+  `shell_recover`'s points (per-ply $C$).
 - `von_mises(sigma)`: $\sqrt{\tfrac12[(\sigma_{11}-\sigma_{22})^2 + (\sigma_{22}-\sigma_{33})^2
   + (\sigma_{33}-\sigma_{11})^2] + 3(\sigma_{23}^2 + \sigma_{13}^2 + \sigma_{12}^2)}$ in Voigt
   order. The von Mises stress of the element average is not the average of point values.
@@ -193,24 +197,29 @@ Stacking the small `(n, 6)` outputs avoids `np.hstack([info["rigid"], V])`, whic
 
 | function | `apply_M` columns | host | device |
 |---|---|---|---|
-| `normalize(V, M)` | n | copy of V | $\approx (2 + \text{ws})\,w\,n_\text{dof}\cdot 8$ B |
-| `mac(A, B, M)` | $n_A + n_B$ ($n_A$ when `B is A`) | $n_A n_B$ | same |
+| `normalize(V, M)` | n | the output (a copy of V) | $\approx (3 + \text{ws})\,w\,n_\text{dof}\cdot 8$ B |
+| `mac(A, B, M)` | $n_A + n_B$ ($n_B$ when `B is A`) | $n_A n_B$ | same |
 | `participation(V, M, r)` | $n + 6$ | $O(6\,n_\text{dof})$ | same |
-| `element_stress` | none | $96\,n_\text{el}\,k$ B | chunk × kb element values |
+| `element_stress` | none | $96\,n_\text{el}(k + kb)$ B | $8\,n_\text{dof}\,kb$ B + one chunk |
 
-- $w = \min(\text{batch}, n)$, ws the operator's own workspace per column. Host memory is the
-  inputs plus $O(w\,n_\text{dof})$ per batch.
+- $w = \min(\text{batch}, n)$, ws the operator's own workspace per column; the device holds
+  the batch, its product and the product dispatched ahead. Host memory is the inputs plus
+  $O(w\,n_\text{dof})$ per batch (`normalize` works on 64-column blocks for its sign and max
+  norms). Device input is pulled to the host once.
+- $kb = \min(\text{batch}, k)$; `element_stress` holds the outputs plus one block's
+  `(n_e, kb, 6)` pair on the host, and the column batch `(n_dof, kb)` on the device.
 - The host GEMM of `_gram` ($A^\top MB$) is $2 n_A w\,n_\text{dof}$ flops per batch.
 - `element_stress` runs `ceil(k / batch)` × (blocks × chunks) kernel calls; geometry and the
-  `ssh8` EAS factorization are computed once per chunk and column batch. `recover` is one pass
+  `ssh8` EAS factorization are computed once per chunk and column batch (not per column). `recover` is one pass
   per field.
-- VTU size: about $24\,n_\text{nodes}$ B per mode before zlib, and zlib gains little on fp64
-  fields. meshio builds each array in memory, so export `V[:, sel]` for large models.
+- VTU size: about $24\,n_\text{nodes}$ B per mode before zlib; what zlib gains depends on the
+  field (little on noisy fields, about 17× on smooth synthetic fields on a structured box). meshio builds each array in memory, so export `V[:, sel]` for large models.
 - Compiles: one `apply_M` per batch width, one recovery kernel per (type, chunk, kb) and per ply
   count for `ssh8`; repeat calls compile nothing.
 
 Measured once (M-series laptop CPU, 64 GB, hex20 $43^3$ box, 1.0M DOF, 79.5k elements, 256
-random columns): `_gram` $V^\top MV$ 1.6 s (0.41 s per 64-column batch, nearly all `apply_M`;
-the host GEMM is 0.06 s), `participation` 1.7 s, `element_stress` of 64 columns 2.5 s (32 ms
-per 1024-element chunk; `ssh8` one ply: 16 ms). Peak RSS 6.8 GB, of which V is 1.9 GB and the
-operator and mesh 1.7 GB.
+random columns): `_gram` $V^\top MV$ 1.6 s (0.41 s per 64-column batch, of which the host GEMM
+is 0.06 s, overlapped with the next `apply_M`; the GEMM grows with $n_A$), `participation`
+1.7 s, `normalize` 2.4 s with a host peak of 1.25× V, `element_stress` of 64 columns 0.33 s
+(4.2 ms per 1024-element chunk; `ssh8` one ply: 16 ms) with a host peak of 0.97 GB. Process peak
+RSS 6.8 GB, of which V is 1.9 GB and the operator and mesh 1.7 GB.
