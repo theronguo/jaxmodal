@@ -14,14 +14,14 @@ from jaxmodal.eigen import reference_modes
 from jaxmodal.materials import Laminate
 from jaxmodal.mesh import box_mesh, solid_shell
 from jaxmodal.operators import assemble, dof_mask, restrict
+from tests.exact import SIMPLY_SUPPORTED as SS
 from tests.exact import plate_modes
 
-EPS = np.finfo(float).eps
+EPS = sa.EPS
 GATE = {"srao": 1e-3, "cyl": 1e-3, "skew": 1e-2}  # ssh8 error in f
 CRIT = {"cyl": 2e-4, "skew": 2e-3}  # hex27 reference error in f
 CHECKED = {"cyl SS": 5, "cyl SA": 4, "cyl AS": 6, "cyl AA": 6, "skew": 5}  # back-checked modes
 REMOVED = {("pag", 10): [0] * 10, ("ortho", 10): [0] * 10}  # strip modes dropped by the filter
-SS = {"xmin": "yz", "xmax": "yz", "ymin": "xz", "ymax": "xz"}
 
 
 @functools.cache
@@ -79,6 +79,8 @@ def test_reference_gate(case):
     assert r["ref"].max() <= CRIT[kind]
     assert r["err"].max() <= GATE[kind], r["err"]
     assert (2 * r["flam_shell"] <= 0.1 * GATE[kind]).all()
+    assert r["roundoff"].min() >= 3  # no difference used is near round-off
+    assert r["gap"] >= 2 * r["err"].max()  # sorted ssh8 / hex27 matching cannot cross
 
 
 def test_pinned():
@@ -88,22 +90,25 @@ def test_pinned():
     assert np.isclose(r["cyl SA"]["ref"].max(), 1.17e-4, rtol=0.01)
     assert np.isclose(r["cyl SA"]["nz"][0], 3.95e-5, rtol=0.01)
     assert np.isclose(r["skew"]["ref"].max(), 1.09e-3, rtol=0.01)
+    assert np.isclose(r["cyl SA"]["back"][r["cyl SA"]["checked"]].min(), 1.474, rtol=0.01)
     assert np.isclose(
         r["srao pag 10"]["err"][sa.LABELS["pag", 10].index((1, 3, 0))], 5.77e-4, rtol=0.01
     )
 
 
+slow = pytest.mark.slow
 RECOMPUTE = [
-    ("srao", ("pag", 10, (2, 0, 0), 32, 12)),  # laminate, 90 deg ply, zero-index strip and filter
-    ("srao", ("ortho", 100, (2, 4, 0), 48, 4)),  # two mirror cuts
-    ("cylinder", ("ssh8", "SA", 512, 96, 1)),
-    ("cylinder", ("hex27", "SA", 24, 12, 3)),
-    ("skew", ("ssh8", 192, 1)),
-    ("skew", ("hex27", 24, 3)),  # 1728 elements: 2 assembly chunks
+    ("srao", ("pag", 10, (1, 0, 0), 32, 12)),  # fast: laminate, strip and filter
+    ("skew", ("hex27", 6, 3)),  # fast: hex27 and mirror parity
+    pytest.param("srao", ("pag", 10, (2, 0, 0), 32, 12), marks=slow),  # 90 deg ply, rank > 0
+    pytest.param("srao", ("ortho", 100, (2, 4, 0), 48, 4), marks=slow),  # two mirror cuts
+    pytest.param("cylinder", ("ssh8", "SA", 512, 96, 1), marks=slow),
+    pytest.param("cylinder", ("hex27", "SA", 24, 12, 3), marks=slow),
+    pytest.param("skew", ("ssh8", 192, 1), marks=slow),
+    pytest.param("skew", ("hex27", 24, 3), marks=slow),  # 1728 elements: 2 assembly chunks
 ]
 
 
-@pytest.mark.slow
 @pytest.mark.parametrize("builder, args", RECOMPUTE)
 def test_recompute(builder, args):
     old = next(r for r in record() if r["builder"] == builder and sa._key(r["args"]) == args)
@@ -170,9 +175,11 @@ def test_crossing():
     ext = [(1, 0), (1, 1)]
     swap = np.array([[1.0, 1.02], [0.95, 0.96]])  # the upper mode moves 3x its gap
     benign = np.array([[1.0, 1.2], [0.99, 1.19]])
-    assert sa.crossing(swap, ext[:1], ext)[1][0, 0] >= 1
-    assert sa.crossing(benign, ext[:1], ext)[1][0, 0] < 1
-    assert not sa.crossing(benign[::-1], ext[:1], ext)[0]  # increasing
+    coarse_gap = np.array([[1.0, 1.1], [0.99, 1.02]])  # move 0.08: 0.8 of the coarse gap
+    assert sa.crossing(swap, ext)[1][0, 0] >= 1
+    assert sa.crossing(benign, ext)[1][0, 0] < 1
+    assert sa.crossing(coarse_gap, ext)[1][0, 0] < 1
+    assert not sa.crossing(benign[::-1], ext)[0]  # increasing
 
 
 # ---- builders, filter, digest ----
@@ -180,13 +187,9 @@ def test_crossing():
 
 def full_plate(name, Lt, nx, ny, k, a=1.0, b=1.0):
     """The whole SS plate [0, a] x [0, b] in `ssh8`, k elements per ply."""
-    pl = sa._plies(name, Lt)
-    nz = k * len(pl)
+    nz = k * len(sa._plies(name, Lt))
     m = box_mesh((nx, ny, nz), spacing=(a / nx, b / ny, 1 / Lt / nz))
-    zc = m.points[m.blocks["hex8"]].mean(1)[:, 2]
-    material = np.searchsorted(np.cumsum([p[2] for p in pl])[:-1], zc)
-    m, _ = solid_shell(dataclasses.replace(m, voxel=None, material=material), direction=(0, 0, 1.0))
-    return m, sa._shell_mats(name), SS
+    return sa.plied(m, name, Lt), sa._shell_mats(name), SS
 
 
 def test_srao_equivalence():
@@ -237,10 +240,10 @@ def test_cylinder_classes(typ, nz):
     assert min(c[-1] for c in classes) > 1.1 * lam_T  # the union is complete below 1.1 lam_T
     union = np.sort(np.concatenate(classes))
     sym = sa.run("cylinder", (typ, "S", 16, 8, nz), lmax=False, n=16, half=True)["lam"]
-    assert np.allclose(sym, union[:16], rtol=1e-9)
+    assert np.allclose(sym, union[:16], rtol=1e-6)  # above the floors 2 f_lam <= 7e-8
     anti = np.array(sa.run("cylinder", (typ, "A", 16, 8, nz), lmax=False, n=48, half=True)["lam"])
     assert anti[-1] > 1.1 * lam_T
-    inside = np.array([np.isclose(union, x, rtol=1e-8).any() for x in anti])
+    inside = np.array([np.isclose(union, x, rtol=1e-6).any() for x in anti])
     assert inside[anti < 0.9 * lam_T].all()
     extra = anti[~inside & (anti < 1.1 * lam_T)]
     assert len(extra) == 1 and abs(extra[0] / lam_T - 1) <= (0.01 if typ == "hex27" else 0.06)
@@ -293,7 +296,7 @@ def test_smoke():
 # ---- no locking ----
 
 
-def bending(typ, Lt, n, k=16):
+def bending(typ, Lt, n, k):
     """Lowest 6 bending lam (z-parity) of the SS square n x n x 1, and its floor 10 eps lmax/lam."""
     m = box_mesh((n, n, 1), spacing=(1 / n, 1 / n, 1 / Lt), type="hex8")
     if typ == "ssh8":
@@ -338,7 +341,6 @@ def test_no_locking():
     assert all(d[Lt] <= 0.1 * e[Lt] for Lt in e)
 
 
-@pytest.mark.slow
 def test_hex8_locks():
     """Negative control: the same bounded ratio on hex8 is far above 1.5."""
     assert lock_ratio("hex8")[0] > 10

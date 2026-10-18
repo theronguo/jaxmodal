@@ -340,7 +340,7 @@ The cost is a tie here; in a full solve degree 2 is fastest (PR 13c, AMG, hex20 
 | hex27 $16^3$ | 107,811 | 509 iterations, 21.6 s | 15, 3.4 s |
 
 **Limitations** ([`open_items.md`](open_items.md)).
-- **Flat elements:** the hex8 coarse space locks in bending when elements are flat ($a \gg 1$), so the coarse correction misses the smooth bending error. See the table above; the hex27 plate $32^2\times1$ at $a = 10$ needs > 1000 iterations and does not converge. Slenderness alone with $a = 1$ is fine (beam: 16). AMG on the hex8 level makes it worse (below); revisited in M4 (solid-shell elements).
+- **Flat elements:** the hex8 coarse space locks in bending when elements are flat ($a \gg 1$), so the coarse correction misses the smooth bending error. See the table above; the hex27 plate $32^2\times1$ at $a = 10$ needs > 1000 iterations and does not converge. Slenderness alone with $a = 1$ is fine (beam: 16). AMG on the hex8 level makes it worse (below); revisited in PR 18 (solid-shell AMG).
 - **`splu` scaling** (coarse hex8 matrix of an $n^3$ box, COLAMD):
 
   | $n$ | coarse DOF | factor time | $L + U$ | process peak |

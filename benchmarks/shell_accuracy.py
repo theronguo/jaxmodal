@@ -125,15 +125,18 @@ def _shell_mats(name):
 
 def _laminate(name):
     """The plies of _shell_mats as one Laminate (equal fractions)."""
-    sm = _shell_mats(name).values()
-    return Laminate(
-        tuple(
-            m.plies[0]._replace(fraction=1 / len(sm))
-            if isinstance(m, Laminate)
-            else Ply(m, 0.0, 1 / len(sm))
-            for m in sm
-        )
-    )
+    if name == "ortho":
+        return Laminate((Ply(Material(ORTHO, 0.7), 0.0, 1.0),))
+    pag = Material(PAG, 1.0)
+    return Laminate(tuple(Ply(pag, a, 1 / 3) for a in (0.0, np.pi / 2, 0.0)))
+
+
+def plied(mesh, name, Lt):
+    """Ply ids of a hex8 box through [0, 1/Lt] from the element centroids, then `ssh8` along z."""
+    zc = mesh.points[mesh.blocks["hex8"]].mean(1)[:, 2]
+    material = np.searchsorted(np.cumsum([p[2] for p in _plies(name, Lt)])[:-1], zc)
+    mesh = dataclasses.replace(mesh, voxel=None, material=material)
+    return solid_shell(mesh, direction=(0.0, 0.0, 1.0))[0]
 
 
 def srao_case(name, Lt, label, q, k, width=None):
@@ -149,13 +152,10 @@ def srao_case(name, Lt, label, q, k, width=None):
     nz = k * len(pl) or 1
     mesh = box_mesh(((q if m_ else 1), (q if n_ else 1), nz), spacing=(hx, hy, 1 / Lt / nz))
     if k:
-        zc = mesh.points[mesh.blocks["hex8"]].mean(1)[:, 2]
-        mats = _shell_mats(name)
-        material = np.searchsorted(np.cumsum([p[2] for p in pl])[:-1], zc)
+        mesh, mats = plied(mesh, name, Lt), _shell_mats(name)
     else:
-        mats, material = {0: _laminate(name)}, np.zeros(mesh.n_el, int)
-    mesh = dataclasses.replace(mesh, voxel=None, material=material)
-    mesh, _ = solid_shell(mesh, direction=(0.0, 0.0, 1.0))
+        mesh = dataclasses.replace(mesh, voxel=None, material=np.zeros(mesh.n_el, int))
+        mesh, mats = solid_shell(mesh, direction=(0.0, 0.0, 1.0))[0], {0: _laminate(name)}
     bcs = {"xmin": "yz", "ymin": "xz", "xmax": "x" if m_ else "yz", "ymax": "y" if n_ else "xz"}
     return mesh, mats, bcs
 
@@ -166,10 +166,7 @@ def cylinder(typ, cls, nt, na, nz, half=False):
     half: theta in [0, pi], full length, both ends clamped, cls "S" or "A" about y = 0. hex27 is
     cosine-graded toward the clamped ends; `ssh8` is uniform (typ "ssh8" from a hex8 box)."""
     j = np.arange(na + 1) / na
-    if typ != "hex27":
-        ya = j
-    else:
-        ya = (1 - np.cos(np.pi * j)) / 2 if half else 1 - np.cos(np.pi * j / 2)
+    ya = j if typ != "hex27" else (1 - np.cos(np.pi * j)) / 2 if half else 1 - np.cos(np.pi * j / 2)
     m = box_mesh(
         (nt, na, nz),
         type="hex8" if typ == "ssh8" else typ,
@@ -220,10 +217,10 @@ def keys(part):
     """(builder, args) of a part, each unique key once."""
     if part == "srao":
         out = [
-            (name, Lt, lab, q, k) for (name, Lt), (q, k) in SRAO.items() for lab in LABELS[name, Lt]
-        ]
-        out += [
-            (name, Lt, lab, q, 0) for (name, Lt), (q, _) in SRAO.items() for lab in LABELS[name, Lt]
+            (name, Lt, lab, q, kk)
+            for (name, Lt), (q, k) in SRAO.items()
+            for kk in (k, 0)
+            for lab in LABELS[name, Lt]
         ]
     elif part == "cyl":
         s = dict.fromkeys(CYL["levels"] + CYL["coarse"] + CYL["mid"])
@@ -280,7 +277,8 @@ def skew_parity(mesh, V):
     x = P[:, 0] - y * np.sin(ANGLE)
     A, B = (np.rint(np.c_[u, v, P[:, 2]] * 1e9).astype(np.int64) for u, v in ((x, y), (y, x)))
     ia, ib = np.lexsort(A.T[::-1]), np.lexsort(B.T[::-1])
-    assert (A[ia] == B[ib]).all(), "mesh not mirror symmetric"
+    if not (A[ia] == B[ib]).all():
+        raise ValueError("mesh not mirror symmetric")
     perm = np.empty(len(P), int)
     perm[ia] = ib
     d = np.array([1 + np.sin(ANGLE), np.cos(ANGLE)]) / np.hypot(1 + np.sin(ANGLE), np.cos(ANGLE))
@@ -358,7 +356,6 @@ def run(builder, args, lmax=True, n=None, **kw):
     if lmax:
         Kf, Mf, _ = restrict(K, M, free)
         rec["lmax"] = float(sla.eigsh(Kf, 1, Mf, which="LA", tol=1e-3)[0][0])
-    del K, M, V
     rss = harness.maxrss_bytes(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, sys.platform)
     rec |= {"lam": lam.tolist(), "time": time.perf_counter() - t0, "rss_gb": rss / 1e9}
     print(
@@ -414,7 +411,7 @@ def _f(r, sel):
     return np.sqrt([lam[np.flatnonzero(c == k)[j]] for k, j in sel])
 
 
-def crossing(F_all, sel, ext):
+def crossing(F_all, ext):
     """Monotone crossing guard. F_all (levels, len(ext)) f of the modes ext (the gated modes sel and
     their upper neighbours, by class). Returns (decreasing, ratios (levels - 1, pairs), pair
     members): ratio = upper mode's move / its class gap below at the coarser level."""
@@ -438,22 +435,25 @@ def reference_case(runs, builder, pre, S):
     sel = _select(runs[levels[-1]])
     ext = sorted(set(sel) | {(k, j + 1) for k, j in sel})
     F_all = np.array([_f(runs[k], ext) for k in levels])
-    dec, rat, members = crossing(F_all, sel, ext)
-    F = np.array([_f(runs[k], sel) for k in levels])
+    dec, rat, members = crossing(F_all, ext)
+    F = F_all[:, [ext.index(s) for s in sel]]
     est, p, ok = richardson(F[1:])
     estb, pb, okb = richardson(F[:3])
     crossed = {m for (lo, up), x in zip(members, rat[0], strict=True) if x >= 1 for m in (lo, up)}
     checked = np.array([s not in crossed for s in sel])
     with np.errstate(invalid="ignore", divide="ignore"):
         back = estb / (np.abs(F[2] / F[3] - 1) + est)
-    t, ratio, zmono = nz_term(
-        np.array([_f(runs[k], sel) for k in coarse]), np.array([_f(runs[k], sel) for k in mid])
+    C = np.array([_f(runs[k], sel) for k in coarse])
+    t, ratio, zmono = nz_term(C, np.array([_f(runs[k], sel) for k in mid]))
+    floor = lambda ks, G: 10 * EPS * runs[ks]["lmax"] / G  # noqa: E731  (absolute, in f)
+    roundoff = np.minimum(  # second differences over the floors of their two runs
+        np.abs(F[2] - F[3]) / (floor(levels[2], F[2]) + floor(levels[3], F[3])),
+        np.abs(C[1] - C[2]) / (floor(coarse[1], C[1]) + floor(coarse[2], C[2])),
     )
-    fin = runs[levels[-1]]
-    flam = 10 * EPS * fin["lmax"] / F[3] ** 2
+    flam = 10 * EPS * runs[levels[-1]]["lmax"] / F[3] ** 2
     ref = est + t + flam
-    rs = runs[shell]
-    fs = _f(rs, sel)
+    fs = _f(runs[shell], sel)
+    gap = min(F_all[-1, ext.index(b)] / F_all[-1, ext.index(a)] - 1 for a, b in members)
     return {
         "f": F[3],
         "p": p,
@@ -472,7 +472,9 @@ def reference_case(runs, builder, pre, S):
         "flam": flam,
         "ref": ref,
         "err": np.abs(fs / F[3] - 1),
-        "flam_shell": 10 * EPS * rs["lmax"] / fs**2,
+        "flam_shell": 10 * EPS * runs[shell]["lmax"] / fs**2,
+        "roundoff": roundoff,
+        "gap": gap,
     }
 
 
@@ -487,9 +489,7 @@ def analyze(rec):
         for lab in LABELS[name, Lt]:
             ex, rank = target(name, Lt, lab)
             for kk, col in ((k, "err"), (0, "layered")):
-                r = runs.get(("srao", (name, Lt, lab, q, kk)))
-                if r is None:
-                    continue
+                r = runs["srao", (name, Lt, lab, q, kk)]
                 lam = r["lam"][rank]
                 rows[col].append(np.sqrt(lam / ex) - 1)
                 if kk:
@@ -514,7 +514,7 @@ def main():
     a = ap.parse_args()
     data = load()
     commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"], capture_output=True, text=True
+        ["git", "describe", "--always", "--dirty"], capture_output=True, text=True
     ).stdout.strip()
     for part in a.parts:
         t0 = time.perf_counter()

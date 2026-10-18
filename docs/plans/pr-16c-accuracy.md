@@ -39,6 +39,11 @@ meshes", and the `docs/verification.md` entries ("reference levels, elements per
   hashes the integer data and compares float moments to $10^{-12}$ (rounding floats flips at
   rounding boundaries). The antisymmetric half cylinder needs 48 modes to pass $1.1\lambda_T$
   (40 below it on hex27). `enable_x64` runs at the benchmark's import (constants were fp32).
+- rev 6 (code review 1): `analyze` also returns the smallest in-class gap at the finest level
+  (asserted $\ge 2\times$ the worst `ssh8` error, so sorted matching cannot cross) and the
+  second differences over their run floors (asserted $\ge 3$); two cheap recomputes and the hex8
+  control run in the fast suite; skew reference pinned at $1.09\cdot10^{-3}$; corner angles
+  corrected (60°/120°).
 
 ## Sizing study (shipped `ssh8`, 2026-10-18)
 
@@ -145,9 +150,9 @@ $12\times\{3,4,5\}$ (coarse) and $24\times\{3,4\}$ (mid); `ssh8` $192\times192\t
   reference); $128\times128$ gives 1.26.
 - Modes 5 and 6 are $0.22\%$ apart in $f$ (hex27 48) and $0.23\%$ (`ssh8`), so sorted matching pairs
   them consistently; a swap would give $5.1$ and $9.7\cdot10^{-3}$, still within the gate.
-- In-plane rate: the 150° clamped-clamped plan-view corner has exponent 1.083 (anti-plane 1.2);
-  the cosine grading (radical $\beta = 2 > 2/1.083$) keeps the asymptotic rate at hex27's 4, which
-  the uniform mesh would cut to about 2.2.
+- In-plane rate: (rev 6: the rhombus corners are 60° and 120°, not 150°; the 150° exponents
+  were wrong for this geometry, and the grading is justified by the measured uniform-level
+  failure above.)
 - Times: hex27 0.6, 2, 17, 147 s (48: 190k DOF; 16.6 GB measured on the uniform mesh of the same
   size), extra $n_z$ runs 3, 5, 33 s; `ssh8` 28 s. About 4 min.
 
@@ -175,7 +180,7 @@ it on $f$ errors is conservative by 2×.
   middle-level error $|f_2/f_3 - 1| + \text{est}_3$ for every mode the crossing guard passes on the
   first pair (measured $\ge 1.39$; those modes have coarser $p \in [2.25, 3.52]$); `analyze`
   returns the number of checked modes, and the tests pin it
-  (S/A 5 of 6, all others 6 of 6).
+  (rev 6: S/S 5, S/A 4, A/S 6, A/A 6, skew 5 of 6).
 - **Mode-crossing guard** (monotone form, round 3 math): $f$ decreases at every level pair (hex27
   approaches from above), and for each adjacent pair $(i, i+1)$, $|f_{i+1}^{(k)} - f_{i+1}^{(k+1)}|$
   is below the gap $f_{i+1}^{(k)} - f_i^{(k)}$ at the coarser level $k$; a crossing between levels
@@ -255,7 +260,7 @@ it on $f$ errors is conservative by 2×.
   gate and reference criterion, the matched labels, the back-check counts, the crossing guard, the
   zero-index filter counts, and $2f_\lambda \le 0.1\times$ gate. A few `analyze` outputs are pinned
   to the sizing study (`analyze3.py`) to 1%: cylinder S/A reference error $1.17\cdot10^{-4}$ and its
-  mode-1 $n_z$ term, skew reference error $1.13\cdot10^{-3}$, `pag` $L/t = 10$ (1,3)
+  mode-1 $n_z$ term, skew reference error $1.09\cdot10^{-3}$ (rev 5), `pag` $L/t = 10$ (1,3)
   $5.77\cdot10^{-4}$; a swapped level or coarse/mid level changes them (this replaces a synthetic
   record).
 - **Slow recompute** (one per code path, `run(..., lmax=False)` against the record to
