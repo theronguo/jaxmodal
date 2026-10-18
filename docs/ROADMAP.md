@@ -643,7 +643,7 @@ Split into five parts (2026-10-18, the PR 18a plan `docs/plans/pr-18a-shell-amg.
 - Contents:
   - Morton reordering and reordering tuning.
   - Kernel fusion checks (HLO inspection, report-only, recorded in `docs/performance.md`).
-  - fp32 option for p-MG and AMG (as in PR 11), modelled by the PR 13 estimator, and its validation.
+  - fp32 option for p-MG and AMG (as in PR 11), including the solid-shell Schwarz patch inverses (18a), modelled by the PR 13 estimator, and its validation.
   - σ-round reuse of the solid-shell AMG aggregates across `_precond_sigma`'s rebuilds (18a, `docs/open_items.md`).
   - Compile-time benchmark: full `solve_modes` compile time with GMG/AMG vs size, recorded in `docs/performance.md`.
   - Performance follow-ups (`docs/open_items.md`): the refill through `device_put(V[:, i:i+c].T).T` (2.4× faster on CPU), caching `layout` for the gather path, the verify skips before the gather.

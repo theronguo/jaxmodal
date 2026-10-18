@@ -590,11 +590,11 @@ At $n = 256$ (396k DOF), $t_A$ = 59.6 ms (stored-Ke $A_P$), per fine DOF:
     $k$-aware: $g$ stored chunks per scan step, with $g$ chosen at trace time from
     chunk·$s$·$k$·8·$g$ ≤ CB. A uniformly larger `chunk_bytes` is the alternative.
   - Cost of the remedy: the apply temporaries $2\,\texttt{chunk\_bytes}\cdot k/24$ (about
-    4.5 GB at 256 MiB and $k = 200$) and the inversion transient of about 7 × `chunk_bytes`.
+    4.5 GB at 256 MiB and $k = 200$) and the inversion transient of about 7 × `chunk_bytes` (one chunk in flight).
     Both are recorded.
   - The same check records packed vs full inverses.
   - The **host setup peak** check lists the host temporaries outside extraction:
-    - the level-0 group graph (int8 data);
+    - the level-0 group graph (int32 data);
     - $B^{(\ell)}_\text{fine}$, 72 B per DOF;
     - the patch `idx`;
     - the keys, 72 B per DOF per level;

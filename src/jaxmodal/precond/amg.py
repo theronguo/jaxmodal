@@ -134,7 +134,7 @@ class AMGAggregates:
     """The topology part of an amg setup, for amg(..., aggregates=): the Hex8Pattern, the
     tentative prolongators and coarse candidates per SA level, the mask and a connectivity
     fingerprint (host data). On solid-shell meshes tents is empty and shell holds the fiber
-    groups and, per level, the group -> aggregate map, the tentative prolongator, its
+    groups and, per level, the vertex -> aggregate map, the tentative prolongator, its
     zero-column (identity) flags and the shell-group flags."""
 
     pattern: Hex8Pattern

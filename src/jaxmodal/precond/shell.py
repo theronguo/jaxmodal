@@ -168,13 +168,13 @@ def _shell_levels(op, Ab, free, points, max_coarse, shell=None):
     """(levels, A_coarsest, shell, info) for the solid-shell AMG of the BSR hex8 Galerkin
     matrix Ab (3 x 3 node blocks, the Hex8Pattern's sorted indices): levels [(A_l BSR, (blocks,
     sel) patches, P_l)], shell = (group, ((agg, T, zero, shell flags) per level)) for reuse
-    (given, aggregation, frames and fits are skipped) and info: per level rho, the group graph
-    and the node -> next aggregate map ("rho", "graphs", "nodes"). Runs under a
+    (given, fibers, aggregation, frames and fits are skipped) and info: per level rho, the
+    group graph and the node -> next aggregate map ("rho", "graphs", "nodes"). Runs under a
     fixed local NumPy seed and leaves the global state unchanged."""
     reuse = shell is not None
     group = _fibers(op) if not reuse else shell[0]
-    patches = _columns(op, group)
-    patches = (patches, np.repeat(patches >= 0, 3, axis=1))
+    cols = _columns(op, group)
+    patches = (cols, np.repeat(cols >= 0, 3, axis=1))
     fn = np.asarray(free, bool).reshape(-1, 3)
     ng = group.max() + 1
     fg = np.zeros(ng, bool)
@@ -185,7 +185,7 @@ def _shell_levels(op, Ab, free, points, max_coarse, shell=None):
     G = _indicator(gf[group], fg.sum())
     S = _graph(G.T @ S @ G)
     Tn = _tensors(op, points) if not reuse else None
-    R = _nullspace(points, fn.ravel())
+    R = _nullspace(points, fn.ravel()) if not reuse else None
     state = np.random.get_state()
     np.random.seed(0)
     levels, stored, info = [], [], {"rho": [], "graphs": [S], "nodes": []}
@@ -218,7 +218,8 @@ def _shell_levels(op, Ab, free, points, max_coarse, shell=None):
             S = _graph(Ind.T @ S @ Ind)
             info["graphs"].append(S)
             patches = _rings(S, zero, flags)
-            Q = sp.csr_array(T) if Q is None else Q @ T
+            if not reuse:
+                Q = sp.csr_array(T) if Q is None else Q @ T
             info["nodes"].append(na)
             A = sp.bsr_array(Ac, blocksize=(B, B))
             A.sort_indices()

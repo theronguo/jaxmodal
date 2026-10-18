@@ -144,6 +144,7 @@ def build(A, blocks, sel, chunk_bytes=CHUNK_BYTES):
             B[: len(q)] = _extract(A, keys, blk, J)
             dof = np.take_along_axis(blk, J // b, 1) * b + J % b
             idx[o : o + len(q)] = np.where(valid[: len(q)], dof, n)
+            ok.block_until_ready()  # one chunk in flight: the queue would hold every B
             buf, ok = _invert(buf, ok, jnp.asarray(B), jnp.asarray(valid), o // ch)
         if not bool(ok):
             raise ValueError("Schwarz patch inverses are not finite")

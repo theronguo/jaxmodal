@@ -130,16 +130,16 @@ def cost(mesh, sigma, bcs, m=15, max_coarse=1000):
 def main(out=harness.RESULTS, write=True):
     runs = []
     for name, mesh, sigma, bcs, mats, mc in cases():
-        op, free = unstructured(mesh, mats), dof_mask(mesh, bcs)
+        op, free, sigma = unstructured(mesh, mats), dof_mask(mesh, bcs), float(sigma)
         t = time.perf_counter()
-        P = amg(op, free, float(sigma), mesh.points, max_coarse=mc, nonsingular=sigma == 0)
+        P = amg(op, free, sigma, mesh.points, max_coarse=mc, nonsingular=sigma == 0)
         jax.block_until_ready(P)
         build = time.perf_counter() - t
-        n, ok = its(op, free, float(sigma), P)
-        r = dict(case=name, n_dof=op.n_dof, sigma=float(sigma), max_coarse=mc, iterations=n,
+        n, ok = its(op, free, sigma, P)
+        r = dict(case=name, n_dof=op.n_dof, sigma=sigma, max_coarse=mc, iterations=n,
                  converged=ok, sizes=sizes(P), build_s=build)  # fmt: skip
         if name == "flat32-50":
-            r["jacobi"] = its(op, free, float(sigma), jacobi(op, free, float(sigma)))
+            r["jacobi"] = its(op, free, sigma, jacobi(op, free, sigma))
         print(json.dumps(r), flush=True)
         runs.append(r)
         jax.clear_caches()

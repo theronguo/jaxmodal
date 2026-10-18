@@ -610,7 +610,7 @@ def same_graph(A, B):
     return A.shape == B.shape and ((sp.csr_array(A) != 0) != (sp.csr_array(B) != 0)).nnz == 0
 
 
-@pytest.mark.parametrize("name", ["web", "clamped"])
+@pytest.mark.parametrize("name", ["web", "clamped", "strip"])
 def test_groups(name):
     """Test 4: the level-0 graph, the aggregation (pyamg plus singletons), the one-ring
     level-1 graph and the level-1 patches against NumPy loops; identity DOFs only in their own

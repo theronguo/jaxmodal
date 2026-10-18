@@ -79,7 +79,7 @@ Km, Mm = masked(K, free), masked(M, free)  # constrained rows and columns zero
 AP = a_p(K + 1e3 * M, free)  # SPD: constrained diagonal = mean free diagonal
 ```
 
-Thin walls and laminates use the solid shell `ssh8` (PR 16): convert hex8 elements so that reference $\zeta$ is the thickness and give them a `Laminate` of plies (bottom to top; angles in radians about the normal). `assemble`, the stored matrix-free operator and `solve_modes` (Jacobi-preconditioned until solid-shell AMG in PR 18b; fine for test-size plates, see `docs/eigensolvers.md`) take them:
+Thin walls and laminates use the solid shell `ssh8` (PR 16): convert hex8 elements so that reference $\zeta$ is the thickness and give them a `Laminate` of plies (bottom to top; angles in radians about the normal). `assemble`, the stored matrix-free operator and `solve_modes` (Jacobi-preconditioned until solid-shell AMG in PR 18b; `amg(op, free, sigma, mesh.points)` itself handles `ssh8` and `ssh8` + `hex8` meshes since PR 18a, `docs/preconditioners.md`; fine for test-size plates, see `docs/eigensolvers.md`) take them:
 
 ```python
 from jaxmodal.eigen import solve_modes
