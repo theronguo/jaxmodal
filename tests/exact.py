@@ -5,10 +5,11 @@ import itertools
 
 import numpy as np
 import scipy.linalg as sl
-from helpers import tensor
 from numpy.polynomial import legendre as lg
 from scipy.optimize import brentq
 from scipy.special import spherical_jn
+
+from tests.helpers import tensor
 
 SLIDING = {"xmin": "x", "xmax": "x", "ymin": "y", "ymax": "y", "zmin": "z", "zmax": "z"}
 SIMPLY_SUPPORTED = {"xmin": "yz", "xmax": "yz", "ymin": "xz", "ymax": "xz"}

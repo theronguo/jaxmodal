@@ -5,7 +5,7 @@ Exact solutions and published benchmarks that check the discretization, with the
 ## Error measures and mode matching
 
 - **Targets** are relative errors in frequency, $|f^h/f - 1|$ with $f = \sqrt\lambda/2\pi$; the roadmap's 0.1% in $f$ is about 0.2% in $\lambda$.
-- **Rates** are fitted to relative errors in $\lambda$, $|\lambda^h/\lambda - 1|$: the least-squares slope of $\log$ error against $\log h$, per mode, over the stated levels. Richardson extrapolation is not used. The finest error must be $\ge 100 f_\lambda$, with the solver floor $f_\lambda = 10\,\varepsilon\,\hat\lambda_\max/\lambda$ ($\hat\lambda_\max$ from `eigsh(which="LA", tol=1e-3)`: an order-of-magnitude estimate suffices, and the default tolerance costs about 20 s on a 30k-DOF mesh), so that round-off cannot bend the fit.
+- **Rates** are fitted to relative errors in $\lambda$, $|\lambda^h/\lambda - 1|$: the least-squares slope of $\log$ error against $\log h$, per mode, over the stated levels. Richardson extrapolation is not used for rates (PR 16c's reference estimates use it, [below](#solid-shell-accuracy-pr-16c)). The finest error must be $\ge 100 f_\lambda$, with the solver floor $f_\lambda = 10\,\varepsilon\,\hat\lambda_\max/\lambda$ ($\hat\lambda_\max$ from `eigsh(which="LA", tol=1e-3)`: an order-of-magnitude estimate suffices, and the default tolerance costs about 20 s on a 30k-DOF mesh), so that round-off cannot bend the fit.
 - **Matching.** For the sliding block, the computed modes are compared sorted against the exact sorted spectrum. This is valid because each list is the lowest part of a spectrum: the $k$-th smallest values correspond, whatever the mode shapes. Exactly degenerate exact values pair either way. The Visscher box is compared the same way from mode 7 (generic anisotropy, relative gaps $\ge 10^{-2}$). Srinivas–Rao (8b) pairs by M-weighted MAC with labels, degenerate sets by summed MAC (see "Mode matching" below). FV52 (from mode 4) and FV12 (from mode 7) are compared sorted; the Lamb sphere by cluster means (from mode 7).
 
 ## Sliding block
@@ -233,3 +233,60 @@ Gated: regular $\ge 0.95$ for extension, in-plane and out-of-plane; parallelogra
 - **Lift:** $Ax$ prescribed on the lateral-boundary nodes; the interior surface DOFs are loaded by the consistent traction $f_I = (K_\text{hex8}Ax)_I$ (`assemble` on the same mesh as hex8 with $C' = \mathrm{rotate}(C, R_\text{shell})$, exact since hex8 passes the patch test) and solved by `spsolve`. Gated at $10^{-10}$ (measured $\le 2\cdot10^{-13}$) for $u_I$ and the recovered $\sigma$: all 6 states on (i), the 4 states with $\sigma_{13} = \sigma_{23} = 0$ on (ii) and (iii).
 - **Recovery of the imposed field:** `shell_recover` returns $\sigma_0$ at every point for all 6 states on (i)–(iv), to $10^{-10}$; $\sigma = C'\varepsilon$ per point and $\sum$ weights = element volume to $10^{-12}$.
 - **Reported only:** the lift's transverse-shear states on (ii)–(iii) (stress errors 3–13); the lift on (iv), where only $\sigma_{33}$ passes and the membrane states give $3\cdot10^{-2}$–$0.34$ (shear 3–8); the warped patch, (ii) with interior node 4 of both surfaces moved out of plane by $0.1t$ (membrane and $\sigma_{33}$ $1.6\cdot10^{-2}$–$0.11$, shear 3–11). Bathe–Dvorkin ANS is not variationally consistent on non-parallelogram elements.
+
+## Solid-shell accuracy (PR 16c)
+
+Frequencies of `ssh8` meshes against 3D elasticity: `benchmarks/shell_accuracy.py` (parts `srao` 23 min, `cyl` 39 min, `skew` 4 min on the Mac) writes `benchmarks/results/shell_accuracy.json`; `tests/test_shell_accuracy.py` gates the record, recomputes one key per code path and runs the fast checks. Plan and sizing: `docs/plans/pr-16c-accuracy.md`. All solves are the PR 8 `eigsh` (`reference_modes`; Jacobi LOBPCG is impractical at $\kappa \approx 10^{12}$). Errors are relative in $f$, $|f^h/f - 1|$, except the no-locking test (in $\lambda$).
+
+### Reference rules
+
+PR 16's hex27 references use Richardson estimates (amending "Richardson extrapolation is not used" above, which holds for the rate fits).
+
+- **In-plane:** three nested levels (ratio 2), $\Delta_1 = f_1 - f_2$, $\Delta_2 = f_2 - f_3$, require $\Delta_1\Delta_2 > 0$ and $p = \log_2(\Delta_1/\Delta_2) \ge 1$; estimate $1.25\,|\Delta_2|/(2^{\min(p,4)} - 1)$ of the finest (4 is hex27's rate, 1.25 the GCI safety factor). A fourth, coarser level checks the rule one level back: the coarser triplet's estimate must bound the middle level's error $|f_2/f_3 - 1| + \text{est}_3$.
+- **Crossing guard:** $f$ decreases at every level pair, and within each mode class the upper mode of every adjacent pair moves less than the pair's gap at the coarser level (a crossing would move it at least that far). Asserted on the last two level pairs; a pair failing on the first excludes both modes from the back-check.
+- **Thickness ($n_z$):** the thickness error converges at $p_z = 2\lambda_s = 1.42$, the clamped-free corner singularity (plane strain, $\nu = 0.3$, $\lambda_s = 0.7112$); smooth modes converge faster, so the fixed rate over-counts them (by 1.7–2.5×). With runs at $n_z$, $n_z + 1$ on the coarse ($t_c$) and middle ($t_m$) levels, $t = |\Delta_1|/(1 - (n_z/(n_z+1))^{1.42})$ per level, extrapolated in $h$: $1.25\,(t_m + |t_m - t_c|/(2^{1.42} - 1))$. The per-level term levels off in $h$ (measured: the rule's value is $\ge 1.31\times$ the finest-level term). Check: monotone runs at $n_z$, $n_z + 1$, $n_z + 2$ on the coarse level with $\Delta_1/\Delta_2 \ge r(1.42)$, $r(p) = \frac{n_z^{-p} - (n_z+1)^{-p}}{(n_z+1)^{-p} - (n_z+2)^{-p}}$.
+- **Reference error** = in-plane + thickness + $f_\lambda = 10\varepsilon\hat\lambda_\max/\lambda$ of the finest level, per mode; gates compare against the finest level. Every gated `ssh8` run has $2f_\lambda \le 0.1\times$ its gate.
+
+### Simply supported laminates (Srinivas–Rao)
+
+`ortho` and `pag` of [Srinivas–Rao](#simply-supported-plates-srinivasrao), thickness $1/(L/t)$, lowest 10 modes of the full plate against `plate_modes` (gate $10^{-3}$). Each mode $(m, n)$ is solved on the quarter of its half-wave sub-plate $1/m \times 1/n$ ($q\times q$ `ssh8` elements, SS on $x = 0$, $y = 0$, mirrors on the far faces), as the class rank from `plate_modes` (12 modes) on the sub-plate; a zero index gives a one-element strip with SS cuts, whose modes are kept when the free in-plane component ($u_y$ for $(m, 0)$, $u_x$ for $(0, n)$) is equal on both cut faces ($\|u_{lo} - u_{hi}\|/\|u_{lo} + u_{hi}\| \le 10^{-6}$; $\ge 10^6$ dropped, between fails). `pag`'s middle ply is the 0° ply at a ply angle of $\pi/2$. $k$ = `ssh8` elements per ply.
+
+| laminate | $L/t$ | $q$ | $k$ ($n_z$) | worst mode | error | margin | time per run (incl. $\hat\lambda_\max$) |
+|---|---|---|---|---|---|---|---|
+| `pag` | 10 | 32 | 12 (36) | (1,3) | $5.77\cdot10^{-4}$ | 1.73 | 97–135 s |
+| `ortho` | 10 | 32 | 24 (24) | (3,1) | $4.99\cdot10^{-4}$ | 2.01 | 40–55 s |
+| `pag` | 100 | 48 | 3 (9) | (1,5) | $4.19\cdot10^{-4}$ | 2.38 | 21–37 s |
+| `ortho` | 100 | 48 | 4 (4) | (2,4) | $3.37\cdot10^{-4}$ | 2.97 | 4–6 s |
+
+- $L/t = 100$ is thickness-dominated: `pag` (2,5) at $q = 48$ is $9.9\cdot10^{-4}$ at $k = 1$ and $3.7\cdot10^{-4}$ at $k = 3$; in-plane refinement at $k = 1$ barely helps ($9.0\cdot10^{-4}$ at $q = 96$).
+- **Stacking:** two layers are no better than one on bending (on a symmetric stack the mid node lies on the neutral plane, so the in-plane displacement through the thickness stays linear): SS `ortho` $L/t = 20$ (1,1) gives $2.35$, $2.34$, $1.31$, $0.88\cdot10^{-3}$ at $k = 1, 2, 3, 4$. At clamped edges with $\nu \ne 0$ one layer is in addition soft (the EAS thickness parameter is unrestrained), which cancels part of its stiffening.
+- **One layered element** (reported, not regression-checked against an independent value): one `ssh8` layer with the whole `Laminate`, same $q$: worst errors 0.169 (`pag` 10), 0.033 (`ortho` 10), $7.0\cdot10^{-3}$ (`pag` 100), $8.5\cdot10^{-4}$ (`ortho` 100); the zero-index (in-plane) modes $1.0\cdot10^{-4}$.
+- Checks: the quarter of the (1,1) sub-plate and the (2,1) mode of the full plate equal the full-plate FE modes to $10^{-10}$; a wide strip's spurious cross-strip modes are removed and its target equals the narrow strip's and a full-plate mode; `plate_modes` at $P = 24$ equals $P = 12$ to $10^{-9}$ ($L/t = 10$) and $10^{-5}$ ($L/t = 100$, z-Ritz round-off).
+
+### Clamped cylinder
+
+$R = 1$, $t = 0.02$ ($R/t = 50$), length 2 ($L/R = 2$), both ends clamped, isotropic $E = 1$, $\nu = 0.3$, $\rho = 1$, gate $10^{-3}$, reference criterion $2\cdot10^{-4}$. The 1/8 model ($\theta \in [0, \pi/2]$, clamped end to mid-length) with $u_y = 0$ on $y = 0$ has 4 classes: S or A about the $x = 0$ plane, S or A about mid-length; lowest 6 each. It excludes the $y$-antisymmetric partners of the $n \ge 1$ doublets (equal frequencies) and the $n = 0$ torsion mode $\lambda_T = (\pi/2)^2G/\rho = 0.949$, above every gated mode ($\le 0.561$); a half-model test shows both: the $y$-symmetric half equals the union of the 4 classes, and the $y$-antisymmetric half adds only the torsion mode below $1.1\lambda_T$. hex27 at $n_z = 3$, axially graded toward the clamped end ($1 - \cos(\pi i/2n)$), levels $12\times6$ (back-check), $24\times12$, $48\times24$, $96\times48$ (circumferential × axial); $n_z$ 3–5 at $24\times12$, 3–4 at $48\times24$. `ssh8` $512\times96\times1$, uniform.
+
+| class | $p$ | $p$ one level back | back-check (modes) | in-plane | thickness | reference error | `ssh8` worst | margin (with reference) |
+|---|---|---|---|---|---|---|---|---|
+| S/S | 3.38–3.72 | 3.10–3.52 | $\ge 1.42$ (5 of 6) | $4.8\cdot10^{-5}$ | $4.8\cdot10^{-5}$ | $8.3\cdot10^{-5}$ | $6.00\cdot10^{-4}$ | 1.67 (1.47) |
+| S/A | 3.19–3.60 | 2.84–3.36 | $\ge 1.47$ (4 of 6) | $6.5\cdot10^{-5}$ | $5.1\cdot10^{-5}$ | $1.16\cdot10^{-4}$ | $7.64\cdot10^{-4}$ | 1.31 (1.14) |
+| A/S | 3.32–3.71 | 3.00–3.50 | $\ge 1.41$ (6 of 6) | $6.2\cdot10^{-5}$ | $4.8\cdot10^{-5}$ | $1.03\cdot10^{-4}$ | $5.69\cdot10^{-4}$ | 1.76 (1.49) |
+| A/A | 3.15–3.60 | 2.76–3.33 | $\ge 1.48$ (6 of 6) | $5.0\cdot10^{-5}$ | $5.5\cdot10^{-5}$ | $1.06\cdot10^{-4}$ | $6.32\cdot10^{-4}$ | 1.58 (1.36) |
+
+- Observed $p_z$ 2.44–3.79 at the coarse level; crossing ratios on the last two pairs $\le 0.54$.
+- One `ssh8` layer approaches a floor of about $6\cdot10^{-4}$ under in-plane refinement ($7.96\cdot10^{-4}$ at $384\times96$).
+- Finest hex27: 385k free DOF, 359–379 s, 25.6–29.7 GB process peak; `ssh8` 66 s.
+
+### Clamped skew plate (distorted meshes)
+
+Rhombus of side 1, skew angle 30° (corner angle 60°), thickness 1/20 ($L/t = 20$), all edges clamped, isotropic as above; gate $10^{-2}$, criterion $2\cdot10^{-3}$. The parallelogram elements are the distortion. hex27 at $n_z = 3$, graded toward the edges in both directions ($(1 - \cos(\pi i/n))/2$; uniform levels are pre-asymptotic near the clamped edges and failed the back-check), levels 6 (back-check), 12, 24, 48; $n_z$ 3–5 at 12, 3–4 at 24. `ssh8` $192\times192\times1$, uniform. Modes are matched within their mirror class (reflection across the long diagonal): modes 5 and 6 (and 8 and 9) swap order between levels 12 and 24.
+
+- $p$ 3.67–3.75 (3.06–3.47 one level back), back-check $\ge 1.43$ (5 of 6); in-plane $\le 1.7\cdot10^{-4}$, thickness $\le 9.3\cdot10^{-4}$ (observed $p_z$ 2.55–2.91), reference error $1.09\cdot10^{-3}$ (margin 1.84).
+- `ssh8` worst $7.42\cdot10^{-3}$ (modes 5–6), margin 1.35 (1.18 with the reference); $128\times128$ gives 1.26.
+- The 150° plan-view corners (clamped-clamped exponent 1.083) would cut the uniform in-plane rate to about 2.2; the cosine grading restores hex27's 4.
+- Finest hex27: 190k free DOF, 145 s, 15.1 GB.
+
+### No locking
+
+SS square ([plates](#simply-supported-plates-srinivasrao) BCs), isotropic, one `ssh8` layer, $6\times6$ at $L/t = 10$ and 1000, 16 modes, the lowest 6 bending ones by z-reflection parity ($u_z$ even, $u_x$, $u_y$ odd; every mode is cleanly even or odd); reference $48\times48\times1$ at the same $L/t$. Error $e = \max_6|\lambda/\lambda_{48} - 1|$: 0.640 at $L/t = 10$, 0.838 at 1000. With $\delta$ the Richardson estimate in $\lambda$ on 12/24/48 plus the larger floor of the $6\times6$ and $48\times48$ runs ($10^{-3}$ at 1000), the gate $\frac{e_{1000} + (1 + e_{1000})\delta_{1000}}{e_{10} - (1 + e_{10})\delta_{10}} \le 1.5$ holds at 1.37, and $\delta \le 0.1e$ at both. hex8 on the same meshes gives 168 (locking), the negative control.

@@ -8,11 +8,11 @@ import itertools
 import numpy as np
 import pytest
 from exact import SIMPLY_SUPPORTED, SLIDING, lamb_sphere, mac, plate_modes, sliding_block, visscher
-from helpers import ORTHO, R
+from helpers import ORTHO, PLATES, H, R
 from scipy.sparse.linalg import eigsh
 
 from jaxmodal.eigen import reference_modes
-from jaxmodal.materials import Material, isotropic, orthotropic, rotate
+from jaxmodal.materials import Material, isotropic, rotate
 from jaxmodal.mesh import box_mesh, voxel_mesh
 from jaxmodal.operators import assemble, dof_mask, restrict
 
@@ -105,13 +105,6 @@ def test_rates(t, mass, mat):
             assert np.all(runs[b][0] <= runs[a][0] + 10 * EPS * runs[b][1])
 
 
-PAG = np.asarray(orthotropic(25.0, 1.0, 1.0, 0.25, 0.25, 0.25, 0.5, 0.5, 0.2))
-RZ = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])  # 90 deg about z
-H = 0.1  # plates [0, 1]^2 x [0, H]
-PLATES = {
-    "ortho": [(np.asarray(ORTHO), 0.7, H)],
-    "pag": [(PAG, 1.0, H / 3), (np.asarray(rotate(PAG, RZ)), 1.0, H / 3), (PAG, 1.0, H / 3)],
-}
 TARGET_NZ = {"ortho": 4, "pag": 3}  # elements per ply on the 16 x 16 target mesh
 ORDER = {  # labels (m, n, family) of the lowest 10, grouped into degenerate sets
     "ortho": [{(1, 1, 0)}, {(1, 2, 0)}, {(2, 1, 0)}, {(1, 0, 0), (0, 1, 0)}, {(2, 2, 0)},

@@ -26,6 +26,9 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.ruff.lint.per-file-ignores]
+"benchmarks/shell_accuracy.py" = ["E402"]  # enable_x64 before the imports
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

@@ -30,6 +30,15 @@ meshes", and the `docs/verification.md` entries ("reference levels, elements per
   synthetic record; a rounded digest with a sensitivity test; filter and builder unit tests; the
   hex8 no-locking negative control; the `pag` $L/t = 100$ recompute dropped; corrected part times;
   the remaining doc locations and logged departures.
+- rev 5 (implementation findings): the skew guard failed on modes 5–6 between levels 12 and 24
+  (ratio 7.4), and their mirror parity (long-diagonal reflection) shows they swap there, as do
+  8–9; skew runs record the parity and modes are matched within their class (hex27 10 modes,
+  `ssh8` 8). Class-matched skew: $p$ 3.67–3.75, back-check $\ge 1.43$, reference error
+  $1.09\cdot10^{-3}$ (margin 1.84), `ssh8` unchanged. The first-pair guard skips both members of a
+  pair that may have crossed (cylinder S/A: modes 4–5, 4 of 6 checked; skew 5 of 6). The digest
+  hashes the integer data and compares float moments to $10^{-12}$ (rounding floats flips at
+  rounding boundaries). The antisymmetric half cylinder needs 48 modes to pass $1.1\lambda_T$
+  (40 below it on hex27). `enable_x64` runs at the benchmark's import (constants were fp32).
 
 ## Sizing study (shipped `ssh8`, 2026-10-18)
 

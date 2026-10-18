@@ -235,7 +235,7 @@ For SPD $K_f$ (clamped, sliding), pass 1 is as accurate as a pass near $-\lambda
 
 The rule is validated against dense `eigh` up to $\kappa = \lambda_\max/\lambda_7 \approx 8\cdot10^9$, and certifies on the free hex27 plate $8\times8\times1$ with spacing $(1, 1, 0.005)$ ($L/t = 1600$, $\kappa = 3\cdot10^{13}$) for `n_modes` 7, 10, 12, 17, 21 and 25; there the floor $f_\lambda = 10\,\varepsilon\,\kappa \approx 0.07$ for the lowest elastic mode, and the measured error against dense `eigh` is $0.09 f_\lambda$ (lowest 12; the same under PR 8a's $-0.01$ and the current $-0.3$). (Without the thin-structure case of pass 2, pass 1 at $|\sigma_0| \approx 10^5\lambda_k$ fails the residual check there, at 700–7800ε.)
 
-**Explicit `sigma`** skips the rule (one pass), e.g. $-0.3\lambda_k$ from a coarser run, for solid shells ($\kappa \approx 10^{12}$ at large $L/t$, e.g. PR 16c's `eigsh` references) if the rule ever fails there. A $\sigma$ far below $\lambda_k$ raises the residuals (45–90ε on the $L/t = 200$ plates at $-10^{-2}\bar s$) and can trip the residual check, loudly.
+**Explicit `sigma`** skips the rule (one pass), e.g. $-0.3\lambda_k$ from a coarser run, for solid shells ($\kappa \approx 10^{12}$ at large $L/t$) if the rule ever fails there; the default rule certified every PR 16c reference and `ssh8` run (up to $L/t = 1000$). A $\sigma$ far below $\lambda_k$ raises the residuals (45–90ε on the $L/t = 200$ plates at $-10^{-2}\bar s$) and can trip the residual check, loudly.
 
 ### Certification
 
@@ -297,7 +297,7 @@ The tests (`tests/test_reference.py`) assert $2 f_\lambda$, $10^{-12}$ and $100\
 | hex27 plate $40\times40\times1$, $L/t = 200$, free | ND | 59.0k | 7.7 s | 1.9 s | 1.26 GB |
 | the same plate | MMD | 59.0k | 5.7 s | 1.4 s | 0.90 GB |
 
-The factorizations dominate; the check is about 20–45% of the time. The largest supported size is about 100k free DOF on bulky meshes with `points` (2 minutes, 7 GB), and about 35k without. Plate-like meshes factor much faster and go further; on the plate MMD is as good as ND.
+The factorizations dominate; the check is about 20–45% of the time. The largest supported size is about 100k free DOF on bulky meshes with `points` (2 minutes, 7 GB), and about 35k without. Plate-like meshes factor much faster and go further; on the plate MMD is as good as ND. Measured on the thin hex27 references of PR 16c ([verification](verification.md#solid-shell-accuracy-pr-16c), `points`, times including $\hat\lambda_\max$): 385k free DOF at $n_z = 3$ (the cylinder, 25.7 GB, 6 min), 190k at $n_z = 3$ (the skew plate, 16.6 GB, 2.5 min), 276k at $n_z = 2$ (14.2–15.4 GB, 2.5 min); memory grows with the DOF and $n_z$.
 
 ## LOBPCG
 
@@ -780,7 +780,7 @@ Both converged with σ unmoved and τ_eff = τ. About 1 s per MINRES iteration a
 ## Sizes
 
 - **Reference size** means $\le$ `MAX_DENSE` = 20k free DOF: dense `eigh`, $M^{-1}$ and `count_below` are affordable (PR 9's dense $r_M$ and inertia comparisons, PR 14's exact count and the dense estimator of PR 14a's tests).
-- **The PR 8 `eigsh`** means `reference_modes` alone: about 100k free DOF on bulky meshes with `points`, about 35k without, further on plates (used by PRs 11, 13, 16, 18).
+- **The PR 8 `eigsh`** means `reference_modes` alone: about 100k free DOF on bulky meshes with `points`, about 35k without, further on plates (thin hex27 to 385k at $n_z = 3$, 25.7 GB, PR 16c) (used by PRs 11, 13, 16, 18).
 
 ## Dense inertia count (`count_below`)
 
@@ -790,7 +790,7 @@ Both converged with σ unmoved and τ_eff = τ. About 1 s per MINRES iteration a
 - **Counting.** $D$ has $1\times1$ and $2\times2$ blocks (`ipiv < 0` marks the rows of $2\times2$ blocks). Bunch–Kaufman chooses a $2\times2$ pivot only when $|a_{kk}|\,\sigma_r < \alpha\lambda^2$ and $|a_{rr}| < \alpha\sigma_r$, $\alpha = (1 + \sqrt{17})/8$, on the entries that form the block. So $|a_{kk}a_{rr}| < \alpha^2\lambda^2 < \lambda^2$ and $\det < 0$: each $2\times2$ block has exactly one negative eigenvalue. The count is the number of negative $1\times1$ pivots plus half the number of $2\times2$ rows.
 - **Errors.** An exactly zero pivot ($\sigma$ is an eigenvalue to working precision) raises `ValueError`, as does $n_\text{free} >$ `MAX_DENSE` = 20 000 (3.2 GB, 16 s; 1.9 s at 8k). Counts are exact for $\sigma$ in gaps of relative width $\ge 10^{-3}$; a $\sigma$ inside a near-degenerate pair or the rigid cluster gives an ambiguous count.
 
-**Why two inertia counts.** `count_below` is dense and pivoted (Bunch–Kaufman is backward stable), so it is exact for well-separated $\sigma$: the roadmap's exact count at reference sizes (PRs 9, 14). The check inside `reference_modes` is sparse and unpivoted; it reuses the solver's factorization and runs to about 100k DOF, and a failure is loud.
+**Why two inertia counts.** `count_below` is dense and pivoted (Bunch–Kaufman is backward stable), so it is exact for well-separated $\sigma$: the roadmap's exact count at reference sizes (PRs 9, 14). The check inside `reference_modes` is sparse and unpivoted; it reuses the solver's factorization and runs to about 100k DOF on bulky meshes (385k on the thin PR 16c references), and a failure is loud.
 
 ## Validation
 
