@@ -105,7 +105,7 @@ Save with `Mesh.MshFileVersion = 4.1` and `Mesh.Binary = 0`. Other versions rais
 ### VTU `.vtu`
 
 - **Read:** `material` / `orientation` cell data (integer, or float with integral values, below $2^{31}$ in magnitude) become the labels, defaulting to 0. VTU carries no sets.
-- **Write:** points, blocks and the two label arrays (int64). Sets and voxel metadata are not written. `ssh8` is written as a VTK hexahedron, so it reads back as hex8; on an all-`ssh8` mesh `solid_shell(mesh, direction=...)` restores it up to `order`, while on a mixed mesh the former `ssh8` elements must be selected again (e.g. by label). The VTU type field is deferred.
+- **Write:** points, blocks and the two label arrays (int64), binary zlib, through `write_vtu(path, mesh, point_data, cell_data)`, which `post.write_modes` shares (`docs/postprocessing.md`). Sets and voxel metadata are not written. `ssh8` is written as a VTK hexahedron, so it reads back as hex8; on an all-`ssh8` mesh `solid_shell(mesh, direction=...)` restores it up to `order`, while on a mixed mesh the former `ssh8` elements must be selected again (e.g. by label). The VTU type field is deferred. Consecutive hexahedron blocks (hex8 and `ssh8` with no hex20/hex27 between) merge into one block on read, and the re-read element order follows the merged block (`ssh8` elements become part of the hex8 block); `read` handles both.
 
 ## Voxel meshes
 

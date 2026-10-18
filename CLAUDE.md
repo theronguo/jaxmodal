@@ -27,13 +27,13 @@ Format: `<type>: <title>`, then a blank line and a short summary. Types: `feat`,
 
 ## Before pushing a PR
 
-1. Run the full test suite, `pytest -m "not gpu"` with slow tests included; it must pass. GPU-only acceptance criteria go into the "Deferred GPU checks" list in `docs/ROADMAP.md`.
-2. Run several review rounds, each with 3–5 subagents reviewing the code (correctness, simplicity, tests and reference comparisons, docs, performance). Address the feedback, then start another round. Repeat until there are no substantive findings.
+1. Run the full test suite with `scripts/test.sh` (`pytest -m "not gpu"` in parallel stages, slow tests included); it must pass. Mark new tests that assert wall time `serial` and ones that assert a process memory peak `peak`. GPU-only acceptance criteria go into the "Deferred GPU checks" list in `docs/ROADMAP.md`.
+2. Run review rounds, each with 5 fresh subagents reviewing the code (correctness, simplicity, tests and reference comparisons, docs, performance); wait for all 5. Address the feedback after each round. Stop when one round has all 5 satisfied, or when two rounds in a row find only small bugs or minor issues; otherwise run another round.
 3. Make sure the docs (`README.md`, `docs/`, `docs/ROADMAP.md`) reflect the change.
 4. Make sure memory is up to date.
 
 ## Planning
 
 - Before implementing any PR, write a plan for it (e.g. `docs/plans/pr-NN-<slug>.md`, committed on the PR branch) and review it as below; implement only once all reviewers are satisfied.
-- When making a plan, run review rounds of 5 subagents each to check it. Revise after each round; run another round only when reviewers ask for design or other major changes (minor fixes are folded in, then implementation starts).
+- When making a plan, run review rounds of 5 fresh subagents each to check it. Revise after each round. Stop when one round has all 5 satisfied, or when two rounds in a row ask only for minor changes; otherwise run another round.
 - Stop the review loop and ask the user when the remaining issues need the user's input (decisions or information only they have) instead of iterating further.

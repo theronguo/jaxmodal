@@ -30,19 +30,26 @@ def read(path):
 
 def write(path, mesh):
     """Write a VTU file with `material`/`orientation` cell data. Sets are not written."""
+    write_vtu(path, mesh)
+
+
+def write_vtu(path, mesh, point_data=None, cell_data=None):
+    """Binary zlib VTU of mesh with point_data {name: (n_nodes, ...)} and cell_data {name:
+    element-order (n_el, ...)} (split per block) plus `material`/`orientation`. ssh8 is written
+    as hexahedron (read back as hex8)."""
     if Path(path).suffix.lower() != ".vtu":
         raise ValueError("only .vtu can be written")
-    names = {v: k for k, v in MESHIO.items()} | {"ssh8": "hexahedron"}  # read back as hex8
+    names = {v: k for k, v in MESHIO.items()} | {"ssh8": "hexahedron"}
     off = mesh.offsets
-    rows = {t: slice(off[t], off[t] + len(c)) for t, c in mesh.blocks.items()}
+    rows = [slice(off[t], off[t] + len(c)) for t, c in mesh.blocks.items()]
+    cells = {"material": mesh.material, "orientation": mesh.orientation, **(cell_data or {})}
     m = meshio.Mesh(
         mesh.points,
         [(names[t], c) for t, c in mesh.blocks.items()],
-        cell_data={
-            k: [getattr(mesh, k)[rows[t]] for t in mesh.blocks] for k in ("material", "orientation")
-        },
+        point_data=point_data or {},
+        cell_data={k: [np.asarray(v)[r] for r in rows] for k, v in cells.items()},
     )
-    meshio.vtu.write(path, m)
+    meshio.vtu.write(path, m, compression="zlib")
 
 
 def _int_labels(a, what):

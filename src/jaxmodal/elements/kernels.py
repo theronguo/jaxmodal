@@ -98,6 +98,16 @@ def _strain(G, u):
     return jnp.einsum("vij,...qij->...qv", jnp.asarray(S, H.dtype), H)
 
 
+def hex_recover(name, X, C, u):
+    """Recovery at the quadrature points: points N X (..., nq, 3), weights w det J (..., nq),
+    global Voigt strain B u and stress C B u (..., nq, 6), engineering shear (RECOVER contract)."""
+    _hex_only(name)
+    invJ, wdet = jacobian(name, X)
+    eps = _strain(gradients(name, invJ), u)
+    N = jnp.asarray(ELEMENTS[name].N, wdet.dtype)
+    return jnp.einsum("qa,...ai->...qi", N, X), wdet, eps, jnp.einsum("...vw,...qw->...qv", C, eps)
+
+
 def stiffness_form(name, X, C, u, w):
     """u^T Ke w (...) without forming Ke."""
     _hex_only(name)

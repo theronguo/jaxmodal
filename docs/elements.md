@@ -65,6 +65,7 @@ lumped_mass(name, X, rho) -> diagonal of the lumped Me (..., 3n)
 kernels.lumped_nodal(name, wdet) -> lumped nodal masses per unit density (..., n)  # PR 5 reuses it
 stiffness_form(name, X, C, u, w) -> u^T Ke w (...)   # u, w: (..., 3n)
 mass_form(name, X, rho, u, w) -> u^T Me w (...)
+kernels.hex_recover(name, X, C, u) -> (points (..., nq, 3), wdet (..., nq), eps, sigma (..., nq, 6))  # RECOVER, PR 17
 ```
 
 At each quadrature point $q$ with weight $w_q$:
@@ -190,7 +191,7 @@ points, weights, eps, sigma = shell_recover(X, table_e, u)  # (8L, 3), (8L,), (8
 ```
 
 - **One element per call.** Unlike the batched `kernels.*`, the shell kernels take one element `X (8, 3)` and `table_e = (plies, R_o)`, with `plies` a `Ply` whose leaves have a leading ply axis `(L,)` and `R_o (3, 3)`; callers `vmap`. They are pure `jax.numpy`: `jit`, `vmap` and `grad` (in $X$, $C$, angle, fraction, $\rho$) work through them.
-- **Registry.** The `ssh8` entry copies hex8's (nodes, faces, 2×2×2 rule) with `lumping=None`; it serves node counts (`default_chunk`, `_chunk_temps`), `check_elements`, `jacobian` and the sampling width only. `stiffness`, `mass`, `lumped_mass`, `stiffness_form` and `mass_form` raise for `ssh8` (the forms arrive in PR 21).
+- **Registry.** The `ssh8` entry copies hex8's (nodes, faces, 2×2×2 rule) with `lumping=None`; it serves node counts (`default_chunk`, `_chunk_temps`), `check_elements`, `jacobian` and the sampling width only. `stiffness`, `mass`, `lumped_mass`, `stiffness_form`, `mass_form` and `hex_recover` raise for `ssh8` (the forms arrive in PR 21).
 
 **Formulation.** With $g_j = \partial X/\partial\xi_j$, $J = [g_1\ g_2\ g_3]$ ($J_{ij} = \partial x_i/\partial\xi_j$) and $J_0$ at the centre:
 
@@ -209,11 +210,11 @@ points, weights, eps, sigma = shell_recover(X, table_e, u)  # (8L, 3), (8L,), (8
 
 **Zero modes:** 6 rigid modes, 7th eigenvalue $\ge 10^{-3}\lambda_\max$ at $h/t \le 2$, regular and distorted (measured $1.2\cdot10^{-2}$). At $h/t = 100$ (reported) it is $4\cdot10^{-9}$ (regular) and $7\cdot10^{-10}$ (distorted): bending stiffness scales with $(t/h)^2$, so the 7th eigenvalue of a thin element is small without being spurious.
 
-**Recovery and `RECOVER`.** `RECOVER = {"ssh8": shell_recover}` (`elements/__init__.py`) is the per-type recovery registry PR 17 extends. Contract: `RECOVER[t](X, table_e, u) -> (points (nq, 3), weights (nq,), eps (nq, 6), sigma (nq, 6))`, with `table_e` the per-element slice of the kernel input, weights $w\det J$, and `eps`, `sigma` global Cartesian in Voigt order with engineering shear, from the ANS strains plus the EAS strains with the condensed $\alpha$. For `ssh8`, $nq = 8L$ ($L$ padded); padded plies give weight-0 points, so sums need no mask, and $u^\top K_e u = \sum_q w_q\,\varepsilon_q\cdot\sigma_q$.
+**Recovery and `RECOVER`.** `RECOVER` (`elements/__init__.py`) is the per-type recovery registry: `partial(kernels.hex_recover, t)` for hex8/hex20/hex27 ($\varepsilon = Bu$, $\sigma = C\varepsilon$, quadrature points $NX$; PR 17) and `shell_recover` for `ssh8`. Contract: `RECOVER[t](X, table_e, u) -> (points (nq, 3), weights (nq,), eps (nq, 6), sigma (nq, 6))`, with `table_e` the type's kernel input for one element (the rotated $C$ (6, 6) of its phase from `phase_table` for hex, the `(plies, R_o)` slice of `ply_table` for `ssh8`), weights $\omega_q = w_q\det J_q$, and `eps`, `sigma` global Cartesian in Voigt order with engineering shear, for `ssh8` from the ANS strains plus the EAS strains with the condensed $\alpha$. For every type $u^\top K_e u = \sum_q \omega_q\,\varepsilon_q\cdot\sigma_q$. `jaxmodal.post.recover` and `element_stress` run it over a mesh (`docs/postprocessing.md`). For `ssh8`, $nq = 8L$ ($L$ padded); padded plies give weight-0 points, so sums need no mask.
 
 ## Not covered
 
 - Wedges and tets: later, one registry entry each.
 - Solid-shell (PR 16): the matrix-free operator is stored mode only (otf is refused permanently, `docs/operators.md`); solid-shell AMG arrives in PR 18 (`solve_modes` uses Jacobi), the forms in PR 21.
-- Stress recovery: `ssh8` has `RECOVER`; PR 17 adds the hex entries and the postprocessor.
+- Nodal stress smoothing (`docs/open_items.md`).
 - The element-wise $M_e$ Cholesky for probes: PR 14.

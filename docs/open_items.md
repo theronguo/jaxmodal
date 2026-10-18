@@ -196,7 +196,7 @@ Without user input (16a):
 - **Type and producer:** type `ssh8`, last in `TYPES`; the registry entry copies hex8's with `lumping=None`; `solid_shell` returns `order` and appends on a second call; `box_mesh(type="ssh8")` is refused; hand-built blocks are the user's responsibility, with `check_elements` checking $\det J$ over $\zeta \in [-1, 1]$ at the 2×2 in-plane points; the VTU type field is deferred (`ssh8` reads back as hex8).
 - **Thickness rules:** a per-element `direction` array; cosine margin 0.1; the unique smallest chain count (rings counted once, chains stop at unselected elements and boundaries); the sweep sign by a tolerant `argmax`; proper permutations only; no edge-length check; `direction` required (documented, not enforced) for off-axis, non-orthotropic or unsymmetric laminates.
 - **Laminates and frame:** `Laminate`/`Ply` in `materials`, angles in radians; 2 points per ply, fixed; the reference-$\zeta$ ply mapping; a placeholder `phase_table` entry for a `Laminate` phase; the frame from $R_o$ axis 1 with the axis-2 fallback below a projection of 0.1; hex8 and `ssh8` parts with one label on a tilted plate are oriented differently (documented).
-- **Code structure:** dispatch by name with `kernels.*` raising for `ssh8` (permanent); one-element shell kernels; `ply_table` exported; `RECOVER` in `elements/__init__.py` with the `(X, table_e, u)` contract (`registry.py` stays NumPy-only); the forms deferred to PR 21. PR 17's plan must cover `ssh8` recovery.
+- **Code structure:** dispatch by name with `kernels.*` raising for `ssh8` (permanent); one-element shell kernels; `ply_table` exported; `RECOVER` in `elements/__init__.py` with the `(X, table_e, u)` contract (`registry.py` stays NumPy-only); the forms deferred to PR 21. `ssh8` recovery is covered by PR 17 (`post.recover`, `element_stress`).
 - **Element tests:** zero modes gated at $h/t \le 2$ with the 7th $\ge 10^{-3}\lambda_\max$ (stricter than the roadmap's $10^{-8}$), $h/t = 100$ reported; MacNeal–Harder with tip loads split equally over the 4 tip nodes, `direction=(0, 0, 1)` and the distortions in the shell plane; the twist couple as nodal forces about the end-face centre (reported only). Patch (i) uses 0.08 elements (the size of the MacNeal–Harder patch): at element size $1/3$ ($h/t = 33$) $\mathrm{cond}(K_{II}) = 2\cdot10^6$ amplifies a round-off residual to $10^{-10}$, the gate.
 - **Measured limits (documented, not fixed):** MacNeal–Harder in-plane shear on the parallelogram 0.620 and on the trapezoid 0.047 (trapezoidal in-plane locking); membrane states on curved patches $10^{-2}$–0.34.
 
@@ -224,6 +224,19 @@ Without user input (16c, plan `docs/plans/pr-16c-accuracy.md`; the frame's decis
 - **Tests:** the half-cylinder antisymmetric check below $0.9\lambda_T$ plus exactly one torsion mode within 1% (hex27) / 6% (`ssh8`) of $\lambda_T$; oracle tolerance $10^{-5}$ at $L/t = 100$ (z-Ritz round-off).
 - **Benchmark:** three parts (`srao`, `cyl`, `skew`, each under 1 h) instead of the frame's two; `enable_x64` at import (material constants built in fp32 would differ at $10^{-8}$).
 - **`COUNT_STEP` refit:** re-deferred to PR 18 (16b Reader entry).
+
+### PR 17 decisions without user input (plan `docs/plans/pr-17-postprocess.md`)
+
+- **VTU only:** meshio's XDMF writer imports h5py even with XML data and its reader fails on mixed hex20/hex27 grids; XML XDMF was also 13× the zlib VTU size. XDMF/HDF5 or PVTU pieces, and the h5py extra, are PR 19 (parallel output).
+- **Frequencies** are not stored in the VTU (meshio's VTU writer emits no field data); `format_table` is written as a sidecar text file.
+- **Clusters:** `rtol=1e-4` (the solver's own rule at the default tol), `atol=0`, rigid modes as exact zeros; the recipe passes `max(1e-4, cluster_rtol(info))`, valid for converged solves.
+- **Masked $r$:** influence fields are zero on constrained DOFs, so totals are $r_f^\top M_{ff}r_f$, not the base-excitation load for consistent mass; the default origin is the node centroid (as `rigid_modes`), not the centre of mass.
+- **Sign rule:** the lowest-index DOF within $10^{-6}$ of $\max|v|$ is made positive.
+- **Hex element averages** (code review): `element_stress` averages the hex gradients before applying them to $u$ (8× faster at 1M DOF, equal to the mean of `hex_recover` to round-off) instead of reducing `RECOVER` point values as the plan said; `ssh8` keeps the point reduction (per-ply $C$).
+- **Host pull:** device `V` is pulled to the host once and batches are put back (the plan said the fp64 cast happens on the device); the host GEMM needs it there anyway.
+- **VTK tensor order:** `write_modes` passes data unchanged; the docs' recipe reorders to XX, YY, ZZ, XY, YZ, XZ and halves strain shear.
+- **Deferred:** nodal stress smoothing; time-series and animation files; `jax.grad` through the postprocessor (the `RECOVER` kernels stay pure JAX for a later stress constraint); `s_K` scaling of recovered stresses (SIMP stress, PR 21/23); multi-host or sharded `V` (PR 19: the batched reductions become `psum`s, the chunk loops per shard). PR 18: pipeline `assembled._chunked` (dispatch chunk i+1 before pulling chunk i; 8% on CPU in `element_stress`, more on GPU, also used by `assemble`).
+- **CPU batch lifetime** (code review round 3): on CPU, `device_put` of a NumPy batch keeps it alive until Python's garbage collector runs (up to two extra batches, bounded); a copying `jnp.array` frees it at once but compiles an extra copy kernel, so the alias is kept.
 
 ### MINRES plateaus below $\|b\|$ (PR 15c)
 
