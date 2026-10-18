@@ -138,7 +138,7 @@ One element through the thickness stalls at 3.4% (ORTHO, $n = 12$): the thicknes
 
 ## Mode matching
 
-- **MAC** (`mac(A, B, M)` in `tests/exact.py`, M-weighted, FE consistent $M$): $\text{MAC}_{ij} = (a_i^\top M b_j)^2/((a_i^\top M a_i)(b_j^\top M b_j))$. PR 17's library version is checked against it.
+- **MAC** (`mac(A, B, M)` in `tests/exact.py`, M-weighted, FE consistent $M$): $\text{MAC}_{ij} = (a_i^\top M b_j)^2/((a_i^\top M a_i)(b_j^\top M b_j))$. `post.mac` (PR 17) is checked against it to $10^{-13}$; the oracle stays independent.
 - **Sets.** The analytic modes are split where the relative gap exceeds $10^{-2}$; an isolated mode is a set of size 1. The gap after the last compared mode must be $\ge 10^{-2}$, so the cutoff does not split a set. The sets and their labels are asserted.
 - **Rule.** Each FE degenerate pair is first rotated by 45°: any basis of the eigenspace is valid, and this forces mixing whatever eigsh returns. Then for every set $S$, $\sum_{j\in S}\text{MAC}_{ij} \ge 0.9999$ for $i \in S$, so FE mode $i$ carries the label of its set.
 - **Measured** (hex20 target meshes): isolated modes 0.999998–1.000000; a pair as returned by eigsh, e.g. 0.9997/0.0003, sums to 1.000000. Flipping the sign of the analytic $U$ gives 0.991–0.994 on PAG.
@@ -290,3 +290,13 @@ Rhombus of side 1, skew angle 30° (corner angle 60°), thickness 1/20 ($L/t = 2
 ### No locking
 
 SS square ([plates](#simply-supported-plates-srinivasrao) BCs), isotropic, one `ssh8` layer, $6\times6$ at $L/t = 10$ and 1000, 16 modes, the lowest 6 bending ones by z-reflection parity ($u_z$ even, $u_x$, $u_y$ odd; every mode is cleanly even or odd); reference $48\times48\times1$ at the same $L/t$. Error $e = \max_6|\lambda/\lambda_{48} - 1|$: 0.640 at $L/t = 10$, 0.838 at 1000. With $\delta$ the Richardson estimate in $\lambda$ on 12/24/48 plus the larger floor of the $6\times6$ and $48\times48$ runs ($10^{-3}$ at 1000), the gate $\frac{e_{1000} + (1 + e_{1000})\delta_{1000}}{e_{10} - (1 + e_{10})\delta_{10}} \le 1.5$ holds at 1.37, and $\delta \le 0.1e$ at both. hex8 on the same meshes (60 modes, enough for 6 bending ones) gives 168 (locking), the negative control.
+
+## Postprocessing (PR 17)
+
+`tests/test_post.py` checks `jaxmodal.post` against dense `scipy.linalg.eigh` on the assembled $K_{ff}, M_{ff}$ (all modes, 100–400 DOF):
+
+- **Sum rule:** over all free modes, $\sum_i m^\text{eff}_{ik} = r_f^\top M_{ff}r_f$ to $10^{-10}$ in all 6 directions (clamped and sliding base; consistent, lumped and nodal masses; matrix and matrix-free M); $\Gamma$ and $m^\text{eff}$ of randomly scaled modes equal a test-written formula to $10^{-12}$. On a free box the totals equal $\rho V$ and the box inertias to $10^{-12}$ and every elastic $m^\text{eff}$ is $\le 10^{-20}$ of the total.
+- **Recipe after `solve_modes`** (hex20 $2\times2\times2$, sliding base, 12 modes at tol $10^{-10}$): the cluster partition equals the dense one (modes 6–7 are $2.1\cdot10^{-4}$ apart), per-cluster $m^\text{eff}$ agree to $10^{-8}$ of the total, and complete elastic clusters carry $\ge 0.5$ of the total in z, Rx and Ry.
+- **Cluster invariance:** on a C4-symmetric prism, a random rotation inside each degenerate cluster leaves the cluster sums unchanged to $10^{-12}$ of the total while per-mode values change by up to 0.64.
+- **Recovery:** under $u = Ax + b$ every quadrature point gives $\varepsilon$ = Voigt(sym $A$) ($10^{-12}$) and $\sigma = C\varepsilon$ ($10^{-10}$) on distorted hex8/hex20/hex27 meshes with two materials and orientations; the `ssh8` patches i–iv recover the analytic stress to $10^{-10}$ (the PR 16 roadmap test); laminates equal `tests/shell_ref.recover` to $10^{-12}$; $\sum_q w_q\,\varepsilon_q\cdot\sigma_q = u^\top Ku$ to $10^{-10}$.
+- **Export:** VTU round trips are exact (points, cells, cell data, mode components).

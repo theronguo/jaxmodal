@@ -27,16 +27,44 @@ _SHELL = {
 }
 
 
-def _chunked(kernel, X, conn, p, chunk):
-    """kernel(X[conn], p) in chunks of min(chunk, n_el); the last chunk is padded. p is an array
-    or a pytree of per-element arrays."""
-    n, out = len(conn), []
+def _chunked(kernel, X, conn, p, chunk, *args):
+    """kernel(X[conn], p, *args) in chunks of min(chunk, n_el); the last chunk is padded. p is
+    an array or a pytree of per-element arrays, args are passed whole; the result (an array or
+    a pytree) is written into host arrays allocated after the first chunk."""
+    n, out = len(conn), None
     c = min(chunk, n)
     for s in range(0, n, c):
         e = np.arange(s, s + c)
         e = np.where(e < n, e, s)  # pad by repeating the chunk's first element
-        out.append(np.asarray(kernel(X[conn[e]], jax.tree.map(lambda a, e=e: a[e], p)))[: n - s])
-    return np.concatenate(out)
+        r = kernel(X[conn[e]], jax.tree.map(lambda a, e=e: a[e], p), *args)
+        if out is None:
+            out = jax.tree.map(lambda a: np.empty((n, *a.shape[1:]), a.dtype), r)
+        for o, a in zip(jax.tree.leaves(out), jax.tree.leaves(r), strict=True):
+            o[s : s + c] = np.asarray(a)[: n - s]
+    return out
+
+
+def _tables(mesh, materials, orientations, mass):
+    """Checks, then (element -> phase index, rotated C (P, 6, 6), rho (P,), ssh8 plies or None)
+    as NumPy."""
+    index, pairs = phases(mesh)
+    check_materials(pairs, materials, orientations)
+    check_laminates(mesh, index, pairs, materials)
+    check_elements(mesh, mass)
+    C, rho = (np.asarray(a) for a in phase_table(pairs, materials, orientations))
+    plies = None
+    if "ssh8" in mesh.blocks:
+        plies = jax.tree.map(np.asarray, ply_table(pairs, materials, orientations))
+    return index, C, rho, plies
+
+
+def _blocks(mesh, index, table, plies):
+    """(type, conn, element slice, per-element kernel table) per block: table[phase] for hex,
+    the (plies, R_o) slices for ssh8."""
+    for t, conn in mesh.blocks.items():
+        e = slice(mesh.offsets[t], mesh.offsets[t] + len(conn))
+        p = jax.tree.map(lambda a, e=e: a[index[e]], plies) if t == "ssh8" else table[index[e]]
+        yield t, conn, e, p
 
 
 def assemble(
@@ -57,10 +85,7 @@ def assemble(
     if chunk < 1:
         raise ValueError(f"chunk must be >= 1, got {chunk}")
     check_x64("assemble")
-    index, pairs = phases(mesh)
-    check_materials(pairs, materials, orientations)
-    check_laminates(mesh, index, pairs, materials)
-    check_elements(mesh, mass)
+    index, C, rho, plies = _tables(mesh, materials, orientations, mass)
     n_nodes = len(mesh.points)
     n_dof = 3 * n_nodes
     if nodal_mass is not None:
@@ -69,21 +94,13 @@ def assemble(
         x = None if x is None else np.asarray(x, float)
         if x is not None and (x.shape != (mesh.n_el,) or not (np.isfinite(x) & (x >= 0)).all()):
             raise ValueError(f"{name} must be None or a finite, non-negative ({mesh.n_el},) array")
-    C, rho = (np.asarray(a) for a in phase_table(pairs, materials, orientations))
-    if "ssh8" in mesh.blocks:
-        plies = jax.tree.map(np.asarray, ply_table(pairs, materials, orientations))
     dofs = element_dofs(mesh)
 
     def values(kernel, table, scale):
         out = []
-        for t, conn in mesh.blocks.items():
-            e = slice(mesh.offsets[t], mesh.offsets[t] + len(conn))
-            if t == "ssh8":
-                p = jax.tree.map(lambda a, e=e: a[index[e]], plies)
-                v = _chunked(_SHELL[kernel], mesh.points, conn, p, chunk)
-            else:
-                k = partial(_KERNELS[kernel], t)
-                v = _chunked(k, mesh.points, conn, table[index[e]], chunk)
+        for t, conn, e, p in _blocks(mesh, index, table, plies):
+            k = _SHELL[kernel] if t == "ssh8" else partial(_KERNELS[kernel], t)
+            v = _chunked(k, mesh.points, conn, p, chunk)
             if scale is not None:
                 v = v * np.asarray(scale, float)[e].reshape(-1, *[1] * (v.ndim - 1))
             out.append(v.ravel())

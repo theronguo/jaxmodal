@@ -159,7 +159,7 @@ Out of scope, logged in `docs/open_items.md`:
 
 ## API (`jaxmodal.post`)
 
-```python
+```text
 normalize(V, M=None, kind="mass", batch=64)          # -> V scaled per column (a copy)
 mac(A, B, M=None, batch=64)                          # -> (nA, nB)
 influence(mesh, free, origin=None)                   # -> r (n_dof, 6)

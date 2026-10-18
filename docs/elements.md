@@ -209,11 +209,11 @@ points, weights, eps, sigma = shell_recover(X, table_e, u)  # (8L, 3), (8L,), (8
 
 **Zero modes:** 6 rigid modes, 7th eigenvalue $\ge 10^{-3}\lambda_\max$ at $h/t \le 2$, regular and distorted (measured $1.2\cdot10^{-2}$). At $h/t = 100$ (reported) it is $4\cdot10^{-9}$ (regular) and $7\cdot10^{-10}$ (distorted): bending stiffness scales with $(t/h)^2$, so the 7th eigenvalue of a thin element is small without being spurious.
 
-**Recovery and `RECOVER`.** `RECOVER = {"ssh8": shell_recover}` (`elements/__init__.py`) is the per-type recovery registry PR 17 extends. Contract: `RECOVER[t](X, table_e, u) -> (points (nq, 3), weights (nq,), eps (nq, 6), sigma (nq, 6))`, with `table_e` the per-element slice of the kernel input, weights $w\det J$, and `eps`, `sigma` global Cartesian in Voigt order with engineering shear, from the ANS strains plus the EAS strains with the condensed $\alpha$. For `ssh8`, $nq = 8L$ ($L$ padded); padded plies give weight-0 points, so sums need no mask, and $u^\top K_e u = \sum_q w_q\,\varepsilon_q\cdot\sigma_q$.
+**Recovery and `RECOVER`.** `RECOVER` (`elements/__init__.py`) is the per-type recovery registry: `partial(kernels.hex_recover, t)` for hex8/hex20/hex27 ($\varepsilon = Bu$, $\sigma = C\varepsilon$, quadrature points $NX$; PR 17) and `shell_recover` for `ssh8`. Contract: `RECOVER[t](X, table_e, u) -> (points (nq, 3), weights (nq,), eps (nq, 6), sigma (nq, 6))`, with `table_e` the type's kernel input for one element (the rotated $C$ (6, 6) of its phase from `phase_table` for hex, the `(plies, R_o)` slice of `ply_table` for `ssh8`), weights $w\det J$, and `eps`, `sigma` global Cartesian in Voigt order with engineering shear, for `ssh8` from the ANS strains plus the EAS strains with the condensed $\alpha$. For every type $u^\top K_e u = \sum_q w_q\,\varepsilon_q\cdot\sigma_q$. `jaxmodal.post.recover` and `element_stress` run it over a mesh (`docs/postprocessing.md`). For `ssh8`, $nq = 8L$ ($L$ padded); padded plies give weight-0 points, so sums need no mask.
 
 ## Not covered
 
 - Wedges and tets: later, one registry entry each.
 - Solid-shell (PR 16): the matrix-free operator is stored mode only (otf is refused permanently, `docs/operators.md`); solid-shell AMG arrives in PR 18 (`solve_modes` uses Jacobi), the forms in PR 21.
-- Stress recovery: `ssh8` has `RECOVER`; PR 17 adds the hex entries and the postprocessor.
+- Nodal stress smoothing (`docs/open_items.md`).
 - The element-wise $M_e$ Cholesky for probes: PR 14.

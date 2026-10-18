@@ -225,6 +225,16 @@ Without user input (16c, plan `docs/plans/pr-16c-accuracy.md`; the frame's decis
 - **Benchmark:** three parts (`srao`, `cyl`, `skew`, each under 1 h) instead of the frame's two; `enable_x64` at import (material constants built in fp32 would differ at $10^{-8}$).
 - **`COUNT_STEP` refit:** re-deferred to PR 18 (16b Reader entry).
 
+### PR 17 decisions without user input (plan `docs/plans/pr-17-postprocess.md`)
+
+- **VTU only:** meshio's XDMF writer imports h5py even with XML data and its reader fails on mixed hex20/hex27 grids; XML XDMF was also 13× the zlib VTU size. XDMF/HDF5 or PVTU pieces, and the h5py extra, are PR 19 (parallel output).
+- **Frequencies** are not stored in the VTU (meshio's VTU writer emits no field data); `format_table` is written as a sidecar text file.
+- **Clusters:** `rtol=1e-4` (the solver's own rule at the default tol), `atol=0`, rigid modes as exact zeros; the recipe passes `max(1e-4, cluster_rtol(info))`, valid for converged solves.
+- **Masked $r$:** influence fields are zero on constrained DOFs, so totals are $r_f^\top M_{ff}r_f$, not the base-excitation load for consistent mass; the default origin is the node centroid (as `rigid_modes`), not the centre of mass.
+- **Sign rule:** the lowest-index DOF within $10^{-6}$ of $\max|v|$ is made positive.
+- **VTK tensor order:** `write_modes` passes data unchanged; the docs' recipe reorders to XX, YY, ZZ, XY, YZ, XZ and halves strain shear.
+- **Deferred:** nodal stress smoothing; time-series and animation files; `jax.grad` through the postprocessor (the `RECOVER` kernels stay pure JAX for a later stress constraint); `s_K` scaling of recovered stresses (SIMP stress, PR 21/23); multi-host or sharded `V` (PR 19: the batched reductions become `psum`s, the chunk loops per shard).
+
 ### MINRES plateaus below $\|b\|$ (PR 15c)
 
 PR 15c's stagnation rule skips plateaus only while the best explicit residual is $\ge \|b\|$. A plateau below $\|b\|$ in the 2-norm (another norm ratio, a better preconditioner) would still stop the slice as "inner solves failed", and the band with it. Not measured so far. A later fallback: continue a stagnated column once from its best iterate. While a column plateaus above $\|b\|$, `minres` returns its best *checked* iterate, which can be worse than $x = 0$ ($1.22\,\|b\|$ in the test case); a capped column counts as bad for si_slice's σ-move and τ_eff rules either way. Revisit if a band stops with "inner solves failed".

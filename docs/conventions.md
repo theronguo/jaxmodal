@@ -5,7 +5,7 @@ Fixed in PR 0 (roadmap Principle 7). Later PRs follow these without restating th
 ## Data and numerics
 
 - **Node ordering:** VTK internally. Other formats are converted at import (`mesh/io`; only meshio's Gmsh permutation is needed today).
-- **Voigt order:** $[11, 22, 33, 23, 13, 12]$ with engineering shear strains, $\gamma_{ij} = 2\varepsilon_{ij}$.
+- **Voigt order:** $[11, 22, 33, 23, 13, 12]$ with engineering shear strains, $\gamma_{ij} = 2\varepsilon_{ij}$. VTK/ParaView reads 6-component arrays as symmetric tensors in the order XX, YY, ZZ, XY, YZ, XZ with tensor shear: export `a[..., [0, 1, 2, 5, 3, 4]]`, with strain shear halved first (`docs/postprocessing.md`).
 - **Precision:** fp64 by default, but only through an explicit call:
 
   ```python
