@@ -958,6 +958,7 @@ def test_voxel_normalizes_scalars():
 # --- 8. Size --------------------------------------------------------------------------------
 
 
+@pytest.mark.serial
 def test_voxel_size():
     t = time.perf_counter()
     m = voxel_mesh((88, 88, 88))

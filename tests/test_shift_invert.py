@@ -631,6 +631,7 @@ def lam_voxel(s, k):
     return np.sort(spla.eigsh(K[f][:, f].tocsc(), k, M[f][:, f].tocsc(), sigma=0)[0])
 
 
+@pytest.mark.peak
 @pytest.mark.slow
 @pytest.mark.skipif(sys.platform != "darwin", reason="peak_bytes needs macOS")
 @pytest.mark.parametrize("case", ["minres", "basis"])
@@ -672,6 +673,7 @@ _form_v(jnp.ones((1000, cap)), 0, Y, 24)  # warm-up
 """
 
 
+@pytest.mark.peak
 @pytest.mark.slow
 @pytest.mark.skipif(sys.platform != "darwin", reason="peak_bytes needs macOS")
 def test_form_v_peak():

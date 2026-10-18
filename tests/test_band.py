@@ -356,6 +356,7 @@ def test_not_converged(spy, chunk):
     assert info["count"] == {"ran": False, "reason": "solve not converged"}
 
 
+@pytest.mark.serial
 @pytest.mark.slow
 def test_calibration(monkeypatch):
     """Test 7b: 50 steps on hex20 12^3: the calibrated count time within [0.5, 2] x the
@@ -541,6 +542,7 @@ solve_modes(mesh, mats, {"xmin": "xyz"}, **kw)
 """
 
 
+@pytest.mark.peak
 @pytest.mark.slow
 @pytest.mark.skipif(sys.platform != "darwin", reason="peak_bytes needs macOS")
 def test_peak():

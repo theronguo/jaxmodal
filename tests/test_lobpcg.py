@@ -742,6 +742,7 @@ lobpcg(op, free, 40, guards=8, maxit=3, low_memory=LOW)
 """
 
 
+@pytest.mark.peak
 @pytest.mark.slow
 @pytest.mark.skipif(sys.platform != "darwin", reason="peak_bytes needs macOS")
 @pytest.mark.parametrize("low", [False, True], ids=["9-block", "low"])
@@ -789,6 +790,7 @@ assert info["converged"] and len(lam) == 100
 """
 
 
+@pytest.mark.peak
 @pytest.mark.slow
 @pytest.mark.skipif(sys.platform != "darwin", reason="peak_bytes needs macOS")
 @pytest.mark.parametrize("dtype", ["float64", "float32"])

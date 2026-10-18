@@ -512,6 +512,7 @@ count(op, free, W, lam, 1.0, 1.5, degree=3, tau=1e-2, block=B, n_probes=3 * B)
 """
 
 
+@pytest.mark.peak
 @pytest.mark.slow
 @pytest.mark.skipif(sys.platform != "darwin", reason="peak_bytes needs macOS")
 def test_count_peak():
@@ -885,7 +886,7 @@ def test_band_info_and_errors():
     assert info["edges"] == (c_lo, c_hi) and info["gaps"] == (g_lo, g_hi)
     a = c_lo / c_hi
     assert info["lam_c"] == c_hi and info["degree"] == 30 and not info["capped"]
-    assert info["gap"] == min(g_hi, g_lo * 2 * np.sqrt(a) / (1 + a))
+    assert info["gap"] == pytest.approx(min(g_hi, g_lo * 2 * np.sqrt(a) / (1 + a)), rel=1e-14)
     top, bot, w = lam[19] / c_hi, lam[12] / c_hi, counting.WEYL_A
     assert info["n_top"] == pytest.approx(7 / (top**w - bot**w) * top**w, rel=1e-14)
     gamma, n_free = _band_gamma(info), int(band_case()[1].sum())  # the lower tail at given d

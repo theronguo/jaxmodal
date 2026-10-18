@@ -502,6 +502,7 @@ def test_singular_narrow(monkeypatch):
         solve_modes(vox, MAT, {"xmin": "xyz"}, 2)
 
 
+@pytest.mark.serial
 @pytest.mark.slow
 @pytest.mark.skipif(sys.platform != "darwin", reason="Mac acceptance")
 def test_mac_acceptance():

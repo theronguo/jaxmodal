@@ -289,10 +289,16 @@ See [`docs/eigensolvers.md`](docs/eigensolvers.md) for `solve_modes`, its option
 ## Development
 
 ```sh
-scripts/check.sh                        # lint + fast tests (< 5 min)
-uv run --locked pytest -m "not gpu"     # merge gate, slow tests included
+scripts/check.sh                        # lint + fast tests, 8 parallel workers (about 5 min)
+scripts/test.sh                         # merge gate: pytest -m "not gpu", slow tests included
 uv run --locked python benchmarks/harness.py   # machine peaks -> benchmarks/results/system.json
 ```
+
+Both scripts run the tests in parallel with pytest-xdist (`JOBS` workers, default 8; each worker
+gets an equal share of the cores for BLAS). Tests marked `peak` (process memory peaks against the
+estimators) run 3 at a time in `test.sh`, and tests marked `serial` (wall-time budgets, which
+contention would stretch) run alone. The large tests already use every core, so the full suite
+takes about 50 min instead of 75.
 
 Conventions (node ordering, Voigt order, precision, indices, tolerances, benchmark harness rules) are in [`docs/conventions.md`](docs/conventions.md).
 

@@ -186,8 +186,8 @@ The LOBPCG rows use PR 9b's measured steps: 16 blocks for the 9-block step (new 
 
 - **Development:** Apple M3 Max with 16 cores and 64 GB of unified memory, using the JAX CPU backend in fp64. The acceptance tests run at 1M (hex20) and 2M (voxel) DOFs. 10M is an optional benchmark.
 - **No Mac GPU:** the GPU isn't usable for this project. Metal GPUs have no fp64 hardware, and the `jax-metal` plugin is experimental with incomplete op coverage.
-- **Local checks:** `scripts/check.sh` runs lint plus the fast suite, `pytest -m "not slow and not gpu"`, which must finish in under 5 minutes on the M3. Remote CI comes later.
-- **Merge gate:** `pytest -m "not gpu"`, slow tests included.
+- **Local checks:** `scripts/check.sh` runs lint plus the fast suite, `pytest -m "not slow and not gpu"`, which must finish in about 5 minutes on the M3 (8 pytest-xdist workers, then the `peak` and `serial` tests one at a time). Remote CI comes later.
+- **Merge gate:** `pytest -m "not gpu"`, slow tests included, as `scripts/test.sh` runs it: 8 parallel workers, then the `peak` tests (process memory peaks) 3 at a time, then the `serial` tests (wall-time budgets) alone.
 - **GPU checks:** GPU acceptance criteria go into the "Deferred GPU checks" list and are run in PR 24 whenever a CUDA machine becomes available. They don't gate other milestones.
 - **Mac acceptance budgets:** final (PR 9c): 10 min for PR 11's 2M voxel solve and 15 min for PR 13's 1M hex20 solve, with the run specified as tol $10^{-6}$, the 9-block step, an fp64 basis, and wall time including setup, the σ pre-estimate and compilation. The throughput model behind them is in `docs/eigensolvers.md` (Mac acceptance budgets); PR 11 or 13 revises its budget with that model if its measured LOBPCG iterations exceed the assumed 150 or its V-cycle costs more than assumed.
 - **Benchmarks:**

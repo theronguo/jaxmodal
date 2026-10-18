@@ -411,6 +411,7 @@ print(best)
 """
 
 
+@pytest.mark.serial
 @pytest.mark.slow
 @pytest.mark.parametrize("mode, path", [(mo, pa) for mo in MODES for pa in PATHS])
 def test_compile_time(mode, path):
@@ -455,6 +456,7 @@ op.apply_M(v).block_until_ready()
 """
 
 
+@pytest.mark.peak
 @pytest.mark.slow
 @pytest.mark.skipif(sys.platform != "darwin", reason="peak_bytes needs macOS")
 @pytest.mark.parametrize("path", PATHS)
