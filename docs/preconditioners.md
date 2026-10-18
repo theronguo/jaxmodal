@@ -11,6 +11,8 @@ PR 10 adds the single-level kernels that the multigrid PRs (11–13), the eigenv
 | `jaxmodal.precond` (`precond/gmg.py`) | `gmg`, `GMG` (voxel geometric multigrid; the shared V-cycle) |
 | `jaxmodal.precond` (`precond/pmg.py`) | `pmg` (unstructured p-multigrid, returns a `GMG`) |
 | `jaxmodal.precond` (`precond/amg.py`) | `amg` (p-level plus smoothed-aggregation AMG, returns a `GMG`), `ELLTransfer` |
+| `precond/shell.py` (PR 18a, internal) | the solid-shell AMG setup: fibers, column and ring patches, group graphs, curvature candidates, `_shell_levels` |
+| `jaxmodal.precond.schwarz` (`precond/schwarz.py`, PR 18a) | `Schwarz` (additive Schwarz over packed patch inverses), `build`, `layout`, `nbytes` |
 | `jaxmodal.operators` (`operators/constraints.py`) | `ap_operator`, the matrix-free $A_P$ |
 | operators (`matfree.py`, `voxel.py`) | the sixth interface method `block_diag_K()`; `matfree.element_matrices` (PR 12) |
 
@@ -50,7 +52,7 @@ Both approximate $A_P$ of $K + \sigma M$ with $\sigma \ge 0$, are pytree callabl
   $$B_n = K_{nn} + \sigma\,\mathrm{diag}(M)_n I_3,$$
   constrained rows and columns replaced by the identity. On the free entries $B_n$ is the 3×3 diagonal block of $A_P$. The blocks are inverted by a batched Cholesky (a non-SPD block gives NaN, which then shows up as NaN in the solver's `residuals`). Storage: 9 values per node.
 - A concrete $\sigma < 0$ or NaN raises `ValueError` in both (a traced σ is not checked). For the indefinite $K - \sigma_b M$, build the preconditioner at $+\sigma_b$.
-- **Solid shells:** `jacobi` is the `solve_modes` default on `ssh8` meshes until PR 18 (iterations grow about like $(L/t)^2$: 57, 232, 1644 at $L/t$ = 10, 20, 50, `docs/eigensolvers.md`); `amg` and `pmg` raise "… does not support ssh8 blocks; solid-shell AMG arrives in PR 18".
+- **Solid shells:** `jacobi` is the `solve_modes` default on `ssh8` meshes until PR 18b (iterations grow about like $(L/t)^2$: 57, 232, 1644 at $L/t$ = 10, 20, 50, `docs/eigensolvers.md`; 1289 PCG iterations on the $32^2$ plate at $L/t = 50$). `amg` works on them since PR 18a ([below](#amg-on-solid-shells-pr-18a)); `pmg` raises.
 - **Internal entry for level blocks:** `precond.jacobi._inverse_blocks(B, free)` masks and inverts any `(n, b, b)` SPD blocks with an `(n·b,)` mask and returns `(inv, mask)`; PRs 11 and 13 feed it their coarse-level 3×3 and 6×6 blocks.
 
 ## Chebyshev
@@ -205,7 +207,7 @@ Both are far inside the 10-min budget and the ±20% band; the cold runs peak hig
 
 **Limitations** (tracked in [`docs/open_items.md`](open_items.md)).
 - **Anisotropic spacing:** coarsening is by element count, not spacing; $h_z = h/10$ needs 106 iterations. Spacing-aware semi-coarsening needs line smoothers along long stopped axes.
-- **Thin plates and slender beams:** at σ = $\lambda_1$ the iterations grow like $h^{-1}$ (single-layer plates 23 / 37 / 71 / 136 from $16^2$ to $128^2$). Coarse trilinear hex8 cells on a one- or two-element-thick layer get ever flatter and lock in bending, so the coarse correction misses the smooth bending error. Larger σ hides it (the same plates at the overestimated `sigma_estimate` took ≤ 60). AMG on the hex8 level (PR 13a) does not fix this (it makes the unstructured flat-element case worse, see `amg`); the remedy is the solid-shell element (M4 / PR 18).
+- **Thin plates and slender beams:** at σ = $\lambda_1$ the iterations grow like $h^{-1}$ (single-layer plates 23 / 37 / 71 / 136 from $16^2$ to $128^2$). Coarse trilinear hex8 cells on a one- or two-element-thick layer get ever flatter and lock in bending, so the coarse correction misses the smooth bending error. Larger σ hides it (the same plates at the overestimated `sigma_estimate` took ≤ 60). AMG on the hex8 level (PR 13a) does not fix this (it makes the unstructured flat-element case worse, see `amg`); the remedy is the solid-shell element (M4) with its own AMG ([PR 18a](#amg-on-solid-shells-pr-18a)).
 - **High contrast at low σ:** at its own $\lambda_1$ a SIMP field's lowest modes are spurious island and void-region modes of $s_K = \rho^3$, $s_M = \rho$ ($\lambda_1$ is $10^{-6}$–$10^{-3}$ of the solid's). Deflation removes the island modes, but soft-region error that trilinear coarse functions cannot separate from the stiff material remains: 87 on the checked-in field, 109–135 on other seeds, 452 on an unfiltered binary field (every case converges). A SciPy prototype with Jacobi-smoothed, phase-aware prolongation plus deflation reached 34 (checked-in field) and 55 (seed 4); such operator-dependent transfers widen the coarse stencils beyond 27 points; PR 13b's study runs `amg` on the checked-in field as an unstructured hex8 mesh. Topology optimization removes the spurious modes with a modified mass interpolation (PRs 21–23), and PR 23 re-runs the contrast test on a real design.
 
 ## Unstructured p-multigrid (`pmg`)
@@ -340,7 +342,7 @@ The cost is a tie here; in a full solve degree 2 is fastest (PR 13c, AMG, hex20 
 | hex27 $16^3$ | 107,811 | 509 iterations, 21.6 s | 15, 3.4 s |
 
 **Limitations** ([`open_items.md`](open_items.md)).
-- **Flat elements:** the hex8 coarse space locks in bending when elements are flat ($a \gg 1$), so the coarse correction misses the smooth bending error. See the table above; the hex27 plate $32^2\times1$ at $a = 10$ needs > 1000 iterations and does not converge. Slenderness alone with $a = 1$ is fine (beam: 16). AMG on the hex8 level makes it worse (below); revisited in PR 18 (solid-shell AMG).
+- **Flat elements:** the hex8 coarse space locks in bending when elements are flat ($a \gg 1$), so the coarse correction misses the smooth bending error. See the table above; the hex27 plate $32^2\times1$ at $a = 10$ needs > 1000 iterations and does not converge. Slenderness alone with $a = 1$ is fine (beam: 16). AMG on the hex8 level makes it worse (below). Thin structures should use `ssh8` elements, whose AMG ([PR 18a](#amg-on-solid-shells-pr-18a)) handles them; `pmg` refuses `ssh8`.
 - **`splu` scaling** (coarse hex8 matrix of an $n^3$ box, COLAMD):
 
   | $n$ | coarse DOF | factor time | $L + U$ | process peak |
@@ -368,6 +370,7 @@ P2 = amg(op.scaled(s_K=rho2**3, s_M=rho2), free, sigma, mesh.points, aggregates=
 
 `amg` is the production preconditioner for `Unstructured` operators (PR 13a; `solve_modes`' default for unstructured meshes since 13b). It returns a `GMG`, the shared V-cycle, with one flat hierarchy:
 - **hex20/hex27 or mixed meshes:** level 0 is `pmg`'s p-level (the matrix-free $A_P$ with Chebyshev over node-block Jacobi, and the `NodalTransfer`). Level 1 is the hex8 Galerkin matrix $A_c = P^\top A_P P$.
+- **Solid-shell meshes** (`ssh8`, or `ssh8` + `hex8`; PR 18a): level 0 is the matrix-free $A_P$ with Chebyshev over additive Schwarz on column patches, then shell SA levels with 9 candidates per aggregate and Schwarz smoothers ([below](#amg-on-solid-shells-pr-18a)).
 - **All-hex8 meshes:** $P = I$, so there is no p-level. Level 0 is the matrix-free $A_P$ with Chebyshev over `block_jacobi`, and its transfer is the first AMG prolongator $P_0$, set up on the assembled $A_P$.
 - **Below that:** the smoothed-aggregation levels, down to `max_coarse` DOF, then a dense fp64 `Cholesky` of the coarsest matrix.
 
@@ -466,6 +469,95 @@ Source: `benchmarks/amg_study.py` → `benchmarks/results/amg_study.json` (jax 0
 
 On the filtered fields at their own $\lambda_1$ AMG is far behind: GMG deflates the stiff islands, while AMG's near-null space is the global rigid modes and θ = 0 aggregates across void and solid. On the binary field the two are level. A strength threshold θ = 0.02 (plan prototype) brings the checked-in field at its own $\lambda_1$ to 49–51, but at the solid's $\lambda_1$ its coarse levels turn dense and coarsening stalls, and it raises AMG storage 34–56% on the 13a cases; 13b keeps θ = 0, which also keeps the reuse equality ([`open_items.md`](open_items.md)).
 
+### AMG on solid shells (PR 18a)
+
+`amg()` takes the solid-shell path when any block of the operator is `ssh8`: `ssh8` alone or with `hex8` (T-junctions, L-folds, stiffeners and hex8 solids glued to shells). A mesh with `ssh8` and `hex20`/`hex27` blocks raises `ValueError` ("solid-shell AMG supports ssh8 and hex8 blocks"; the meshes are nonconforming). Hex-only meshes run the code above unchanged. The signature, `return_aggregates` and `aggregates=` are the same; `solve_modes` and `amg_memory` still refuse AMG on `ssh8` until PR 18b (`jacobi` stays `solve_modes`' choice there). Code: `precond/shell.py` (host setup), `precond/schwarz.py` (the smoother).
+
+**Why the hex8 path fails.** Measured in the 18a prototypes (SS plate $n^2\times1$, PCG to $10^{-6}$ at σ = $\lambda_1$):
+1. *Near-null space:* rigid modes do not represent plate bending on coarse aggregates.
+2. *Smoothers:* once $h/t \gg 1$, point, node-block and fiber-block Jacobi lose the membrane–bending coupling, which lives inside the element. $n = 32$, $L/t$ = 10 / 100 / 300 / 1000: fiber blocks 10 / 17 / 51 / 183, element patches 11 / 13 / 16 / 38.
+3. *Coarse levels:* each coarsening widens aggregates about 3× in-plane at the same thickness, so block Jacobi on the coarse levels fails the same way ($n = 64$, $L/t = 1000$: two-level 22, coarse 9×9 block Jacobi 79, coarse patches 24).
+4. *Bending candidates must be one field per level:* frames fixed on the fine level give piecewise fields on level 1 (80 against 26).
+5. *Bending is fourth order:* with one smoothing step on every level the counts grow with depth (26 / 40 at $n$ = 64 / 128); two steps below level 0 give 21 / 18 at $n$ = 128 / 256.
+6. *Stacks need column patches:* an element patch covers $1/k$ of a $k$-layer stack (3 layers: 10 / 43 / 322 / > 2000; column patches 11 / 15 / 40 / 117).
+
+**Groups.** Level 0 works on the corner space ($A_b = A_P$, since every `ssh8` node is a corner; `_hex8_galerkin` is used directly). Its groups are the through-thickness **fibers**: connected components of the node pairs $(a, a+4)$, $a = 0..3$, over the `ssh8` elements (bottom face 0–3, top 4–7, [`elements.md`](elements.md)). One layer gives node pairs, $k$ layers give $(k+1)$-node fibers, and at a junction the members' fibers merge into one group. Nodes in no `ssh8` element (`hex8` nodes) are singleton groups. On level $\ell \ge 1$ the groups are the level-$\ell$ aggregates, each with 9 coarse DOFs.
+
+**Size guard.** A level-0 patch (below) of more than 384 DOFs raises `ValueError` ("ssh8 patch of N DOFs: check solid_shell's direction, or the stack is too deep"). That allows 31-layer stacks and multi-layer junctions up to 6 layers per member (a T of two 5-layer members has $s = 252$), and catches a consistently wrong thickness axis on larger meshes (`direction=(1, 0, 0)` on a $40^2$ plate chains whole rows: $s = 492$). A wrong axis on smaller meshes is not detected; the counts are then poor.
+
+**Aggregation.** pyamg's `standard_aggregation` on a group graph, without strength of connection:
+- level 0: $G^\top S G$ with $S$ the `Hex8Pattern` structure and $G$ the node → group indicator over the **free** groups only (a group with a free DOF), diagonal removed, int32;
+- level $\ell \ge 1$: the one-ring $\mathrm{Agg}^\top S_{\ell-1}\,\mathrm{Agg}$ of the previous group graph (the smoothed $P$ below widens the matrix pattern to a two-ring, which would cost 7× in patch storage).
+
+Free groups left alone (separate parts, coarse leftovers) become singleton aggregates; fully constrained groups stay out (empty tentative rows). The graphs depend on the mask, not the values.
+
+**Candidates.** Per level, 9 columns of $B^{(\ell)}_\text{fine}$ on the corner DOFs: the masked rigid modes and three constant-curvature Kirchhoff fields of each node's level-$(\ell+1)$ aggregate, in the aggregate's frame $(t_1, t_2, n)$ with local coordinates $(X, Y, Z)$ of $x - \bar x$:
+$$\kappa_{11}: w = \tfrac{X^2}{2},\ u_1 = -ZX; \qquad \kappa_{22}: w = \tfrac{Y^2}{2},\ u_2 = -ZY; \qquad \kappa_{12}: w = XY,\ u_1 = -ZY,\ u_2 = -ZX,$$
+with $w$ along $n$ and $u_\alpha$ along $t_\alpha$.
+- **Sign-free frame:** per node $T_a = \sum v v^\top$ over the thickness edges $v$ of its `ssh8` elements; $n$ is the dominant eigenvector of $\sum_{a \in \text{agg}} T_a$ (batched `eigh`), $t_1 = n\times e/\|n\times e\|$ with $e$ the axis least aligned with $n$, $t_2 = n\times t_1$. The span of the three fields does not depend on the sign of $n$, so flipped element orientations (the sweep on curved shells) do not matter. Aggregates without `ssh8` nodes get zero curvature columns.
+- **Per level:** the fields of level $\ell$ are projected through the tentatives, $B_\ell = (T_0\cdots T_{\ell-1})^\top B^{(\ell)}_\text{fine}$ (exact for the rigid modes, and for the curvatures on flat plates and complete-fiber stacks), then `fit_candidates` gives $T_\ell$ with 9 columns per aggregate.
+- **Identity rows:** columns of $T_\ell$ that `fit_candidates` writes as exact zeros (rank-deficient aggregates: hex groups, constrained or collinear fibers) give zero rows and columns of $A_{\ell+1}$. Their diagonal is set to the mean diagonal of the other rows, so the coarse matrix stays SPD with sizes a multiple of 9; these DOFs are inert in the V-cycle (zero restriction, decoupled, zero next prolongator rows). This replaces the zero-column drop of the hex8 path.
+
+**Prolongators.** $P_\ell = (I - \tfrac{\omega}{\rho} D^{-1}A_\ell)^{d_\ell}\,T_\ell$ with $\omega = 4/3$, $D$ the point diagonal, $\rho$ pyamg's `approximate_spectral_radius` of $D^{-1}A_\ell$ (under the local seed) and $d_0 = 1$, $d_\ell = 2$ below. $A_{\ell+1} = P_\ell^\top A_\ell P_\ell$, symmetrized, as BSR(9). The stop rules (`STALL`, the 4·`max_coarse` cap) are the hex8 path's, counted with identity DOFs.
+
+**Smoothers: additive Schwarz under Chebyshev.** On every level Chebyshev (`degree`, `ratio`) runs over
+$$D^{-1} r = \sum_i R_i^\top A_i^{-1} R_i\, r, \qquad A_i = R_i A R_i^\top,$$
+which is SPD (principal submatrices of an SPD matrix), so the V-cycle stays symmetric and positive definite.
+- **Level 0:** a column patch per `ssh8` element: the DOFs of its 4 fibers ($12(k+1)$ for $k$ layers, 24 on one layer), deduplicated across the elements of a column by their set of groups; a node patch (3 DOFs) per hex-only group.
+- **Level $\ell \ge 1$:** per shell group, its 9 DOFs plus the non-identity DOFs of its one-ring neighbours that are shell groups too ($s \le 81$ on a single layer); per hex group its own 9 DOFs. Identity DOFs are thus only in their own patch (Schwarz eigenvalue exactly 1), and hex regions do not pull 20+ neighbours into ring patches.
+- **Bound:** a coarse patch above $\sqrt{\texttt{chunk\_bytes}/8}$ = 2048 DOFs raises (ring patches have no fiber guard; they can grow at hubs such as radially meshed disk centres).
+- **Build:** the dense $A_i$ are read from the BSR matrix by sorted block keys (`np.searchsorted`, chunked, no CSR copy), inverted on the device by `_inverse_blocks` (Cholesky, padded slots the identity), and stored as packed upper triangles, $s(s+1)/2$ floats per patch. A non-finite inverse raises `ValueError`.
+- **Size classes:** one class per distinct patch size, then the adjacent pair with the least added padding is merged while there are more than 8 classes or the padded bytes stay ≤ 1.1× the natural bytes. Each class is one scan per apply over balanced chunks of at most $\texttt{chunk\_bytes}/(8 s \max(s, 24))$ patches (`schwarz.layout`; `schwarz.nbytes` gives the device bytes, for PR 18b's `amg_memory`). Pad slots gather 0 and their scatter is dropped.
+- **Apply:** a `lax.scan` per class: gather, unpack, `einsum`, scatter-add into the carry. Its temporaries are bounded by `chunk_bytes` (the unpacked chunk) and `chunk_bytes`·$k$/24 (gathers), independent of $n$.
+- **Stacks** cost about $24(k+1)$ packed floats per DOF on level 0 (96 at $k = 3$, 264 at $k = 10$).
+
+**Reuse.** `AMGAggregates.shell` holds the fiber groups and, per level, the group → aggregate map, $T_\ell$ and its identity and shell-group flags. `aggregates=` skips fibers, aggregation, frames and fits; it rebuilds the patch sets and recomputes $A_b$, the smoothed $P$, the Galerkin products, the patch inverses and the export. New materials, `s_K`, `s_M` or σ give a fresh setup's V-cycle (test: $10^{-12}$); another connectivity or `free` raises.
+
+**Measured** (`benchmarks/shell_amg_study.py` → `benchmarks/results/shell_amg_study.json`, jax 0.11.2, fp64, M3 Max CPU). PCG to $10^{-6}$ on 4 fixed-seed masked columns (max over them), steel, σ = the Kirchhoff $\lambda_1$ on flat SS plates ($D\pi^4(2/L^2)^2/(\rho t)$; clamped: coefficient 35.99), else an `eigsh` $\lambda_1$ (128² panels: of the 64² version); `max_coarse` 1000 on the $\ge 64^2$ plates, else 100. The tests gate each count at 1.5×.
+
+| case | DOF | coarse level sizes | iterations | build (s) |
+|---|---|---|---|---|
+| flat SS plate $128^2$, $L/t = 10$ | 99,846 | 16,641 / 2,025 / 225 | 12 | 2.2 |
+| flat SS plate $128^2$, $L/t = 1000$ | 99,846 | 16,641 / 2,025 / 225 | 21 | 2.2 |
+| 90° panel $128^2$, $L/t = 10$ | 99,846 | 16,641 / 2,025 / 225 | 11 | 2.2 |
+| 90° panel $128^2$, $L/t = 1000$ | 99,846 | 16,641 / 2,025 / 225 | 30 | 2.2 |
+| flat $64^2$, $L/t = 100$ | 25,350 | 4,356 / 576 | 14 | 1.1 |
+| flat $128^2$, $L/t = 100$ | 99,846 | 16,641 / 2,025 / 225 | 13 | 2.2 |
+| flat $256^2$, $L/t = 1000$ | 396,294 | 66,564 / 7,623 / 918 | 19 | 5.6 |
+| flat $32^2$, $L/t = 50$ | 6,534 | 1,089 / 144 / 36 | 13 | 1.4 |
+| 3 plies in one element, $32^2$, $L/t = 50$ | 6,534 | 1,089 / 144 / 36 | 12 | 1.4 |
+| 90° panel $32^2$, $L/t = 50$ | 6,534 | 1,089 / 144 / 36 | 14 | 1.4 |
+| free 270° cylinder 24×8 (sweep-built), $R/t = 50$ | 1,350 | 243 / 27 | 46 | 0.8 |
+| T-junction $24^2$, $L/t = 50$ (clamped edges) | 5,700 | 864 / 108 / 9 | 13 | 1.6 |
+| L-fold $24^2$ | 5,700 | 864 / 108 / 18 | 11 | 1.3 |
+| T-junction, 3-layer skin and web | 12,000 | 864 / 108 / 9 | 18 | 1.7 |
+| flat $32^2$, $L/t = 300$ | 6,534 | 1,089 / 144 / 36 | 17 | 1.4 |
+| $32^2$ plate with a hex8 rib, $L/t = 50$ | 7,128 | 1,188 / 153 / 36 | 19 | 1.6 |
+| hex8 $16^3$ block with an `ssh8` skin ($L/t$ = 100), base clamped | 15,606 | 1,944 / 72 | 14 | 1.3 |
+| clamped $32^2$, $L/t = 50$ | 6,534 | 1,089 / 144 / 36 | 12 | 1.3 |
+| bottom edges supported $32^2$ | 6,534 | 1,089 / 144 / 36 | 12 | 1.3 |
+| $32^2$ and $4^2$ plates, separate (`max_coarse` 40) | 6,684 | 1,125 / 153 / 45 / 18 | 14 | 1.6 |
+| free $24^2$ at σ = $\lambda_7$ | 3,750 | 729 / 81 | 14 | 0.9 |
+| 3-layer stack $32^2$, $L/t = 10$ | 13,068 | 1,089 / 144 / 36 | 11 | 1.5 |
+| 3-layer stack, $L/t = 100$ | 13,068 | 1,089 / 144 / 36 | 16 | 1.5 |
+| 3-layer stack, $L/t = 300$ (reported) | 13,068 | 1,089 / 144 / 36 | 40 | 1.5 |
+| 3-layer stack, $L/t = 1000$ (reported) | 13,068 | 1,089 / 144 / 36 | 145 | 1.5 |
+
+- **Roadmap gate:** on the flat $128^2$ plate the count grows 12 → 21 (1.75×) from $L/t$ = 10 to 1000. The counts follow the element flatness $h/t$ rather than $L/t$: at $L/t = 1000$ they fall with refinement, 21 / 19 at $128^2$ / $256^2$ ($h/t$ = 7.8 / 3.9), so the ratio depends on the mesh.
+- **Limitations:** curved panels at $L/t = 1000$ (11 / 30 on $128^2$ from $L/t$ = 10 to 1000, 2.7×; `degree=3` lowers the counts to 8 / 23 but not the ratio), stacks at $L/t \ge 300$ (40 / 145 at 300 / 1000), and deep thin curved shells (the free 270° cylinder of radius 1: 16 / 46 / 135 at $R/t$ = 10 / 50 / 200, 46 / 44 / 32 for 24×8 / 48×16 / 96×32 elements at $R/t = 50$): the flat curvature fields of an aggregate spanning a large arc miss the inextensional modes. Jacobi on the $32^2$ plate at $L/t = 50$ needs 1289 iterations.
+
+**Cost** (same JSON, $m = 15$ columns, B per fine DOF, distinct device arrays; build includes compilation). Flat plate $256^2$ at $L/t = 1000$ (396,294 DOF, stored-Ke operator 480 B per DOF, $t_A$ = 49.9 ms):
+
+| component | B per DOF |
+|---|---|
+| level-0 Schwarz ($s = 24$, packed, with `idx`) | 413 |
+| $P_0$ and $P_0^\top$ ($b = 3$) | 529 |
+| level-1 Schwarz / $A_1$ / $P_1$, $P_1^\top$ | 502 / 148 / 183 |
+| level 2 and the coarsest factor | 151 |
+| **total** (without the operator) | **1934** |
+
+The V-cycle costs 8.9 $t_A$ and the host setup 5.5 s; the preconditioner stores about 4× the operator (about 2 GB at 1M DOF, 20 GB at 10M in fp64). On the hex-dominant $32^3$ block with an `ssh8` skin (111,078 DOF) the shell path stores 1169 B per DOF, its V-cycle costs 5.0 $t_A$ and PCG takes 13 iterations; PR 13's hex8 AMG on the same block without the skin stores 1096 B per DOF, 6.0 $t_A$, 10 iterations.
+
 ### Memory: `amg_memory`
 
 `amg_memory(mesh, m, max_coarse=1000, degree=2)` (PR 13b; `max_coarse` and `degree` PR 13c) returns, in bytes, for a hex8/hex20/hex27 mesh with $n_c$ corner DOF ($3\times$ corner nodes) and $n$ DOF:
@@ -476,7 +568,7 @@ On the filtered fields at their own $\lambda_1$ AMG is far behind: GMG deflates 
 The constants come from box meshes only (hex20 $8^3$–$44^3$, hex27 $6^3$–$24^3$, hex8 $12^3$–$68^3$); the AMG part per corner DOF varies with the hierarchy (hex20: 1463–2317 B, hex8: 874–1150 B), so `AMG_STORAGE` is its maximum. Graded and curved meshes, and $n_c$ below $10^4$, are not calibrated ([`open_items.md`](open_items.md)). `solve_modes_memory(..., precond="amg")` composes `amg_memory` with `lobpcg_memory`; the build peak is not summed into `total` (it enters through $\max$(operator build, preconditioner build, step)), because the first build runs before LOBPCG allocates; it counts in `host_total` next to the host V (PR 15d), because the count-time rebuild with aggregates held runs while V is alive. The mesh scan behind the estimate (`_amg_scan`: family, corner DOF, tables) is cached per mesh (`lru_cache(maxsize=1)`; 2.3 s at 10.2M hex20), so the band searches' many calls cost it once; with the gather path the operator estimate still runs `layout` per call (3.2 s at 10.2M; [`operators.md`](operators.md), PR 18c).
 
 **Limitations** ([`open_items.md`](open_items.md)).
-- **Flat elements:** AMG on the hex8 coarse space makes `pmg`'s flat-element weakness worse (table). The loss comes from the deeper AMG levels, whose six rigid modes per aggregate represent plate bending poorly: on the plate with $a = 1$ (study runs `amg max_coarse=…`), `max_coarse` = 2000 (no AMG level) gives 15, 1000 (one AMG level) 19 and 100 (two) 36. Large meshes always have deep hierarchies, so the `max_coarse` = 100 numbers are the representative ones. Remedy: solid-shell elements (M4 / PR 18).
+- **Flat elements:** AMG on the hex8 coarse space makes `pmg`'s flat-element weakness worse (table). The loss comes from the deeper AMG levels, whose six rigid modes per aggregate represent plate bending poorly: on the plate with $a = 1$ (study runs `amg max_coarse=…`), `max_coarse` = 2000 (no AMG level) gives 15, 1000 (one AMG level) 19 and 100 (two) 36. Large meshes always have deep hierarchies, so the `max_coarse` = 100 numbers are the representative ones. Remedy: solid-shell elements (M4) and their AMG ([below](#amg-on-solid-shells-pr-18a)).
 - **10M scale:** `amg_memory` puts the host build peak at 14.6 GB for 10M hex20 DOF and 46.6 GB for 10M hex8 DOF (extrapolated; all-hex8: the fine level is the assembled $A_P$ itself); the device storage at 7.1 / 12.6 GB. The 10M configurations are deferred GPU checks.
 - **SIMP fields at their own $\lambda_1$:** 790–910 iterations against GMG's 87 (table above); θ = 0 and the reuse equality are kept, the remedy is logged in [`open_items.md`](open_items.md).
 
@@ -518,3 +610,4 @@ The counts grow as $h^{-1}$ (×1.86–1.96 per refinement) for all three, as exp
 - `tests/test_pmg.py` (PR 13b): the production assembler returns sorted int32 BSR whose padded positions point past the pattern, equals PR 12's reference values (hex20 chunked, hex27, mixed with shared nodes; hex8 against the assembled $a_p$) and, with a reused pattern at a new σ, a fresh build to $10^{-15}$.
 - `tests/test_pmg.py`: the transfer reproduces trilinear fields on graded hex20 and hex27 boxes to $10^{-12}$, restriction and the dense prolongation equal an independent element-loop $P$ (also on the mixed hex8 + hex20 mesh, whose hex8 nodes get identity rows), with hand-checked ½ / ¼ / ⅛ rows; `_hex8_galerkin` equals $P^\top a_p(K + \sigma M, free, s) P$ from SciPy to $10^{-12}$ and is exactly symmetric (hex20, hex27, mixed; stored and otf; consistent and lumped; two phases, random `s_K`/`s_M`, nodal masses, a mixed clamped/sliding mask), also with padded chunks (whose `element_matrices` are zero) and on all-hex8 meshes (the assembled $a_p$); the V-cycle at degree 3, ratio 20 equals a NumPy composition with an independently built smoother and $(P^\top A P)^{-1}$ to $10^{-10}$ and is SPD on the free DOFs; symmetry on unmasked vectors, masked outputs, `type(pmg(...)) is GMG`; PCG in ≤ 2 iterations on a pure hex8 box; h-independence (≤ 20% growth from $3^3$ to $12^3$, hex20 and hex27; slow: hex20 $24^3$); ≤ 30 iterations on the beam, free, curved, nodal-mass and `s_K`-checkerboard cases; LOBPCG with p-MG against `reference_modes` in ≤ 40 iterations (hex20, hex27); the input errors; no recompile for a reused build; the factor freed after `jax.clear_caches()`; the study smoke run.
 - `tests/test_amg.py`: every SA level's coarse matrix equals $P^\top A_z P$ from SciPy to $10^{-12}$ and is symmetric, $P$ has no zero column, and the device levels, transfers ($P$, $P^\top$) and coarsest factor equal the SciPy matrices (hex20 $6^3$, clamped plus sliding); two setups are bitwise identical and leave `np.random` unchanged; $B$ spans the corner restriction of `rigid_modes` with exactly zero constrained rows; the first-level $P$ equals pyamg's `smoothed_aggregation_solver` to $10^{-12}$ (hex20, hex8 $12^3$); a random 30%-free mask drops zero columns and keeps every coarse matrix SPD (hex20, hex8); aggregates straddle the Dirichlet boundary and the setup succeeds; the V-cycle at degree 3, ratio 20 equals a NumPy composition with test-built smoothers and the dense coarsest inverse to $10^{-10}$, symmetric, SPD on the free DOFs, masked (hex20 with two AMG levels; hex8 with a sliding mask, whose constrained rows of $P_0$ are exactly 0); the no-AMG-level paths (hex20 equal to `pmg`, hex8 a direct solve); h-independence (≤ 20% growth and ≤ 1.5× the measured count: hex20 $3^3$–$12^3$, slow $24^3$; hex27 $3^3$–$12^3$; hex8 $6^3$–$24^3$); ≤ 1.5× the measured count on the beam, free, curved, nodal-mass and checkerboard cases and, as a regression bound, the single-layer plate (36); LOBPCG with AMG against `reference_modes` in ≤ 40 iterations (hex20, hex8); the input errors, the coarsest cap (monkeypatched singleton aggregation), the non-finite level and coarsest raises, a degenerate `max_coarse`, array leaves, a matrix-free fine level; the study smoke run. PR 13b: aggregate reuse equals a fresh setup to $10^{-12}$ (and ≤ 1.2× its iterations) after a 20% density perturbation and at σ > 0 from σ = 0 aggregates (hex20, hex8), stays within 1.2× the iterations after a 2% node perturbation, calls none of the pattern, tables, strength, aggregation or fit (monkeypatched), and raises for another connectivity or `free`; σ = 0 raises `SingularShiftError` without `nonsingular=True` and with it gives a finite V-cycle under which PCG converges (hex20, hex8), and raises for a zero `s_K` element; a second build leaves no SciPy matrix and no device array beyond the pytree's leaves; `amg_memory`'s storage ≥ the owned device bytes of the built `amg` (hex20, hex27, hex8, sliding, distorted), with its n-scaling part alone ≥ the non-coarse bytes and within 1.3× at hex20 $12^3$ and hex8 $16^3$; a mixed mesh's build term uses the largest per-type constant; the LOBPCG step with AMG within `AMG_STEP` (slow: within 1 block below at hex20 $24^3$ and hex8 $48^3$); slow: the build peaks below `amg_memory`'s `build` and within 1.3×, the benchmark entries' smoke runs.
+- `tests/test_shell_amg.py` (PR 18a): fibers against a union-find (single layer, 3-layer stack, junctions, hex-only nodes) and the size guard (a wrong axis on a $40^2$ plate, 31 layers pass and 32 raise, the 5/5-layer T builds) and the `ssh8` + `hex20`/`hex27` raise; the candidates on flat plates and stacks against the Kirchhoff fields in an independent frame (level 0 and the projected level 2, to $10^{-12}$ in span angle), sign-free on a sweep-built cylinder, zero curvature columns on hex aggregates; the Schwarz apply against the dense sum over independently built patches of the assembled $A_P$ (web, stack, T, clamped, a 5/5-layer T with $s = 252$, a strip whose collinear fibers give identity DOFs; level 1 against SciPy's $A_1$ and NumPy rings), at small `chunk_bytes` (several chunks, pad slots), the class rule (one class per distinct size, the 1.1× rule, the cap of 8), `nbytes`, the coarse bound and the non-finite raise; group graphs, aggregation and coarse patch sets against NumPy; the setup against dense references (P, ρ, $A_{\ell+1}$, identity rows with $(D^{-1}A)e = e$, the V-cycle at degree 3, ratio 20 to $10^{-10}$, symmetric, SPD, masked, array leaves), $1.1\tilde\lambda_\max \ge \lambda_\max$ of the Schwarz-preconditioned levels, the one-level M4 plate as the dense inverse; PCG counts gated at 1.5× the measured ones (tests 6–11: the slow $L/t$ growth on $128^2$ with ratio ≤ 2 and the curved panel, refinement $64^2 \to 128^2$ at $L/t = 100$ and $128^2 \to 256^2$ at 1000 within 1.3×, plies, curved, cylinder, junctions, $L/t = 300$, the hex8-web plate, the hex-dominant block, clamped, bottom-supported, two separate parts with a singleton aggregate, a free plate at $\lambda_7$, σ = 0 with `nonsingular=True`, stacks), Jacobi and the PR 13 hex8 count reported; aggregate reuse equal to a fresh setup to $10^{-12}$ with fibers, aggregation and fits skipped (spies) and the raises; hex meshes never reach the shell code, and `pmg` refuses `ssh8`.

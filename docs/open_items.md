@@ -238,6 +238,23 @@ Without user input (16c, plan `docs/plans/pr-16c-accuracy.md`; the frame's decis
 - **Deferred:** nodal stress smoothing; time-series and animation files; `jax.grad` through the postprocessor (the `RECOVER` kernels stay pure JAX for a later stress constraint); `s_K` scaling of recovered stresses (SIMP stress, PR 21/23); multi-host or sharded `V` (PR 19: the batched reductions become `psum`s, the chunk loops per shard). PR 18c: pipeline `assembled._chunked` (dispatch chunk i+1 before pulling chunk i; 8% on CPU in `element_stress`, more on GPU, also used by `assemble`).
 - **CPU batch lifetime** (code review round 3): on CPU, `device_put` of a NumPy batch keeps it alive until Python's garbage collector runs (up to two extra batches, bounded); a copying `jnp.array` frees it at once but compiles an extra copy kernel, so the alias is kept.
 
+### PR 18a decisions without user input (plan `docs/plans/pr-18a-shell-amg.md`)
+
+- **The split:** PR 18 is split into 18a (solid-shell AMG core), 18b (`solve_modes` and `amg_memory` on shells), 18c (kernels), 18d (band follow-ups), 18e (CalculiX comparison). Until 18b merges, `solve_modes` on `ssh8` stays Jacobi.
+- **`ssh8` + `hex20`/`hex27`: not supported** (the meshes are nonconforming); `amg()` raises. No owner.
+- **Memory:** about 2 kB per DOF of preconditioner in fp64, about 4× the stored-Ke operator (2 GB at 1M, 20 GB at 10M). Accepted: Jacobi needs 1289 iterations on the $32^2$ plate at $L/t = 50$. 18c's fp32 halves the patches. Logged, not built: $P_0 = S\,T$ applied matrix-free, $P_0^\top$ as a scatter over $P_0$'s ELL, 1.25× ELL width classes.
+- **Stack storage** grows like $24(k+1)$ packed floats per DOF on level 0 (2.1 kB per DOF at 10 layers); the guard allows it.
+- **Hex regions** of mixed meshes get 9-DOF block patches on coarse levels, and shell one-rings skip hex neighbours. The hex-dominant $32^3$ block with a skin costs about the PR 13 hex8 hierarchy of the bare block (benchmark JSON) and takes 14 iterations on $16^3$ against PR 13's 10 without the skin.
+- **Identity DOFs** (zero tentative columns) are kept with a mean diagonal instead of dropped, and only in their own Schwarz patch.
+- **GPU scan steps:** the Schwarz apply is a scan over chunks; its per-step overhead is a deferred GPU check with a pass criterion (lever: `chunk_bytes`, a public option in 18c if needed).
+- **Element flatness:** counts follow $h/t$ (21 / 19 at $128^2$ / $256^2$, $L/t = 1000$), so the roadmap ratio is taken on $128^2$ (1.75×).
+- **Curved panel at $L/t = 1000$:** 30 against 11 at $L/t = 10$ (2.7×) on $128^2$, above the roadmap's 2×, which the flat plate meets. Reported and gated. The plan's fallback `degree=3` was measured: 8 / 23 (flat 8 / 19), lower counts but no better ratio, so the default stays degree 2; 18b documents `precond_options={"degree": 3}`.
+- **Stacks and deep shells:** stacks at $L/t \ge 300$ (40 / 145) and the free 270° cylinder at $R/t \ge 50$ (46 at 24×8; 135 at $R/t = 200$) stay above flat single layers: documented limitations. Logged, not built: vertex patches over columns, a line smoother through stacks, fold-aware aggregation, curved (shallow-shell) candidates.
+- **Vertex patches on level 0** (5× the storage for 1.6× fewer iterations) are not used.
+- **Guards:** a level-0 patch above 384 DOFs raises, a coarse patch above $\sqrt{\texttt{chunk\_bytes}/8}$ raises; a wrong thickness axis on small meshes is not detected.
+- **No conftest `LONG` entry:** the refinement test at $256^2$ takes about 25 s, not the planned 3 min.
+- **σ-round reuse** of the shell aggregates is deferred to 18c.
+
 ### MINRES plateaus below $\|b\|$ (PR 15c)
 
 PR 15c's stagnation rule skips plateaus only while the best explicit residual is $\ge \|b\|$. A plateau below $\|b\|$ in the 2-norm (another norm ratio, a better preconditioner) would still stop the slice as "inner solves failed", and the band with it. Not measured so far. A later fallback: continue a stagnated column once from its best iterate. While a column plateaus above $\|b\|$, `minres` returns its best *checked* iterate, which can be worse than $x = 0$ ($1.22\,\|b\|$ in the test case); a capped column counts as bad for si_slice's σ-move and τ_eff rules either way. Revisit if a band stops with "inner solves failed".

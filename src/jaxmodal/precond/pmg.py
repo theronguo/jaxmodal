@@ -212,8 +212,8 @@ def _hex8_galerkin(A, pattern=None):
 
 
 def no_shell(name):
-    """The refusal of AMG-family preconditioners on solid-shell blocks."""
-    return ValueError(f"{name} does not support ssh8 blocks; solid-shell AMG arrives in PR 18")
+    """The refusal of solve_modes' AMG and amg_memory on solid-shell blocks (until PR 18b)."""
+    return ValueError(f"{name} does not support ssh8 blocks; solid-shell AMG arrives in PR 18b")
 
 
 def _check(name, op, sigma, nonsingular=False):
@@ -224,8 +224,6 @@ def _check(name, op, sigma, nonsingular=False):
         raise TypeError(
             f"{name} needs an Unstructured operator, got {type(op).__name__} (voxel stencils: gmg)"
         )
-    if any(b.type == "ssh8" for b in op.blocks):
-        raise no_shell(name)
     _check_sigma(sigma)
     sigma = float(sigma)
     if sigma == 0 and not nonsingular:
@@ -251,5 +249,7 @@ def pmg(op, free, sigma, *, degree=2, ratio=30.0):
     host splu (test-scale only; amg is the production variant). sigma > 0 is concrete and
     required."""
     sigma = _check("pmg", op, sigma)
+    if any(b.type == "ssh8" for b in op.blocks):
+        raise ValueError("pmg does not support ssh8 blocks; use amg")
     (A, S), Ab, pattern = _p_level(op, free, sigma, degree, ratio)
     return GMG(((A, S),), (pattern.T,), HostLU(spla.splu(Ab.tocsc())), A.free, None)

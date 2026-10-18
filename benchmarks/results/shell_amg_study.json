@@ -1,0 +1,479 @@
+{
+  "runs": [
+    {
+      "case": "flat128-10",
+      "n_dof": 99846,
+      "sigma": 9545997.060264576,
+      "max_coarse": 1000,
+      "iterations": 12,
+      "converged": true,
+      "sizes": [
+        99846,
+        16641,
+        2025,
+        225
+      ],
+      "build_s": 2.1930886670015752
+    },
+    {
+      "case": "curved128-10",
+      "n_dof": 99846,
+      "sigma": 14804715.792801172,
+      "max_coarse": 1000,
+      "iterations": 11,
+      "converged": true,
+      "sizes": [
+        99846,
+        16641,
+        2025,
+        225
+      ],
+      "build_s": 2.2096803750027902
+    },
+    {
+      "case": "flat128-1000",
+      "n_dof": 99846,
+      "sigma": 954.5997060264574,
+      "max_coarse": 1000,
+      "iterations": 21,
+      "converged": true,
+      "sizes": [
+        99846,
+        16641,
+        2025,
+        225
+      ],
+      "build_s": 2.2037193750147708
+    },
+    {
+      "case": "curved128-1000",
+      "n_dof": 99846,
+      "sigma": 168668.9511467461,
+      "max_coarse": 1000,
+      "iterations": 30,
+      "converged": true,
+      "sizes": [
+        99846,
+        16641,
+        2025,
+        225
+      ],
+      "build_s": 2.1743634159793146
+    },
+    {
+      "case": "flat64-100",
+      "n_dof": 25350,
+      "sigma": 95459.97060264576,
+      "max_coarse": 1000,
+      "iterations": 14,
+      "converged": true,
+      "sizes": [
+        25350,
+        4356,
+        576
+      ],
+      "build_s": 1.0726156249875203
+    },
+    {
+      "case": "flat128-100",
+      "n_dof": 99846,
+      "sigma": 95459.97060264576,
+      "max_coarse": 1000,
+      "iterations": 13,
+      "converged": true,
+      "sizes": [
+        99846,
+        16641,
+        2025,
+        225
+      ],
+      "build_s": 2.171104084001854
+    },
+    {
+      "case": "flat256-1000",
+      "n_dof": 396294,
+      "sigma": 954.5997060264574,
+      "max_coarse": 1000,
+      "iterations": 19,
+      "converged": true,
+      "sizes": [
+        396294,
+        66564,
+        7623,
+        918
+      ],
+      "build_s": 5.639068208984099
+    },
+    {
+      "case": "flat32-50",
+      "n_dof": 6534,
+      "sigma": 381839.882410583,
+      "max_coarse": 100,
+      "iterations": 13,
+      "converged": true,
+      "sizes": [
+        6534,
+        1089,
+        144,
+        36
+      ],
+      "build_s": 1.3758653329568915
+    },
+    {
+      "case": "plies32-50",
+      "n_dof": 6534,
+      "sigma": 0.044265512160972964,
+      "max_coarse": 100,
+      "iterations": 12,
+      "converged": true,
+      "sizes": [
+        6534,
+        1089,
+        144,
+        36
+      ],
+      "build_s": 1.3949477499700151
+    },
+    {
+      "case": "curved32-50",
+      "n_dof": 6534,
+      "sigma": 3459521.106974652,
+      "max_coarse": 100,
+      "iterations": 14,
+      "converged": true,
+      "sizes": [
+        6534,
+        1089,
+        144,
+        36
+      ],
+      "build_s": 1.3793917499715462
+    },
+    {
+      "case": "cylinder",
+      "n_dof": 1350,
+      "sigma": 537.8115589591215,
+      "max_coarse": 100,
+      "iterations": 46,
+      "converged": true,
+      "sizes": [
+        1350,
+        243,
+        27
+      ],
+      "build_s": 0.837171292048879
+    },
+    {
+      "case": "T1",
+      "n_dof": 5700,
+      "sigma": 845146.0837606651,
+      "max_coarse": 100,
+      "iterations": 13,
+      "converged": true,
+      "sizes": [
+        5700,
+        864,
+        108,
+        9
+      ],
+      "build_s": 1.5509774999809451
+    },
+    {
+      "case": "L1",
+      "n_dof": 5700,
+      "sigma": 1305593.0034956413,
+      "max_coarse": 100,
+      "iterations": 11,
+      "converged": true,
+      "sizes": [
+        5700,
+        864,
+        108,
+        18
+      ],
+      "build_s": 1.3413279590313323
+    },
+    {
+      "case": "T3",
+      "n_dof": 12000,
+      "sigma": 852698.6115691832,
+      "max_coarse": 100,
+      "iterations": 18,
+      "converged": true,
+      "sizes": [
+        12000,
+        864,
+        108,
+        9
+      ],
+      "build_s": 1.7062284590210766
+    },
+    {
+      "case": "flat32-300",
+      "n_dof": 6534,
+      "sigma": 10606.663400293972,
+      "max_coarse": 100,
+      "iterations": 17,
+      "converged": true,
+      "sizes": [
+        6534,
+        1089,
+        144,
+        36
+      ],
+      "build_s": 1.3574394999886863
+    },
+    {
+      "case": "web32",
+      "n_dof": 7128,
+      "sigma": 1722147.0434834918,
+      "max_coarse": 100,
+      "iterations": 19,
+      "converged": true,
+      "sizes": [
+        7128,
+        1188,
+        153,
+        36
+      ],
+      "build_s": 1.5818023330066353
+    },
+    {
+      "case": "block16",
+      "n_dof": 15606,
+      "sigma": 11685289.900472594,
+      "max_coarse": 100,
+      "iterations": 14,
+      "converged": true,
+      "sizes": [
+        15606,
+        1944,
+        72
+      ],
+      "build_s": 1.2853335419786163
+    },
+    {
+      "case": "clamped32",
+      "n_dof": 6534,
+      "sigma": 1269260.2645761885,
+      "max_coarse": 100,
+      "iterations": 12,
+      "converged": true,
+      "sizes": [
+        6534,
+        1089,
+        144,
+        36
+      ],
+      "build_s": 1.3079906250350177
+    },
+    {
+      "case": "bottom32",
+      "n_dof": 6534,
+      "sigma": 785864.3002129204,
+      "max_coarse": 100,
+      "iterations": 12,
+      "converged": true,
+      "sizes": [
+        6534,
+        1089,
+        144,
+        36
+      ],
+      "build_s": 1.2696107919909991
+    },
+    {
+      "case": "parts",
+      "n_dof": 6684,
+      "sigma": 11796.40705183542,
+      "max_coarse": 40,
+      "iterations": 14,
+      "converged": true,
+      "sizes": [
+        6684,
+        1125,
+        153,
+        45,
+        18
+      ],
+      "build_s": 1.6122543329838663
+    },
+    {
+      "case": "free24",
+      "n_dof": 3750,
+      "sigma": 176722.66916906522,
+      "max_coarse": 100,
+      "iterations": 14,
+      "converged": true,
+      "sizes": [
+        3750,
+        729,
+        81
+      ],
+      "build_s": 0.8681213750387542
+    },
+    {
+      "case": "stack32-10",
+      "n_dof": 13068,
+      "sigma": 9545997.060264576,
+      "max_coarse": 100,
+      "iterations": 11,
+      "converged": true,
+      "sizes": [
+        13068,
+        1089,
+        144,
+        36
+      ],
+      "build_s": 1.474115459015593
+    },
+    {
+      "case": "stack32-100",
+      "n_dof": 13068,
+      "sigma": 95459.97060264576,
+      "max_coarse": 100,
+      "iterations": 16,
+      "converged": true,
+      "sizes": [
+        13068,
+        1089,
+        144,
+        36
+      ],
+      "build_s": 1.490065541001968
+    },
+    {
+      "case": "stack32-300",
+      "n_dof": 13068,
+      "sigma": 10606.663400293972,
+      "max_coarse": 100,
+      "iterations": 40,
+      "converged": true,
+      "sizes": [
+        13068,
+        1089,
+        144,
+        36
+      ],
+      "build_s": 1.4751911250059493
+    },
+    {
+      "case": "stack32-1000",
+      "n_dof": 13068,
+      "sigma": 954.5997060264574,
+      "max_coarse": 100,
+      "iterations": 145,
+      "converged": true,
+      "sizes": [
+        13068,
+        1089,
+        144,
+        36
+      ],
+      "build_s": 1.4900276249973103
+    }
+  ],
+  "cost_plate256_Lt1000": {
+    "n_dof": 396294,
+    "m": 15,
+    "its": [
+      19,
+      true
+    ],
+    "t_A_s": 0.04992920800577849,
+    "vcycle_t_A": 8.870076108405867,
+    "setup_s": 5.518514458031859,
+    "operator_B_per_dof": 479.70363417059053,
+    "levels_B_per_dof": [
+      {
+        "n_dof": 396294,
+        "smoother": 412.7941780597233,
+        "A": 8.000040374065719,
+        "transfer": 528.8609971384881
+      },
+      {
+        "n_dof": 66564,
+        "smoother": 502.4259362998178,
+        "A": 148.25615325995346,
+        "transfer": 182.736130246736
+      },
+      {
+        "n_dof": 7623,
+        "smoother": 53.13858902733829,
+        "A": 36.27432158952697,
+        "transfer": 44.59267109772038
+      }
+    ],
+    "coarse_B_per_dof": 17.01209707944102,
+    "total_B_per_dof": 1934.091114172811
+  },
+  "cost_block32_skin": {
+    "n_dof": 111078,
+    "m": 15,
+    "its": [
+      13,
+      true
+    ],
+    "t_A_s": 0.02742679201764986,
+    "vcycle_t_A": 4.965152648960284,
+    "setup_s": 2.1715817500371486,
+    "operator_B_per_dof": 802.9493509065702,
+    "levels_B_per_dof": [
+      {
+        "n_dof": 111078,
+        "smoother": 41.833666432596914,
+        "A": 8.000144042924791,
+        "transfer": 563.3070454995589
+      },
+      {
+        "n_dof": 11979,
+        "smoother": 28.279839392138857,
+        "A": 250.9435171681161,
+        "transfer": 253.0599038513477
+      }
+    ],
+    "coarse_B_per_dof": 23.894992707826933,
+    "total_B_per_dof": 1169.3191090945102
+  },
+  "cost_block32_hex8_pr13": {
+    "n_dof": 107811,
+    "m": 15,
+    "its": [
+      10,
+      true
+    ],
+    "t_A_s": 0.026482374989427626,
+    "vcycle_t_A": 5.986989763127012,
+    "setup_s": 1.7994629580061883,
+    "operator_B_per_dof": 800.1636196677518,
+    "levels_B_per_dof": [
+      {
+        "n_dof": 107811,
+        "smoother": 32.00014840786191,
+        "A": 8.000148407861907,
+        "transfer": 795.728636224504
+      },
+      {
+        "n_dof": 7986,
+        "smoother": 1.1853335930470916,
+        "A": 172.3335837716003,
+        "transfer": 75.36321896652476
+      }
+    ],
+    "coarse_B_per_dof": 10.94181484264129,
+    "total_B_per_dof": 1095.5528842140413
+  },
+  "tol": 1e-06,
+  "system": "benchmarks/results/system.json",
+  "versions": {
+    "jax": "0.11.2",
+    "jaxlib": "0.11.2",
+    "numpy": "2.5.3",
+    "platform": "macOS-27.2-arm64-arm-64bit",
+    "cpu_count": 16,
+    "p_cores": 12,
+    "e_cores": 4,
+    "xla_flags": null,
+    "jax_num_cpu_devices": true
+  }
+}

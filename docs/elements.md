@@ -215,6 +215,6 @@ points, weights, eps, sigma = shell_recover(X, table_e, u)  # (8L, 3), (8L,), (8
 ## Not covered
 
 - Wedges and tets: later, one registry entry each.
-- Solid-shell (PR 16): the matrix-free operator is stored mode only (otf is refused permanently, `docs/operators.md`); solid-shell AMG arrives in PR 18 (`solve_modes` uses Jacobi), the forms in PR 21.
+- Solid-shell (PR 16): the matrix-free operator is stored mode only (otf is refused permanently, `docs/operators.md`); solid-shell AMG is `amg()` since PR 18a (`solve_modes` uses Jacobi until PR 18b), the forms in PR 21.
 - Nodal stress smoothing (`docs/open_items.md`).
 - The element-wise $M_e$ Cholesky for probes: PR 14.
