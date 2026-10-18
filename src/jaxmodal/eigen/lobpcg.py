@@ -21,6 +21,10 @@ TAU = 1e-14  # SVQB drop tolerance, relative to the largest Gram eigenvalue
 TAU_P = 1e-8  # P noise rule: drop a column whose norm falls below TAU_P of its norm before
 PIVOT = 1e-10  # Rayleigh-Ritz pivot test: min diag(L)^2 of the Gram Cholesky
 STALL = 50  # iterations without progress before the stagnation exit
+# iterations without progress before a 9-block chunk switches to the low-memory step (every
+# product explicit: on stiff pencils, e.g. thin shells, the implicit updates drift and leak
+# rigid components; docs/eigensolvers.md)
+SWITCH = 5
 POWER = 30  # power iterations for ||K|| and ||M||
 
 
@@ -111,11 +115,15 @@ def _update(V, Cx, Cp):
 
 def _project(B, count, Y, MY, c):
     """Y - V (V^T MY) with V = B[:, :count], over column chunks of width c (upcast to fp64).
-    Columns past count are zero, so the last chunk may read past it."""
+    Columns past count are zero, so the last chunk may read past it. c need not divide the
+    capacity (the solve's c and, after a switch, the low step's c = m both reach here): the
+    last chunk then starts at cap - c and masks the columns before i c."""
 
     def body(i, Y):
-        Bc = jax.lax.dynamic_slice_in_dim(B, i * c, c, 1).astype(Y.dtype)
-        return Y - Bc @ (Bc.T @ MY)
+        s = jnp.minimum(i * c, B.shape[1] - c)
+        Bc = jax.lax.dynamic_slice_in_dim(B, s, c, 1).astype(Y.dtype)
+        new = (s + jnp.arange(c) >= i * c).astype(Y.dtype)
+        return Y - Bc @ ((Bc.T @ MY) * new[:, None])
 
     return jax.lax.fori_loop(0, (count + c - 1) // c, body, Y)
 
@@ -222,6 +230,12 @@ def lobpcg_step_low(state, op, m, precond, R, MR, B, count, consts, *, c):
     th, Cx, Cp, keep, dropped = _rr_coeffs(GK, GM, k, actW, actP, lam, consts)
     Xn, Pn = _update((X, W, P), Cx, Cp)
     return (Xn, Pn, keep, th), jnp.concatenate([r, t, lam, dropped[None].astype(r.dtype)])
+
+
+@functools.partial(jax.jit, donate_argnums=(0, 1), static_argnames="c")
+def _to_low(X, P, op, m, R, MR, B, count, *, c):
+    """X and P of the low-memory state at a switch, deflated once against R and B[:, :count]."""
+    return _deflate(op, m, R, MR, B, count, X, c), _deflate(op, m, R, MR, B, count, P, c)
 
 
 @functools.partial(jax.jit, donate_argnums=0)
@@ -402,24 +416,31 @@ def _extent(lam, r, t, want, guards, lock, failed=False):
 def _iterate(state, args, consts, want, lock, guards, tol, maxit, low, c, stop):
     """The iteration loop of one chunk: (state, r, t, j, record), with j = want extended over
     a cluster at the block boundary and record the info["chunks"] entry plus history and
-    drops."""
+    drops. A 9-block chunk without progress for SWITCH iterations switches to the low-memory
+    step (sticky; not with stop) and gets a fresh progress window; record["switched"] is the
+    9-block iteration after which it did (1-based), None if never."""
     op, m = args[0], args[1]
     k = state[0].shape[1]
     hist, lsum, drops = [], [], 0
     best, best_l, it_best = np.inf, np.inf, 0
     converged = stagnated = False
     j = want
-    t_warm = 0.0  # step seconds after the compiling first iteration
+    switched = None
+    # step seconds of the solve's own step after the compiling first iteration (it may average
+    # few iterations when a 9-block chunk switches early)
+    t_warm, n_warm = 0.0, 0
     for it in range(maxit):
         ts = time.perf_counter()
         if low:
             state, out = lobpcg_step_low(state, *args, consts, c=c)
+        elif switched:
+            state, out = lobpcg_step_low(state, *args, consts, c=k)
         else:
             recompute = (it + 1) % RECOMPUTE == 0
             state, out = lobpcg_step(state, *args, consts, recompute, c=c)
         out = np.asarray(out)
-        if it:
-            t_warm += time.perf_counter() - ts
+        if it and not switched:
+            t_warm, n_warm = t_warm + time.perf_counter() - ts, n_warm + 1
         if not np.isfinite(out).all():
             raise FloatingPointError(f"non-finite LOBPCG step at iteration {it + 1}")
         r, t, lam = out[:k], out[k : 2 * k], out[2 * k : 3 * k]
@@ -439,24 +460,31 @@ def _iterate(state, args, consts, want, lock, guards, tol, maxit, low, c, stop):
             stagnated = True
             break
         if (r[:j] <= t[:j]).all():
-            state, r2, t2 = _explicit(state, op, m, consts, low)
+            state, r2, t2 = _explicit(state, op, m, consts, low or switched)
             if (r2[:j] <= t2[:j]).all():
                 r, t, converged = r2, t2, True
                 stagnated = bool((r[:j] > tol).any())
                 break
+        if not (low or switched or stop) and it - it_best >= SWITCH:
+            X, P, actP, lam_s = state[0], state[3], state[6], state[7]
+            state = None  # the other 9-block buffers die before the switch
+            state = (*_to_low(X, P, op, m, *args[3:], c=c), actP, lam_s)
+            X = P = None
+            switched, best, best_l, it_best = it + 1, np.inf, np.inf, it
     if not converged:  # report residuals of explicit products on every exit
         # wanted columns near convergence but a failed chunk: a split cluster (guard error)
         if lock and near:
             _extent(lam, r, t, want, guards, lock, failed=True)
-        state, r, t = _explicit(state, op, m, consts, low)
+        state, r, t = _explicit(state, op, m, consts, low or switched)
     rec = dict(want=want, locked=j if converged else 0, iterations=it + 1, converged=converged,
-               stagnated=stagnated, history=hist, drops=drops,
-               t_warm=t_warm / it if it else 0.0)  # fmt: skip
+               stagnated=stagnated, switched=switched, history=hist, drops=drops,
+               t_warm=t_warm / n_warm if n_warm else 0.0)  # fmt: skip
     return state, r, t, j, rec
 
 
 def _explicit(state, op, m, consts, low):
-    """_confirm on the state's X; the 9-block state takes the explicit products."""
+    """_confirm on the state's X; the 9-block state (low False: not low-memory and not
+    switched) takes the explicit products."""
     KX, MX, r, t = _confirm(state[0], state[-1], op, m, consts)
     if not low:
         state = (state[0], KX, MX) + state[3:]

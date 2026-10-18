@@ -27,6 +27,7 @@ from jaxmodal.operators.matfree import _block_data, element_matrices
 from jaxmodal.operators.sampling import element_factor, xi_shapes
 from jaxmodal.precond import amg, pmg
 
+EPS = np.finfo(float).eps
 STEEL = {0: Material(isotropic(210e9, 0.3), 7850.0)}
 PATHS = ("scatter", "gather")
 AMG = "amg does not support ssh8 blocks; solid-shell AMG arrives in PR 18b"
@@ -182,10 +183,13 @@ def test_m4_reference(plate_ref):
     check_lam(lam, lr_all, lmax, tol)
     Vf, Vrf = np.asarray(V)[idx], Vr[idx, :6]
     rm, rm_ref = r_M(Kf, Mf, Ld, lam, Vf), r_M(Kf, Mf, Ld, lr, Vrf)
+    # both residuals bound the angle (the solver's can be the sharper one); the reference's is
+    # at the rounding floor
+    assert (rm_ref <= 10 * EPS * lmax / lr).all()
     for g in ([0], [1, 2], [3], [4, 5]):
-        assert rm_ref[g].max() <= 0.1 * rm[g].max()  # the reference is the sharper one
         gap = np.abs(np.delete(lr_all, g)[:, None] - lr[g][None]).min()
-        assert max_sine(Mf, Ld, Vf[:, g], Vrf[:, g]) <= 10 * (rm[g] * lam[g]).max() / gap
+        bound = 10 * ((rm[g] + rm_ref[g]) * lam[g]).max() / gap
+        assert max_sine(Mf, Ld, Vf[:, g], Vrf[:, g]) <= bound
 
 
 def test_rho_not_read():
