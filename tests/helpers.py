@@ -17,6 +17,13 @@ from jaxmodal.operators import assemble, dof_mask, restrict, unstructured
 ORTHO = orthotropic(10.0, 4.0, 2.0, 0.3, 0.2, 0.25, 1.5, 1.2, 0.8)
 R = np.asarray(from_euler(np.array([0.3, 1.1, -0.7])))
 MATERIALS = {0: Material(isotropic(3.0, 0.3), 2.0), 1: Material(ORTHO, 0.7)}
+PAG = np.asarray(orthotropic(25.0, 1.0, 1.0, 0.25, 0.25, 0.25, 0.5, 0.5, 0.2))
+RZ = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])  # 90 deg about z
+H = 0.1  # plates [0, 1]^2 x [0, H]
+PLATES = {
+    "ortho": [(np.asarray(ORTHO), 0.7, H)],
+    "pag": [(PAG, 1.0, H / 3), (np.asarray(rotate(PAG, RZ)), 1.0, H / 3), (PAG, 1.0, H / 3)],
+}
 PAIRS = [(0, 0), (1, 1), (2, 2), (1, 2), (0, 2), (0, 1)]  # Voigt index -> tensor indices
 
 
