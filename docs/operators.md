@@ -201,7 +201,7 @@ Call it on the mesh that will be used (after `rcm`, if any), with the same keywo
 - `overhead`: 10 MB, the only constant fitted to measured peaks ($t$, $a$, $b$ come from `memory_analysis`; measured on hex20 $30^3$ and hex8 $60^3$; the formulas match `memory_analysis` without factors).
 - `total = overhead + storage + max(build, vectors + workspace)`.
 - Not counted: `layout`'s host transient (≈ 4× the int64 inverse map while it is built, e.g. 0.55 GB at hex20 $55^3$ gather). It is freed before any device leaf exists, so it does not set the peak of `unstructured`, but an estimator that composes this one with live device memory should add it.
-- The estimate costs as much as `layout` (0.3 s at 1M DOF gather, 3.2 s per call at 10.2M: about 35 s of estimates per band call there; caching `layout` is PR 18).
+- The estimate costs as much as `layout` (0.3 s at 1M DOF gather, 3.2 s per call at 10.2M: about 35 s of estimates per band call there; caching `layout` is PR 18c).
 - **Composition:** later estimators (PR 9/11/13/14/15) add PR 5's `storage + workspace` and count `overhead` once; they count their own vectors.
 
 ## Voxel stencil (`stencil`)
@@ -248,7 +248,7 @@ Every per-cell gather passes `fill_value=0`, so inactive and padded cells contri
 
 The rule is within 10% of the best for both $m$ (`slab_rule_ok`, checked by a fast test). Per DOF this is ≈ 4.5× faster than PR 5's stored-Ke `unstructured` at m = 1 and ≈ 1.4× at m = 16.
 
-**Cost per apply** (m = 1, P = 1, for PR 18's roofline): per cell, $2 \cdot 24^2 = 1152$ flops; data moved per slab: the int32 `node`/`cell` slices (≈ 8 B per cell), the gathered $u$ and the scattered output (each ≈ 24 B per node read and written), $s$ (8 B per cell); the rest stays in slab-sized buffers.
+**Cost per apply** (m = 1, P = 1, for PR 18c's roofline): per cell, $2 \cdot 24^2 = 1152$ flops; data moved per slab: the int32 `node`/`cell` slices (≈ 8 B per cell), the gathered $u$ and the scattered output (each ≈ 24 B per node read and written), $s$ (8 B per cell); the rest stays in slab-sized buffers.
 
 ### Memory estimator (`stencil_memory`)
 

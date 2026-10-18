@@ -35,7 +35,7 @@ class Mesh:
 
 ### Renumbering
 
-Grid order is not an invariant, so node and element permutations (PR 5 RCM, PR 18 Morton) are legal if they update every dependent field:
+Grid order is not an invariant, so node and element permutations (PR 5 RCM, PR 18c Morton) are legal if they update every dependent field:
 
 - **Node permutation** $p$ (new → old): `points[p]`; connectivity through $p^{-1}$; `node_sets` mapped through $p^{-1}$ and re-sorted; non-negative `voxel.node_map` entries mapped through $p^{-1}$.
 - **Element permutation** $q$ (new → old) within one block (the global index is fixed by `TYPES` order): block rows, `material` and `orientation` indexed by $q$; `element_sets` mapped through $q^{-1}$ and re-sorted; non-negative `voxel.element_map` entries mapped through $q^{-1}$.
@@ -163,4 +163,5 @@ Converts hex8 elements to solid shells (`ssh8`, `docs/elements.md`) by permuting
 - **`direction=None` (sweep):** a chain runs from an element through the opposite faces of a reference axis, continuing in each face neighbour along that neighbour's axis through the shared face, and stopping at unselected elements and boundary faces; a closed ring counts its length once. Each chain is walked once ($O(n_\text{el})$) and its element count given to every member. The thickness axis is the unique smallest of an element's 3 counts; a tie raises `ValueError("ambiguous thickness direction: pass direction=")` (e.g. the $3^3$ cube, a $6\times1\times1$ strip, $8\times8\times12$). The count is topological: an $8\times10\times12$ box picks $x$ whatever the element shapes.
 - **Sweep sign:** $\zeta$ along the positive global axis most aligned with the element's mean thickness edge, by a tolerant `argmax` (the first axis with $|e_i| \ge \max_j|e_j| - 10^{-8}\|e\|$), so round-off cannot split a flat plate (e.g. normal $(0,1,-1)/\sqrt2$). It is consistent on flat plates and may flip on curved shells.
 - **When the sign matters:** under a $\zeta$ flip the plies are reversed, the angles negated and each ply turned 180° about an in-plane material axis. Pass `direction` for off-axis plies (even $[\pm45]_s$), non-orthotropic plies or unsymmetric stacking; this is documented, not enforced.
+- **A wrong thickness axis** (e.g. `direction` in-plane) is not checked by `solid_shell`. `amg` groups the nodes along the thickness edges into fibers, so a wrong axis chains in-plane rows: a level-0 patch of more than 384 DOFs raises `ValueError` (on a single-layer plate from $32^2$ elements up), smaller meshes converge worse. T-junctions and L-folds are fine, and so are multi-layer junctions up to 6 layers per member ([`preconditioners.md`](preconditioners.md#amg-on-solid-shells-pr-18a)).
 - **Not checked:** edge lengths (a thick element converts if its topology says so). Hand-built `ssh8` blocks are the user's responsibility; `check_elements` checks $\det J$ through the thickness.

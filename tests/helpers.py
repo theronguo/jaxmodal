@@ -203,3 +203,35 @@ def max_sine(Mf, L, Q, Qr):
     M Q)), never sqrt(1 - cos^2), which bottoms out near 1e-8."""
     E = Q - Qr @ (Qr.T @ (Mf @ Q))
     return np.linalg.norm(L.T @ E, 2)
+
+
+def cheb(A, Dinv, lmax, degree, ratio):
+    """Dense Chebyshev smoother matrix, the recurrence of precond.chebyshev."""
+    hi = 1.1 * lmax
+    lo = hi / ratio
+    theta, delta = (hi + lo) / 2, (hi - lo) / 2
+    sig = theta / delta
+    rho = 1 / sig
+    R = np.eye(len(A))
+    d = Dinv @ R / theta
+    x = d
+    for _ in range(degree - 1):
+        R = R - A @ d
+        rho_new = 1 / (2 * sig - rho)
+        d = rho_new * rho * d + 2 * rho_new / delta * (Dinv @ R)
+        x, rho = x + d, rho_new
+    return x
+
+
+def vcycle(levels, Ps, Ci, m, U):
+    """Dense NumPy V-cycle on the masked U: levels [(A, S)], prolongators Ps, coarsest Ci."""
+
+    def go(b, lvl):
+        if lvl == len(levels):
+            return Ci @ b
+        A, S = levels[lvl]
+        x = S @ b
+        x = x + Ps[lvl] @ go(Ps[lvl].T @ (b - A @ x), lvl + 1)
+        return x + S @ (b - A @ x)
+
+    return m[:, None] * go(m[:, None] * U, 0)

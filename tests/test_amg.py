@@ -17,6 +17,7 @@ import scipy.sparse.linalg as spla
 from helpers import (
     MATERIALS,
     STEEL,
+    cheb,
     checkerboard,
     cube,
     dense,
@@ -28,6 +29,7 @@ from helpers import (
     rhs,
     sigma6,
     step_bytes,
+    vcycle,
 )
 from pyamg import smoothed_aggregation_solver
 from pyamg.aggregation import fit_candidates, standard_aggregation
@@ -192,24 +194,6 @@ def test_straddling():
 # ---------------------------------------------------------------- 4: the cycle
 
 
-def cheb(A, Dinv, lmax, degree, ratio):
-    """Dense Chebyshev smoother matrix, the recurrence of precond.chebyshev."""
-    hi = 1.1 * lmax
-    lo = hi / ratio
-    theta, delta = (hi + lo) / 2, (hi - lo) / 2
-    sig = theta / delta
-    rho = 1 / sig
-    R = np.eye(len(A))
-    d = Dinv @ R / theta
-    x = d
-    for _ in range(degree - 1):
-        R = R - A @ d
-        rho_new = 1 / (2 * sig - rho)
-        d = rho_new * rho * d + 2 * rho_new / delta * (Dinv @ R)
-        x, rho = x + d, rho_new
-    return x
-
-
 def block_inv(A, b, m):
     """Dense block Jacobi: inverse b x b diagonal blocks, constrained rows/columns masked."""
     n = len(A) // b
@@ -220,18 +204,6 @@ def block_inv(A, b, m):
         Bk = A[s, s] * np.outer(mi, mi) + np.diag(1 - mi)
         D[s, s] = np.linalg.inv(Bk) * mi[:, None]
     return D
-
-
-def vcycle(levels, Ps, Ci, m, U):
-    def go(b, lvl):
-        if lvl == len(levels):
-            return Ci @ b
-        A, S = levels[lvl]
-        x = S @ b
-        x = x + Ps[lvl] @ go(Ps[lvl].T @ (b - A @ x), lvl + 1)
-        return x + S @ (b - A @ x)
-
-    return m[:, None] * go(m[:, None] * U, 0)
 
 
 @pytest.mark.parametrize("t", ["hex20", "hex8"])

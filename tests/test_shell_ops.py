@@ -20,7 +20,7 @@ from test_shell import _K, _M, C_ANI, C_ORT, I3, laminate, mixed, three_plies
 from jaxmodal.eigen import reference_modes, solve_modes
 from jaxmodal.materials import Material, isotropic, phases, ply_table
 from jaxmodal.memory import BUILD_BYTES, amg_memory, solve_modes_memory, unstructured_memory
-from jaxmodal.mesh import box_mesh, read, solid_shell
+from jaxmodal.mesh import Mesh, box_mesh, read, solid_shell
 from jaxmodal.operators import assemble, dof_mask, restrict, unstructured
 from jaxmodal.operators import matfree as mf
 from jaxmodal.operators.matfree import _block_data, element_matrices
@@ -29,7 +29,7 @@ from jaxmodal.precond import amg, pmg
 
 STEEL = {0: Material(isotropic(210e9, 0.3), 7850.0)}
 PATHS = ("scatter", "gather")
-AMG = "amg does not support ssh8 blocks; solid-shell AMG arrives in PR 18"
+AMG = "amg does not support ssh8 blocks; solid-shell AMG arrives in PR 18b"
 
 
 def shells():
@@ -228,10 +228,15 @@ def test_refusals():
     with pytest.raises(ValueError, match=AMG):
         amg_memory(mesh, 4)
     op, free = unstructured(mesh, mats, ori), dof_mask(mesh, bcs)
-    with pytest.raises(ValueError, match=AMG):
-        amg(op, free, 1.0, mesh.points)
-    with pytest.raises(ValueError, match=AMG.replace("amg", "pmg", 1)):
+    with pytest.raises(ValueError, match="pmg does not support ssh8 blocks; use amg"):
         pmg(op, free, 1.0)
+    h, sh = box_mesh((1, 1, 1), type="hex20"), solid_shell(box_mesh((2, 2, 1)))[0]
+    c, n = sh.blocks["ssh8"] + len(h.points), h.n_el + sh.n_el
+    two = Mesh(np.vstack([h.points, sh.points + 2]), {"hex20": h.blocks["hex20"], "ssh8": c},
+               {}, {}, np.zeros(n, np.int64), np.zeros(n, np.int64))  # fmt: skip
+    op = unstructured(two, STEEL)
+    with pytest.raises(ValueError, match="solid-shell AMG supports ssh8 and hex8 blocks"):
+        amg(op, np.ones(op.n_dof, bool), 1.0, two.points)
     with pytest.raises(ValueError, match="consistent-mass only"):
         solve_modes_memory(mesh, bcs, 2, mass="lumped")
     with pytest.raises(ValueError, match="consistent-mass only"):

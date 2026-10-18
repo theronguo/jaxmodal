@@ -1,6 +1,7 @@
 """Smoothed-aggregation AMG below the hex8 level of unstructured meshes: a host setup loop over
 pyamg's primitives (node aggregation, zero-column drop) exported to the device as one flat
-V-cycle with PR 12's p-level on top (none for all-hex8 meshes). See docs/preconditioners.md."""
+V-cycle with PR 12's p-level on top (none for all-hex8 meshes). Meshes with ssh8 blocks take
+the solid-shell path (precond/shell.py, precond/schwarz.py). See docs/preconditioners.md."""
 
 import dataclasses
 import hashlib
@@ -15,10 +16,12 @@ from pyamg.strength import symmetric_strength_of_connection
 
 from ..linalg.ell import BlockELL, block_ell
 from ..operators.common import is_count, register
+from ..operators.constraints import ap_operator
+from . import schwarz
 from .chebyshev import chebyshev, lmax_estimate
 from .gmg import GMG, Cholesky
 from .jacobi import _block_jacobi, _inverse_blocks
-from .pmg import Hex8Pattern, _check, _p_level
+from .pmg import Hex8Pattern, _check, _hex8_galerkin, _p_level
 
 OMEGA = 4 / 3  # Jacobi prolongation smoothing weight (over the spectral radius estimate)
 STALL = 0.9  # stop coarsening when a level would keep more than this fraction of its DOFs
@@ -130,17 +133,21 @@ def _cholesky(A):
 class AMGAggregates:
     """The topology part of an amg setup, for amg(..., aggregates=): the Hex8Pattern, the
     tentative prolongators and coarse candidates per SA level, the mask and a connectivity
-    fingerprint (host data)."""
+    fingerprint (host data). On solid-shell meshes tents is empty and shell holds the fiber
+    groups and, per level, the vertex -> aggregate map, the tentative prolongator, its
+    zero-column (identity) flags and the shell-group flags."""
 
     pattern: Hex8Pattern
     tents: tuple
     free: np.ndarray
     key: tuple
+    shell: tuple | None = None
 
 
 def _fingerprint(op):
-    """Per block: element count and a hash of the DOF table (connectivity and element order)."""
-    return tuple((b.n_el, hashlib.sha1(np.asarray(b.dofs)).hexdigest()) for b in op.blocks)
+    """Per block: type, element count and a hash of the DOF table (connectivity and element
+    order)."""
+    return tuple((b.type, b.n_el, hashlib.sha1(np.asarray(b.dofs)).hexdigest()) for b in op.blocks)
 
 
 def amg(
@@ -156,11 +163,16 @@ def amg(
     level. sigma >= 0 is concrete; sigma = 0 needs nonsingular=True, the caller's statement
     that A_P(0) is nonsingular (no rigid modes left by the BCs; s_K > 0 is checked here).
 
+    Meshes with ssh8 blocks (ssh8 alone or with hex8; hex20/hex27 raise) take the solid-shell
+    path: fiber groups, 9 candidates per aggregate (the masked rigid modes plus 3 curvature
+    fields per level), additive Schwarz smoothers under Chebyshev on every level.
+
     return_aggregates=True returns (P, AMGAggregates); aggregates= reuses one from the same mesh
     and mask (connectivity and free are checked, points are not): it skips the pattern,
-    strength, aggregation and the tentative fit and recomputes everything that depends on the
-    values. For new materials, s_K, s_M or sigma the result equals a fresh setup; for moved
-    points it keeps the old near-null space (an approximation). max_coarse is then ignored."""
+    strength, aggregation and the tentative fit (on solid shells also fibers and frames) and
+    recomputes everything that depends on the values. For new materials, s_K, s_M or sigma
+    the result equals a fresh setup; for moved points it keeps the old near-null space (an
+    approximation). max_coarse is then ignored."""
     if not is_count(max_coarse):
         raise ValueError(f"max_coarse must be an int >= 1, got {max_coarse!r}")
     sigma = _check("amg", op, sigma, nonsingular)
@@ -177,6 +189,17 @@ def amg(
         if not np.array_equal(mask, aggregates.free):
             raise ValueError("aggregates come from another free mask")
     pattern = aggregates.pattern if aggregates is not None else None
+    types = {b.type for b in op.blocks}
+    if "ssh8" in types:
+        if types - {"ssh8", "hex8"}:
+            raise ValueError("solid-shell AMG supports ssh8 and hex8 blocks")
+        shell = aggregates.shell if aggregates is not None else None
+        P, pattern, shell = _shell_amg(
+            op, free, sigma, points, degree, ratio, max_coarse, pattern, shell
+        )
+        if return_aggregates:
+            return P, AMGAggregates(pattern, (), mask.copy(), key, shell)
+        return P
     fine, Ab, pattern = _p_level(op, free, sigma, degree, ratio, pattern)
     A = fine[0]
     if aggregates is None:
@@ -195,3 +218,22 @@ def amg(
     if return_aggregates:
         return P, AMGAggregates(pattern, tents, mask.copy(), key)
     return P
+
+
+def _shell_amg(op, free, sigma, points, degree, ratio, max_coarse, pattern, shell):
+    """(GMG, pattern, shell): the solid-shell V-cycle, Chebyshev over additive Schwarz on
+    every level (the matrix-free A_P on level 0, A_b = A_P there), down to a dense Cholesky."""
+    from .shell import B, _shell_levels  # shell imports amg's constants
+
+    A = ap_operator(op, free, sigma)
+    Ab, pattern = _hex8_galerkin(A, pattern)
+    levels, coarsest, shell = _shell_levels(op, Ab, A.free, points, max_coarse, shell)[:3]
+    out, transfers = [], []
+    for i, (Al, (blocks, sel), P) in enumerate(levels):
+        S = schwarz.build(Al, blocks, sel)
+        E = A if i == 0 else block_ell(Al, B)
+        out.append((E, chebyshev(E, S, lmax_estimate(E, S), degree, ratio)))
+        b = 3 if i == 0 else B
+        transfers.append(ELLTransfer(block_ell(P, b), block_ell(P.T.tocsr(), b)))
+    P = GMG(tuple(out), tuple(transfers), _cholesky(coarsest), A.free, None)
+    return P, pattern, shell
