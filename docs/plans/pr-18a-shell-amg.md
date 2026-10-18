@@ -7,356 +7,602 @@ PR 16 rule "until PR 18, `solve_modes` on solid-shell meshes uses Jacobi".
 ## Revisions
 
 - **Revision 1:** draft.
+- **Revision 2** (round 1, all five not satisfied; three asked for design changes):
+  - **Level 0:** column patches (the union of an element's 4 fibers) instead of element
+    patches. Multi-layer stacks need them; on one layer they are identical.
+  - **Normals:** sign-free (dominant eigenvector of $\sum v v^\top$). `solid_shell`'s
+    sweep flips element orientation on curved shells.
+  - **Prolongator smoothing:** one step on level 0, two below. Same counts, 49% fewer $P_0$
+    nonzeros and 63% fewer level-1 nonzeros.
+  - **Coarse levels:** dropped tentative columns become decoupled identity rows, so coarse
+    levels keep 9×9 blocks. Export with $b = 3$ ($P_0$) and $b = 9$ (coarser).
+  - **Patch inverses:** stored packed (upper triangle) and inverted in fixed chunks.
+  - **hex20/hex27 + `ssh8`:** the Schwarz goes on the existing assembled corner level (exact).
+    The p-level is unchanged, so the approximate interface patches are gone.
+  - **Patch extraction:** one vectorized mechanism (`searchsorted` keys), run before any
+    in-place compaction of $A_b$.
+  - **Aggregation:** isolated groups with free DOFs become singleton aggregates. A fiber
+    check raises on wrong thickness axes.
+  - **Reuse between σ rounds:** `solve_modes`' σ pre-estimate reuses the aggregates
+    (exact).
+  - **Storage accounting:** now with transfers, coarse matrices and padding. The V-cycle cost
+    and the setup time are measured and documented.
+  - **Tests:** hierarchies with ≥ 2 levels asserted; accuracy at moderate $L/t$ with the
+    floor asserted; SciPy/pyamg/NumPy references for $P$, the Galerkin products and the
+    V-cycle; clamped and bottom-supported plates; stacks; a sweep-built cylinder. The stored
+    hex reference is replaced by a spy. Peak/serial marks, sizes and memory are stated.
+  - **Docs:** the full list of statements that become false. The roadmap split, the CalculiX
+    bullet, dependency rows and owners of every `→ PR 18` open item are recorded.
 
 ## PR 18 split
 
 PR 18 is too large for one branch. It splits into four parts, in this order:
 
-| part | branch | contents (roadmap PR 18 bullets) | plan |
+| part | branch | contents | plan |
 |---|---|---|---|
-| 18a | `pr-18a-shell-amg` | AMG on the assembled $A_P$ of solid-shell meshes, iteration counts vs $L/t$; `solve_modes`' default on `ssh8` meshes becomes AMG | this file |
-| 18b | `pr-18b-kernels` | Morton reordering; the fp32 option for p-MG and AMG (and its estimator, the 1M Mac acceptance with fp32 AMG); HLO fusion checks; the compile-time benchmark; the roofline tests; `docs/performance.md` | own plan |
-| 18c | `pr-18c-band` | the PR 15d band follow-ups (memory levers, $\hat\lambda_\max$, $\delta_\max \le 1$ on slices from 0, MINRES remedies near depth 1000, halving before a capacity error, `err.result`, the hybrid junction, $f_1 > 0$ in `solve_modes_memory`, `np.memmap`, the refill transposes, caching `layout`, the verify skips); the `COUNT_STEP` refit at ≥ 1M DOF | own plan |
-| 18d | `pr-18d-calculix` | the CalculiX comparison (user request, 2026-10-18): CalculiX `*FREQUENCY` against `solve_modes` on the same `.inp` meshes | own plan |
+| 18a | `pr-18a-shell-amg` | AMG on the assembled $A_P$ of solid-shell meshes, iteration counts vs $L/t$; `"auto"` → AMG on `ssh8` meshes | this file |
+| 18b | `pr-18b-kernels` | Morton reordering; fp32 for p-MG and AMG (estimator; the 1M Mac acceptance with fp32 AMG; fp32 Schwarz inverses); HLO fusion checks; the compile-time benchmark; the roofline tests; `docs/performance.md`; the performance `→ PR 18` open items | own plan |
+| 18c | `pr-18c-band` | the PR 15d band follow-ups (roadmap bullet), the measured time crossover (GPU, if any), the `COUNT_STEP` refit at ≥ 1M DOF (with AMG on `ssh8` since 18a), and the band/count/slice `→ PR 18` open items | own plan |
+| 18d | `pr-18d-calculix` | CalculiX comparison (user request, 2026-10-18): CalculiX `*FREQUENCY` against `solve_modes` on the same `.inp` meshes, about 100k–1M DOF, 20 and 200 modes; wall time, peak memory, frequency agreement; ≤ 1 h per run | own plan |
 
-18a goes first: 18b's fp32 option and estimator work, and 18d's shell cases, build on it.
-18c is independent of 18a/18b. 18d measures the final state, so it goes last. Each later
-part gets its own reviewed plan, `docs/plans/pr-18x-<slug>.md`, before it starts. The roadmap
-PR 18 section gets the split and per-part status lines in 18a.
+**Ownership of the `→ PR 18` entries in `docs/open_items.md`.** Every entry not owned by 18a
+goes to 18b (performance) or 18c (band, count, slices):
+- **18b:** `assembled._chunked` pipelining (PR 17); the refill through
+  `device_put(V[:, i:i+c].T).T`; caching `layout` for the gather path; host transposes and small
+  compiles (code review round 10).
+- **18c:** everything else:
+  - σ-move retries;
+  - span counts at small capacities;
+  - σ between the counting edges;
+  - verification slices;
+  - per-step residuals;
+  - merge and count copies;
+  - the verify skips before the gather;
+  - reuse of locked modes after a capacity stop;
+  - store sizing;
+  - `t_ref` with compile.
+
+**Order and dependencies:**
+- 18a ← 13, 16c;
+- 18b ← 11, 12, 13, 18a (fp32 covers the shell AMG);
+- 18c ← 15d, 18a (the `COUNT_STEP` refit runs on the post-18a `ssh8` default);
+- 18d ← 18a–18c (it measures the final state).
+
+Each later part gets its own reviewed plan, `docs/plans/pr-18x-<slug>.md`, before it starts.
+18a records the split in `docs/ROADMAP.md`:
+- the PR 18 section gets the four parts and per-part status lines, plus a CalculiX bullet in
+  Contents and a CalculiX test;
+- the dependency table row "18" becomes rows 18a–18d (19 depends on all of them);
+- the deferred GPU check "PR 18: matvec ≥ 50% of roofline" becomes 18b.
 
 ## Goal (18a)
 
-`amg()` and `solve_modes(..., precond="amg")` work on meshes with `ssh8` blocks (all `ssh8`,
-`ssh8` + `hex8`, and `ssh8` + `hex20`/`hex27`). PCG iterations on a simply supported plate
-grow ≤ 2× from $L/t = 10$ to $L/t = 1000$ (roadmap test). The setup stays independent of the
-mesh size: same counts at 4× the elements. `"auto"` on solid-shell meshes selects AMG.
-`amg_memory` covers solid-shell meshes. Hex-only meshes take the unchanged PR 13 path.
+`amg()` and `solve_modes(..., precond="amg")` work on meshes with `ssh8` blocks: all `ssh8`,
+`ssh8` + `hex8`, and `ssh8` + `hex20`/`hex27`.
+- On a simply supported single-layer plate $128^2$, PCG iterations grow ≤ 2× from $L/t = 10$ to
+  $L/t = 1000$ (roadmap test).
+- Under refinement at fixed $L/t$ the counts do not grow: $256^2$ ≤ 1.3× $128^2$.
+- `"auto"` selects AMG on solid-shell meshes.
+- `amg_memory` covers solid-shell meshes.
+- Hex-only meshes take the unchanged PR 13 path.
 
 ## Why the PR 13 AMG fails on solid shells
 
-Three causes, each measured in the 18a prototypes. Setup: SS plate $n^2 \times 1$ `ssh8`, PCG to
-$10^{-6}$ on $A_P = K + \lambda_1 M$, Chebyshev degree 2 on every level, dense coarsest
-solve. The scripts are listed under Measured.
+Measured in the 18a prototypes (Measured below): SS plate $n^2 \times 1$ `ssh8`, PCG to
+$10^{-6}$ at σ = $\lambda_1$, Chebyshev degree 2 on every level, dense coarsest solve.
 
-1. **Near-null space.** Rigid modes alone cannot represent plate bending on coarse aggregates
-   (the PR 13a hex20-plate entry). Three constant-curvature fields are added, in the
+1. **Near-null space.** Rigid modes alone do not represent plate bending on coarse aggregates
+   (the PR 13a hex20-plate entry). Three constant-curvature fields are added. They are the
+   Kirchhoff displacements $u_\alpha = -Z\,\partial w/\partial X_\alpha$, written in an
    aggregate's local frame $(t_1, t_2, n)$ with local coordinates $(X, Y, Z)$:
-   $$\kappa_{11}: w = X^2/2,\ u_1 = -ZX; \qquad \kappa_{22}: w = Y^2/2,\ u_2 = -ZY; \qquad
+   $$\kappa_{11}: w = \tfrac{X^2}{2},\ u_1 = -ZX; \qquad \kappa_{22}: w = \tfrac{Y^2}{2},\ u_2 = -ZY; \qquad
    \kappa_{12}: w = XY,\ u_1 = -ZY,\ u_2 = -ZX.$$
-   These are the Kirchhoff displacements of constant curvature. With the 6 rigid modes, each
-   aggregate gets 9 coarse DOF.
-2. **Smoothers.** Point and node-block Jacobi lose the thickness coupling. The pair block (the
-   6×6 block of the two nodes of a through-thickness fiber) is not enough when the element is
-   flat ($h/t \gg 1$). The membrane–bending coupling lives in the element. At $n = 32$:
-   pair-block Jacobi 10/17/51/183 iterations at $L/t$ = 10/100/300/1000; element-patch Schwarz
-   11/13/16/38; vertex-patch Schwarz 11/12/15/24.
-3. **Coarse levels.** Each coarsening makes the aggregates about 3× wider in-plane at the same
-   thickness, so coarse levels are even "flatter" than the fine level. Block Jacobi on the
-   9×9 aggregate blocks then fails the same way pair blocks fail on the fine level. At
-   $n = 64$, $L/t = 1000$, element patches on the fine level:
-   - a two-level cycle (exact solve on level 1) takes 22 iterations;
-   - the full V-cycle with 9×9 block Jacobi below takes 79;
-   - with vertex patches on the coarse levels it takes 24 (edge patches: 78).
-
-Two more findings fix details of the setup:
-
-4. **Bending candidates must be one function per level.** SA passes the coarse candidates
-   down as coefficients ($T R = B$). Per-aggregate local frames on the fine level only (one
-   frame per level-1 aggregate) give level-1 candidates that are piecewise, not one global
-   field, and the next level fits them wrongly. Flat plate $n = 64$, $L/t = 1000$:
-   - fine-level frames only: 80 iterations;
-   - global bending fields: 26;
-   - the scheme below (candidates rebuilt per level from the next aggregates' frames): 26.
-   
-   On a curved panel (90° cylindrical, $R = 1$) global fields give 96 and the per-level scheme
-   35.
-5. **Prolongator smoothing.** Bending is a fourth-order problem. One Jacobi step of
-   prolongator smoothing leaves the coarse basis too stiff, and counts grow with depth (flat,
-   $L/t = 1000$: 26 at $n = 64$, 40 at $n = 128$ with 4 levels). Two steps fix it (24 at
-   $n = 128$). They widen the coarse stencils, though: 2.7× the level-1 nonzeros, and vertex
-   patches over the coarse matrix graph cost 852 floats per DOF. Patches and the next
-   aggregation therefore use the **one-ring aggregate adjacency** (aggregates adjacent when
-   their members are adjacent on the level above). With it the patches cost 114 floats per
-   DOF: flat 11/20, curved 10/29 at $L/t$ = 10/1000, $n = 128$.
+   With the 6 rigid modes each aggregate gets 9 coarse DOF.
+2. **Smoothers.** Point and node-block Jacobi lose the thickness coupling. The 6×6 block of a
+   through-thickness fiber is not enough once the element is flat ($h/t \gg 1$), because the
+   membrane–bending coupling lives in the element. At $n = 32$ and $L/t$ = 10/100/300/1000:
+   - fiber-block Jacobi: 10/17/51/183 iterations;
+   - element patches: 11/13/16/38;
+   - vertex patches: 11/12/15/24.
+3. **Coarse levels.** Each coarsening widens aggregates about 3× in-plane at the same thickness,
+   so the coarse levels are flatter still. Block Jacobi on 9×9 aggregate blocks fails there as
+   fiber blocks fail on level 0. At $n = 64$ and $L/t = 1000$:
+   - a two-level cycle: 22 iterations;
+   - the V-cycle with coarse 9×9 block Jacobi: 79;
+   - with coarse vertex patches: 24;
+   - with coarse edge patches: 78.
+4. **The bending candidates must be one field per level.** SA passes the coarse candidates down
+   as coefficients ($T R = B$).
+   - Fine-level frames only (one frame per level-1 aggregate) give piecewise level-1
+     candidates, and the next level fits them wrongly: 80 iterations on the flat $n = 64$,
+     $L/t = 1000$ plate.
+   - Global bending fields give 26.
+   - Candidates rebuilt per level from the next aggregates' frames (below) also give 26.
+   - On a 90° cylindrical panel, global fields give 96 and per-level frames 35.
+5. **Prolongator smoothing.** Bending is fourth order. With one Jacobi step on every level, the
+   counts grow with depth (flat, $L/t = 1000$: 26 at $n = 64$, 40 at $n = 128$ with 4
+   levels); two steps on every level give 20.
+   - Only the coarse levels need the second step. One step on level 0 and two below gives
+     21 at $n = 128$ and 19 at $n = 256$ (5 levels), with half the $P_0$ nonzeros and a third
+     of the level-1 nonzeros (review measurement).
+   - Two steps widen the coarse stencils. Patches and the next aggregation therefore use the
+     **one-ring aggregate adjacency** (aggregates adjacent when their members are adjacent one
+     level up), not the coarse matrix pattern. Over the matrix pattern, vertex patches cost 852
+     floats per DOF; over the adjacency, 114.
+6. **Stacks need column patches.** With $k$ elements through the thickness, an element patch
+   covers $1/k$ of it (3 layers, $n = 32$: 10/43/322/>2000). A patch per element column (the
+   DOFs of an element's 4 fibers) gives 11/15/40/117. Stacks stay weaker than single layers at
+   $L/t \ge 300$ (limitation below).
 
 ## Design (18a)
 
 ### Scope of the shell path
 
-`amg()` takes the shell path when any operator block is `ssh8`. Otherwise it runs the PR 13 code
-unchanged (bit-identical results, test 12). The shell path reuses:
-- `_p_level`'s `Hex8Pattern` and `_hex8_galerkin` (an `ssh8` element's 8 nodes are all
-  corners, and `_w8(8)` is the identity, so on `ssh8` + `hex8` meshes $A_b$ is the assembled
-  $A_P$ itself);
-- `ELLTransfer`, `_level`'s block-ELL export, `_cholesky`, and the `GMG` V-cycle;
-- the zero-column drop, `STALL`, `CAP` and the local seed of `_sa_levels`.
+`amg()` takes the shell path when any operator block is `ssh8`. Otherwise the PR 13 code runs
+unchanged: no code on the hex path changes behaviour, test 13.
 
-New: `precond/schwarz.py` (the device smoother, about 60 lines) and `_shell_levels` in
-`precond/amg.py` (the setup loop, about 90 lines).
+The shell path reuses:
+- `_p_level` (`ap_operator`, `_hex8_galerkin`, the `Hex8Pattern`). An `ssh8` element's 8 nodes
+  are all corners and `_w8(8)` is the identity. So on `ssh8` and `ssh8` + `hex8` meshes the
+  corner-space matrix $A_b$ is the assembled $A_P$ itself.
+- `_level`, which gains an optional smoother argument: `_level(A, b, degree, ratio, D=None)`.
+- `ELLTransfer`, `block_ell`, `_cholesky`, the `GMG` V-cycle, `STALL`, `CAP`, and the local
+  seed.
+
+New code:
+- `precond/schwarz.py`: `Schwarz`, the patch extraction and the chunked inversion, about 90
+  lines.
+- `_shell_levels` in `precond/amg.py`: the setup loop, about 120 lines.
+- The `amg()` wiring and `AMGAggregates` fields, about 30 lines.
+- `amg_memory`'s shell family, about 25 lines.
+- `resolve_precond` and the `pmg` check, about 10 lines.
+
+That is about 280 source lines and 500 test lines. The fit-candidates + `STALL` step is shared
+between `_sa_levels` and `_shell_levels` as a helper only if that leaves the hex results
+bit-identical (same operations); otherwise each keeps its own.
+
+### Level structure
+
+- **`ssh8` and `ssh8` + `hex8` meshes** (every block 24 DOF; `amg()` already treats them as
+  "all hex8"):
+  - level 0 is the matrix-free $A_P$ with Chebyshev over the level-0 Schwarz (exact, since
+    $A_b = A_P$);
+  - its transfer is $P_0$;
+  - below come the shell SA levels.
+- **Meshes with `hex20`/`hex27` blocks:**
+  - the p-level is PR 12/13's, unchanged (Chebyshev over node-block Jacobi, `NodalTransfer`);
+  - the corner level is the assembled $A_b$ as `block_ell(A_b, 3)`, with Chebyshev over the
+    level-0 Schwarz (exact: $A_b$ is that level's matrix);
+  - the shell SA levels follow.
+  - On `ssh8` nodes the p-level smoother is a weak extra smoother ahead of an exact-patch level
+    (test 9 measures it).
 
 ### Groups and aggregation
 
-A **group** is a set of DOFs aggregated together.
-- **Level 0 (corner space):** groups are through-thickness **fibers**. They are the connected
-  components of the graph whose edges are the node pairs $(a, a+4)$, $a = 0..3$, of every
-  `ssh8` element (bottom face nodes 0–3, top 4–7, `mesh/shell.py`'s permuted order). One layer
-  gives node pairs; a stack of $k$ elements gives $k+1$-node fibers. Nodes in no `ssh8`
-  element are singleton groups, so a pure-hex region aggregates nodes as PR 13 does.
-- **Level $\ell \ge 1$:** groups are the level-$\ell$ aggregates. Coarse DOF $j$ belongs to
-  group $\lfloor j_\text{orig}/c \rfloor$ with $c$ the candidate count, via the kept column
-  indices of $T$.
+A **group** is a set of DOFs that is aggregated together.
+- **Level 0 (corner space): through-thickness fibers.**
+  - A fiber is a connected component (`scipy.sparse.csgraph.connected_components`) of the graph
+    whose edges are the node pairs $(a, a+4)$, $a = 0..3$, of every `ssh8` element. Bottom face
+    nodes are 0–3 and top 4–7, `docs/elements.md`.
+  - One layer gives node pairs; a stack of $k$ elements gives $(k+1)$-node fibers.
+  - Corner nodes in no `ssh8` element are singleton groups, so a pure-hex region aggregates
+    nodes as PR 13 does.
+  - **Fiber check:** if two nodes of one element face (bottom or top) lie in the same fiber,
+    the thickness axes are inconsistent (for example a wrong per-element `direction`), and
+    `amg` raises `ValueError`.
+- **Level $\ell \ge 1$:** the groups are the level-$\ell$ aggregates. Every aggregate keeps 9
+  coarse DOF (below), so coarse DOF $j$ belongs to group $\lfloor j/9 \rfloor$.
 
-The group graph:
-- on level 0: $G^\top |A_z| G$ ($G$ the DOF → group indicator), diagonal removed, pattern only
-  (θ = 0 as in PR 13);
-- on level $\ell \ge 1$: the one-ring adjacency $\mathrm{Agg}^\top (C + I)\,\mathrm{Agg}$ of
-  the level above, not the coarse matrix pattern (finding 5).
+**Group graph:**
+- On level 0: $G^\top |A_b| G$, with $G$ the DOF → group indicator. Diagonal removed, pattern
+  only (θ = 0, as PR 13).
+- On level $\ell \ge 1$: the one-ring adjacency $\mathrm{Agg}_{\ell-1}^\top (S_{\ell-1} + I)\,
+  \mathrm{Agg}_{\ell-1}$. Here $S_{\ell-1}$ is the previous level's group graph and
+  $\mathrm{Agg}_{\ell-1}$ its group → aggregate indicator.
 
-`standard_aggregation` runs on the group graph. A DOF's aggregate is its group's aggregate.
-Unaggregated groups (isolated: fully constrained fibers) keep empty tentative rows, as in PR 13.
+**Aggregation:** `standard_aggregation` on the group graph. A DOF's aggregate is its group's.
+- A group without neighbours is left unaggregated by pyamg. If it holds a free DOF it becomes
+  a singleton aggregate; this keeps separate parts and coarse leftovers on every level.
+- Only fully constrained groups stay unaggregated, with empty tentative rows as in PR 13.
+- Fine-node membership of a level-$(\ell+1)$ aggregate is composed through the per-level
+  group → aggregate maps.
 
 ### Candidates
 
 On level $\ell$, after aggregation:
-- $B^{(\ell)}_\text{fine}$ is $(3 n_c, 9)$: columns 0–5 are the masked rigid modes at the corner
-  points (global, `_nullspace`). Columns 6–8 are the three curvature fields of each fine node's
-  level-$(\ell+1)$ aggregate, in that aggregate's frame.
-- **Frame:** the normal $n$ is the normalized sum of the member nodes' thickness vectors (per
-  node: the sum over its `ssh8` elements of top-minus-bottom edge vectors). $t_1 = n \times e$,
-  with $e$ the coordinate axis least aligned with $n$, normalized; $t_2 = n \times t_1$.
-  $(X, Y, Z)$ are the projections of $x - \bar x_\text{agg}$ onto $(t_1, t_2, n)$.
-- **Aggregates without any `ssh8` node:** curvature columns are zero there, so their tentative
-  columns drop out (rigid-only aggregates, as in PR 13). The rows of constrained DOFs are zeroed
-  (masked).
-- **On level $\ell$:** $B_\ell = (T_0 T_1 \cdots T_{\ell-1})^\top B^{(\ell)}_\text{fine}$. The
-  tentative $T$ have orthonormal columns, so this is the least-squares coefficient of the fine
-  field in the level's basis. It is exact for the rigid columns, and for the curvature columns
-  on flat plates. Level 0 uses $B^{(0)}_\text{fine}$ directly.
-- Then `fit_candidates` → $(T_\ell, R_\ell)$, the zero-column drop, `STALL`.
-- $R_\ell$ is not used as the next level's $B$. The next level recomputes $B_{\ell+1}$ from its
-  own aggregates' frames.
+- **$B^{(\ell)}_\text{fine}$** is $(3 n_c, 9)$. Columns 0–5 are the masked rigid modes at the
+  corner points (`_nullspace`). Columns 6–8 are the three curvature fields of each corner
+  node's level-$(\ell+1)$ aggregate, in that aggregate's frame. Constrained rows are zeroed.
+- **Frame (sign-free):**
+  - Per node, $T_a = \sum v v^\top$ over the thickness edges $v$ (top minus bottom node,
+    4 per element) of the `ssh8` elements that contain it.
+  - Per aggregate, $n$ is the dominant eigenvector of $\sum_{a \in \text{agg}} T_a$. The sign
+    of $n$ does not matter, since the span of the curvature fields is invariant under $n \to -n$.
+  - $t_1 = n \times e / \|n \times e\|$, with $e$ the coordinate axis least aligned with $n$;
+    $t_2 = n \times t_1$.
+  - $(X, Y, Z)$ are the projections of $x - \bar x$ onto $(t_1, t_2, n)$, with $\bar x$ the
+    mean of the aggregate's corner nodes.
+  - All of this is computed vectorized: batched `eigh`, `np.add.at`, no per-aggregate loop.
+  - The curvature fields are set on every node of the aggregate, hex-region nodes of mixed
+    aggregates included.
+  - An aggregate whose $\sum T_a$ is zero (no `ssh8` node) gets zero curvature columns.
+- **Projection:** $B_\ell = (T_0 T_1 \cdots T_{\ell-1})^\top B^{(\ell)}_\text{fine}$. The
+  tentative $T$ have orthonormal (or zero) columns, so this is the least-squares coefficient of
+  the fine field in the level's basis. It is exact for the rigid columns, and for the curvature
+  columns on flat plates (test 2). Level 0 uses $B^{(0)}_\text{fine}$.
+- Then `fit_candidates` → $(T_\ell, R_\ell)$, with all 9 columns per aggregate kept (no drop).
+  $R_\ell$ is stored for reuse but not used as the next level's $B$.
 
-Cost: one fine-length field per level, pushed through $\ell$ sparse products with 9 columns.
-That is negligible next to the Galerkin products.
+### Prolongator and coarse matrices
 
-### Prolongator
-
-$P_\ell = (I - \tfrac{\omega}{\rho} D^{-1} A_z)^2\, T_\ell$: `jacobi_prolongation_smoother`
-with `degree=2`, $\omega = 4/3$, scalar diagonal $D$ on every level (as the prototype; the PR 13
-first-level 3×3 block weighting is measured as an alternative during implementation and taken
-only if it lowers counts). Galerkin $P^\top A_z P$, symmetrized, as now.
+- $P_\ell = (I - \tfrac{\omega}{\rho} D^{-1} A)^{d_\ell}\, T_\ell$, from
+  `jacobi_prolongation_smoother(A, T, None, R, 4/3, degree=d_ℓ, weighting="diagonal")`, with
+  $d_0 = 1$ and $d_\ell = 2$ for $\ell \ge 1$. Scalar diagonal $D$, $C$ = `None` (used only when
+  filtering).
+- $A_{\ell+1} = P^\top A P$, symmetrized.
+- A zero column of $T$ (aggregates with fewer than 9 independent candidates: no `ssh8` node,
+  or constrained) gives a zero row and column of $A_{\ell+1}$. Its diagonal is set to the mean
+  diagonal of the level. Those DOFs are then decoupled, $A_{\ell+1}$ stays SPD, and the coarse
+  size stays a multiple of 9.
+- This replaces PR 13's zero-column drop on the shell path. Their candidate rows are zero, so
+  they never carry near-null energy.
+- **Stop rule:** `STALL` on the aggregate count ($9\,n_\text{agg} > 0.9\,n_\ell$), and `CAP` on
+  the coarsest size, as PR 13.
 
 ### Smoothers: additive Schwarz under Chebyshev
 
-On every level the Chebyshev smoother (`degree`, `ratio` as today) runs over an additive Schwarz
-preconditioner
-$$D^{-1} r = \sum_i R_i^\top A_i^{-1} R_i\, r,\qquad A_i = R_i A R_i^\top,$$
-with patches $i$ that cover every DOF of the level. The inverse is SPD whenever the patches cover
-all DOFs and every $A_i$ is SPD.
-- **Level 0 (corner space):** one patch per `ssh8` element (its 24 DOFs). A corner node in no
-  `ssh8` element gets one node patch (its 3 DOFs, the PR 13 block). $A_i$ is read from $A_b$ at
-  the element's `Hex8Pattern.pos` (the 64 node-block positions per element, already built). No
-  per-patch SciPy indexing is needed.
-- **Level $\ell \ge 1$:** one patch per group, made of its DOFs and those of its one-ring
-  neighbour groups. $A_i$ is extracted per patch from the level's CSR matrix on the host.
-  Levels below the fine one have $\le 1/6$ of the DOFs: about 18k patches at 1M DOF, a few
-  seconds.
-- **Fine level of `ssh8` + `hex8` meshes:** the matrix-free $A_P$ (as all-hex8 meshes today)
-  with the level-0 Schwarz. Here $A_b = A_P$, so the patches are exact.
-- **Fine level of `ssh8` + `hex20`/`hex27` meshes (p-level):** Chebyshev over a Schwarz on all
-  nodes:
-  - the `ssh8` element patches taken from $A_b$;
-  - node-block Jacobi (`block_jacobi`) on every node in no `ssh8` element.
-  
-  $A_b$ differs from the fine $A_P$ only on node pairs coupled through a hex20/hex27 element
-  (the interface). The patch is then an SPD approximate inverse, and Chebyshev's
-  $\lambda_\max$ estimate absorbs the difference. Test 9 checks the counts.
-- **Inverses:** batched Cholesky on the device, the generalization of `_inverse_blocks`.
-  Constrained rows of $A_P$ are $s\,e_i$ and stay SPD. Padded slots get the identity and a zero
-  mask. A non-finite inverse raises `ValueError`, as `_level`.
+On every SA level, and on the corner level of meshes with hex20/hex27 blocks, Chebyshev
+(`degree`, `ratio` as today) runs over an additive Schwarz preconditioner
+$$D^{-1} r = \sum_i R_i^\top A_i^{-1} R_i\, r, \qquad A_i = R_i A R_i^\top,$$
+whose patches $i$ cover every DOF of the level. Each $A_i$ is a principal submatrix of an SPD
+matrix, so the sum is SPD.
+- **Level 0 (corner space):**
+  - one patch per element column: the DOFs of the 4 fibers of an `ssh8` element. Elements in
+    the same column give the same patch, so the patches are deduplicated. One layer gives
+    exactly the element's 24 DOFs; $k$ layers give $12(k+1)$.
+  - Each corner node in no `ssh8` element gets one node patch (its 3 DOFs, the PR 13 block).
+- **Level $\ell \ge 1$:** one patch per group: its 9 DOFs plus those of its one-ring neighbour
+  groups (the adjacency above).
+- **Extraction** is the same for all levels. Per size class, the $s^2$ (row, col) keys of each
+  patch are looked up by `searchsorted` in the level's sorted CSR keys, `_pattern`'s idiom,
+  vectorized with no per-patch Python. Missing entries are 0.
+  - Level 0 is extracted from $A_b$ **before** any in-place compaction (`eliminate_zeros`
+    shifts BSR data). The shell path works on a CSR copy, so $A_b$'s data is never moved under
+    the extraction.
+- **Inversion:** in fixed chunks of patches (host loop, device `_inverse_blocks` per chunk:
+  Cholesky, then the inverse). The device transient stays bounded and independent of $n$. A
+  non-finite inverse raises `ValueError`, as `_level`.
+- **Storage:** the upper triangle, packed (`matfree._packed_index`, as the stored $K_e$):
+  $s(s+1)/2$ floats per patch. Single-layer level 0: 300 floats per element.
+- **Size classes:** patch sizes sorted ascending, greedily grouped into classes spanning at
+  most a factor 1.25 and padded to the class maximum. Padded slots carry index $n$, dropped on
+  scatter, and an identity diagonal with a zero mask. On the structured plate, level 0 is one
+  class ($s = 24$) and the coarse levels have about 3 (36/54/81).
 
 ### `Schwarz` (device)
 
-A registered pytree: per size class, `idx (n_p, s) int32` (pad index = $n$, dropped by
-`mode="drop"`), `inv (n_p, s, s)` and the mask. Apply on $(n, k)$ blocks:
-- gather $r[\text{idx}]$, then `einsum` with `inv`, then scatter-add;
-- a `lax.scan` over chunks of patches bounds the temporaries to
-  $\text{chunk} \cdot s \cdot k$ per class.
+A registered pytree with, per class, `idx (n_p, s) int32`, `inv (n_p, s(s+1)/2)` and the mask.
+Apply on $(n, k)$ blocks: a `lax.scan` over fixed-size chunks of patches, chunk ≈ $2^{16}/s$
+patches. Per chunk it does:
+- gather $r[\text{idx}]$;
+- unpack the inverse by `_packed_index`;
+- `einsum`;
+- scatter-add into the output.
 
-**Size classes:** patch sizes rounded up to a multiple of 9 (level ≥ 1) or exact (level 0: 24 or
-3). This keeps the padding of irregular aggregate valences small. One gather per class.
+The temporaries are bounded by chunk·$s$·$k$ plus one unpacked chunk, an $n$-independent term in
+`amg_memory`'s $K$.
 
-**Fine-level storage:** $8 \cdot 24^2$ B per `ssh8` element (4.6 kB; the stored condensed $K_e$
-and $m_e$ are 2.7 kB). About 95 floats per DOF on flat single-layer plates. Measured on the
-prototypes, the coarse levels add about 125 floats per DOF and the coarse matrices of
-operator complexity 1.9.
+### Cost estimates (prototype numbers; replaced by measurements in the docs)
+
+Per fine DOF on the flat single-layer plate (fp64):
+- level-0 patches 48 floats (384 B) and coarse patches about 55 floats (440 B), both packed;
+- coarse matrices: the prototype's level nonzeros sum to about 0.35 of the fine assembled
+  nonzeros, about 140 B;
+- transfers $P$ and $P^\top$ (b = 3/9 ELL): about 550 B;
+- with ELL padding, about **1.6–2 kB per DOF**: about 1.8 GB at 1M DOF, against 0.45 kB/DOF
+  for the stored-Ke operator.
+
+V-cycle cost, from review measurements at $n = 256$ with $m = 15$, in units of $t_A$ (one
+stored-Ke $A_P$ apply):
+- level-0 Schwarz 0.56;
+- coarse $s = 81$ patches about 0.5;
+- with $b = 3$/$9$ blocks and one level-0 smoothing step, the whole cycle about 10 $t_A$ (hex20
+  AMG: 5.4).
+
+Host setup at 396k DOF, from the review measurement with two steps everywhere: about 15 s and
+1.4 GB beyond $A_b$, about 3.6 kB per corner DOF. The design here is cheaper.
+
+Implementation measures and documents:
+- the setup time;
+- the per-component storage;
+- the V-cycle cost in $t_A$;
+- `solve_modes` wall time against Jacobi (test 8).
 
 ### API and defaults
 
-- `amg(op, free, sigma, points, ...)`: signature unchanged; the shell path is internal.
-  `return_aggregates`/`aggregates=` work on it: `AMGAggregates` gains the per-level groups,
-  aggregates, kept columns and patch index sets. Reuse skips fibers, aggregation, the candidate
-  fit and patch sets. It recomputes everything value-dependent; moved points keep the old
-  candidates, as PR 13.
-- `resolve_precond`: `"auto"` → `"amg"` on unstructured meshes with `ssh8` blocks. The refusal of
-  `precond="amg"` on them is removed. `"jacobi"` stays selectable.
-- `amg_memory`: no refusal on `ssh8` meshes (below).
-- `pmg` keeps refusing `ssh8` blocks. The message becomes "pmg does not support ssh8 blocks; use
-  amg". `no_shell` moves to `pmg.py`'s only remaining use.
-- `examples/m4_shell.py`: `precond` "auto" (now AMG), iterations printed. The Jacobi run moves
-  to a comparison line.
-- PR 16 tests that assert `info["precond"] == "jacobi"` under `"auto"` pass `precond="jacobi"`
-  explicitly (test_shell_ops band tests, `test_auto_jacobi_mixed` → `test_auto_amg_mixed`).
+- **`amg(op, free, sigma, points, ...)`:** signature unchanged; the shell path is internal.
+  - `return_aggregates`/`aggregates=` work on it. `AMGAggregates` gains, per level, the
+    tentative $(T_\ell, R_\ell)$ (as PR 13), the group arrays and the patch index arrays and
+    classes. The `Hex8Pattern`, mask and fingerprint are kept as today.
+  - Reuse skips fibers, aggregation, the frames and fits, and the patch index sets. It
+    recomputes $A_b$, the smoothed prolongators, the Galerkin products, the patch values and
+    inverses, and the export.
+  - Moved points keep the old candidates, as PR 13.
+- **`_precond_sigma`:** reuses the first build's aggregates for the later σ rounds, for every
+  AMG mesh. This is exact: reuse equals a fresh setup for a new σ (the PR 13b reuse test, σ = 0
+  aggregates at σ > 0). It saves up to 4 topology passes per `solve_modes` call.
+- **`resolve_precond`:** `"auto"` → `"amg"` on every unstructured mesh, `ssh8` included. The
+  refusal of `precond="amg"` on `ssh8` is removed; `"jacobi"` stays selectable.
+- **The σ pre-estimate on shells:** `solve_modes` runs the multigrid-refined `_precond_sigma`
+  (it skipped it under Jacobi). σ = 0 builds need `nonsingular` as today; free shells start
+  from `sigma_estimate`'s bound. Test 8 checks σ ∈ [λ₁, 2λ₁] on a plate with levels.
+- **`pmg`** keeps refusing `ssh8` blocks. `_check` gets a `shells` flag (False for pmg, True
+  for amg). The message becomes "pmg does not support ssh8 blocks; use amg". `no_shell` stays
+  in `pmg.py` for pmg only, and its imports in `memory.py` and `eigen/api.py` go.
+- **`examples/m4_shell.py`:** `"auto"` (AMG), iterations printed, plus a Jacobi comparison
+  line.
 
 ### `amg_memory` on solid-shell meshes
 
-New family `"shell"` (any `ssh8` block):
-- **storage** = the p-level term (meshes with hex20/hex27: as today) plus $8 \cdot 24^2$ per
-  `ssh8` element (exact) plus $8 \cdot 3^2$ per non-shell corner node, plus
-  `AMG_STORAGE["shell"]` $\cdot n_c$ (coarse matrices, coarse Schwarz, transfers) plus the
-  coarsest factor term;
-- **build / host_build:** $\beta + \alpha_\text{shell} n_c$;
-- **step / step_low / count:** `AMG_STEP[("shell", ...)]`, `AMG_COUNT` reused unless the fit
-  says otherwise.
+A new family `"shell"` (any `ssh8` block). `_amg_scan` counts the level-0 patches and their
+sizes. The terms:
+- **storage**:
+  - the p-level term, for meshes with hex20/hex27 only, as today;
+  - $120\,n_\text{nodes}$ for the mask and the p-level's node-block Jacobi, only where it
+    exists today (no double count: on `ssh8`/`ssh8` + `hex8` meshes the level-0 smoother is
+    the Schwarz, not `block_jacobi`);
+  - the level-0 patches, exactly: packed bytes per class from the scan;
+  - `AMG_STORAGE["shell"]` $\cdot\,n_c$ for the coarse patches, matrices and transfers;
+  - the coarsest factor term.
+- **build / host_build:** $\beta + \alpha_\text{ssh8} n_c$, with β shared and `AMG_BUILD`'s
+  dict gaining the key `"ssh8"`. The device transient of the chunked inversion is a fixed term
+  added to `build`.
+- **step / step_low / count:** `AMG_STEP[("shell", ...)]` and an `AMG_COUNT` entry for the
+  shell family, fitted; `AMG_LOOP_K` refitted if the Schwarz loop body changes it.
 
-All new constants are fitted as the PR 13b ones (upper envelope +2–4%). Calibration meshes:
-- SS plates $64^2$–$256^2 \times 1$ `ssh8` at $L/t$ 100;
-- a 3-layer laminate $64^2 \times 3$;
+The constants are fitted as the PR 13b ones (upper envelope +2–4%). Calibration meshes:
+- SS plates $64^2$, $128^2$, $256^2$ and a ≥ 1M-DOF plate ($416^2$, about 1.04M DOF; host setup
+  about 40 s) at $L/t$ 100;
+- a 3-layer stack $64^2 \times 3$;
 - a curved panel $128^2$;
-- an `ssh8` + hex20 mesh.
+- an `ssh8` + `hex20` mesh.
 
-Those are about 25k–400k DOF. The fit range goes into `docs/open_items.md`, and the 1M-DOF
-point is a slow test (test 11).
+The ≥ 1M point is part of the fit, so the 10M figure is a short extrapolation. The fit range and
+the 10M figure go into `docs/open_items.md`.
 
 ## Tests (18a)
 
-`tests/test_shell_amg.py`, unless noted. Meshes are built by a helper `plate(n, Lt,
-curved=False, layers=1)`. It makes `box_mesh` + `solid_shell(direction=(0, 0, 1))`, and the
-curved variant maps $x$ onto a 90° cylinder of radius 1.
+`tests/test_shell_amg.py` unless noted. Meshes come from a helper `plate(n, Lt, curved=False,
+layers=1, bcs="ss")`: `box_mesh((n, n, layers), spacing=(1/n, 1/n, t/layers))` +
+`solid_shell(direction=(0, 0, 1))`, with $L = 1$ the in-plane side and $t = L/(L/t)$.
+- **Curved:** the box is mapped onto a 90° cylindrical panel of radius 1; $L$ stays the
+  straight side 1, and the arc is 1.57.
+- **σ** for count tests: the Kirchhoff $\lambda_1$ of the flat SS plate, $D \pi^4 (2/L^2)^2 /
+  (\rho t)$ with $D = E t^3 / (12(1-\nu^2))$. Any shift of the right order serves the count
+  tests; the same σ is used for the curved panel. No `eigsh` at 100k+ DOF.
+- **Counts:** `pcg` to $10^{-6}$ on a fixed-seed random block of 4 columns, max over columns,
+  `max_coarse` stated per test. Each gated count is ≤ 1.5× the implementation's measured
+  device count, recorded in the docs (the `test_h_independence` pattern).
 
-1. **Fibers:** a 1-layer plate gives the node pairs. A 3-layer stack gives 4-node fibers equal
-   to the `box_mesh` columns. In an `ssh8` + `hex8` mesh the hex-only nodes are singletons.
+1. **Fibers:**
+   - 1 layer gives node pairs; 3 layers give 4-node fibers equal to the `box_mesh` columns;
+   - `ssh8` + `hex8`: the hex-only nodes are singletons;
+   - a wrong per-element `direction` (an in-plane thickness axis) raises the fiber-check
+     `ValueError`.
 2. **Candidates:**
-   - on a flat plate, the level-0 local-frame candidates span, per aggregate, the same space as
-     global $[\text{rigid}, \kappa]$ (principal angles ≤ 1e-10);
-   - on every level, $T_\ell R_\ell = B_\ell$ to 1e-12 (the fit identity);
-   - on the curved panel, each aggregate's curvature fields are the Kirchhoff fields in its
-     frame (formula check on 3 aggregates).
-3. **Schwarz apply** equals a dense NumPy $\sum_i R_i^\top A_i^{-1} R_i r$:
-   - on an `ssh8` + `hex8` mesh (level 0) and on a coarse level, to 1e-12;
-   - symmetric ($x^\top D^{-1} y = y^\top D^{-1} x$ to 1e-12);
-   - chunked equals unchunked (exact);
-   - padded slots are inert (a padded class against an unpadded one, exact).
-4. **Level-0 patches from `pos`** equal SciPy `A[s][:, s]` to 1e-14.
-5. **V-cycle** symmetric to 1e-12 and positive on random blocks, on `ssh8`, `ssh8` + `hex8` and
-   `ssh8` + `hex20` meshes.
-6. **$L/t$ growth (roadmap test):**
-   - PCG iterations to $10^{-6}$ at σ = $\lambda_1$ (from `eigsh`), on the SS plate $128^2
-     \times 1$: count at $L/t = 1000$ ≤ 2× the count at $L/t = 10$ (prototype 11 → 20);
-   - the curved panel $128^2$ is report-only for the ratio (prototype 10 → 29). Its $L/t = 1000$
-     count is gated at ≤ 1.5× the implementation's measured value, recorded in the docs.
-   - Slow.
-7. **Mesh independence:** flat $L/t = 1000$, the $256^2$ count ≤ 1.3× the $128^2$ count
-   (prototype 18 vs 20; slow, about 400k DOF). The $h/t$ dependence (the $64^2$ count, 26) is
-   reported in the docs.
-8. **`solve_modes` with AMG** matches the PR 8 `eigsh` to the PR 9 tolerances:
-   - the M4 example plate (roadmap test);
-   - a 3-layer laminate (Srinivas–Rao-type ply table);
-   - the curved panel;
-   - a band solve on the M4 plate.
+   - **Flat plate:** $\|(I - T_0 T_0^\top) B^{(1)}_\text{fine}\|$ ≤ 1e-10 relative, for the
+     rigid and curvature columns; this is the exactness claim. Per aggregate, the level-0
+     local-frame span equals the global $[\text{rigid}, \kappa]$ span (principal angles ≤ 1e-10).
+   - **Sweep-built 270° cylinder** (`solid_shell(direction=None)`, whose element orientations
+     flip): every aggregate normal is within 1e-8 of the radial direction at its centroid
+     (sign-free), with no NaN. The curvature fields satisfy the Kirchhoff formulas in the frame
+     on 3 aggregates.
+3. **Schwarz apply** equals a dense NumPy $\sum_i R_i^\top A_i^{-1} R_i r$ to 1e-12:
+   - on level 0 of an `ssh8` + `hex8` mesh, a 3-layer stack and a coarse level;
+   - symmetric to 1e-12;
+   - chunked against single-chunk to 1e-14;
+   - a padded class against an unpadded one to 1e-14;
+   - masked padded slots give exactly 0.
+4. **Extraction** equals SciPy `A[s][:, s]` to 1e-14 on every class, on a clamped plate, where
+   zero blocks occur.
+5. **Setup against references** (small plate $8^2 \times 1$, `max_coarse` 20, and an `ssh8` +
+   `hex20` mesh):
+   - $P_\ell$ equals pyamg `jacobi_prolongation_smoother(degree=d_ℓ, ω=4/3)` on the same
+     $T_\ell$ to 1e-12;
+   - $A_{\ell+1} = P^\top A P$ plus the identity rows to 1e-12;
+   - the device V-cycle equals a NumPy V-cycle (SciPy levels, dense Schwarz, NumPy Chebyshev,
+     dense Cholesky) to 1e-10;
+   - the V-cycle is symmetric to 1e-12, positive on the free DOFs, and exactly 0 on
+     constrained ones.
+   - Shell versions of `test_setup_scipy`, `test_pyamg_prolongator` and `test_vcycle_dense`.
+6. **$L/t$ growth (roadmap test, slow).** Flat SS plate $128^2$ (99.8k DOF), default
+   `max_coarse`:
+   - count($L/t$ 1000) ≤ 2 × count($L/t$ 10); prototype (rev. 2) 12 / 21;
+   - the curved panel $128^2$ is report-only for the ratio (prototype 11 → 29); both its counts
+     are gated as above;
+   - if the device flat ratio exceeds 2, the documented fallback is taken (degree 3, or the
+     $256^2$ plate) and stated in the docs.
+7. **Refinement (slow, `peak`, in conftest `LONG`).** Flat $L/t = 1000$: the $256^2$ count
+   (396k DOF) ≤ 1.3× the $128^2$ count (prototype 18 vs 21). The $64^2$ count (25–27, $h/t$
+   15.6) is reported.
+   - Expected about 3 min and about 4 GB (no `eigsh`, analytic σ); `peak` keeps it out of the
+     8-wide stage.
+8. **`solve_modes` with AMG against the PR 8 `eigsh`** to the PR 9 tolerances. Each case has an
+   explicit mesh, $L/t$, `tol` and `max_coarse`, and asserts `len(P.levels) ≥ 2` and
+   `info["precond"] == "amg"` under `"auto"`:
+   - flat plate $32^2$, $L/t = 50$, `max_coarse` 100;
+   - 3-layer stack $24^2 \times 3$, $L/t = 20$;
+   - one element with 3 plies (0/90/0 laminate, Srinivas–Rao-type ply table) $32^2$,
+     $L/t = 50$;
+   - curved panel $32^2$, $L/t = 50$;
+   - a band solve on the flat plate (exercises the λ_c rebuild with aggregates);
+   - one $L/t = 300$ case for robustness.
    
-   `info["precond"] == "amg"` under `"auto"`. Iterations ≤ 1/5 of Jacobi's on the M4 plate
-   (measured ratio in the docs).
-9. **Mixed meshes:** a plate of `ssh8` with a `hex8` stiffener, and with a `hex20` stiffener
-   (p-level path), with `solve_modes` AMG against `eigsh` to the PR 9 tolerances. PCG count
-   below Jacobi's.
-10. **Reuse:** `aggregates=` on a shell mesh with new materials, $s_K$, σ equals a fresh setup
-    (V-cycle to 1e-12). A connectivity or mask change raises.
-11. **`amg_memory`** (shell family):
-    - storage ≥ owned bytes and within 1.3× on the calibration plates;
-    - build ≥ the host peak and ≤ 1.3× (`peak` marker);
-    - the LOBPCG step with AMG ≤ `lobpcg_memory`'s step (`memory_analysis`);
-    - a ≥ 1M-DOF `ssh8` plate: estimate ≥ the measured peak (slow, `peak`).
-12. **Hex meshes unchanged:** the existing `test_amg.py` passes unmodified. One added test pins a
-    hex20 V-cycle against a stored reference output to 1e-14, so the shell branch never touches
-    the hex path.
-13. **Refusals updated** (`test_shell_ops.py`): `amg`, `amg_memory`, `solve_modes(precond="amg")`
-    accept `ssh8`; `pmg` raises the new message; otf on `ssh8` still raises.
+   For each case the PR 9 floor $\max(10^{-8}, 10\,\varepsilon\,\lambda_\max/\lambda)$ is
+   asserted ≤ 1e-6 (as `test_m4_reference`'s comment), except the $L/t = 300$ case, which
+   records its floor. `tol` is 1e-8 (1e-6 at $L/t = 300$).
+   - The pre-estimate σ is in [λ₁, 2λ₁] on the flat plate.
+   - The flat plate's `solve_modes` iterations and wall time with AMG against Jacobi are
+     recorded in the docs. The gate is AMG wall time ≤ Jacobi's (`serial`).
+   - The M4 plate (486 DOF, below `max_coarse`: a direct solve) keeps `test_m4_reference`,
+     switched to `"auto"` → `"amg"`. The PR 16 band tests on M4 pass `precond="jacobi"`.
+9. **Mixed meshes:** a $32^2$ `ssh8` plate with a `hex8` stiffener, and with a `hex20`
+   stiffener (p-level path) and a `hex27` one:
+   - `solve_modes` with AMG against `eigsh` to the PR 9 tolerances;
+   - PCG counts gated ≤ 1.5× measured;
+   - Jacobi's count reported.
+10. **Constraints:**
+    - a clamped-edge plate (whole fibers fully constrained) and a plate supported on the bottom
+      face only (partly constrained fibers): V-cycle SPD on the free DOFs, exactly 0 on
+      constrained ones, counts gated (prototype clamped $64^2$: 11 / 24 at $L/t$ 10 / 1000);
+    - a mesh of two separate plates, each supported: isolated groups become singleton
+      aggregates and the count is gated.
+11. **Stacks:** the 3-layer plate $32^2$ at $L/t$ 10 / 100, counts gated (prototype 11 / 15).
+    $L/t$ 300 / 1000 is reported (40 / 117; limitation).
+12. **Reuse:**
+    - `aggregates=` with new materials, $s_K$ or σ equals a fresh setup (V-cycle to 1e-12);
+    - moved points (2%) stay within 1.2× a fresh setup's count;
+    - a spy confirms fibers, aggregation and fits are skipped;
+    - a connectivity or mask change raises;
+    - setup determinism: two fresh builds equal exactly;
+    - `_precond_sigma` with reuse gives the same σ as without (1e-12), on a hex20 box and the
+      flat plate.
+13. **Hex path unchanged:** `test_amg.py` passes unmodified. A spy (monkeypatch
+    `_shell_levels` and `Schwarz` to raise) runs a hex20 and a hex8 `amg` build and their PCG.
+14. **`amg_memory`, shell family:**
+    - storage ≥ owned bytes and ≤ 1.3× on the calibration plates;
+    - build ≥ the host setup peak and ≤ 1.3× (`peak`, subprocess per mesh as PR 13b);
+    - the LOBPCG step and count with AMG ≤ `lobpcg_memory`'s (`memory_analysis`);
+    - `solve_modes_memory(..., "auto")` on `ssh8` reports AMG;
+    - **the ≥ 1M plate** (slow, `peak`, `LONG`): storage and build each within [1, 1.3]× of the
+      owned bytes and the host setup peak measured in a subprocess (no `solve_modes`). The plan
+      expects about 5 GB host and 2 GB device, about 1–2 min.
+15. **Refusals updated** (`test_shell_ops.py`):
+    - `test_refusals`: the `amg`, `amg_memory` and `solve_modes(precond="amg")` blocks are
+      deleted; `pmg` raises the new message; otf on `ssh8` still raises;
+    - the `AMG` constant goes;
+    - `test_auto_labels` is rewritten: under `"auto"` (now AMG) `degree` and `sigma_options`
+      are valid, so the test asserts an unknown option is labelled "auto (resolved to amg)";
+    - `test_auto_jacobi_mixed` becomes `test_auto_amg_mixed`.
+
+Runtime: tests 6, 7 and 14d are slow (about 3–8 min together, 7 and 14d in the `peak` stage);
+the rest are fast (≤ 30 s each, plates ≤ $48^2$). New wall-time assertions (test 8's) are
+`serial`.
 
 ## Docs (18a)
 
-- `docs/preconditioners.md`: an "AMG on solid shells" section covering:
-  - the three causes, with the measured tables;
-  - fibers, local-frame curvature candidates (LaTeX as above) and their per-level projection;
-  - degree-2 prolongator smoothing;
-  - the one-ring adjacency;
-  - Schwarz patches, storage, `amg_memory`'s shell family.
-  
-  The flat-element limitation in the AMG section points to it.
-- `docs/open_items.md`: the thin-plate entry is resolved for solid shells (hex plates keep the
-  limitation; solid shells are the remedy). New decisions:
-  - the approximate patches at hex20/`ssh8` interfaces;
-  - aggregates across folds or T-junctions get a mean normal (rigid modes stay exact; no
-    fold-aware strength yet);
-  - the shell family's calibration range.
-- `docs/eigensolvers.md` and `README.md`: `"auto"` → AMG on solid-shell meshes.
-- `docs/elements.md`: the PR 16 Jacobi note is updated.
-- `docs/ROADMAP.md`: the PR 18 split and status; deferred GPU checks for the shell AMG at 10M if
-  any.
+Statements that become false, all updated:
+- **`docs/preconditioners.md`:**
+  - a new section "AMG on solid shells" covering:
+    - the causes and measured tables;
+    - fibers and the fiber check;
+    - sign-free frames and the curvature candidates (LaTeX as above), and their per-level
+      projection;
+    - $d_\ell$;
+    - the one-ring adjacency;
+    - identity rows;
+    - column and vertex patches, packed chunked inverses, size classes;
+    - the level structure for mixed meshes;
+    - storage, V-cycle cost, setup time, `amg_memory`'s shell family;
+  - the Jacobi section's "Solid shells" bullet (:53);
+  - pmg's flat-element note (:343);
+  - GMG's thin-plate remedy (:208);
+  - `amg_memory`'s "for a hex8/hex20/hex27 mesh" and calibration range (:470, :476);
+  - the AMG flat-element limitation, which points to the new section.
+- **`docs/eigensolvers.md`:**
+  - the slender-models and "Solid shells" bullets (:40, :41);
+  - the `precond` table row (:79);
+  - the `max_coarse` row (:88);
+  - the σ pre-estimate section (shells now use it).
+- **`README.md`:** the status line (:5), the solid-shell line (:82), the laminate snippet
+  (its Jacobi-motivated thickness and `maxit`).
+- **`docs/elements.md`:** the PR 16 Jacobi note (:218).
+- **`docs/ROADMAP.md`:**
+  - the status paragraph (:18);
+  - :474, :493, :579;
+  - the PR 18 split, the CalculiX bullet and test, the dependency rows and the deferred GPU
+    entries (above);
+  - new deferred GPU checks: the shell AMG at 10M (storage about 18 GB fp64 by `amg_memory`,
+    the Schwarz gather/scatter speed, the host setup peak).
+- **`docs/open_items.md`:**
+  - the thin-plate entry (:18, :22): resolved for solid shells, kept for hex plates;
+  - :104 (no thin-plate counting test);
+  - the Messages entry (:210) and the README entry (:211);
+  - every decision under Risks below is logged with its measurement.
+- **Docstrings:** `solve_modes` (`eigen/api.py:311`), `amg` (`amg.py:150`), `amg_memory`
+  (`memory.py:338-345`), `no_shell` (`pmg.py:214`), `examples/m4_shell.py:2`.
 
 ## Measured (prototypes, 18a planning)
 
-Scripts in the session scratchpad (`pr18/`), host SciPy/pyamg, fp64. SS plate (all four edges
-`SIMPLY_SUPPORTED`-style), one `ssh8` layer, PCG to $10^{-6}$ at σ = $\lambda_1$ from a random
-right-hand side.
-- `proto_cheb.py` / `proto_cheb2.py`: pyamg SA hierarchy (pair BSR 6, global bending), smoother
-  variants.
-- `proto_impl.py`: the scheme of this plan.
+Host SciPy/pyamg, fp64, in
+`/private/tmp/claude-501/-Users-tairoon-projects-jax-explicit/0381ac12-7b3d-4224-ac3d-6fd4d9e44c2b/scratchpad/pr18/`
+(session scratchpad, not kept; the numbers are recorded here):
+- `proto_cheb.py`, `proto_cheb2.py`: the pyamg hierarchy with smoother variants;
+- `proto_impl.py`: revision 1's scheme;
+- `proto_rev.py`: this revision's scheme.
 
-| configuration | n | $L/t$ = 10 / 100 / 300 / 1000 |
-|---|---|---|
-| pair-block Jacobi, coarse 9×9 block | 32 | 10 / 17 / 51 / 183 |
-| element patches, coarse 9×9 block | 32 | 11 / 13 / 16 / 38 |
-| vertex patches, coarse 9×9 block | 32 | 11 / 12 / 15 / 24 |
-| element patches, coarse 9×9 block | 64 | 12 / 14 / 35 / 79 |
-| element patches, two-level | 64 | – / – / 15 / 22 |
-| element patches, coarse vertex patches (pyamg hierarchy) | 64 | 12 / – / 18 / 24 |
-| this plan with one prolongator step, fine-level frames only | 64 | 12 / – / 41 / 80 |
-| this plan with one step, per-level frames | 64 | 12 / – / – / 26 |
-| this plan with one step, per-level frames | 128 | 12 / 13 / – / 40 |
-| **this plan** (two steps, one-ring adjacency) | 64 | 11 / – / – / 26 |
-| **this plan** | 128 | 11 / – / – / 20 |
-| **this plan** | 256 | – / – / – / 18 |
-| curved panel, one step, global bending | 64 | 13 / – / – / 96 |
-| curved panel, one step, per-level frames | 64 | 10 / – / – / 35 |
-| curved panel, this plan | 64 | – / – / – / 32 |
-| **curved panel, this plan** | 128 | 10 / – / – / 29 |
+SS plate, one `ssh8` layer, PCG to $10^{-6}$ at σ = $\lambda_1$ (`eigsh`), random right-hand
+side. `max_coarse` (MC) is given per row.
+
+| configuration | n | MC | $L/t$ = 10 / 100 / 300 / 1000 |
+|---|---|---|---|
+| fiber-block Jacobi, coarse 9×9 block | 32 | 300 | 10 / 17 / 51 / 183 |
+| element patches, coarse 9×9 block | 32 | 300 | 11 / 13 / 16 / 38 |
+| vertex patches, coarse 9×9 block | 32 | 300 | 11 / 12 / 15 / 24 |
+| element patches, coarse 9×9 block | 64 | 300 | 12 / 14 / 35 / 79 |
+| element patches, two-level | 64 | 300 | – / – / 15 / 22 |
+| element patches, coarse vertex (matrix graph), pyamg hierarchy, global bending | 64 | 300 | 12 / – / 18 / 24 |
+| element patches, coarse edge patches | 64 | 300 | 12 / – / 33 / 78 |
+| rev. 1, one step, fine-level frames only | 64 | 300 | 12 / – / 41 / 80 |
+| rev. 1, one step, global bending | 64 | 300 | – / – / – / 26 |
+| rev. 1, one step, per-level frames | 64 | 300 | 12 / – / – / 26 |
+| rev. 1, one step, per-level frames | 128 | 300 | 12 / 13 / – / 40 |
+| rev. 1, two steps, matrix-graph patches | 128 | 300 | 11 / – / – / 24 |
+| rev. 1 (two steps, one-ring adjacency) | 64 / 128 / 256 | 300 | 11 / – / – / 26; 11 / – / – / 20; – / – / – / 18 |
+| rev. 1, curved, global bending | 64 | 300 | 13 / – / – / 96 |
+| rev. 1, curved, per-level frames, one step | 64 | 300 | 10 / – / – / 35 |
+| rev. 1, curved | 64 / 128 | 300 | – / – / – / 32; 10 / – / – / 29 |
+| **rev. 2**, flat | 64 | 1000 | 12 / 14 / – / 25 |
+| **rev. 2**, curved | 64 | 1000 | 10 / 15 / – / 32 |
+| **rev. 2**, clamped | 64 | 1000 | 11 / – / – / 24 |
+| **rev. 2**, flat | 128 | 1000 | 12 / – / – / 21 |
+| **rev. 2**, curved | 128 | 1000 | 11 / – / – / 29 |
+| **rev. 2**, flat | 256 | 1000 | – / – / – / 18 |
+| **rev. 2**, 3 layers (column patches) | 32 | 1000 | 11 / 15 / 40 / 117 |
+| rev. 1, 3 layers, element patches (review) | 32 | 300 | 10 / 43 / 322 / > 2000 |
+| rev. 1 with one level-0 step (review) | 64 / 128 / 256 | 1000 | 27; 12 / 21; 19 at $L/t$ 1000 |
+
+Revision 2 stores 48–50 + 55–66 packed floats per DOF of patch inverses (level 0 + coarse) at
+$n$ = 64–256. Its level-1 matrix has 338k nonzeros at $n = 64$ (revision 1: 876k), and the
+coarse matrices sum to 0.35 of the fine nonzeros. At $n = 256$: 4 levels, $P$ nonzeros
+9.8M / 3.2M / 0.8M, host setup 19 s in the prototype, which still has a per-patch Python
+loop.
 
 At fixed $L/t = 1000$ the counts fall with refinement (26 / 20 / 18 at $n$ = 64 / 128 / 256,
-$h/t$ = 15.6 / 7.8 / 3.9): they follow the element flatness $h/t$, not $L/t$ itself. The
-roadmap ratio is therefore a statement about the mesh used: at $n = 64$ the flat ratio is 2.4×,
-at $n = 128$ 1.8×. The $n = 256$ run (396k DOF, 5 levels) took 170 s in the host prototype.
+$h/t$ = 15.6 / 7.8 / 3.9). They follow the element flatness $h/t$, not $L/t$ itself, so the
+roadmap ratio depends on the mesh: 2.4× at $n = 64$, 1.8× at $n = 128$. The seed (0–4) changes
+the counts by ±1 (review).
 
-Floats per DOF of the Schwarz inverses (fine / coarse levels): pair 6; element 93–95 /
-vertex 454–470 on the fine level; coarse vertex patches over the matrix graph 117 (one step) and
-852 (two steps), over the one-ring adjacency 114 + 12.
+## Risks and decisions without user input (all logged in `docs/open_items.md`)
 
-## Risks and decisions without user input
-
-- **Memory:** the shell AMG stores about 220 floats per DOF of Schwarz inverses plus coarse
-  matrices of operator complexity 1.9, against 6 for Jacobi. That is 1.8 GB at 1M DOF in fp64.
-  It is accepted: Jacobi does not converge at $L/t \ge 300$ within practical counts. 18b's fp32
-  option halves the inverses.
-- **Vertex patches on the fine level** (454 floats/DOF, counts 24 vs 38 at $n = 32$) are not
-  used: 5× the storage for 1.6× fewer iterations. Element patches plus coarse vertex patches
-  give the target.
-- **Element flatness:** counts grow with $h/t$ (prototype: 18 / 20 / 26 at $h/t$ = 3.9 / 7.8 /
-  15.6, $L/t = 1000$). The docs state this, and the roadmap gate is taken on $128^2$
-  ($h/t \le 7.8$).
-- **The curved-panel ratio** (2.9× at the prototype) is above the roadmap's 2×, which the flat
-  plate meets. Per the roadmap's "or a fallback is documented", the curved ratio is reported
-  and gated on its absolute count. The documented fallback is a higher Chebyshev degree
-  (`precond_options={"degree": 3}`, measured during implementation).
-- **Folds and junctions:** a mean normal per aggregate is wrong across a fold. Rigid modes stay
-  exact, and only the curvature columns degrade there. No fold-aware strength in 18a; logged.
-- **hex20/hex27 + `ssh8` interfaces:** approximate fine patches (above). Measured in test 9.
+- **Memory:** about 1.6–2 kB per DOF of preconditioner (patches, coarse matrices, transfers),
+  4× the stored-Ke operator and about 1.8 GB at 1M DOF in fp64. Accepted: Jacobi does not
+  converge at $L/t \ge 300$ in practical counts. 18b's fp32 halves the patches. If memory binds
+  at 10M, apply $P_0 = S\,T$ matrix-free (one $A$ apply per transfer, only $T$ stored); that is
+  logged, not built.
+- **Element flatness:** counts grow with $h/t$ (18 / 20 / 26 at $h/t$ = 3.9 / 7.8 / 15.6,
+  $L/t = 1000$). The docs state it, and the roadmap gate is taken on $128^2$.
+- **The curved-panel ratio** (2.9×) is above the roadmap's 2×, which the flat plate meets. Per
+  "or a fallback is documented", it is reported and its counts are gated. The documented
+  fallback is `precond_options={"degree": 3}`, measured in implementation.
+- **Stacks** at $L/t \ge 300$ (3 layers: 40 / 117) stay well above single layers. That is a
+  documented limitation. Laminates inside one element (plies) are the single-layer case.
+  Further remedies are logged, not built: fine vertex patches over columns, or a line smoother
+  through the stack.
+- **Vertex patches on level 0** (5× the storage for 1.6× fewer iterations) are not used.
+- **Folds and junctions:** the sign-free normal is still an average across a fold. Rigid modes
+  stay exact; only the curvature columns degrade there. No fold-aware strength in 18a.
+- **hex20/hex27 + `ssh8`:** the p-level keeps node-block Jacobi on `ssh8` nodes, followed by the
+  exact corner-level Schwarz; test 9 measures it.
+- **`amg_memory`'s shell family** is calibrated on plates, a stack, a panel and one mixed mesh,
+  up to about 1M DOF.
