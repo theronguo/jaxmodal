@@ -1,6 +1,6 @@
 """M4 solid shell: the lowest modes of a simply supported square steel plate (L/t = 20) of
-ssh8 elements, one element through the thickness, with Jacobi-preconditioned LOBPCG; checked
-against Kirchhoff plate theory and the SciPy reference.
+ssh8 elements, one element through the thickness, with LOBPCG and the solid-shell AMG (the
+default since PR 18b); checked against Kirchhoff plate theory and the SciPy reference.
 
 Usage: python examples/m4_shell.py
 """
@@ -20,7 +20,7 @@ E, nu, rho, L, t = 210e9, 0.3, 7850.0, 1.0, 0.05
 steel = {0: Material(isotropic(E, nu), rho)}
 plate = solid_shell(box_mesh((8, 8, 1), spacing=(L / 8, L / 8, t)), direction=(0, 0, 1))[0]
 ss = {"xmin": "yz", "xmax": "yz", "ymin": "xz", "ymax": "xz"}  # simply supported edges
-lam, V, info = solve_modes(plate, steel, ss, 6, tol=1e-6, maxit=2000)
+lam, V, info = solve_modes(plate, steel, ss, 6, tol=1e-6)
 f = info["frequencies"]
 # Kirchhoff: f_11 = pi / 2 (2 / L^2) sqrt(D / (rho t)), D = E t^3 / (12 (1 - nu^2))
 f11 = np.pi * np.sqrt(E * t**2 / (12 * (1 - nu**2) * rho)) / L**2

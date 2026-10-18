@@ -205,6 +205,19 @@ def max_sine(Mf, L, Q, Qr):
     return np.linalg.norm(L.T @ E, 2)
 
 
+def r_M_sparse(Kf, Mf, lu, lam, X):
+    """r_M with lu = splu(Mf): ||L^-1 res|| = sqrt(res^T M^-1 res)."""
+    X = X / np.sqrt(np.einsum("ij,ij->j", X, Mf @ X))
+    res = Kf @ X - (Mf @ X) * lam
+    return np.sqrt(np.maximum(np.einsum("ij,ij->j", res, lu.solve(res)), 0)) / np.abs(lam)
+
+
+def max_sine_sparse(Mf, Q, Qr):
+    """max_sine without the factor: ||L^T E||_2 = sqrt(lambda_max(E^T M E))."""
+    E = Q - Qr @ (Qr.T @ (Mf @ Q))
+    return np.sqrt(max(np.linalg.eigvalsh(E.T @ (Mf @ E))[-1], 0))
+
+
 def cheb(A, Dinv, lmax, degree, ratio):
     """Dense Chebyshev smoother matrix, the recurrence of precond.chebyshev."""
     hi = 1.1 * lmax

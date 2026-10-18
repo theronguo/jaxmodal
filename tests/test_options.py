@@ -92,8 +92,9 @@ def test_defaults_snapshot(calls):
         ("amg", [0.0], dict(nonsingular=True)),
         ("lobpcg", [1, 0.1, None], dict(maxit=20, seed=0)),
         ("amg", [s], dict(nonsingular=True)),
-        ("lobpcg", [4, 1e-6, None, None], LOBPCG_FINAL),
+        ("lobpcg", [4, 1e-6, None, None], LOBPCG_FINAL | {"polish": calls[-1][2]["polish"]}),
     ]
+    assert callable(calls[-1][2]["polish"])  # AMG: the polish closure
     del calls[:]
     lam, _, info = solve_modes(vox(), STEEL, CLAMP, 4)
     s = info["sigma"]
@@ -102,7 +103,7 @@ def test_defaults_snapshot(calls):
         ("gmg", [0.0], {}),
         ("lobpcg", [1, 0.1, None], dict(maxit=20, seed=0)),
         ("gmg", [s], dict(dtype="float64")),
-        ("lobpcg", [4, 1e-6, None, None], LOBPCG_FINAL),
+        ("lobpcg", [4, 1e-6, None, None], LOBPCG_FINAL | {"polish": None}),
     ]
 
 
@@ -493,7 +494,7 @@ def test_amg_loop_increment():
 
 LOBPCG_FORWARDED = {
     "op", "free", "n_modes", "tol", "R", "precond", "X0", "maxit", "seed", "chunk", "guards",
-    "basis_dtype", "low_memory",
+    "basis_dtype", "low_memory", "polish",
 }  # fmt: skip
 
 
@@ -511,7 +512,9 @@ def test_option_sets_pinned():
     for name, f in builders.items():
         assert params(f) - api.RESERVED[name] == set(allowed[name]), name
     assert params(lobpcg) == LOBPCG_FORWARDED
-    assert params(LOB.lobpcg) <= params(solve_modes) | {"op", "free", "R", "precond"}
+    # built internally: precond and polish (tuned through polish_options)
+    assert params(LOB.lobpcg) <= params(solve_modes) | {"op", "free", "R", "precond", "polish"}
+    assert api.POLISH_OPTIONS == ("on", "tol", "maxit")
     assert params(api._precond_sigma) - {"op", "free", "R", "build", "seed"} == set(
         api.SIGMA_OPTIONS
     )

@@ -189,6 +189,15 @@ def ap_dense(mesh, free, sigma, A):
 # ---------------------------------------------------------------- independent references
 
 
+def fibers(op):
+    return SH._fibers(SH._shell_nodes(op), op.n_nodes)
+
+
+def columns(op, g=None):
+    """The level-0 patches of op (fibers g, default op's)."""
+    return SH._columns(SH._shell_nodes(op), fibers(op) if g is None else g, op.n_nodes)
+
+
 def union_find(mesh):
     """Fiber label per node from a Python union-find over the (a, a + 4) pairs of ssh8."""
     parent = list(range(len(mesh.points)))
@@ -274,21 +283,21 @@ def test_fibers():
         junction("T", 8, 50)[0],
     ):
         op = unstructured(mesh, STEEL)
-        g = SH._fibers(op)
+        g = fibers(op)
         assert same_partition(g, union_find(mesh))
         cnt = np.bincount(g)
         hexonly = np.setdiff1d(np.arange(len(g)), mesh.blocks["ssh8"])
         assert (cnt[g[hexonly]] == 1).all()
-        cols = SH._columns(op, g)
+        cols = columns(op, g)
         assert all(len(set(r[r >= 0])) == (r >= 0).sum() for r in cols)  # no repeated node
         got = {frozenset(r[r >= 0].tolist()) for r in cols}
         assert len(got) == len(cols) and got == column_patches(mesh)
-    assert set(np.bincount(SH._fibers(unstructured(plate(4, 50)[0], STEEL)))) == {2}
+    assert set(np.bincount(fibers(unstructured(plate(4, 50)[0], STEEL)))) == {2}
     op = unstructured(plate(4, 50, layers=3)[0], STEEL)
-    cols = SH._columns(op, SH._fibers(op))
+    cols = columns(op)
     assert len(cols) == 16 and ((cols >= 0).sum(1) == 16).all()  # 48 = 12 (k + 1) DOFs
     T = junction("T", 8, 50)[0]
-    assert np.bincount(SH._fibers(unstructured(T, STEEL))).max() > 2  # the joint fibers merge
+    assert np.bincount(fibers(unstructured(T, STEEL))).max() > 2  # the joint fibers merge
 
 
 def test_guard():
@@ -308,7 +317,7 @@ def test_guard():
                 amg(op, free, 1.0, m.points)
     T = junction("T", 8, 20, ks=5, kw=5)[0]
     op = unstructured(T, STEEL)
-    cols = SH._columns(op, SH._fibers(op))
+    cols = columns(op)
     assert 3 * (cols >= 0).sum(1).max() == 3 * max(len(p) for p in column_patches(T)) == 252
     amg(op, dof_mask(T, SIMPLY_SUPPORTED), 1.0, T.points)
     mesh = disjoint()
@@ -510,7 +519,7 @@ def test_schwarz(name):
     if lv:
         blocks, sel = lv[0][1]
     else:
-        blocks = SH._columns(op, SH._fibers(op))
+        blocks = columns(op)
         sel = np.repeat(blocks >= 0, 3, axis=1)
     ref = node_patch_dofs(column_patches(mesh))
     cb = max(2**14, 8 * int(sel.sum(1).max()) ** 2)
@@ -569,7 +578,7 @@ def test_schwarz_layout():
     mesh = plate(4, 50)[0]
     op, free = unstructured(mesh, STEEL), dof_mask(mesh, SIMPLY_SUPPORTED)
     Ab = _hex8_galerkin(ap_operator(op, free, 1e4))[0]
-    blocks = SH._columns(op, SH._fibers(op))
+    blocks = columns(op)
     sel = np.repeat(blocks >= 0, 3, axis=1)
     with pytest.raises(ValueError, match="exceeds 23"):
         SW.build(Ab, blocks, sel, chunk_bytes=8 * 24 * 24 - 1)

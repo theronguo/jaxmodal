@@ -22,20 +22,19 @@ def _shell_nodes(op):
     return np.concatenate(out)
 
 
-def _fibers(op):
+def _fibers(E, n_nodes):
     """Group id per node: connected components of the through-thickness node pairs (a, a + 4)
-    of the ssh8 elements; nodes in no ssh8 element are singleton groups."""
-    E = _shell_nodes(op)
+    of the ssh8 elements E (n_el, 8); nodes in no ssh8 element are singleton groups."""
     i, j = E[:, :4].ravel(), E[:, 4:].ravel()
-    G = sp.coo_array((np.ones(len(i)), (i, j)), shape=(op.n_nodes, op.n_nodes))
+    G = sp.coo_array((np.ones(len(i)), (i, j)), shape=(n_nodes, n_nodes))
     return connected_components(G, directed=False)[1]
 
 
-def _columns(op, group):
+def _columns(E, group, n_nodes):
     """Level-0 patches as (n_p, m) node ids (valid first, pad -1): per distinct set of groups
-    of an ssh8 element the nodes of those groups, per node in no ssh8 element the node. A patch
-    above GUARD DOFs raises ValueError."""
-    E = _shell_nodes(op)
+    of an ssh8 element (E: (n_el, 8) nodes) the nodes of those groups, per node in no ssh8
+    element the node. A patch above GUARD DOFs raises ValueError. amg_memory's mesh scan calls
+    it on the mesh's connectivity."""
     g = np.sort(group[E], axis=1)
     g[:, 1:][g[:, 1:] == g[:, :-1]] = -1  # repeated groups (junctions)
     g = np.unique(-np.sort(-g, axis=1), axis=0)  # valid first; dedup over a column's elements
@@ -55,7 +54,7 @@ def _columns(op, group):
     pr = np.repeat(P, c)
     blocks = np.full((len(g), size.max()), -1, np.int32)
     blocks[pr, np.arange(len(pr)) - (np.cumsum(size) - size)[pr]] = node
-    lone = np.setdiff1d(np.arange(op.n_nodes), E)
+    lone = np.setdiff1d(np.arange(n_nodes), E)
     pad = np.full((len(lone), blocks.shape[1]), -1, np.int32)
     pad[:, 0] = lone
     return np.concatenate([blocks, pad])
@@ -172,8 +171,9 @@ def _shell_levels(op, Ab, free, points, max_coarse, shell=None):
     group graph and the node -> next aggregate map ("rho", "graphs", "nodes"). Runs under a
     fixed local NumPy seed and leaves the global state unchanged."""
     reuse = shell is not None
-    group = _fibers(op) if not reuse else shell[0]
-    cols = _columns(op, group)
+    E = _shell_nodes(op)
+    group = _fibers(E, op.n_nodes) if not reuse else shell[0]
+    cols = _columns(E, group, op.n_nodes)
     patches = (cols, np.repeat(cols >= 0, 3, axis=1))
     fn = np.asarray(free, bool).reshape(-1, 3)
     ng = group.max() + 1
