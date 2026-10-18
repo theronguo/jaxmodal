@@ -19,24 +19,28 @@ def _cols(V, n_dof=None):
     return V
 
 
-def _mbatches(M, B, batch):
-    """(column slice, M B[:, slice] on the host) over batches of width min(batch, n); the last
-    batch is zero-padded (one compile per width), the next batch is dispatched before the
-    current one is pulled. M: an operator with apply_M, a matrix, or None (identity)."""
+def _batches(B, batch):
+    """(column slice, fp64 B[:, slice]) over batches of width min(batch, n), the last one
+    zero-padded (one compile per width)."""
     if batch < 1:
         raise ValueError(f"batch must be >= 1, got {batch}")
     n = B.shape[1]
     w = max(min(batch, n), 1)
+    for j in range(0, n, w):
+        b = np.asarray(B[:, j : j + w], np.float64)  # a view for fp64 input
+        m = b.shape[1]
+        yield slice(j, j + m), b if m == w else np.pad(b, ((0, 0), (0, w - m)))
+
+
+def _mbatches(M, B, batch):
+    """(column slice, M B[:, slice] on the host) over _batches; the next batch is dispatched
+    before the current one is pulled. M: an operator with apply_M, a matrix, or None."""
 
     def pull(cols, y):
         return cols, np.asarray(y)[:, : cols.stop - cols.start]
 
     pending = None
-    for j in range(0, n, w):
-        cols = slice(j, min(j + w, n))
-        b = np.asarray(B[:, cols], np.float64)
-        if b.shape[1] < w:
-            b = np.pad(b, ((0, 0), (0, w - b.shape[1])))
+    for cols, b in _batches(B, batch):
         if M is None:
             y = b
         elif hasattr(M, "apply_M"):
@@ -79,10 +83,6 @@ def _nonzero(d, what):
         raise ValueError(f"{what} has zero or non-finite (M-)norm columns {bad}")
 
 
-def _colblocks(n, size=64):
-    return (slice(c, min(c + size, n)) for c in range(0, n, size))
-
-
 def normalize(V, M=None, kind="mass", batch=64):
     """Scaled copy of the modes V (n_dof, n) (1-D: one mode). kind "mass": phi^T M phi = 1;
     "max": the largest nodal displacement norm is 1. Sign: the lowest-index DOF with |v| within
@@ -97,11 +97,12 @@ def normalize(V, M=None, kind="mass", batch=64):
     V = _cols(V)  # not upcast: the output is the only fp64 copy
     n = V.shape[1]
     j, s = np.zeros(n, int), np.zeros(n)
-    for c in _colblocks(n):  # column blocks: temporaries of 64 columns, not of V
-        a = np.abs(V[:, c])
+    for c in (slice(s, s + 64) for s in range(0, n, 64)):  # temporaries of 64 columns, not V
+        b = V[:, c].astype(np.float64)
+        a = np.abs(b)
         j[c] = np.argmax(a >= (1 - 1e-6) * a.max(0, initial=0), axis=0)
         if kind == "max":
-            s[c] = np.linalg.norm(V[:, c].reshape(len(V) // 3, 3, -1), axis=1).max(0, initial=0)
+            s[c] = np.linalg.norm(b.reshape(len(V) // 3, 3, -1), axis=1).max(0, initial=0)
     if kind == "mass":
         s = np.sqrt(np.maximum(_mdiag(M, V, batch), 0))
     _nonzero(s, "V")
@@ -162,12 +163,11 @@ def clusters(lam, rtol=1e-4, atol=0.0):
     """Index arrays of clusters of the ascending lam: neighbours join when
     lam[i+1] - lam[i] <= rtol |lam[i+1]| + atol."""
     lam = np.asarray(lam, float)
-    d = np.diff(lam) if lam.ndim == 1 else None
-    if d is None or not np.isfinite(lam).all() or (d < 0).any():
+    if lam.ndim != 1 or not np.isfinite(lam).all() or (np.diff(lam) < 0).any():
         raise ValueError("lam must be a finite, ascending 1-D array")
     if len(lam) == 0:
         return []
-    split = np.flatnonzero(d > rtol * np.abs(lam[1:]) + atol) + 1
+    split = np.flatnonzero(np.diff(lam) > rtol * np.abs(lam[1:]) + atol) + 1
     return np.split(np.arange(len(lam)), split)
 
 

@@ -1,10 +1,9 @@
 """VTU export of mode shapes and element data. See docs/postprocessing.md."""
 
-from pathlib import Path
-
 import numpy as np
 
 from ..mesh.io import write_vtu
+from .modal import _cols
 
 
 def write_modes(path, mesh, V, cell_data=None):
@@ -13,13 +12,8 @@ def write_modes(path, mesh, V, cell_data=None):
     written unchanged; VTK reads 6 components as tensors XX, YY, ZZ, XY, YZ, XZ with tensor
     shear, so pass Voigt (11, 22, 33, 23, 13, 12) arrays as a[..., [0, 1, 2, 5, 3, 4]], strains
     with the shear halved first (docs/postprocessing.md)."""
-    if Path(path).suffix.lower() != ".vtu":
-        raise ValueError("only .vtu can be written")
     n_nodes = len(mesh.points)
-    V = np.asarray(V)
-    V = V[:, None] if V.ndim == 1 else V
-    if V.ndim != 2 or V.shape[0] != 3 * n_nodes:
-        raise ValueError(f"V must be ({3 * n_nodes}, n), got shape {V.shape}")
+    V = _cols(V, 3 * n_nodes)
     n = V.shape[1]
     w = max(3, len(str(n - 1)))
     point_data = {f"mode_{i:0{w}d}": V[:, i].reshape(n_nodes, 3) for i in range(n)}

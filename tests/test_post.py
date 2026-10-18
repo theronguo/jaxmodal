@@ -27,7 +27,7 @@ from jaxmodal.materials import Material, isotropic, rotate
 from jaxmodal.mesh import Mesh, box_mesh, read, solid_shell, voxel_mesh
 from jaxmodal.operators import assemble, dof_mask, rigid_modes, stencil, unstructured
 from jaxmodal.post import stress
-from jaxmodal.post.modal import _gram
+from jaxmodal.post.modal import _dot, _gram
 
 ROOT = Path(__file__).parents[1]
 MATS = {0: Material(isotropic(3.0, 0.3), 2.0), 1: Material(rotate(ORTHO, R), 0.7)}
@@ -84,7 +84,7 @@ def test_sum_rule_and_formulas(bcs, kind):
     for Mx, Vx in ((M, Vs), (op, jnp.asarray(Vs))):
         gamma, m_eff, total = post.participation(Vx, Mx, r)
         assert rel(total, expect) <= 1e-12
-        assert rel(m_eff.sum(0), expect) <= 1e-10
+        assert (np.abs(m_eff.sum(0) - expect) <= 1e-10 * expect).all()  # per direction
         assert rel(gamma, b / mu[:, None]) <= 1e-12
         assert rel(m_eff, b**2 / mu[:, None]) <= 1e-12
 
@@ -151,6 +151,9 @@ def test_empty_mode_set():
     assert post.mac(np.zeros((len(free), 0)), np.zeros((len(free), 2)) + 1.0).shape == (0, 2)
     t = post.frequency_table([], np.zeros((0, 6)), total)
     assert t["clusters"] == [] and t["m_eff"].shape == (0, 6)
+    assert len(post.format_table(t).splitlines()) == 1  # the header only
+    shapes = [x.shape for x in post.element_stress(mesh, MATS, np.zeros((len(free), 0)), {1: R})]
+    assert shapes == [(mesh.n_el, 0, 6)] * 2
 
 
 # ---------------------------------------------------------------- 2: the docs recipe
@@ -210,6 +213,18 @@ def test_normalize():
     assert np.allclose(np.linalg.norm(Vm.reshape(-1, 3, W.shape[1]), axis=1).max(0), 1, 0, 1e-15)
     w0 = post.normalize(W[:, 0], kind="max")
     assert w0.ndim == 1 and np.array_equal(w0, Vm[:, 0])
+    W = rng.standard_normal((len(free), 150)) * free[:, None]  # several 64-column blocks
+    W[:, 70] *= 1e-3
+    a = np.abs(W)
+    sign = np.sign(W[np.argmax(a >= (1 - 1e-6) * a.max(0), axis=0), np.arange(150)])
+    nodal = np.linalg.norm(W.reshape(-1, 3, 150), axis=1).max(0)
+    for got, scale in (
+        (post.normalize(W, M), np.sqrt(np.einsum("ij,ij->j", W, M @ W))),
+        (post.normalize(W, kind="max"), nodal),
+    ):
+        assert rel(got, W * sign / scale) <= 1e-14
+    W32 = W.astype(np.float32)
+    assert rel(post.normalize(W32, kind="max"), post.normalize(W32.astype(float), kind="max")) == 0
 
 
 @pytest.mark.parametrize(
@@ -280,13 +295,10 @@ def test_gram_batches():
     G32 = _gram(A.astype(np.float32), op, B.astype(np.float32), batch=7)[0]
     assert G32.dtype == np.float64 and rel(G32, A.T @ (M @ B)) <= 1e-6
     B32 = B.astype(np.float32)
-    assert (
-        rel(
-            post.participation(B32, op, B[:, :6])[1],
-            post.participation(B32.astype(float), op, B[:, :6])[1],
-        )
-        <= 1e-12
-    )
+    m32 = post.participation(B32, op, B[:, :6])[1]
+    assert rel(m32, post.participation(B32.astype(float), op, B[:, :6])[1]) <= 1e-12
+    A32 = A.astype(np.float32)
+    assert rel(_dot(A32, B, rows=7), A32.astype(float).T @ B) <= 1e-14  # several row blocks
     N32 = post.normalize(B32, op)
     assert N32.dtype == np.float64 and rel(N32, post.normalize(B32.astype(float), op)) <= 1e-12
 
@@ -368,8 +380,9 @@ def test_clusters():
     assert [list(c) for c in post.clusters(lam, atol=1e-3)][-3:] == [[3, 4], [5, 6], [7]]
     edge = [list(c) for c in post.clusters([1.0, 1.5, 2.0], rtol=0.25)]  # gaps 0.5: <= 0.25 * 2.0
     assert edge == [[0], [1, 2]]  # |lam[i+1]| and <= : 1.5 - 1.0 > 0.375, 2.0 - 1.5 <= 0.5
-    with pytest.raises(ValueError, match="ascending"):
-        post.clusters([1.0, 0.5])
+    for bad in ([1.0, 0.5], [[0.0, 1.0]]):
+        with pytest.raises(ValueError, match="ascending"):
+            post.clusters(bad)
     assert post.cluster_rtol({"thresholds": np.array([1e-6, 3e-6])}) == pytest.approx(3e-4)
     assert post.cluster_rtol({"thresholds": np.zeros(0), "r_acc": 2e-6}) == pytest.approx(2e-4)
     assert post.cluster_rtol({"thresholds": np.zeros(0)}) == pytest.approx(1e-4)
@@ -538,6 +551,13 @@ def test_element_stress(case, monkeypatch):
         for key, got in (("eps", eps), ("sigma", sig)):
             mean = (w * b[key]).sum(1) / w.sum(1)
             assert np.abs(got[e, 3] - mean).max() <= 1e-13 * np.abs(mean).max()
+    U32 = U.astype(np.float32)
+    for x, y in zip(
+        post.element_stress(mesh, mats, U32, ori),
+        post.element_stress(mesh, mats, U32.astype(float), ori),
+        strict=True,
+    ):
+        assert x.dtype == np.float64 and np.array_equal(x, y)  # fp32 input, cast per batch
     single = [post.element_stress(mesh, mats, U[:, j], ori) for j in range(70)]
     for i, got in enumerate((eps, sig)):
         one = np.stack([x[i] for x in single], 1)
@@ -656,10 +676,15 @@ def test_frequency_table():
     expect.append(cur)
     assert [list(c) for c in t["clusters"]] == expect
     assert rel(t["f"], [np.sqrt(lam[c].mean()) / (2 * np.pi) for c in expect]) <= 1e-14
-    assert rel(t["fraction"], np.array([m_eff[c].sum(0) for c in expect]) / total) <= 1e-12
+    m = np.array([m_eff[c].sum(0) for c in expect])
+    assert rel(t["m_eff"], m) <= 1e-12 and rel(t["fraction"], m / total) <= 1e-12
+    assert rel(t["lam"], [lam[c].mean() for c in expect]) <= 1e-14
+    assert np.array_equal(t["total"], total)
     assert np.abs(t["cumulative"][-1] - 1).max() <= 1e-10
     text = post.format_table(t).splitlines()
     assert len(text) == 1 + len(expect) and "f [Hz]" in text[0]
+    i = next(i for i, c in enumerate(expect) if len(c) > 1)
+    assert text[1 + i].split()[0] == f"{expect[i][0] + 1}-{expect[i][-1] + 1}"
     z = post.frequency_table(lam, m_eff, np.r_[total[:5], 0.0])
     assert (z["fraction"][:, 5] == 0).all() and (z["cumulative"][:, 5] == 0).all()
     mesh, free, lam, V, M = prism(bcs=None)

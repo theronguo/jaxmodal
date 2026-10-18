@@ -49,13 +49,12 @@ batched pass over `B` and one over `A` (a single pass when `B is A`). The test o
 
 ## Influence vectors, participation and effective mass
 
-`influence(mesh, free, origin=None)` returns the 6 rigid-body fields `r (n_dof, 6)`:
-translations $e_x, e_y, e_z$ and rotations $e_k \times (x - x_0)$, with the sign convention of
-`rigid_modes`. Rows of constrained DOFs are 0. `free` is the `dof_mask` (`None` = no
-constraints); it is required, because a forgotten mask on a supported body silently breaks the
-sum rule. The default origin $x_0$ is the unweighted node centroid, as in `rigid_modes`. It is
-neither the centre of mass nor a support point, and the rotational effective masses depend on
-it.
+`influence(mesh, free, origin=None)` returns the 6 rigid-body fields `r (n_dof, 6)`: translations
+$e_x, e_y, e_z$ and rotations $e_k \times (x - x_0)$, with the sign convention of `rigid_modes`.
+Rows of constrained DOFs are 0. `free` is the `dof_mask` (`None` = no constraints); it is required,
+because a forgotten mask on a supported body silently breaks the sum rule. The default origin $x_0$
+is the unweighted node centroid of the whole mesh (`rigid_modes` uses it per part). It is neither
+the centre of mass nor a support point, and the rotational effective masses depend on it.
 
 `participation(V, M, r, batch=64)` returns `gamma (n, 6)`, `m_eff (n, 6)` and `total (6,)`:
 
@@ -120,32 +119,34 @@ the 6 fractions and the 3 translational cumulative fractions.
 
 ## Strain and stress recovery
 
-`RECOVER[t](X, table_e, u)` (`jaxmodal.elements`, see `docs/elements.md`) returns the
-quadrature points $NX$, the weights $w\det J$, and the global Voigt strain and stress (engineering
-shear) at the quadrature points of one element: `hex_recover` ($\varepsilon = Bu$,
+`RECOVER[t](X, table_e, u)` (`jaxmodal.elements`, see `docs/elements.md`) returns the quadrature
+points $NX$, the weights $\omega_q = w_q\det J_q$, and the global Voigt strain and stress
+(engineering shear) at the quadrature points of one element: `hex_recover` ($\varepsilon = Bu$,
 $\sigma = C\varepsilon$, with $C$ rotated to the element's orientation) for hex8/hex20/hex27,
-`shell_recover` (ANS plus condensed EAS strains, per ply) for `ssh8`. For every type
-$u^\top K_e u = \sum_q w_q\,\varepsilon_q\cdot\sigma_q$.
+`shell_recover` (ANS plus condensed EAS strains, per ply) for `ssh8`. For every type $u^\top K_e u =
+\sum_q \omega_q\,\varepsilon_q\cdot\sigma_q$.
 
 - `recover(mesh, materials, u, orientations=None, chunk=1024)` takes one field `u (n_dof,)` and
-  returns per block `{"points" (n_e, nq, 3), "weights" (n_e, nq), "eps", "sigma" (n_e, nq, 6)}`.
+  returns a dict keyed by element type (`out["hex20"]`, in block order) of `{"points" (n_e, nq,
+  3), "weights" (n_e, nq), "eps", "sigma" (n_e, nq, 6)}`.
   `ssh8` padded plies have weight 0. Use it for quadrature-point detail on a few modes and for
   per-ply values on laminates.
 - `element_stress(mesh, materials, U, orientations=None, chunk=1024, batch=64)` returns the volume
-  averages `(eps, sigma)`, $\bar\varepsilon_e$ and $\bar\sigma_e = \sum_q w_q\sigma_q/\sum_q w_q$,
-  each `(n_el, k, 6)` in element order (1-D `U`: `(n_el, 6)`). On laminates the average mixes the
-  plies. For hex elements the kernel averages the gradients first, $\bar\varepsilon_e = S(\bar
-  G_e^\top u_e)$ with $\bar G_e = \sum_q w_q G_q/\sum_q w_q$, and $\bar\sigma_e =
-  C_e\bar\varepsilon_e$ ($\varepsilon$ is linear in $u$ and $C_e$ constant), which equals the
-  weighted mean of `hex_recover` without the per-point work per column; `ssh8` averages
-  `shell_recover`'s points (per-ply $C$).
+  averages `(eps, sigma)`, $\bar\varepsilon_e$ and $\bar\sigma_e = \sum_q \omega_q\sigma_q/\sum_q
+  \omega_q$, each `(n_el, k, 6)` in element order (1-D `U`: `(n_el, 6)`). On laminates the average
+  mixes the plies. For hex elements the kernel averages the gradients first, $\bar\varepsilon_e =
+  S(\bar G_e^\top u_e)$, $S$ the symmetric part in Voigt form (engineering shear), with $\bar G_e =
+  \sum_q \omega_q G_q/\sum_q \omega_q$, and $\bar\sigma_e = C_e\bar\varepsilon_e$ ($\varepsilon$ is
+  linear in $u$ and $C_e$ constant), which equals the weighted mean of `hex_recover` without the
+  per-point work per column; `ssh8` averages `shell_recover`'s points (per-ply $C$).
 - `von_mises(sigma)`: $\sqrt{\tfrac12[(\sigma_{11}-\sigma_{22})^2 + (\sigma_{22}-\sigma_{33})^2
   + (\sigma_{33}-\sigma_{11})^2] + 3(\sigma_{23}^2 + \sigma_{13}^2 + \sigma_{12}^2)}$ in Voigt
   order. The von Mises stress of the element average is not the average of point values.
 
 Both run the material, laminate and element checks (`check_elements(mesh, "consistent")`), as
-`assemble` does. A mass-normalized mode gives stresses per unit modal amplitude; stresses do not
-depend on the mass model. Mode shapes have no physical amplitude, so only ratios (stress
+`assemble` does. They use the materials' $C$ unscaled: `s_K` from `op.scaled` is not applied (SIMP
+stresses are PR 21/23). A mass-normalized mode gives stresses per unit modal amplitude; stresses do
+not depend on the mass model. Mode shapes have no physical amplitude, so only ratios (stress
 distribution, hot spots) are meaningful without a forced or base-excitation response.
 
 ## Export
@@ -170,7 +171,8 @@ write `format_table` next to it. XDMF/HDF5 and parallel output are PR 19.
 
 After `solve_modes`, with `mesh`, `materials` and `bcs` as in the solve (here 12 modes at a tight
 tolerance, so that the clusters are sharp). The operator is the one `solve_modes` builds
-(`info["operator"]`), with the same `mass`, `nodal_mass` and `orientations`:
+(`info["operator"]`), with the same `mass`, `nodal_mass` and `orientations`; pass `orientations`
+to `element_stress` too:
 
 <!-- recipe -->
 ```python
@@ -207,7 +209,7 @@ Stacking the small `(n, 6)` outputs avoids `np.hstack([info["rigid"], V])`, whic
 | `normalize(V, M)` | n | the output (a copy of V) | $\approx (3 + \text{ws})\,w\,n_\text{dof}\cdot 8$ B |
 | `mac(A, B, M)` | $n_A + n_B$ ($n_B$ when `B is A`) | $8\,n_A n_B$ B | same |
 | `participation(V, M, r)` | $n + 6$ | $O(6\,n_\text{dof})$ | same |
-| `element_stress` | none | $96\,n_\text{el}(k + kb)$ B | $8\,n_\text{dof}\,kb$ B + one chunk |
+| `element_stress` | none | $96\,n_\text{el}(k + kb) + 8\,n_\text{dof}\,kb$ B | $8\,n_\text{dof}\,kb$ B + one chunk |
 
 - $w = \min(\text{batch}, n)$, ws the operator's own workspace per column; the device holds
   the batch, its product and the product dispatched ahead. Host memory is the inputs plus
@@ -220,19 +222,21 @@ Stacking the small `(n, 6)` outputs avoids `np.hstack([info["rigid"], V])`, whic
 - The host GEMM of `_gram` ($A^\top MB$) is $2 n_A w\,n_\text{dof}$ flops per batch.
 - `element_stress` runs `ceil(k / batch)` × (blocks × chunks) kernel calls; geometry and the
   `ssh8` EAS factorization are computed once per chunk and column batch (not per column).
-  `recover` is one pass per field.
-- VTU size: $24\,n_\text{nodes}$ B per mode raw; meshio base64-encodes the zlib blocks, so mode
-  shapes take about 28–31 B per node (0.85 of raw for `solve_modes` modes, 0.78 for random
-  fields; only smooth synthetic fields compress 2.6–3.8×). meshio builds each array in memory,
+  The host gather and setup per chunk repeat for every column batch, so a larger `batch`
+  amortizes them at $8\,n_\text{dof}\,kb$ B of device memory. `recover` is one pass per field.
+- VTU size: $24\,n_\text{nodes}$ B per mode raw; zlib keeps about 0.9 (`solve_modes` modes) to
+  0.96 (random fields) of it and meshio's base64 adds 4/3, so mode shapes take about 28–31 B per
+  node (only smooth synthetic fields compress 2.6–3.8×). meshio builds each array in memory,
   so export `V[:, sel]` for large models.
-- Compiles: one `apply_M` per batch width, one recovery kernel per (type, chunk, kb) and per ply
-  count for `ssh8`; repeat calls compile nothing.
+- Compiles: one `apply_M` per batch width, one recovery kernel per (type, effective chunk
+  $\min(\text{chunk}, n_e)$, kb) and per ply count for `ssh8` (`recover`: no kb); repeat calls
+  compile nothing.
 
-Measured once (M-series laptop CPU, 64 GB, hex20 $43^3$ box, 1.0M DOF, 79.5k elements, 256
-random columns): `_gram` $V^\top MV$ 1.6 s (0.41 s per 64-column batch, of which the host GEMM
-is 0.06 s, overlapped with the next `apply_M`; the GEMM grows with $n_A$), `participation`
-1.7 s (fp32 V: `_gram` 1.7 s, host peak 1.5 GB), `normalize` 2.3 s with a host peak of 1.25× V,
-`element_stress` of 64 columns 0.32 s (about 55 ms setup plus 2.2–2.9 ms of kernel per
-1024-element chunk; `ssh8` one ply: 16 ms) with a host peak of 0.97 GB. Process peak RSS 6.8 GB,
-of which V is 1.9 GB and the operator and mesh 1.7 GB; outputs kept afterwards (the `normalize`
-copy) come on top.
+Measured once (M-series laptop CPU, 64 GB, hex20 $43^3$ box, 1.0M DOF, 79.5k elements, 256 random
+columns; host peaks above the inputs): `_gram` $V^\top MV$ 1.6 s (0.41 s per 64-column batch, of
+which the host GEMM is 0.06 s, overlapped with the next `apply_M`; the GEMM grows with $n_A$),
+`participation` 1.7 s (fp32 V: `_gram` 1.7 s, host peak 1.5 GB), `normalize` 2.3 s with a host peak
+of 1.25× V, `element_stress` of 64 columns 0.32 s (about 55 ms setup plus 2.2–2.9 ms of kernel per
+1024-element chunk; `ssh8` one ply: 16 ms) with a host peak of 0.97 GB. Process peak RSS 6.8 GB, of
+which V is 1.9 GB and the operator and mesh 1.7 GB; outputs kept afterwards (the `normalize` copy)
+come on top.

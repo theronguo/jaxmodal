@@ -235,7 +235,8 @@ Without user input (16c, plan `docs/plans/pr-16c-accuracy.md`; the frame's decis
 - **Hex element averages** (code review): `element_stress` averages the hex gradients before applying them to $u$ (8× faster at 1M DOF, equal to the mean of `hex_recover` to round-off) instead of reducing `RECOVER` point values as the plan said; `ssh8` keeps the point reduction (per-ply $C$).
 - **Host pull:** device `V` is pulled to the host once and batches are put back (the plan said the fp64 cast happens on the device); the host GEMM needs it there anyway.
 - **VTK tensor order:** `write_modes` passes data unchanged; the docs' recipe reorders to XX, YY, ZZ, XY, YZ, XZ and halves strain shear.
-- **Deferred:** nodal stress smoothing; time-series and animation files; `jax.grad` through the postprocessor (the `RECOVER` kernels stay pure JAX for a later stress constraint); `s_K` scaling of recovered stresses (SIMP stress, PR 21/23); multi-host or sharded `V` (PR 19: the batched reductions become `psum`s, the chunk loops per shard).
+- **Deferred:** nodal stress smoothing; time-series and animation files; `jax.grad` through the postprocessor (the `RECOVER` kernels stay pure JAX for a later stress constraint); `s_K` scaling of recovered stresses (SIMP stress, PR 21/23); multi-host or sharded `V` (PR 19: the batched reductions become `psum`s, the chunk loops per shard). PR 18: pipeline `assembled._chunked` (dispatch chunk i+1 before pulling chunk i; 8% on CPU in `element_stress`, more on GPU, also used by `assemble`).
+- **CPU batch lifetime** (code review round 3): on CPU, `device_put` of a NumPy batch keeps it alive until Python's garbage collector runs (up to two extra batches, bounded); a copying `jnp.array` frees it at once but compiles an extra copy kernel, so the alias is kept.
 
 ### MINRES plateaus below $\|b\|$ (PR 15c)
 

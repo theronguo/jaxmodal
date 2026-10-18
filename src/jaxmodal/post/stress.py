@@ -9,6 +9,7 @@ from ..elements import RECOVER, kernels
 from ..operators.assembled import _blocks, _chunked, _tables
 from ..operators.common import check_x64
 from ..operators.dofmap import element_dofs
+from .modal import _batches
 
 
 def _full(rec):
@@ -96,16 +97,12 @@ def element_stress(mesh, materials, U, orientations=None, chunk=1024, batch=64):
     U = _field(U, 3 * len(mesh.points), (1, 2))
     one = U.ndim == 1
     U = U[:, None] if one else U
-    k = U.shape[1]
-    kb = max(min(batch, k), 1)
-    eps, sigma = np.empty((mesh.n_el, k, 6)), np.empty((mesh.n_el, k, 6))
-    for j in range(0, k, kb):
-        m = min(kb, k - j)
-        b = np.asarray(U[:, j : j + m], np.float64)
-        b = jnp.asarray(b if m == kb else np.pad(b, ((0, 0), (0, kb - m))))
+    eps, sigma = np.empty((mesh.n_el, U.shape[1], 6)), np.empty((mesh.n_el, U.shape[1], 6))
+    for cols, b in _batches(U, batch):
+        m, b = cols.stop - cols.start, jnp.asarray(b)
         for t, conn, e, p in blocks:
             ee, ss = _chunked(_MEAN[t], mesh.points, conn, p, chunk, b)
-            eps[e, j : j + m], sigma[e, j : j + m] = ee[:, :m], ss[:, :m]
+            eps[e, cols], sigma[e, cols] = ee[:, :m], ss[:, :m]
     return (eps[:, 0], sigma[:, 0]) if one else (eps, sigma)
 
 
