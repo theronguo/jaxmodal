@@ -62,11 +62,27 @@ slender beams" entry of `docs/open_items.md`.
     acceptance check right after it; the polish triggers on any $r_i > t_i$ up to $j$.
   - **`_precond_sigma`:** gets the switch and the final Rayleigh–Ritz (no `stop`; its
     upper-bound docstring now holds), stated and tested.
-  - **Smaller:** polish only for the shell family (hex: polish ≤ step tested);
+  - **Smaller:** the polish memory term only for the shell family (hex: below the modelled
+    step, tested);
     `info["polishes"]` dropped; the polish term counts the output block; `X = X0 = None`
     after `_begin`; `t_iteration` over 9-block iterations only; the 791k build and solve
     peaks from one subprocess; tests reworked (exact dense inverse-iteration fake, a degrading
     fake, live bytes relative to a baseline, one parametrized `switched is None` test).
+- **Revision 6 (plan review round 5; correctness, simplicity, docs, performance satisfied):**
+  - **Tests that failed as specified:** the dense polish tests start from exact eigenvectors
+    plus high-frequency noise below tol (one inverse-iteration step does not remove
+    low-frequency noise: r/t stayed about $10^3$ with $10^{-3}$ noise; measured 7.8 → 0.002
+    with the new start); `_precond_sigma`'s bound tested up to the `check_lam` floor (a
+    converged round keeps the step's λ, 1.8e-6 below `eigsh` at $L/t$ = 1000).
+  - **Simpler:** accept-or-revert instead of keeping the better X; one info key `polish`
+    (PCG iterations or None, as `switched`); `SWITCH` renamed `SWITCH`; no switch when a
+    `stop` callback is given (`sigma_estimate` bitwise unchanged); the projector masks the
+    coefficients, not a slice of B.
+  - **Stated:** the flags of a `STALL` / `maxit` exit accepted by the final Rayleigh–Ritz;
+    the Ritz upper bound exact for the first chunk, up to the locked basis' accuracy later;
+    the polish fit includes the web, block and stack ×10 meshes (polish above the step
+    there by up to 13.7 blocks at web $64^2$, $m$ = 8).
+  - **Tests and docs lists completed** (the existing tests a switch reaches, measured).
 
 ## Goal (18b)
 
@@ -88,7 +104,7 @@ slender beams" entry of `docs/open_items.md`.
 - Band mode reuses the AMG aggregates on shells as on hex meshes (`return_aggregates`, already
   generic).
 
-## Findings (sizing study and review rounds 1–3, CPU fp64, M3 Max)
+## Findings (sizing study and review rounds 1–5, CPU fp64, M3 Max)
 
 ### `solve_modes` with shell AMG works as is below $L/t \approx 200$
 
@@ -159,7 +175,7 @@ $r_i > t_i$ one polish step (PCG tol $10^{-11}$ in this run), then explicit resi
 | $32^2$, $L/t = 100$ | $10^{-10}$ | 170, stalled | 23 | 30, converged | none |
 | $32^2$, $L/t = 300$ | $10^{-6}$ | 190, stalled | 21 | 111, converged | none |
 | $32^2$, $L/t = 1000$ | $10^{-6}$ / $10^{-10}$ | 210, stalled | 27 | 109, stalled, 1.78 | 1 step (0.042), 224 PCG its, 9.2 s |
-| $128^2$, $L/t = 1000$ | $10^{-6}$ | 130, stalled | 21 | 122, stalled, 0.92 (a column) | 1 step (0.043), 122 PCG its, 54 s |
+| $128^2$, $L/t = 1000$ | $10^{-6}$ | 130, stalled | 21 | 122, stalled, 0.92 (a column) | 1 step (0.043), 122 PCG its, 54 s (whole solve with build and compile, before the barrier; re-measured in the benchmark) |
 | stack $32^2\times3$, $L/t = 100$ | $10^{-10}$ | 250, stalled | 26 | 105, converged | none |
 | $32^2$, $L/t = 1000$, 30 modes, chunks of 10 | $10^{-6}$ | | 28 / 24 / 24 | stalled | 1 step per chunk (0.039, 0.038, 0.037) |
 | free $24^2$, $L/t = 50$ | $10^{-10}$ | 130, leaked | yes | converged, `check_lam` passes (1.7e-10) | none |
@@ -270,20 +286,25 @@ round 4).
 
 ### Low-memory switch (`eigen/lobpcg.py`)
 
-- `EXPLICIT = 5` (stuck iterations before the switch). In `_iterate` (9-block mode), when
-  `it - it_best >= EXPLICIT` for the first time in a chunk, `_to_low(X, P, ...)` (one jit,
+- `SWITCH = 5` (stuck iterations before the switch). In `_iterate` (9-block mode), when
+  `it - it_best >= SWITCH` for the first time in a chunk, `_to_low(X, P, ...)` (one jit,
   donating X and P; the 9-block state's other buffers are dropped first) deflates X and P
   against $R$ and the locked basis (`_deflate`) and returns the low state `(X, P, actP, λ)`;
   the rest of the chunk runs `lobpcg_step_low` with `c = k` (the low step's own width, so
   `STEP_FIT["low"]` holds). The progress window (`best`, `best_l`, `it_best`) resets at the
   switch, so the low step gets a full `STALL` window (new since the prototype: the "switch:
   its" column above is re-measured). Sticky: returning to the recurrences re-stalls
-  (measured trigger form).
+  (measured trigger form). `_to_low` deflates X and P but does not re-orthonormalize X: the
+  leak builds up only after the switch point (measured at the switch on free $24^2$, $L/t$ 50
+  and 1000, and the cylinder: $\|R^\top MX\|$ 0 to 4 digits, $\operatorname{diag}(X^\top MX)$
+  = $1 - 10^{-15}$). No switch when a `stop` callback is given (the σ estimates' iterations
+  stay the 9-block step's).
 - **`_project` clamp-safe** (review round 4): in band mode the capacity is a multiple of the
   9-block `c` (`_capacity`), so after a lock `count + k` can exceed it and a `c = k` chunk
   would start past the end (`dynamic_slice` clamps the start; columns already projected were
-  subtracted again). The body slices at `min(i c, cap - c)` and zeroes the columns outside
-  `[i c, count)`; unchanged results for every `c` that divides the capacity.
+  subtracted again). The body slices at $s = \min(ic, \text{cap} - c)$ and masks the $c\times k$
+  coefficients `Bc.T @ MY` to the columns in $[ic, \text{count})$ (no new $n\times c$
+  temporary; measured: `test_step_memory`'s blocks identical); unchanged results for every `c` that divides the capacity.
 - `t_iteration` (`t_warm / it`) counts warm 9-block iterations only: the switch iteration
   (it compiles the low step: one extra compile per shape) and the low iterations after it are
   left out of both sums (it feeds `counting.py:155`'s bound, made for the 9-block step).
@@ -297,18 +318,25 @@ round 4).
 it; `state = (X,) + state[1:]` in `_solve` becomes `X = ...`; `_explicit`'s low branch goes):
 
 - **converged:** as today (`_confirm` products; acceptance after the explicit check).
-- **`stop` callback** (σ estimates): as today (`_confirm` residuals, λ unchanged).
+- **`stop` callback** (σ estimates): as today (`_confirm` residuals, λ unchanged; no switch,
+  no `_final_rr`).
 - **`STALL` or `maxit`:** `_final_rr(X)` = `_start(X)` (deflation against $R$ and the basis,
   then SVQB) and `_rr_start`: X rotated, λ the Ritz values of the deflated pencil (ascending;
-  by Courant–Fischer each an upper bound of its eigenvalue, also when X held leaked rigid or
-  basis components), explicit $r$, $t$ (`_confirm`). If SVQB drops a column, λ and X stay as
+  by Courant–Fischer each an upper bound of its eigenvalue, also when X held leaked rigid
+  components; exact for the first chunk, later chunks up to the locked basis' accuracy
+  ($\lambda_i \le \mu_i \le \lambda_{\text{count}+i}$)), explicit $r$, $t$ (`_confirm`).
+  `_final_rr` and the polish's `_start` use the solve's 9-block `c` (reusing `_begin`'s
+  compiled `_start`). If SVQB drops a column, λ and X stay as
   they were (today's behaviour). The polish's step 4 acceptance runs on this result first (a
-  `STALL` exit whose Ritz vectors already pass converges). Then, on a `STALL` exit with
+  `STALL` exit whose Ritz vectors already pass converges, `stagnated` True; a `maxit` exit
+  that passes converges, `stagnated` by the rule below). Then, on a `STALL` exit with
   `polish` given and some $r_i > t_i$ up to $j$, the polish below. Then, with `lock` and
   $r_i^2 \le t_i$ for the wanted columns, the guard check (`_extent(..., failed=True)`). A
   `fix:` commit of its own (all solvers, hex too). `sigma_estimate` (the `stop` exit) is
-  unchanged; `_precond_sigma` (no `stop`) gets it on its `maxit` rounds, which makes its
-  documented upper bound hold, and its rounds can switch (measured: a 4-iteration stuck
+  unchanged; `_precond_sigma` (no `stop`) gets it on its `maxit` rounds, so their λ is a Ritz
+  value (an upper bound up to the rounding floor; converged rounds keep the step's value,
+  measured 1.8e-6 below `eigsh` at $L/t$ = 1000 on free $24^2$, inside the floor $2\cdot10^{-3}$),
+  and its rounds can switch (measured: a 4-iteration stuck
   window on free $24^2$ at $L/t$ = 1000).
 - `_solve` drops the start block after `_begin` (`X = X0 = None`), so only the chunk's own
   state is live during `_iterate` and at the polish (one block less at the step peak too).
@@ -317,22 +345,23 @@ it; `state = (X,) + state[1:]` in `_solve` becomes `X = ...`; `_explicit`'s low 
 
 - `lobpcg(..., polish=None)`, also `_solve`. `polish`: a host callable `X -> (Y, iterations)`
   with $Y \approx A_P(\sigma)^{-1} M_m X$ (masked), $A_P$ SPD.
-- From `_final_rr`'s X, λ, r, t: $w_0$ = worst $r_i/t_i$ up to $j$. One step:
+- From `_final_rr`'s X, λ, r, t, one step:
   1. $Y$, its = `polish(X)` on the whole block ($m$ columns); only X and λ of the chunk are
      live (`_iterate` returned no state; the start block was dropped);
   2. `_start(Y)` (deflation against $R$ and the basis, SVQB) and `_rr_start`; if SVQB drops a
      column or Y is not finite, the polish is discarded;
-  3. explicit residuals and thresholds of the new X (`_confirm`), $w_1$;
+  3. explicit residuals and thresholds of the new X (`_confirm`);
   4. if every wanted $r_i \le t_i$: $j$ = max($j$, `_extent(...)`) on the new Ritz values;
      accept (the chunk converges) when every $r_i \le t_i$ up to $j$;
-  5. otherwise keep whichever of the two X has the smaller worst ratio (a polish never makes a
-     failed exit worse).
+  5. otherwise revert to `_final_rr`'s X, λ, r, t (a polish that does not accept leaves the
+     result bitwise equal to `on=False`).
 - No LOBPCG step follows a polish. A `maxit` exit is not polished (`maxit` is the user's
   budget; documented). Multi-step polishing is not built (every measured case accepts in one
   step after the switch; before the switch 4–6 steps were needed; logged).
 - **Flags:** a polished chunk that accepts is `converged` True. `stagnated` keeps its meaning:
   True for a `STALL` exit (polished or not) and for a floor acceptance with some $r_i >$ tol.
-- `info["chunks"][i]`: `polished` (bool) and `polish_iterations` (no total, as `switched`).
+- `info["chunks"][i]["polish"]`: the PCG iterations of the polish, None if none ran (as
+  `switched`; whether it accepted is `converged`).
 - `solve_modes` passes `polish` for `precond="amg"` (shell and hex meshes) on every LOBPCG run
   except `_precond_sigma`'s 1-mode estimate. The closure builds $A_P$ = `ap_operator(op, free,
   σ)` once and uses LOBPCG's own `P` and σ: `X -> pcg(A_P, m M X, P, ptol, maxit)` returning
@@ -352,8 +381,9 @@ it; `state = (X,) + state[1:]` in `_solve` becomes `X = ...`; `_explicit`'s low 
   V-cycle's preprocessing inside the loop. Review round 4, flat $64^2$: shell MINRES ($b$ = 6)
   456 → 187 MB, 100 iterations 2.27 → 1.91 s; the recurrence 421 → 158 MB ($b$ = 4), 484 →
   218 MB ($b$ = 16); PCG as in the table above. Hex AMG, voxel GMG, p-MG: neutral or faster
-  (p-MG temps 191 → 98 blocks); the recurrence temps of `test_step_memory`'s cases bitwise
-  unchanged.
+  (p-MG temps 191 → 98 blocks), Jacobi bitwise equal; the recurrence temps of
+  `test_step_memory`'s cases bitwise unchanged, elsewhere ≤ the count model (voxel GMG
+  $32^3$ $b$ = 16 +1.9%, ratio to `GMG_COUNT` ≤ 0.97 up to $64^3$).
 - **Cost:** one PCG solve at width $m$ (113–224 V-cycles measured, each about one LOBPCG step);
   at most `maxit` = 500. The `STALL` = 50 iterations before it stay (an earlier trigger logged,
   not built).
@@ -367,8 +397,11 @@ it; `state = (X,) + state[1:]` in `_solve` becomes `X = ...`; `_explicit`'s low 
 - polish $= f\cdot\text{ws} + \texttt{pc["polish"]}$ when the preconditioner estimate has a
   `polish` key (the AMG shell family only): `pc["polish"]` $= 8n(a_P m + c_P) + 8mK_P$, the
   `_pcg` temporaries with the barrier plus its output block, X and b, fitted at $m$ = 8 / 15 /
-  25 (upper envelope; flat $64^2$–$256^2$, stack). Hex AMG has no key: its polish is 0.7–1
-  block below both steps (measured, tested). With `polish_options={"on": False}` the key is
+  25 (upper envelope; flat $64^2$–$256^2$, stack ×3 and ×10, web $64^2$, block $32^3$: the
+  polish exceeds the larger step by up to 13.7 blocks on web $64^2$ at $m$ = 8; valid from
+  25k DOF, as the step fit). Hex AMG has no key: its measured polish is within ±1.3 blocks of
+  the measured steps and 10–29 blocks below the modelled step (hex20 $14^3$, hex8 $24^3$,
+  $40^3$; tested). With `polish_options={"on": False}` the key is
   dropped.
 
 ### `amg_memory` shell family (`memory.py`)
@@ -441,43 +474,47 @@ skip for the build-peak tests; no wall-time asserts (no `serial`).
      sparse variants `r_M_sparse` / `max_sine_sparse` in `helpers.py` (`splu` of $M_f$;
      $\|L^\top E\|_2 = \sqrt{\lambda_\max(E^\top M E)}$), the dense ones unchanged;
    - V M-orthonormal; on the free cases $\|R^\top MV\| \le 10^{-10}$ (fails on `main`: 0.96);
-   - no chunk `polished` on all eight; `chunks[0]["switched"]` not None on the stack and the
+   - `polish` None on every chunk of all eight; `chunks[0]["switched"]` not None on the stack and the
      free cases; `info["iterations"]` ≤ 30 on the curved panel (replaces the Jacobi
      wall-time comparison; measured before pinning).
 3. **Low-memory switch:**
-   - $32^2$, $L/t = 100$, tol $10^{-10}$: converges, not polished, `switched` not None;
+   - $32^2$, $L/t = 100$, tol $10^{-10}$: converges, `polish` None, `switched` not None;
    - one parametrized test: representative AMG / GMG / p-MG solves (`test_gap_band`'s
      pencil, the clamped hex20 box at tol $10^{-8}$, a voxel GMG and a p-MG case) have
      `switched is None` on every chunk and λ bitwise equal to the same solve with
-     `EXPLICIT` monkeypatched to infinity (measured: no converging AMG / GMG / p-MG chunk
+     `SWITCH` monkeypatched to infinity (measured: no converging AMG / GMG / p-MG chunk
      switches; 11 of 516 chunks switch, all Jacobi);
    - `_project` unit test: a capacity of 10, `c` = 4, count 8, 9 and 10: $B^\top M Z$ ≤
      $10^{-13}$ (fails today at 9 and 10: 1.44), and bitwise unchanged where `c` divides the
      capacity; a band solve with `chunk` chosen so a switched chunk starts with count + k >
-     cap (monkeypatched `EXPLICIT` = 1 if needed) matches the reference;
-   - `_to_low` unit test: an injected rigid / basis component ($10^{-6}$) in X and P is gone
-     ($\le 10^{-13}$) and the low step continues from it;
+     cap (monkeypatched `SWITCH` = 1 if needed) matches the reference;
+   - `_to_low` unit test (fp64 basis): an injected rigid / basis component ($10^{-6}$) in X and
+     P is gone ($\le 10^{-13}$) and the low step continues from it;
    - `test_compiles`: a switch adds exactly one low-step compile (and one `_to_low`) per
      shape, none on a second switching solve of the same shape (the 5th solve there switches
      at iteration 130; the expected list stated in the test).
 4. **Polish:**
    - $32^2$, $L/t = 1000$, tol $10^{-6}$ (module fixture, also used by test 5): with
      `on=False` `converged` False, `stagnated` True; with the default `converged` and
-     `stagnated` True, `polished`, the iteration count equal to the unpolished run's,
-     `polish_iterations` in 50–400; residuals recomputed from the assembled K, M ≤ the
+     `stagnated` True, `polish` in 50–400, the iteration count equal to the unpolished run's; residuals recomputed from the assembled K, M ≤ the
      thresholds; λ against the Rayleigh quotients of V (as test 5) and `check_lam`; a `pcg`
      spy: one call with `maxit` 500 and `tol` $10^{-7}$ (the defaults);
    - free thin plate ($24^2$, $L/t = 1000$, tol $10^{-6}$): `check_lam`,
      $\|R^\top M V\| \le 10^{-10}$;
    - chunked ($n$ = 30, chunks of 10, fp64 and fp32 basis) and band mode with `chunk=10` on
-     the thin plate, one test (slow): every chunk polished, `polish_iterations` ≤ 500, no
-     mode twice, $V^\top MV - I$ within the PR 9 bounds, `check_lam` (fp32 and band
+     the thin plate, one test (slow): every chunk converged, `polish` ≤ 500 where not None
+     and not None on the fp64 chunks (measured), no mode twice, $V^\top MV - I$ within the PR 9 bounds, `check_lam` (fp32 and band
      measured before pinning);
    - live bytes: `gc.collect()` and a baseline of `jax.live_arrays()` bytes just before the
-     `lobpcg` call; a fake `polish` records the bytes on entry on a stalling diagonal case;
-     entry − baseline ≤ basis + R + MR + X + one block;
+     `lobpcg` call; a fake `polish` runs `gc.collect()` and records the bytes on entry on a
+     stalling diagonal case ($n$ large enough that a block dominates); entry − baseline ≤
+     basis + X + one block (R, MR are in the baseline);
    - dense unit tests on a PR 9 pencil, `STALL` forced (a small monkeypatched `STALL` and a
-     zero preconditioner), `X0` = exact eigenvectors + $10^{-3}$ noise, `C_FLOOR` unchanged:
+     zero preconditioner), `X0` = the $m$ lowest exact eigenvectors + $\delta\,V_\text{hi} G /
+     \sqrt{n_\text{hi}}$ ($V_\text{hi}$ the upper half of the dense eigenvectors, $G$ Gaussian,
+     $\delta = 10^{-2}\,\mathrm{tol}$; review round 5: r/t 7.8 → 0.002 after one exact step,
+     where $10^{-3}$ noise of all frequencies stays at about $10^3$), `C_FLOOR` unchanged; all
+     fakes share this start:
      - an exact dense inverse-iteration fake, `Y = solve(K_f + σM_f, M_f X)`, accepts;
      - a degrading fake (X + O(1) noise) keeps the pre-polish X: λ, V bitwise equal to the
        `on=False` run; the identity fake runs without a raise (`allclose`);
@@ -486,6 +523,8 @@ skip for the build-peak tests; no wall-time asserts (no `serial`).
      - one case with `low_memory=True`;
      - a polished result with a cluster at the block boundary extends $j$;
      - the failed-exit guard check runs only after a polish that did not accept;
+   - `t_iteration`: with `SWITCH` monkeypatched small and the per-iteration times spied, it
+     equals the mean of the warm 9-block iterations;
    - option errors (`on` not a bool, `tol` ≤ 0, non-int `maxit`, unknown keys, with
      `precond="jacobi"`, with "auto" on `ssh8` + `hex20` (label "auto (resolved to
      jacobi)")).
@@ -493,32 +532,36 @@ skip for the build-peak tests; no wall-time asserts (no `serial`).
    $\max_i |\lambda_i - v_i^\top K v_i / v_i^\top M v_i|/\lambda_i \le 10^{-6}$ with the
    solver's matrix-free op (measured $3.3\cdot10^{-8}$; `main` $6.4\cdot10^{-5}$); off-diagonal
    of $V^\top K V$ over its diagonal ≤ $10^{-7}$ (measured $1.8\cdot10^{-9}$; `main`
-   $3.2\cdot10^{-7}$); residuals equal to ones recomputed with the returned λ; a monkeypatched
-   SVQB drop leaves λ, X as before. `sigma_estimate`: σ equal (rtol $10^{-12}$) to the same
-   call with `_final_rr` monkeypatched out. `_precond_sigma` on the free $24^2$ plate:
-   σ ≥ the reference $\lambda_1$ (the upper bound). `test_stagnation`'s maxit-exit residual
+   $3.2\cdot10^{-7}$); residuals equal (rtol $10^{-5}$, as `test_stagnation`) to ones
+   recomputed with the returned λ; a monkeypatched SVQB drop leaves λ, X as before.
+   `sigma_estimate`: spies assert neither `_final_rr` nor `_to_low` runs on `stop` exits.
+   `_precond_sigma` on the free $24^2$ plate at $L/t$ = 1000: σ ≥ $\lambda_{1,\text{ref}}(1 -
+   10\varepsilon\lambda_\max/\lambda_1)$ (the `check_lam` floor), and a spy sees at least one
+   `maxit` round (two measured) whose λ equals the Rayleigh quotient of its vector. `test_stagnation`'s maxit-exit residual
    check still holds (its `_confirm` counting spy adjusted).
 6. **Memory:**
    - `lobpcg_memory`: step = max(9-block, low, polish) and max(low, polish); no polish term
      for Jacobi, GMG, p-MG, hex AMG or with `on=False`; one case where the low term wins
      (hex8 AMG, 100k) and one where the polish wins (flat $64^2$);
    - the polish model ≥ the measured `_pcg` temporaries (with the barrier) + output + X + b
-     on flat $64^2$ and $128^2$ at $m$ = 8 / 15 / 25, within 1 block on $128^2$; on hex8
-     $40^3$ the measured polish ≤ both measured steps;
+     on flat $64^2$ and $128^2$, web $64^2$, block $32^3$ and stack ×10 at $m$ = 8 / 15 / 25,
+     within 1 block on $128^2$; hex AMG: the modelled step ≥ the measured polish on hex20
+     $14^3$, hex8 $24^3$ and $40^3$ at $m$ = 8 / 25 (measured: 10–29 blocks above);
    - shell MINRES temps ($b$ = 6, flat $64^2$ and $128^2$) ≤ `si_memory`'s minres phase;
      `test_counting::test_step_memory` and the slice-memory tests re-run (barriers);
    - `amg_memory` shell storage ≥ the owned device bytes on every case (flat, stack ×3 and
      ×10, T, web, block, cylinder, L-fold, a $48^2$ plate); the scan's sorted level-0 patch
      sizes equal the built hierarchy's; total within 1.3× on flat $128^2$ and block $32^3$
-     (slow); an out-of-fit size (flat $362^2$, slow);
+     (slow); `_shell_scan` cached (as `test_amg_scan_cached`);
    - step and step_low ≥ the measured step at $m$ = 8 and 15 (flat $64^2$ and $128^2$, stack,
      T, block) and with a basis present, within 1 block of the model on two tight cases
      (slow), a degree-3 case;
    - count ≥ the measured recurrence at $b$ = 4 and 16 on flat $128^2$, within 1.3× at 16;
    - build ≥ the host peak in fresh subprocesses on flat $128^2$, T 3/3 and block $32^3$;
      block $64^3$ (837k): ≥ the peak and ≤ 1.35× (model 1.27×); flat $362^2$ (791k), one
-     subprocess running `solve_modes` (20 modes, tol $10^{-6}$): the peak after the AMG
-     build ≥ the build model and ≤ 1.3× (model 1.20×), the final process peak within ±20% of
+     subprocess running `solve_modes` (20 modes, tol $10^{-6}$): storage ≥ the owned device
+     bytes (the out-of-fit size), the build model ≥ the peak after the AMG build (above the
+     operator) and ≤ 1.3× it (model 1.20×), the final process peak within ±20% of
      `solve_modes_memory` (measured before pinning; `peak`, slow, darwin; the 13b precedent;
      the ≥ 2 GB rule of `ROADMAP.md:184`);
    - `_pc_builds` composition: `solve_modes_memory` on a shell mesh sums as on hex meshes;
@@ -539,7 +582,15 @@ skip for the build-peak tests; no wall-time asserts (no `serial`).
      `amg_memory` refusal tests, `test_stagnation` (test 5), `test_compiles` (test 3);
    - re-run, may move: the hex AMG estimate tests (`test_mac_acceptance`, peak, slow: the
      low-step max adds up to 4% below 240k DOF; est/peak 1.00 → about 1.04, band ±20%),
-     free-body pinned results (the failed-exit RR), `test_counting::test_step_memory`;
+     free-body pinned results (the failed-exit RR), `test_counting::test_step_memory`; the
+     chunks a switch reaches (prototype regression log, round 5: `test_floor[clamped]` at
+     230, whose history-minimum ratio assert 0.1–10 may move, `test_multiplicities[beam]`
+     and `[cube]`, `test_cluster_at_chunk_boundary`, `test_near_singular_mass`,
+     `test_guard_error` at 406, plus the failed-exit RR before its guard check),
+     `test_failed_chunk` (failed-exit λ), `tests/test_readme.py::test_readme_snippets` (the
+     laminate snippet under AMG, `maxit` dropped);
+   - `helpers.py`: `r_M_sparse` / `max_sine_sparse` equal the dense versions (rtol
+     $10^{-10}$) on a small pencil;
    - `test_step_memory` (`tests/test_lobpcg.py:511`), `test_estimate_chunks` and the
      `STEP_FIT` pins: unchanged by design, run as the check.
 9. **Benchmark smoke** (slow): `shell_solve_study --parts` at small sizes records counts,
@@ -555,12 +606,13 @@ skip for the build-peak tests; no wall-time asserts (no `serial`).
     naming the mesh and count of each Jacobi number: 840 LOBPCG iterations here, 1644 /
     1289 at `preconditioners.md:55`; `:40` names `ssh8` among the remedies), `:79` and `:88`
     (the `"auto"` rules; `:88` "since PR 18b");
-  - `:313` (`lobpcg` signature: `polish`), `:315` (`info` / `chunks` keys: `polished`,
-    `polish_iterations`, `switched`; λ, r, t on a failed exit from the final
+  - `:119` (`t_iteration`: warm 9-block iterations only), `:313` (`lobpcg` signature:
+    `polish`), `:315` (`info` / `chunks` keys: `polish`, `switched`; λ, r, t on a failed exit from the final
     Rayleigh–Ritz), `:316` (deflation: plus the one at the switch), `:320` (`low_memory`: a
     9-block solve can end in the low step);
   - `:361` (RECOMPUTE step 7: the switch to the low step after 5 stuck iterations), `:374`
-    (Failed chunk: λ, V, r, t from `_final_rr`), `:391` (Low-memory mode: also the switch
+    (Failed chunk: λ, V, r, t from `_final_rr`), `:376` (Projector: the clamped start and the
+    masked coefficients, `c = k` after a switch), `:391` (Low-memory mode: also the switch
     target; a pointer);
   - new subsections under Convergence: "Low-memory switch" and "Polish" (the three causes, κ ∝
     $(L/t)^4$, the measured tables, the defaults; inverse iteration accepts on residuals and
@@ -570,7 +622,11 @@ skip for the build-peak tests; no wall-time asserts (no `serial`).
     switch), `:404–415` (Memory model: step = max(9-block, low, polish); with shell AMG
     `low_memory` saves less, the polish's PCG being above the low step on small meshes;
     `:415` the `solve_modes_memory` signature: `polish_options`), `:419–430` (Convergence
-    exit table: the polished row, `converged` and `stagnated`), `:496–511` (the Jacobi hex
+    exit table: rows for "`STALL` / `maxit`, final Rayleigh–Ritz passes" and "polished,
+    accepted", `converged` and `stagnated`), `:461` (σ pre-estimate step 2: Ritz values on
+    `maxit` rounds, the bound up to the floor; rounds can switch), `:615` (`count_memory`: the
+    hex family unchanged, the shell family in preconditioners.md), `:735` (`si_memory`'s minres
+    phase: checked on shells), `:496–511` (the Jacobi hex
     table: re-measured or marked "before 18b");
   - the Options table row (`polish_options`), the tests list (`:813` Stagnation, `:820`
     recompute schedule, `:825` Compiles; `tests/test_shell_solve.py`), the count section
@@ -580,25 +636,28 @@ skip for the build-peak tests; no wall-time asserts (no `serial`).
   the `amg_memory` shell family (formulas, the constants listed by name, measured tables, the
   `polish` key), the "AMG on solid shells" `solve_modes` sentence, the degree-3 note
   (`precond_options={"degree": 3}` for curved panels, as 18a promised, `open_items.md:251`);
-  `:88` (PCG "Memory" bullet: the barrier, also in MINRES and the count recurrence).
+  `:88` and `:97` (PCG and MINRES "Memory" bullets: the barrier, also in the count
+  recurrence).
 - `docs/open_items.md`: `:16–22` (the solid-shell part moves to a Resolved entry at the end,
-  the file's convention; the hex / voxel thin-plate part keeps its entry and heading), `:32–34` (SIMP GMG stagnation: the benchmark's result with the switch),
+  the file's convention; the hex / voxel thin-plate part keeps its entry, retitled "(PR 11a; solid shells resolved
+  in 18b)"), `:32–34` (SIMP GMG stagnation: the benchmark's result with the switch),
   `:104` (counting on `ssh8`: test 7's band), `:210`, `:211` (the 4 mm laminate), `:243`,
   `:245`, `:251`; the 18b decisions (Risks below).
 - `docs/ROADMAP.md`: `:18` (status line), the PR 18b section (status, a Contents bullet for the
-  switch, the polish, the failed-exit Rayleigh–Ritz and the `_pcg` barrier), `:184` (the
+  switch, the polish, the failed-exit Rayleigh–Ritz and the barriers in `_pcg`, `_minres`
+  and `_recurrence`), `:184` (the
   ≥ 2 GB validation: the 791k and block $64^3$ tests and the benchmark), `:475`, `:494`,
   `:580` and `:590` (M4 under AMG), `:784` (the 18a host-peak check: CPU calibration done, the
   GPU part kept as one entry); Deferred GPU checks: the shell step / polish fits and the
   barrier's effect on a GPU.
 - Code: `eigen/api.py:311–313` (`precond`, `polish_options`), `memory.py:396–410`
   (`solve_modes_memory` docstring: `polish_options`), the `pcg` / `_minres` comments in
-  `linalg/krylov.py` (the barrier), `memory.py:144–152`
+  `linalg/krylov.py` and `counting._recurrence` (the barrier), `memory.py:144–152`
   (`lobpcg_memory` docstring: the max) and `:338–345` (`amg_memory`), `eigen/lobpcg.py:18`
-  (RECOMPUTE), `:23` (STALL: before the polish), the new `EXPLICIT` comment, `:368` and the
+  (RECOMPUTE), `:23` (STALL: before the polish), the new `SWITCH` comment, `:368` and the
   `lobpcg` docstring (`polish`, `low_memory` and the switch, flags), `examples/m4_shell.py:2`.
 - `docs/elements.md:218`; `README.md:5` (status), `:82` ("`solve_modes` (Jacobi-preconditioned
-  …"), `:95` (the laminate snippet: `maxit=2000` dropped; the 4 mm plate can come back),
+  …"), `:90` and `:95` (the laminate snippet and its thickness comment: `maxit=2000` dropped; the 4 mm plate can come back),
   `:242` (AMG on unstructured meshes: solid shells since 18b), `:252` (options reachable
   through dicts: `polish_options`), `:301` (eigensolvers.md contents: low-memory switch,
   polish); `docs/verification.md:239` (AMG reaches the floor).
@@ -631,31 +690,40 @@ Scripts in the session scratchpad: `s18b/` (`proto.py`, `thin2.py`, `floor.py`, 
 `scilob.py`, `polish.py`, `storage.py`, `step.py`, `peaks.py`), `s18b2/` (`harness.py` the
 patches: `SWITCH`, `TRIG`, `DEFL`, `POLISH`; `plate.py`, `free2.py`, `acc2.py`, `acc3.py`;
 logs `run3.log`, `run4.log`), and the reviewers' folders `plan18b-r1-*`, `plan18b-r2-*`,
-`plan18b-r3-*` (the barrier: `plan18b-r3-performance/polmem*.py`).
+`plan18b-r3-*` (the barrier: `plan18b-r3-performance/polmem*.py`), `plan18b-r4-*` (the
+clamp: `plan18b-r4-correctness/clamp.py`; MINRES and the recurrence:
+`plan18b-r4-performance/mr*.py`, `rec*.py`), `plan18b-r5-*` (the dense polish start:
+`plan18b-r5-tests/inv2.py`; hex / shell polish: `plan18b-r5-performance/hexpol.py`,
+`shpol.py`).
 
 ## Risks and decisions without user input (logged in `docs/open_items.md`)
 
 - **Eigensolver behaviour changes in 18b** (the shell solve needs them; they are not deferred
   to a later part): the low-memory switch, the polish, the failed-exit Rayleigh–Ritz and the
-  `_pcg` barrier. Without them the roadmap test fails at tol $10^{-10}$ and "auto" AMG
+  barriers. Without them the roadmap test fails at tol $10^{-10}$ and "auto" AMG
   stagnates on typical thin shells. Unchanged: 9-block solves that never get stuck for 5
   iterations (every measured converging AMG / GMG / p-MG solve) and `sigma_estimate`. Changed:
   `_precond_sigma`'s `maxit` rounds (Ritz values: its upper bound now holds; it can switch),
   slow or stalling Jacobi and GMG solves that get stuck (late switch; Jacobi measured
-  harmless; the SIMP GMG case re-measured), every `STALL` / `maxit` exit (Ritz λ), PCG
-  (same arithmetic, different scheduling).
+  harmless; the SIMP GMG case re-measured), every `STALL` / `maxit` exit (Ritz λ; a `STALL`
+  exit can now converge without a polish), PCG, MINRES and the count recurrence (same
+  arithmetic, different scheduling).
 - **The rigid-mode leak on `main`** (free thin shells return rigid modes as elastic): fixed by
   the switch (the low step does not leak; one deflation at the switch). A `fix:` commit of its
   own, with the before / after table.
 - **Switch, not recompute:** recomputing in the 9-block step left W's products implicit and
   raised the step's compiled peak; the low step costs 1.4–1.9× per iteration after the switch.
-  `EXPLICIT` = 5, sticky.
+  `SWITCH` = 5, sticky.
 - **Polish:** one step, `"amg"` only (shell and hex); GMG and p-MG unmeasured; pure inverse
   iteration (a LOBPCG restart and LOBPCG with an inner-PCG preconditioner rejected);
   multi-step not built; defaults `tol` $\min(10^{-7}, 0.1\,\mathrm{tol})$, `maxit` 500; a
   `maxit` exit is not polished; no polish in `_precond_sigma`; `polish_options` with a non-AMG
   `precond` raises instead of being ignored.
-- **Flags:** a polished accepted chunk is `converged` and `stagnated`.
+- **Flags:** a polished accepted chunk is `converged` and `stagnated`; a non-accepting polish
+  reverts (accept-or-revert).
+- **Not split into its own part:** the polish is needed only from $L/t \approx 1000$ (no
+  accuracy case polishes), but a 1 mm plate of 1 m span at the default tol $10^{-6}$ fails
+  without it, and its pieces (closure, options, memory key) are small; kept in 18b.
 - **`STALL` = 50 kept**; an earlier trigger logged, not built.
 - **Floor-limited accuracy:** at $L/t = 1000$ the λ error is about $5\cdot10^{-6}$ (residual
   floor $\varepsilon\kappa \approx 10^{-4}$); stated in the docs.
