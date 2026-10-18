@@ -296,9 +296,10 @@ uv run --locked python benchmarks/harness.py   # machine peaks -> benchmarks/res
 
 Both scripts run the tests in parallel with pytest-xdist (`JOBS` workers, default 8; each worker
 gets an equal share of the cores for BLAS). Tests marked `peak` (process memory peaks against the
-estimators) run 3 at a time in `test.sh`, and tests marked `serial` (wall-time budgets, which
-contention would stretch) run alone. The large tests already use every core, so the full suite
-takes about 50 min instead of 75.
+estimators) run 3 at a time in `test.sh`, and tests marked `serial` (wall-time checks, which
+contention would distort) run alone; the Mac acceptance runs keep a 10× margin on their time
+budgets and run with the `peak` tests. The large tests already use every core, so the full suite
+takes about 40 min instead of 75.
 
 Conventions (node ordering, Voigt order, precision, indices, tolerances, benchmark harness rules) are in [`docs/conventions.md`](docs/conventions.md).
 

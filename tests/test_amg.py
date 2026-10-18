@@ -618,7 +618,7 @@ def test_benchmark_smokes():
         assert all(x["gmg"]["converged"]) and all(x["amg max_coarse=100"]["converged"])
 
 
-@pytest.mark.serial
+@pytest.mark.peak  # its time budget has a 10x margin
 @pytest.mark.slow
 @pytest.mark.skipif(sys.platform != "darwin", reason="Mac acceptance")
 def test_mac_acceptance():

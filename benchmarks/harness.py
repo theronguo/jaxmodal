@@ -78,7 +78,9 @@ def measure(code, setup=""):
 
     On macOS, peak_bytes = max(interval footprint delta, ru_maxrss delta); None elsewhere.
     """
+    # the parallel test workers' BLAS caps (tests/conftest.py) must not reach measured children
     drop = ("JAX_ENABLE_X64", "JAX_COMPILATION_CACHE_DIR")
+    drop += ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")
     env = {k: v for k, v in os.environ.items() if k not in drop}
     env["MallocLargeCache"] = "0"  # freed large blocks are unmapped, not reused uncharged
     with tempfile.TemporaryDirectory() as d:

@@ -39,7 +39,7 @@ pythonpath = ["."]
 markers = [
     "slow: long-running",
     "gpu: needs a CUDA device",
-    "serial: asserts wall time; scripts/test.sh runs it alone",
+    "serial: asserts wall time or must run without other load; scripts/test.sh runs it alone",
     "peak: asserts a process memory peak; scripts/test.sh runs 3 at a time",
 ]
 addopts = "--strict-markers"
