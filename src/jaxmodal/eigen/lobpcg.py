@@ -380,11 +380,13 @@ def lobpcg(
     max(5, chunk // 5)); converged chunks are locked into a basis of dtype basis_dtype
     ("float64" or "float32"; with float32, chunks after the first accept at
     max(tol, 1.2e-7)). maxit counts per chunk. low_memory: the low-memory step (11 instead of
-    16 blocks, about 1.4-1.9x the time). Never raises on non-convergence: check
-    info["converged"] and info["stagnated"]; a failed chunk ends the solve, so fewer than
-    n_modes can come back. Breakdowns raise: RuntimeError (start block rank-deficient after 3
-    refills, a locked column in the span of the earlier ones), FloatingPointError (non-finite
-    step)."""
+    16 blocks, about 1.4-1.9x the time); a 9-block chunk stuck for SWITCH iterations switches to it
+    (info["chunks"][i]["switched"]). A STALL or maxit exit returns the Rayleigh-Ritz block of the
+    last X (Ritz values: upper bounds), accepted if its explicit residuals pass. Never raises on
+    non-convergence: check info["converged"] and info["stagnated"]; a failed chunk ends the solve,
+    so fewer than n_modes can come back. Breakdowns raise: RuntimeError (start block rank-deficient
+    after 3 refills, a locked column in the span of the earlier ones), FloatingPointError
+    (non-finite step)."""
     return _solve(
         op, free, n_modes, tol, R, precond, X0, maxit, seed,
         chunk=chunk, guards=guards, basis_dtype=basis_dtype, low=low_memory,
@@ -413,12 +415,35 @@ def _extent(lam, r, t, want, guards, lock, failed=False):
     )
 
 
+def _accept(lam, r, t, want, j, guards, lock):
+    """j (extended over a cluster) if the explicit residuals r pass up to it, else None."""
+    if not (r[:want] <= t[:want]).all():
+        return None
+    j = max(j, _extent(lam, r, t, want, guards, lock))
+    return j if (r[:j] <= t[:j]).all() else None
+
+
+def _final_rr(X, lam, args, consts, c):
+    """A failed exit's block: X deflated, M-orthonormalized and Rayleigh-Ritz rotated, lam its
+    Ritz values (each an upper bound of its index past the locked modes) and explicit (r, t);
+    X and lam unchanged if SVQB drops a column."""
+    op, m, _, R, MR, B, cnt = args
+    Xs, KX, MX, keep = _start(X, op, m, R, MR, B, cnt, c=c)
+    if keep.all():
+        X, _, _, lam = _rr_start(Xs, KX, MX)
+    Xs = KX = MX = None
+    r, t = _confirm(X, lam, op, m, consts)[2:]
+    return X, np.asarray(lam), np.asarray(r), np.asarray(t)
+
+
 def _iterate(state, args, consts, want, lock, guards, tol, maxit, low, c, stop):
-    """The iteration loop of one chunk: (state, r, t, j, record), with j = want extended over
-    a cluster at the block boundary and record the info["chunks"] entry plus history and
+    """The iteration loop of one chunk: (X, lam, r, t, j, record), with j = want extended
+    over a cluster at the block boundary and record the info["chunks"] entry plus history and
     drops. A 9-block chunk without progress for SWITCH iterations switches to the low-memory
     step (sticky; not with stop) and gets a fresh progress window; record["switched"] is the
-    9-block iteration after which it did (1-based), None if never."""
+    9-block iteration after which it did (1-based), None if never. A STALL or maxit exit
+    (without stop) returns _final_rr's block, accepted (the chunk converges) if its explicit
+    residuals pass."""
     op, m = args[0], args[1]
     k = state[0].shape[1]
     hist, lsum, drops = [], [], 0
@@ -471,15 +496,19 @@ def _iterate(state, args, consts, want, lock, guards, tol, maxit, low, c, stop):
             state = (*_to_low(X, P, op, m, *args[3:], c=c), actP, lam_s)
             X = P = None
             switched, best, best_l, it_best = it + 1, np.inf, np.inf, it
-    if not converged:  # report residuals of explicit products on every exit
-        # wanted columns near convergence but a failed chunk: a split cluster (guard error)
-        if lock and near:
-            _extent(lam, r, t, want, guards, lock, failed=True)
-        state, r, t = _explicit(state, op, m, consts, low or switched)
+    X, lam = state[0], np.asarray(state[-1])
+    state = None
+    if not converged and stop is not None:  # explicit residuals, lam unchanged
+        r, t = (np.asarray(a) for a in _confirm(X, lam, op, m, consts)[2:])
+    elif not converged:
+        X, lam, r, t = _final_rr(X, lam, args, consts, c)
+        if (jn := _accept(lam, r, t, want, j, guards, lock)) is not None:
+            j, converged = jn, True
+            stagnated = stagnated or bool((r[:j] > tol).any())
     rec = dict(want=want, locked=j if converged else 0, iterations=it + 1, converged=converged,
                stagnated=stagnated, switched=switched, history=hist, drops=drops,
                t_warm=t_warm / n_warm if n_warm else 0.0)  # fmt: skip
-    return state, r, t, j, rec
+    return X, lam, r, t, j, rec
 
 
 def _explicit(state, op, m, consts, low):
@@ -562,33 +591,38 @@ def _solve(
             X = X.at[:, : X0.shape[1]].set(X0)
         cnt = jnp.asarray(count, jnp.int32)
         state, key, nref = _begin(X, key, op, m, R, MR, B, cnt, c, low)
+        X = X0 = None  # only the chunk's own state stays live
         # fp32 basis: residuals floor near 1e-8 against the rounded locked modes (2 u_32 term)
         t_eff = max(tol, 2.0**-23) if fp32 and count else tol
         consts = jnp.array([nK, nM, t_eff, C_FLOOR])
         args = (op, m, precond, R, MR, B, cnt)
         lock = band or count + want < n_modes  # the final chunk is never locked
-        state, r, t, j, rec = _iterate(
+        Xi, lam, r, t, j, rec = _iterate(
             state, args, consts, want, lock, guards, tol, maxit, low, c, stop
         )
+        state = None
+        # wanted columns near convergence but a failed chunk: a split cluster (guard error)
+        if not rec["converged"] and lock and (r[:want] ** 2 <= t[:want]).all():
+            _extent(lam, r, t, want, guards, lock, failed=True)
         ok = rec["converged"]
         refills, iterations = refills + nref, iterations + rec["iterations"]
         drops += rec.pop("drops")
         hist += rec.pop("history")
         chunks.append(rec)
         jj = j if ok else want
-        lams.append(np.asarray(state[-1][:jj]))
+        lams.append(lam[:jj])
         res.append(r[:jj])
         thr.append(t[:jj])
         i = _band_count(lams[-1], thr[-1], lam_stop) if band else 0
         if not ok or (not band and count + j >= n_modes):
             break
-        X, g = _reortho(state[0], j, op, m, B, cnt, c=c)
+        X, g = _reortho(Xi, j, op, m, B, cnt, c=c)
         if not g > 0.5:
             raise RuntimeError(f"a converged mode lies in the span of the earlier ones ({g:.1e})")
-        rl, tl = _confirm(X, state[-1], op, m, consts)[2:]  # of the columns actually kept
+        rl, tl = _confirm(X, lam, op, m, consts)[2:]  # of the columns actually kept
         res[-1], thr[-1] = np.asarray(rl[:j]), np.asarray(tl[:j])
         if band and i < j:  # the final chunk, re-orthonormalized for the count: not locked
-            state = (X,) + state[1:]
+            Xi = X
             break
         if band and count + k > max_capacity:  # the lock does not fit: stop, chunk dropped
             chunks[-1]["locked"] = 0
@@ -596,7 +630,7 @@ def _solve(
             stopped = "capacity"
             break
         V[:, count : count + j] = np.asarray(X[:, :j])
-        X0, state, args = state[0][:, j:], None, None  # free the old state before the next start
+        X0, Xi, args = Xi[:, j:], None, None  # free the old block before the next start
         if count + k > B.shape[1]:  # band: grow the basis (old freed, new zeros, refill from V)
             # room for the next lock too; the + 1 keeps n_modes > chunk (a modelled basis)
             # when count + j + k is a multiple of c
@@ -609,9 +643,9 @@ def _solve(
         B = _lock(B, count, X, j)
         count += j
     end = count + jj if band else min(count + jj, n_modes)
-    V[:, count:end] = np.asarray(state[0][:, : end - count])
+    V[:, count:end] = np.asarray(Xi[:, : end - count])
     cap = B.shape[1]
-    B = state = args = X = X0 = None  # free the device blocks
+    B = Xi = args = X = X0 = None  # free the device blocks
     if not band:
         V = V[:, :end]
     info = dict(
