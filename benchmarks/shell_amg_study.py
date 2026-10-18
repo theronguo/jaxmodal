@@ -1,9 +1,10 @@
 """Solid-shell AMG study (PR 18a): the PCG counts of tests 6-11 in tests/test_shell_amg.py
-(levels, sizes and build times), the cost on the flat SS plate 256^2 at L/t = 1000 (396k DOF,
-m = 15 columns): t_A, the V-cycle in t_A, device storage per level and component, host setup
-time; and on the hex-dominant 32^3 block with an ssh8 skin the same next to PR 13's hex8 build
-of the block without the skin. PCG to 1e-6 on 4 fixed-seed masked columns, max over columns.
-Times include compilation unless "best" (min of 5 runs). Writes results/shell_amg_study.json.
+(levels, sizes and build times; Jacobi on the 32^2 plate), the cost on the flat SS plate 256^2
+at L/t = 1000 (396k DOF, m = 15 columns): t_A, the V-cycle in t_A, device storage per level
+and component, host setup time; and on the hex-dominant 32^3 block with an ssh8 skin the same
+next to PR 13's hex8 build of the block without the skin. PCG to 1e-6 on 4 fixed-seed masked
+columns, max over columns. Times include compilation unless "best" (min of 5 runs). Writes
+results/shell_amg_study.json.
 """
 
 from jaxmodal import config
@@ -32,7 +33,7 @@ from test_shell import C_ORT, laminate, three_plies
 from jaxmodal.linalg import pcg
 from jaxmodal.mesh import box_mesh
 from jaxmodal.operators import ap_operator, dof_mask, unstructured
-from jaxmodal.precond import amg
+from jaxmodal.precond import amg, jacobi
 
 B = {"zmin": "xyz"}
 
@@ -67,6 +68,7 @@ def cases():
     yield "block16", m, lam1(m, dof_mask(m, B)), B, STEEL, 100
     m, t = T.plate(32, 50)
     yield "clamped32", m, T.kirchhoff(t, 35.99), T.CLAMPED, STEEL, 100
+    yield "clamped32-0", m, 0.0, T.CLAMPED, STEEL, 100
     m = T.bottom(32, 50)[0]
     yield "bottom32", m, lam1(m, dof_mask(m, {"bottom": "xyz"})), {"bottom": "xyz"}, STEEL, 100
     m = T.parts(0.02)
@@ -130,12 +132,14 @@ def main(out=harness.RESULTS, write=True):
     for name, mesh, sigma, bcs, mats, mc in cases():
         op, free = unstructured(mesh, mats), dof_mask(mesh, bcs)
         t = time.perf_counter()
-        P = amg(op, free, float(sigma), mesh.points, max_coarse=mc)
+        P = amg(op, free, float(sigma), mesh.points, max_coarse=mc, nonsingular=sigma == 0)
         jax.block_until_ready(P)
         build = time.perf_counter() - t
         n, ok = its(op, free, float(sigma), P)
         r = dict(case=name, n_dof=op.n_dof, sigma=float(sigma), max_coarse=mc, iterations=n,
                  converged=ok, sizes=sizes(P), build_s=build)  # fmt: skip
+        if name == "flat32-50":
+            r["jacobi"] = its(op, free, float(sigma), jacobi(op, free, float(sigma)))
         print(json.dumps(r), flush=True)
         runs.append(r)
         jax.clear_caches()
@@ -143,13 +147,13 @@ def main(out=harness.RESULTS, write=True):
     plate = cost(m, T.kirchhoff(t), SS)
     print(json.dumps(plate), flush=True)
     jax.clear_caches()
-    m = T.block(32)[0]
-    s = lam1(T.block(16)[0], dof_mask(T.block(16)[0], B))
-    skin = cost(m, s, B, max_coarse=1000)
+    m16 = T.block(16)[0]
+    s = lam1(m16, dof_mask(m16, B))
+    skin = cost(T.block(32)[0], s, B)
     print(json.dumps(skin), flush=True)
     jax.clear_caches()
     cube = box_mesh((32, 32, 32), spacing=(1 / 32,) * 3)
-    hex8 = cost(cube, s, B, max_coarse=1000)
+    hex8 = cost(cube, s, B)
     print(json.dumps(hex8), flush=True)
     result = dict(
         runs=runs,

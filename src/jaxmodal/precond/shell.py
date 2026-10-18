@@ -53,7 +53,7 @@ def _columns(op, group):
     first = np.repeat(np.cumsum(c) - c, c)
     node = order[np.repeat(start[g[P, S]], c) + np.arange(c.sum()) - first]
     pr = np.repeat(P, c)
-    blocks = np.full((len(g), size.max()), -1)
+    blocks = np.full((len(g), size.max()), -1, np.int32)
     blocks[pr, np.arange(len(pr)) - (np.cumsum(size) - size)[pr]] = node
     lone = np.setdiff1d(np.arange(op.n_nodes), E)
     pad = np.full((len(lone), blocks.shape[1]), -1)
@@ -61,16 +61,16 @@ def _columns(op, group):
     return np.concatenate([blocks, pad])
 
 
-def _rings(S, zero, shell):
+def _rings(S, zero, is_shell):
     """Coarse patches as (blocks, sel): per shell group its 9 DOFs and the non-identity DOFs of
     its shell neighbours in the group graph S, per other group its 9 DOFs. zero (9 n_g,) flags
-    the identity DOFs, shell (n_g,) the groups with an ssh8 node."""
+    the identity DOFs, is_shell (n_g,) the groups with an ssh8 node."""
     S = sp.csr_array(S)
     r = np.repeat(np.arange(S.shape[0]), np.diff(S.indptr))
-    k = shell[r] & shell[S.indices]
+    k = is_shell[r] & is_shell[S.indices]
     r, j = r[k], S.indices[k]
     cnt = np.bincount(r, minlength=S.shape[0])
-    blocks = np.full((S.shape[0], 1 + cnt.max()), -1)
+    blocks = np.full((S.shape[0], 1 + cnt.max()), -1, np.int32)
     blocks[:, 0] = np.arange(S.shape[0])
     blocks[r, 1 + np.arange(len(r)) - (np.cumsum(cnt) - cnt)[r]] = j
     sel = np.repeat(blocks >= 0, B, axis=1)
@@ -104,13 +104,13 @@ def _aggregate(S):
     rows = np.flatnonzero(np.diff(agg.indptr))
     lab[rows] = agg.indices
     lone = lab < 0
-    lab[lone] = agg.shape[1] + np.arange(lone.sum())
+    lab[lone] = (agg.shape[1] if agg.nnz else 0) + np.arange(lone.sum())  # none: (n, 1) empty
     return lab
 
 
 def _frames(x, Tn, na, n_agg):
-    """Per aggregate (normal, t1, t2, mean, shell): the dominant eigenvector of the summed
-    node tensors Tn (sign-free), the tangents and the node mean; shell where the sum is > 0."""
+    """Per aggregate (normal, t1, t2, mean, is_shell): the dominant eigenvector of the summed
+    node tensors Tn (sign-free), the tangents and the node mean; is_shell where the sum is > 0."""
     ok = na >= 0
     T = np.zeros((n_agg, 3, 3))
     np.add.at(T, na[ok], Tn[ok])
@@ -126,8 +126,8 @@ def _frames(x, Tn, na, n_agg):
 
 def _curvatures(x, Tn, na, n_agg, free):
     """((3 n, 3) Kirchhoff curvature fields k11, k22, k12 of each node's aggregate na in its
-    frame, masked; zero on nodes without an aggregate or in non-shell aggregates), shell."""
-    nrm, t1, t2, xbar, shell = _frames(x, Tn, na, n_agg)
+    frame, masked; zero on nodes without an aggregate or in non-shell aggregates), is_shell."""
+    nrm, t1, t2, xbar, is_shell = _frames(x, Tn, na, n_agg)
     a = np.maximum(na, 0)
     n, t1, t2 = nrm[a], t1[a], t2[a]
     d = x - xbar[a]
@@ -136,8 +136,8 @@ def _curvatures(x, Tn, na, n_agg, free):
     k22 = -Z * Y * t2 + Y**2 / 2 * n
     k12 = -Z * Y * t1 - Z * X * t2 + X * Y * n
     F = np.stack([k11, k22, k12], axis=2)  # (n, 3, 3): node, component, field
-    F *= ((na >= 0) & shell[a])[:, None, None]
-    return F.reshape(-1, 3) * free[:, None], shell
+    F *= ((na >= 0) & is_shell[a])[:, None, None]
+    return F.reshape(-1, 3) * free[:, None], is_shell
 
 
 def _tensors(op, x):
@@ -189,21 +189,22 @@ def _shell_levels(op, Ab, free, points, max_coarse, shell=None):
     state = np.random.get_state()
     np.random.seed(0)
     levels, stored, info = [], [], {"rho": [], "graphs": [S], "nodes": []}
-    A, na, Q, rows = Ab, gf[group], None, gf[group]
+    A, na, Q = Ab, gf[group], None
     try:
         while (len(levels) < len(shell[1])) if reuse else (A.shape[0] > max_coarse):
             if reuse:
                 agg, T, zero, flags = shell[1][len(levels)]
             else:
                 agg = _aggregate(S)
-                n_agg = agg.max() + 1
-                if B * n_agg > STALL * A.shape[0]:
-                    break
-                nn = np.where(na >= 0, agg[np.maximum(na, 0)], -1)  # node -> next aggregate
-                K, flags = _curvatures(points, Tn, nn, n_agg, fn.ravel())
+            n_agg = agg.max() + 1
+            if not reuse and B * n_agg > STALL * A.shape[0]:
+                break
+            na = np.where(na >= 0, agg[np.maximum(na, 0)], -1)  # node -> next aggregate
+            if not reuse:
+                K, flags = _curvatures(points, Tn, na, n_agg, fn.ravel())
                 Bf = np.concatenate([R, K], axis=1)
                 Bl = Bf if Q is None else Q.T @ Bf
-                lab = np.where(rows >= 0, agg[np.maximum(rows, 0)], -1)
+                lab = na if Q is None else agg  # vertex (free group / aggregate) -> aggregate
                 T = sp.bsr_array(fit_candidates(_indicator(lab, n_agg).astype(np.float64), Bl)[0])
                 zero = np.asarray(T.multiply(T).sum(axis=0)).ravel() == 0
             P, rho = _smooth(A, T, STEPS[min(len(levels), 1)])
@@ -213,14 +214,12 @@ def _shell_levels(op, Ab, free, points, max_coarse, shell=None):
             levels.append((A, patches, P))
             stored.append((agg, T, zero, flags))
             info["rho"].append(rho)
-            Ind = _indicator(agg, agg.max() + 1)
+            Ind = _indicator(agg, n_agg)
             S = _graph(Ind.T @ S @ Ind)
             info["graphs"].append(S)
             patches = _rings(S, zero, flags)
             Q = sp.csr_array(T) if Q is None else Q @ T
-            na = np.where(na >= 0, agg[np.maximum(na, 0)], -1)
             info["nodes"].append(na)
-            rows = np.arange(agg.max() + 1)
             A = sp.bsr_array(Ac, blocksize=(B, B))
             A.sort_indices()
     finally:

@@ -18,9 +18,10 @@ from test_post import disjoint
 from test_shell import C_ORT, laminate, three_plies
 
 from jaxmodal.linalg import pcg
+from jaxmodal.materials import Material, isotropic
 from jaxmodal.mesh import Mesh, box_mesh, solid_shell
 from jaxmodal.operators import ap_operator, assemble, dof_mask, restrict, unstructured
-from jaxmodal.precond import GMG, amg, jacobi, pmg
+from jaxmodal.precond import GMG, amg, jacobi
 from jaxmodal.precond import schwarz as SW
 from jaxmodal.precond import shell as SH
 from jaxmodal.precond.pmg import _hex8_galerkin
@@ -47,7 +48,7 @@ def gate(name, its):
 
 
 def kirchhoff(t, c=19.74):
-    """lambda_1 of a unit square Kirchhoff plate: SS (c = 2 pi^2 / ... = 19.74) or clamped
+    """lambda_1 of a unit square Kirchhoff plate: SS (c = 2 pi^2 = 19.74) or clamped
     (35.99), as D c^2 / (rho t)."""
     D = E * t**3 / (12 * (1 - NU**2))
     return D * c**2 / (RHO * t)
@@ -279,11 +280,12 @@ def test_fibers():
         hexonly = np.setdiff1d(np.arange(len(g)), mesh.blocks["ssh8"])
         assert (cnt[g[hexonly]] == 1).all()
         cols = SH._columns(op, g)
+        assert all(len(set(r[r >= 0])) == (r >= 0).sum() for r in cols)  # no repeated node
         got = {frozenset(r[r >= 0].tolist()) for r in cols}
         assert len(got) == len(cols) and got == column_patches(mesh)
     assert set(np.bincount(SH._fibers(unstructured(plate(4, 50)[0], STEEL)))) == {2}
-    stack = plate(4, 50, layers=3)[0]
-    cols = SH._columns(unstructured(stack, STEEL), SH._fibers(unstructured(stack, STEEL)))
+    op = unstructured(plate(4, 50, layers=3)[0], STEEL)
+    cols = SH._columns(op, SH._fibers(op))
     assert len(cols) == 16 and ((cols >= 0).sum(1) == 16).all()  # 48 = 12 (k + 1) DOFs
     T = junction("T", 8, 50)[0]
     assert np.bincount(SH._fibers(unstructured(T, STEEL))).max() > 2  # the joint fibers merge
@@ -409,9 +411,9 @@ def test_candidates_cylinder():
             assert abs(abs(ref @ nrm[a]) - 1) <= 1e-12
             th = np.arctan2(x[na == a, 1], x[na == a, 0])
             span = np.ptp(np.unwrap(np.sort(th)))
-            if span < np.pi / 2:
-                c = x[na == a].mean(0) * [1, 1, 0]
-                assert abs(nrm[a] @ c) / np.linalg.norm(c) >= np.cos(span) - 1e-12
+            assert span < np.pi / 2
+            c = x[na == a].mean(0) * [1, 1, 0]
+            assert abs(nrm[a] @ c) / np.linalg.norm(c) >= np.cos(span) - 1e-12
         K = SH._curvatures(x, Tn, na, n_agg, free)[0]
         assert np.isfinite(K).all()
         Ks.append((na, K))
@@ -505,8 +507,10 @@ def test_schwarz(name):
     sigma = 1e4
     op, free, A, Ab, lv, Ac, shell, info = levels_of(mesh, sigma, bcs, max_coarse=20)
     Ad = ap_dense(mesh, free, sigma, A)
-    blocks, sel = lv[0][1] if lv else (SH._columns(op, SH._fibers(op)),) * 2
-    if not lv:
+    if lv:
+        blocks, sel = lv[0][1]
+    else:
+        blocks = SH._columns(op, SH._fibers(op))
         sel = np.repeat(blocks >= 0, 3, axis=1)
     ref = node_patch_dofs(column_patches(mesh))
     cb = max(2**14, 8 * int(sel.sum(1).max()) ** 2)
@@ -639,6 +643,8 @@ def test_setup_dense():
     sigma = lam1(mesh, dof_mask(mesh, SIMPLY_SUPPORTED))
     op, free, A, Ab, lv, Ac, shell, info = levels_of(mesh, sigma, SIMPLY_SUPPORTED, max_coarse=20)
     assert len(lv) >= 2
+    Ad = ap_dense(mesh, free, sigma, A)  # A_b = A_P on ssh8 + hex8 (all nodes are corners)
+    assert np.abs(Ab.toarray() - Ad).max() <= 1e-12 * np.abs(Ad).max()
     nxt = [lv[i + 1][0] for i in range(len(lv) - 1)] + [Ac]
     n_id = 0
     for i, (Al, _, Pl) in enumerate(lv):
@@ -741,7 +747,9 @@ def test_lt_growth():
         m64 = plate(64, Lt, curved=True)[0]
         sigma = lam1(m64, dof_mask(m64, SIMPLY_SUPPORTED))
         mesh = plate(128, Lt, curved=True)[0]
-        gate(f"curved128-{Lt}", count(mesh, sigma, SIMPLY_SUPPORTED, max_coarse=1000))
+        its[f"curved{Lt}"] = count(mesh, sigma, SIMPLY_SUPPORTED, max_coarse=1000)
+        gate(f"curved128-{Lt}", its[f"curved{Lt}"])
+    print("counts", its)
     assert its[1000] <= 2 * its[10], its
 
 
@@ -771,7 +779,7 @@ def test_shells():
     sigma = eig(mesh, free, mats, 1)[0]
     gate("plies32-50", count(mesh, sigma, SIMPLY_SUPPORTED, mats))
     mesh = plate(32, 50, curved=True)[0]
-    gate("curved32-50", count(mesh, lam1(mesh, free), SIMPLY_SUPPORTED))
+    gate("curved32-50", count(mesh, lam1(mesh, dof_mask(mesh, SIMPLY_SUPPORTED)), SIMPLY_SUPPORTED))
     mesh = cylinder(False)
     gate("cylinder", count(mesh, lam1(mesh, dof_mask(mesh, {})), {}))
     for kind, k in (("T", 1), ("L", 1), ("T", 3)):
@@ -836,7 +844,8 @@ def test_constraints():
     mesh = plate(24, 50)[0]
     lam = eig(mesh, dof_mask(mesh, {}))
     assert lam[5] < 1e-6 * lam[6]
-    spd(plate(8, 50)[0], 1e4, {})
+    m8 = plate(8, 50)[0]
+    spd(m8, eig(m8, dof_mask(m8, {}))[6], {})
     gate("free24", count(mesh, lam[6], {}))
 
 
@@ -865,8 +874,6 @@ def test_reuse(monkeypatch):
     assert np.array_equal(
         np.asarray(P1(U)), np.asarray(amg(op, free, 1e4, mesh.points, max_coarse=20)(U))
     )
-    from jaxmodal.materials import Material, isotropic
-
     op2 = unstructured(mesh, {0: Material(isotropic(70e9, 0.33), 2700.0)})
     op2 = op2.scaled(s_K=jnp.linspace(0.5, 1.5, op2.n_el))
     fresh = amg(op2, free, 3e4, mesh.points, max_coarse=20)
@@ -896,6 +903,11 @@ def test_reuse(monkeypatch):
     with pytest.raises(ValueError, match="another connectivity"):
         amg(unstructured(other, STEEL), dof_mask(other, SIMPLY_SUPPORTED), 1e4, other.points,
             aggregates=agg)  # fmt: skip
+    box = box_mesh((8, 8, 1), spacing=(1 / 8, 1 / 8, 0.02))  # the ssh8 plate's connectivity
+    m = plate(8, 50)[0]
+    _, ag = amg(unstructured(m, STEEL), dof_mask(m, {}), 1e4, m.points, return_aggregates=True)
+    with pytest.raises(ValueError, match="another connectivity"):
+        amg(unstructured(box, STEEL), dof_mask(box, {}), 1e4, box.points, aggregates=ag)
 
 
 # ---------------------------------------------------------------- 13: the hex path
@@ -918,6 +930,3 @@ def test_hex_path(monkeypatch, t):
     assert np.asarray(info["converged"]).all()
     if t == "hex8":
         amg(op, free, sigma, mesh.points, aggregates=agg)
-    with pytest.raises(ValueError, match="pmg does not support ssh8 blocks; use amg"):
-        m = plate(4, 50)[0]
-        pmg(unstructured(m, STEEL), dof_mask(m, SIMPLY_SUPPORTED), 1.0)

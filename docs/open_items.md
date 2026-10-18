@@ -19,7 +19,7 @@ At σ = $\lambda_1$ the GMG iterations grow like $h^{-1}$ on one-element-thick p
 
 p-MG (PR 12) has the same cause on flat elements: its hex8 coarse space locks in bending when the element aspect ratio $a \gg 1$. Single-layer hex20 plates $16^2\times1$ take 15 / 21 / 63 iterations for $a$ = 1 / 2 / 4 and stagnate at $a = 10$ (620–720); a box with $h_z = h/a$ takes 14 / 17 / 28 / 76; the hex27 plate $32^2\times1$ at $a = 10$ exceeds 1000. Slenderness with $a = 1$ is fine (beam $20\times2\times2$: 16).
 
-AMG on the hex8 level (PR 13a, `max_coarse` = 100) makes it worse: plates 36 / 85 / 229 / > 1000 for $a$ = 1 / 2 / 4 / 10, boxes 14 / 20 / 52 / 244. The deeper AMG levels lose plate bending (the $a = 1$ plate takes 15 / 19 / 36 with zero / one / two AMG levels); the beam stays at 16. **Decision without user input (PR 13a):** neither AMG on the high-order level nor a bending-aware near-null space is attempted; both are a new setup design rather than a hex8-level AMG. Retargeted to M4 / PR 18b (solid-shell elements).
+AMG on the hex8 level (PR 13a, `max_coarse` = 100) makes it worse: plates 36 / 85 / 229 / > 1000 for $a$ = 1 / 2 / 4 / 10, boxes 14 / 20 / 52 / 244. The deeper AMG levels lose plate bending (the $a = 1$ plate takes 15 / 19 / 36 with zero / one / two AMG levels); the beam stays at 16. **Decision without user input (PR 13a):** neither AMG on the high-order level nor a bending-aware near-null space is attempted (on hex8; PR 18a adds one for `ssh8`); both are a new setup design rather than a hex8-level AMG. Retargeted to M4 / PR 18b (solid-shell elements).
 
 ### Anisotropic voxel spacing (PR 11a)
 
@@ -101,7 +101,7 @@ The measured setup peak per corner DOF grows about 0.65 kB per decade of $n_c$ (
 - **Detection test:** 100 sets of 50 probes from one 5000-probe count; each probe has its own `fold_in` key, so the sets are i.i.d. and equal 100 independent 50-probe counts (the roadmap's fixed list of 100 seeds), and results do not depend on the block size (default one block; 14b sizes it with `probe_block`).
 - **Orthonormality check:** $W^T M W = I$ is checked by a streamed random sketch (3 vectors) at `ORTHO_TOL` (1e-6 fp64, 1e-4 fp32), not a full Gram matrix.
 - **Memory constants:** `COUNT_STEP`, `GMG_COUNT`, `AMG_COUNT` are fitted on box meshes (hex20 $12^3$–$28^3$, voxel $16^3$–$64^3$); the hex20 $8^3$ case (one chunk holds the mesh) is outside the fit.
-- **No thin-plate counting test:** AMG is weak on flat elements (see "Thin plates and slender beams"); the slender hex20 cantilever (κ 2.2e9) covers the high-κ case.
+- **No thin-plate counting test:** AMG on hex elements is weak on flat elements (see "Thin plates and slender beams"); the slender hex20 cantilever (κ 2.2e9) covers the high-κ case. Solid-shell AMG exists since PR 18a; counting on `ssh8` with it starts with PR 18b.
 
 ### PR 14b decisions without user input
 
@@ -242,7 +242,7 @@ Without user input (16c, plan `docs/plans/pr-16c-accuracy.md`; the frame's decis
 
 - **The split:** PR 18 is split into 18a (solid-shell AMG core), 18b (`solve_modes` and `amg_memory` on shells), 18c (kernels), 18d (band follow-ups), 18e (CalculiX comparison). Until 18b merges, `solve_modes` on `ssh8` stays Jacobi.
 - **`ssh8` + `hex20`/`hex27`: not supported** (the meshes are nonconforming); `amg()` raises. No owner.
-- **Memory:** about 2 kB per DOF of preconditioner in fp64, about 4× the stored-Ke operator (2 GB at 1M, 20 GB at 10M). Accepted: Jacobi needs 1289 iterations on the $32^2$ plate at $L/t = 50$. 18c's fp32 halves the patches. Logged, not built: $P_0 = S\,T$ applied matrix-free, $P_0^\top$ as a scatter over $P_0$'s ELL, 1.25× ELL width classes.
+- **Memory:** about 2 kB per DOF of preconditioner in fp64, about 4× the stored-Ke operator (2 GB at 1M, 20 GB at 10M). Accepted: Jacobi needs 1289 iterations on the $32^2$ plate at $L/t = 50$ (benchmark JSON). Host setup peak: about 2.9 kB per DOF of NumPy/SciPy at 396k (level-0 Galerkin transient), a deferred check for 18b's `amg_memory`. 18c's fp32 halves the patches. Logged, not built: $P_0 = S\,T$ applied matrix-free, $P_0^\top$ as a scatter over $P_0$'s ELL, 1.25× ELL width classes.
 - **Stack storage** grows like $24(k+1)$ packed floats per DOF on level 0 (2.1 kB per DOF at 10 layers); the guard allows it.
 - **Hex regions** of mixed meshes get 9-DOF block patches on coarse levels, and shell one-rings skip hex neighbours. The hex-dominant $32^3$ block with a skin costs about the PR 13 hex8 hierarchy of the bare block (benchmark JSON) and takes 14 iterations on $16^3$ against PR 13's 10 without the skin.
 - **Identity DOFs** (zero tentative columns) are kept with a mean diagonal instead of dropped, and only in their own Schwarz patch.
@@ -250,9 +250,11 @@ Without user input (16c, plan `docs/plans/pr-16c-accuracy.md`; the frame's decis
 - **Element flatness:** counts follow $h/t$ (21 / 19 at $128^2$ / $256^2$, $L/t = 1000$), so the roadmap ratio is taken on $128^2$ (1.75×).
 - **Curved panel at $L/t = 1000$:** 30 against 11 at $L/t = 10$ (2.7×) on $128^2$, above the roadmap's 2×, which the flat plate meets. Reported and gated. The plan's fallback `degree=3` was measured: 8 / 23 (flat 8 / 19), lower counts but no better ratio, so the default stays degree 2; 18b documents `precond_options={"degree": 3}`.
 - **Stacks and deep shells:** stacks at $L/t \ge 300$ (40 / 145) and the free 270° cylinder at $R/t \ge 50$ (46 at 24×8; 135 at $R/t = 200$) stay above flat single layers: documented limitations. Logged, not built: vertex patches over columns, a line smoother through stacks, fold-aware aggregation, curved (shallow-shell) candidates.
+- **Folds:** the sign-free normal of an aggregate across a fold is an average; rigid modes stay exact, only the curvature columns degrade (L-fold $24^2$ at $L/t = 50$: 11 iterations). Junctions at $L/t = 1000$ were not re-measured in 18a (prototype about 80 against 39 flat).
+- **Fingerprint with the block type** (code review): `AMGAggregates`' key now includes each block's type, so aggregates of an `ssh8` mesh are refused on the `hex8` box it was converted from (same connectivity), instead of silently giving a dense factor of the whole matrix.
 - **Vertex patches on level 0** (5× the storage for 1.6× fewer iterations) are not used.
 - **Guards:** a level-0 patch above 384 DOFs raises, a coarse patch above $\sqrt{\texttt{chunk\_bytes}/8}$ raises; a wrong thickness axis on small meshes is not detected.
-- **No conftest `LONG` entry:** the refinement test at $256^2$ takes about 25 s, not the planned 3 min.
+- **No conftest `LONG` entry:** the refinement test at $256^2$ takes about 25 s, not the planned 3 min (code review asked for it; not needed at that time).
 - **σ-round reuse** of the shell aggregates is deferred to 18c.
 
 ### MINRES plateaus below $\|b\|$ (PR 15c)

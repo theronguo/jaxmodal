@@ -121,6 +121,7 @@ Status: final. Review rounds 1–30 incorporated (round 30: all 5 reviewers sati
 - **Preconditioners:**
   - Voxel meshes: geometric multigrid with semi-coarsening: an axis stops coarsening once it has ≤ 2 elements.
   - Unstructured meshes: p-multigrid (hex20/hex27 → hex8), then smoothed-aggregation AMG. AMG setup runs in pyamg on the host; the V-cycle runs on the device with a self-written block-ELL SpMV.
+  - Solid-shell meshes (`ssh8`, `ssh8` + `hex8`; PR 18a): smoothed aggregation on the assembled A_P over through-thickness fiber groups, 9 candidates per aggregate (rigid modes plus per-level Kirchhoff curvature fields), additive Schwarz smoothers under Chebyshev.
   - No `jax.experimental.sparse` in hot paths.
 - **Shells:** solid-shell elements (3 DOFs per node) following Klinkel–Gruttmann–Wagner (1999):
   - ANS for transverse shear (Bathe–Dvorkin edge midpoints: γ_ξζ at (ξ, η) = (0, ±1), γ_ηζ at (±1, 0)).
@@ -490,7 +491,7 @@ Split into three parts with unchanged acceptance criteria: **8a** the reference 
 - Contents:
   - pyamg smoothed-aggregation setup on the assembled hex8 Galerkin A_P from PR 12, with the masked rigid modes as the near-null-space.
   - Hierarchy exported to block-ELL, with a V-cycle on the device. Zero tentative-prolongator columns (aggregates of fully constrained DOFs) are dropped, so every coarse matrix stays SPD and the coarsest dense Cholesky succeeds.
-  - Combined with PR 12; pure hex8 meshes skip p-MG and run AMG on the assembled A_P (solid-shell meshes do the same from PR 18a, with fiber groups, curvature candidates and Schwarz smoothers). `solve_modes` dispatches unstructured meshes to this preconditioner.
+  - Combined with PR 12; pure hex8 meshes skip p-MG and run AMG on the assembled A_P (solid-shell meshes do the same from PR 18a, with fiber groups, curvature candidates and Schwarz smoothers). `solve_modes` dispatches unstructured meshes to this preconditioner (solid-shell meshes from PR 18b).
   - Memory ordering: setup → free the assembled A → allocate LOBPCG.
   - PR 4's `assemble` is the oracle only (≈ 120 GB at 10M hex8 DOF); the production hex8 A_P needs its own chunked assembler into a precomputed CSR pattern (≈ 1 GB per matrix per 1M hex8 DOF). Done in 13b: a fused device scatter into a precomputed 3×3 block pattern (BSR), 1.48 s and 1.42 GB process peak at 1M hex8 DOF.
   - Option to reuse aggregates and recompute only the values (test: on a perturbed-density model, PCG iterations within 20% of a fresh setup).
@@ -778,8 +779,8 @@ Topology optimization targets the largest size the hardware allows, multi-GPU an
 - PR 15d: the LOBPCG / slice cost ratio on the GPU (memory-driven strategy kept unless a crossover appears); allocating the band basis at $C_{max}$ up front against fragmentation; the per-space fit test against the GPU pool and host RAM; the 10M hex20 band reach (120–260 locked modes with fp64 AMG) and its MINRES behaviour near depth 1000; the slice and count peaks against `si_memory` / `count_memory` on the device. A measured time crossover, if any, is recorded here.
 - PR 18a: the Schwarz scan steps at 10M `ssh8` DOF (about 570 steps per apply, 2300 per V-cycle at degree 2): time the Schwarz apply at `chunk_bytes` CB and 8·CB, at $k = 1$ and at the production width ($m \approx 20$–25), with the step count per level; overhead ≈ $(t(\text{CB}) - t(8\,\text{CB}))\cdot 8/7$. Pass: below 25% of the V-cycle time at the production width (expected to fail at 32 MiB on an A100; remedy in 18c: $g$ chunks per step chosen from $k$, or a larger `chunk_bytes`).
 - PR 18a: packed against full Schwarz inverses (the packed apply writes and rereads the unpacked chunk, about 2.5× the bytes of full inverses; fp32 full = fp64 packed bytes, with 18c's fp32 Schwarz item).
-- PR 18a: solid-shell AMG at 10M DOF on one GPU (about 2 kB per DOF fp64, 19–20 GB, plus the stored-Ke operator's 0.47 kB per DOF).
-- PR 18a: the host setup peak of the shell AMG at 10M (the level-0 group graph, $B_\text{fine}$ 72 B per DOF, the patch `idx`, the block keys 72 B per DOF per level, the stored $T_0$ about 108 B per DOF).
+- PR 18a: solid-shell AMG at 10M DOF on one GPU (about 2 kB per DOF fp64, 19–20 GB, plus the stored-Ke operator's 0.48 kB per DOF).
+- PR 18a: the host setup peak of the shell AMG at 10M (the level-0 group graph, $B_\text{fine}$ 72 B per DOF, the patch `idx`, the block keys 72 B per DOF per level, the stored $T_0$ about 108 B per DOF; and the dominant level-0 Galerkin and smoothing transient: $A_b$ 455, $P_0$ 300 plus its copy inside $A P_0$, $A P_0$ 455, $P_0^\top$ 297 B per fine DOF; measured NumPy peak about 2.9 kB per DOF at 396k, RSS 10.8 GB at 1.58M, so about 30 GB host at 10M), for 18b's `amg_memory` calibration.
 - PR 18c: matvec ≥ 50% of roofline at m = 1.
 - PR 18c: the operator build's XLA kernel temporaries ("XLA kernel temporaries", `docs/open_items.md`): measured against `device_total` on the GPU.
 - PR 19: weak scaling.

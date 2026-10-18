@@ -224,6 +224,8 @@ def cheb(A, Dinv, lmax, degree, ratio):
 
 
 def vcycle(levels, Ps, Ci, m, U):
+    """Dense NumPy V-cycle on the masked U: levels [(A, S)], prolongators Ps, coarsest Ci."""
+
     def go(b, lvl):
         if lvl == len(levels):
             return Ci @ b

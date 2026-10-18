@@ -41,7 +41,7 @@ def layout(sizes, chunk_bytes=CHUNK_BYTES):
         s.pop(i + 1)
     out = []
     for v, c in zip(s, n, strict=True):
-        nc = -(-c // max(1, chunk_bytes // (8 * v * max(v, 24))))
+        nc = -(-c // max(1, chunk_bytes // (8 * v * max(v, 24))))  # gathers <= chunk_bytes k / 24
         out.append((v, nc, -(-c // nc)))
     return out
 
@@ -121,7 +121,6 @@ def build(A, blocks, sel, chunk_bytes=CHUNK_BYTES):
     n = A.shape[0]
     rows = np.repeat(np.arange(n // b, dtype=np.int64), np.diff(A.indptr))
     keys = rows * (n // b) + A.indices
-    del rows
     size = sel.sum(1)
     bound = int(np.sqrt(chunk_bytes / 8))
     if size.max() > bound:

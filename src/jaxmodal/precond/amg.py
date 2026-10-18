@@ -17,6 +17,7 @@ from pyamg.strength import symmetric_strength_of_connection
 from ..linalg.ell import BlockELL, block_ell
 from ..operators.common import is_count, register
 from ..operators.constraints import ap_operator
+from . import schwarz
 from .chebyshev import chebyshev, lmax_estimate
 from .gmg import GMG, Cholesky
 from .jacobi import _block_jacobi, _inverse_blocks
@@ -144,8 +145,9 @@ class AMGAggregates:
 
 
 def _fingerprint(op):
-    """Per block: element count and a hash of the DOF table (connectivity and element order)."""
-    return tuple((b.n_el, hashlib.sha1(np.asarray(b.dofs)).hexdigest()) for b in op.blocks)
+    """Per block: type, element count and a hash of the DOF table (connectivity and element
+    order)."""
+    return tuple((b.type, b.n_el, hashlib.sha1(np.asarray(b.dofs)).hexdigest()) for b in op.blocks)
 
 
 def amg(
@@ -220,8 +222,7 @@ def amg(
 def _shell_amg(op, free, sigma, points, degree, ratio, max_coarse, pattern, shell):
     """(GMG, pattern, shell): the solid-shell V-cycle, Chebyshev over additive Schwarz on
     every level (the matrix-free A_P on level 0, A_b = A_P there), down to a dense Cholesky."""
-    from . import schwarz
-    from .shell import _shell_levels
+    from .shell import B, _shell_levels
 
     A = ap_operator(op, free, sigma)
     Ab, pattern = _hex8_galerkin(A, pattern)
@@ -229,9 +230,9 @@ def _shell_amg(op, free, sigma, points, degree, ratio, max_coarse, pattern, shel
     out, transfers = [], []
     for i, (Al, (blocks, sel), P) in enumerate(levels):
         S = schwarz.build(Al, blocks, sel)
-        E = A if i == 0 else block_ell(Al, 9)
+        E = A if i == 0 else block_ell(Al, B)
         out.append((E, chebyshev(E, S, lmax_estimate(E, S), degree, ratio)))
-        b = 3 if i == 0 else 9
+        b = 3 if i == 0 else B
         transfers.append(ELLTransfer(block_ell(P, b), block_ell(P.T.tocsr(), b)))
     P = GMG(tuple(out), tuple(transfers), _cholesky(coarsest), A.free, None)
     return P, pattern, shell
