@@ -382,7 +382,8 @@ def lobpcg(
     max(tol, 1.2e-7)). maxit counts per chunk. low_memory: the low-memory step (11 instead of
     16 blocks, about 1.4-1.9x the time); a 9-block chunk stuck for SWITCH iterations switches
     to it (info["chunks"][i]["switched"]). A STALL or maxit exit returns the Rayleigh-Ritz
-    block of the last X (Ritz values: upper bounds), accepted if its explicit residuals pass.
+    block of the last X (Ritz values: upper bounds), accepted if its explicit residuals pass
+    (X and lam unchanged and not accepted if SVQB drops a column).
     polish: a host callable X -> (Y, iterations), Y ~ A^-1 M_m X for an SPD A (e.g. PCG on
     K + sigma M), masked: one inverse-iteration step on a STALL exit that has not passed,
     accepted if the new block's explicit residuals pass, else discarded (chunks[i]["polish"]:
@@ -441,12 +442,13 @@ def _rr_block(X, args, consts, c):
 
 
 def _final_rr(X, lam, args, consts, c):
-    """A failed exit's block: _rr_block of X (lam each an upper bound of its index past the
-    locked modes); X and lam unchanged, with explicit (r, t), if SVQB drops a column."""
+    """A failed exit's (X, lam, r, t, ok): _rr_block of X (lam each an upper bound of its index
+    past the locked modes), ok True; if SVQB drops a column (a column in the span of R or the
+    basis), X and lam unchanged with explicit (r, t), ok False (never accepted)."""
     if (out := _rr_block(X, args, consts, c)) is not None:
-        return out
+        return *out, True
     r, t = _confirm(X, lam, args[0], args[1], consts)[2:]
-    return X, np.asarray(lam), np.asarray(r), np.asarray(t)
+    return X, np.asarray(lam), np.asarray(r), np.asarray(t), False
 
 
 def _polish(polish, X, lam, r, t, j, rec, args, consts, want, guards, lock, c):
@@ -469,8 +471,8 @@ def _iterate(state, args, consts, want, lock, guards, tol, maxit, low, c, stop):
     drops. A 9-block chunk without progress for SWITCH iterations switches to the low-memory
     step (sticky; not with stop) and gets a fresh progress window; record["switched"] is the
     9-block iteration after which it did (1-based), None if never. A STALL or maxit exit
-    (without stop) returns _final_rr's block, accepted (the chunk converges) if its explicit
-    residuals pass."""
+    (without stop) returns _final_rr's block, accepted (the chunk converges) if SVQB kept
+    every column and its explicit residuals pass."""
     op, m = args[0], args[1]
     k = state[0].shape[1]
     hist, lsum, drops = [], [], 0
@@ -527,8 +529,8 @@ def _iterate(state, args, consts, want, lock, guards, tol, maxit, low, c, stop):
     if not converged and stop is not None:  # explicit residuals, lam unchanged
         r, t = (np.asarray(a) for a in _confirm(X, lam, op, m, consts)[2:])
     elif not converged:
-        X, lam, r, t = _final_rr(X, lam, args, consts, c)
-        if (jn := _accept(lam, r, t, want, j, guards, lock)) is not None:
+        X, lam, r, t, ok = _final_rr(X, lam, args, consts, c)
+        if ok and (jn := _accept(lam, r, t, want, j, guards, lock)) is not None:
             j, converged = jn, True
             stagnated = stagnated or bool((r[:j] > tol).any())
     rec = dict(want=want, locked=j if converged else 0, iterations=it + 1, converged=converged,

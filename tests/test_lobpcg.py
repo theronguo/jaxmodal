@@ -1057,7 +1057,8 @@ def test_t_iteration_switch(monkeypatch, low):
 
 def test_final_rr(monkeypatch):
     """A STALL exit returns the Rayleigh-Ritz block of the last X (Ritz values ascending, V^T K
-    V diagonal); an SVQB drop in _final_rr's own _start leaves X and lam as they were."""
+    V diagonal); an SVQB drop in _final_rr's own _start leaves X and lam as they were and
+    is never accepted."""
     p = problem(*PENCIL)
     lam, V, info = stalled(monkeypatch)
     assert not info["converged"] and np.all(np.diff(lam) >= 0)
@@ -1065,7 +1066,7 @@ def test_final_rr(monkeypatch):
     G = Vf.T @ (p.Kf @ Vf)
     assert np.abs(G - np.diag(np.diag(G))).max() <= 1e-10 * np.abs(np.diag(G)).max()
     assert np.allclose(np.diag(G) / np.einsum("ij,ij->j", Vf, p.Mf @ Vf), lam, rtol=1e-12)
-    final, start, n_start, seen = lob._final_rr, lob._start, [], []
+    final, start, accept, n_start, seen = lob._final_rr, lob._start, lob._accept, [], []
 
     def drop(*a, **kw):  # every call after _begin's (_final_rr's): one column dropped
         X, KX, MX, keep = start(*a, **kw)
@@ -1076,8 +1077,13 @@ def test_final_rr(monkeypatch):
         seen.append((np.asarray(X), lam))
         return final(X, lam, *a)
 
+    def accepts(*a):  # never reached: the dropped block is not accepted
+        seen.append("_accept")
+        return accept(*a)
+
     monkeypatch.setattr(lob, "_start", drop)
     monkeypatch.setattr(lob, "_final_rr", spy)
+    monkeypatch.setattr(lob, "_accept", accepts)
     lam, V, info = stalled(monkeypatch)
     ((X_in, lam_in),) = seen
     assert len(n_start) == 2 and not info["converged"]
@@ -1204,7 +1210,8 @@ def test_no_switch_when_converging(monkeypatch, name):
 def test_band_clamp(monkeypatch):
     """Band mode, chunks of 40 (block 48, c = 64, capacity 128): the 4th chunk starts at count
     120 with ceil(120 / 48) 48 = 144 > 128 and switches (the clamped _project); an oracle polish
-    (the exact block) locks every chunk: no mode twice, the band complete."""
+    (the exact block) locks every chunk: no mode twice, the band complete. A wiring check: the
+    clamp's arithmetic is test_project_clamp's (the oracle polish hides an unclamped one)."""
     monkeypatch.setattr(lob, "STALL", 3)
     monkeypatch.setattr(lob, "SWITCH", 1)
     n = 3000

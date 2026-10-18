@@ -62,9 +62,10 @@ MESHES = {
 FIT = [("flat", 64), ("flat", 128), ("flat", 256), ("web", 64), ("block", 32), ("stack10", 64),
        ("stack3", 128)]  # fmt: skip
 MS = (6, 8, 15, 25, 60, 120)
-# compile-only extras (case, size, m, degree): T, degree 3 and the 791k plate
-EXTRA = (("T", 48, 15, 2), ("flat", 128, 15, 3), ("flat", 362, 6, 2), ("flat", 362, 120, 2))
-COUNT = [("flat", 64), ("flat", 128), ("stack3", 128)]
+# compile-only extras (case, size, m, degree): T, degree 3, the 791k and 1.58M plates
+EXTRA = (("T", 48, 15, 2), ("flat", 128, 15, 3), ("flat", 362, 6, 2), ("flat", 362, 120, 2),
+         ("flat", 512, 6, 2), ("flat", 512, 120, 2))  # fmt: skip
+COUNT = [("flat", 64), ("flat", 128), ("flat", 256), ("flat", 362), ("flat", 512), ("stack3", 128)]
 STORAGE = FIT + [("T", 48), ("L", 48), ("cylinder", 0), ("flat", 48), ("block", 64),
                  ("flat", 362)]  # fmt: skip
 PEAKS = [("flat", 128), ("flat", 256), ("flat", 362), ("flat", 512), ("stack3", 128),
@@ -219,11 +220,15 @@ def peaks(cases=PEAKS):
 
 
 def solve_peak(case="flat", n=362, n_modes=20):
-    """One cold solve_modes (tol 1e-6) in a fresh subprocess: its info, time and process peak
+    """One cold solve_modes (tol 1e-6, synchronous CPU dispatch) in a fresh subprocess: its info,
+    time and process peak
     above the built operator, next to solve_modes_memory's total."""
     root = str(harness.RESULTS.parents[1])
     # replace, not format: measure_json formats the code once more (its {out})
     code, setup = SOLVE.replace("N_MODES", str(n_modes)), SETUP.format(root=root, case=case, n=n)
+    # synchronous CPU dispatch, set before the backend starts: with async dispatch the 791k peak
+    # varies with machine load (6.6 GB loaded, 7.9-9.4 GB idle), docs/preconditioners.md
+    setup = 'import jax\njax.config.update("jax_cpu_enable_async_dispatch", False)\n' + setup
     r = harness.measure_json(code, setup)
     est = solve_modes_memory(MESHES[case](n), SS, n_modes)["total"]
     r |= dict(case=case, size=n, n_modes=n_modes, estimate_bytes=est)

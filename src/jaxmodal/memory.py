@@ -333,15 +333,15 @@ SHELL_STORAGE = {"shell": 500, "fiber": 6300, "hex": 1250}
 SHELL_BUILD = (150e6, {"shell": 1400, "hex": 3300})
 # pc terms 8 n (a m + c) + K0 (K0 bytes, independent of m): the upper envelope (linear
 # programming, c, K0 >= 0) of memory_analysis minus lobpcg_memory's STEP_FIT part (A b + f ws;
-# the polish with the low f) on flat 64^2-362^2, web 64^2, block 32^3, stack x10 64^2 and x3
-# 128^2 (25k-791k DOF), m = 6-120, rounded up, c + 0.5 against rounding. count: _recurrence
-# minus COUNT_STEP's part, b = 4-32 on flat 64^2, 128^2 and stack x3 128^2, and si_memory's
-# minres (SI_MINRES b + count) at b = 6 on flat 64^2 and 128^2.
+# the polish with the low f) on flat 64^2-512^2, web 64^2, block 32^3, stack x10 64^2 and x3
+# 128^2 (25k-1.58M DOF), m = 6-120, rounded up, c + 0.5 against rounding. count: _recurrence
+# minus COUNT_STEP's part, b = 4-32 on flat 64^2-512^2 and stack x3 128^2, and si_memory's
+# minres (SI_MINRES b + count) at b = 6 on the flat plates.
 SHELL_STEP = {
-    "9-block": (9.3, 7.6, 72e6),
-    "low": (13.6, 6.8, 108e6),
-    "polish": (26.3, 0.5, 130e6),
-    "count": (10.9, 0.5, 123e6),
+    "9-block": (9.7, 5.5, 72e6),
+    "low": (14.0, 4.8, 108e6),
+    "polish": (26.8, 0.5, 129e6),
+    "count": (15.2, 0.5, 117e6),
 }
 
 
@@ -363,8 +363,8 @@ def _shell_amg_memory(mesh, m, max_coarse, degree):
         raise ValueError(SHELL_BLOCKS)
     sizes, n_s, n_h, n_f = _shell_scan(mesh)
     n = 3 * len(mesh.points)
-    a = SHELL_STORAGE
-    storage = (schwarz.nbytes(sizes) + a["shell"] * n_s + a["fiber"] * n_f + a["hex"] * n_h
+    st = SHELL_STORAGE
+    storage = (schwarz.nbytes(sizes) + st["shell"] * n_s + st["fiber"] * n_f + st["hex"] * n_h
                + 8 * min(n, max(max_coarse, 1000)) ** 2)  # fmt: skip
     beta, g = SHELL_BUILD
     hb = beta + storage + g["shell"] * n_s + g["hex"] * n_h

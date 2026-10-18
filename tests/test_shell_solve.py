@@ -6,6 +6,7 @@ import functools
 import importlib
 import sys
 
+import helpers
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -64,7 +65,7 @@ def _ref(mesh):
     """36 reference eigenvalues and lam_max of the SS steel mesh."""
     K, M = assemble(mesh, STEEL)
     Kf, Mf, _ = restrict(K, M, dof_mask(mesh, SS))
-    lmax = float(spla.eigsh(Kf, 1, Mf, which="LA", tol=1e-3, return_eigenvectors=False)[0])
+    lmax = helpers.lmax(Kf, Mf)
     return reference_modes(K, M, 36, dof_mask(mesh, SS), points=mesh.points)[0], lmax
 
 
@@ -82,7 +83,7 @@ def check_reference(mesh, mats, bcs, lam, V, info, tol, n_extra=4):
     n, nr = len(lam), info["n_rigid"]
     lr_all, Vr = reference_modes(K, M, nr + n + n_extra, free, points=mesh.points)
     Kf, Mf, idx = restrict(K, M, free)
-    lmax = float(spla.eigsh(Kf, 1, Mf, which="LA", tol=1e-3, return_eigenvectors=False)[0])
+    lmax = helpers.lmax(Kf, Mf)
     lr, Vrf = lr_all[nr:], Vr[idx, nr:]
     check_lam(lam, lr, lmax, tol)
     lu = spla.splu(Mf.tocsc())
@@ -170,6 +171,22 @@ def test_polish_wiring(lobpcg_spy, precond):
     assert len(polish) == (2 if info["precond"] == "amg" else 1)
 
 
+@pytest.mark.parametrize(
+    ("tol", "opts", "want"),
+    [(1e-10, {}, (0.1 * 1e-10, 500)), (1e-8, {"tol": 1e-9, "maxit": 50}, (1e-9, 50))],
+)
+def test_polish_pcg_options(lobpcg_spy, monkeypatch, tol, opts, want):
+    """The polish closure passes polish_options' tol and maxit (default min(1e-7, 0.1 tol), 500)
+    to pcg."""
+    mesh = T.plate(8, 50)[0]
+    solve_modes(mesh, STEEL, SS, 4, tol=tol, polish_options=opts)
+    calls, real = [], API.pcg
+    monkeypatch.setattr(API, "pcg", lambda *a: calls.append(a[3:]) or real(*a))
+    X = jnp.ones((3 * len(mesh.points), 2))
+    lobpcg_spy[-1]["polish"](X)
+    assert calls == [want]
+
+
 def test_polish_wiring_other(lobpcg_spy):
     """GMG (voxel) and p-MG never polish (pmg is not a solve_modes option: lobpcg only)."""
     mesh = voxel_mesh((6, 5, 4), (0.1,) * 3)
@@ -244,7 +261,7 @@ def test_polish_thin(thin):
     r = np.linalg.norm(Kf @ Vf - MV * lam, axis=0) / (lam * np.linalg.norm(MV, axis=0))
     assert np.all(r <= info["thresholds"]), r / info["thresholds"]
     lr = reference_modes(K, M, 24, free, points=mesh.points)[0]
-    lmax = float(spla.eigsh(Kf, 1, Mf, which="LA", tol=1e-3, return_eigenvectors=False)[0])
+    lmax = helpers.lmax(Kf, Mf)
     check_lam(lam, lr, lmax, 1e-6)
 
 
@@ -416,7 +433,9 @@ def slow_if(cond, *args):
 def test_shell_steps(case, n, m):
     """The shell family's step, low step and polish at the lobpcg_memory level >= the
     measured temporaries; at large n (flat 128^2, stack x3 128^2, m 25 and 120) <= GATE x
-    measured (K0, about 70-130 MB, is most of the slack there)."""
+    measured (up to 1.28x, the polish on flat 128^2 at m = 25; K0, about 70-130 MB, is most of
+    the slack there; a fit of the totals without STEP_FIT's part would be about 16 + 2.5 ws
+    blocks above it). Every point is a fit point: the lower bound is a regression check."""
     mesh = built(case, n)[0]
     model, got = modelled(mesh, m, amg_memory(mesh, m)), measured(case, n, m)
     blk = 8 * 3 * len(mesh.points) * m
@@ -496,10 +515,8 @@ def test_shell_storage(case, n):
     """amg_memory's storage >= the owned device bytes; the mesh scan's patches equal amg's."""
     mesh, op, _, P = built(case, n)
     assert amg_memory(mesh, 6)["storage"] >= owned_bytes(P, op)
-    from test_shell_amg import columns
-
     sizes = MEM._shell_scan(mesh)[0]
-    assert np.array_equal(np.sort(sizes), np.sort(3 * (columns(op) >= 0).sum(1)))
+    assert np.array_equal(np.sort(sizes), np.sort(3 * (T.columns(op) >= 0).sum(1)))
 
 
 @pytest.mark.slow
@@ -565,7 +582,8 @@ def test_shell_build_peak():
 def test_shell_791k_peak():
     """Flat 362^2 (791k, L/t 100, out of the build fit): storage >= the owned bytes, the build
     model >= the setup peak and <= 1.3x it; a cold solve_modes (20 modes, tol 1e-6, no switch,
-    no polish) peaks within 20% of solve_modes_memory (>= 2 GB, ROADMAP.md's rule)."""
+    no polish, synchronous CPU dispatch) peaks within 20% of solve_modes_memory (>= 2 GB,
+    ROADMAP.md's rule)."""
     (b,) = study().peaks([("flat", 362)])
     pc = amg_memory(study().MESHES["flat"](362), 15)
     assert pc["storage"] >= b["owned"] and b["peak_bytes"] <= pc["build"] <= 1.3 * b["peak_bytes"]
