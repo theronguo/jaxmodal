@@ -3,22 +3,25 @@
 `jaxmodal.post` (PR 17) works on the outputs of `solve_modes` and `reference_modes`: mode
 normalization, the M-weighted MAC, participation factors and effective modal mass, clusters and a
 frequency table, strain and stress recovery, and VTU export. Everything here is single-host NumPy
-around jitted kernels; outputs are NumPy float64. Every function except `influence`, `clusters`,
-`cluster_rtol`, `frequency_table`, `format_table`, `von_mises` and `write_modes` needs x64
-(`jaxmodal.config.enable_x64()`).
+around jitted kernels; numeric outputs are NumPy float64. Every function except `influence`,
+`clusters`, `cluster_rtol`, `frequency_table`, `format_table`, `von_mises` and `write_modes` needs
+x64 (`jaxmodal.config.enable_x64()`).
 
 ## Conventions
 
 - **Modes** `V` are host or device arrays `(n_dof, n)` in the full DOF space, node-major
   ($3a + i$), with constrained rows 0, as `solve_modes`, `reference_modes` and `info["rigid"]`
-  return them. A 1-D array is one column; n = 0 columns are allowed everywhere.
+  return them. A 1-D array is one column: `normalize` and `element_stress` then return 1-D
+  results, `mac` and `participation` keep the mode axis. n = 0 columns are allowed everywhere.
 - **Mass** `M` is an operator with `apply_M` (`unstructured`, `stencil`) or a SciPy/NumPy matrix
   (`assemble`'s M). Build the operator with the same `mass`, `nodal_mass` and `orientations` as
   the solve.
 - **Batched products.** Every product with `M` runs on column batches of width
   $w = \min(\text{batch}, n)$ (`batch=64`, an argument of `normalize`, `mac` and `participation`).
-  Only the last batch is zero-padded, so there is one compile per width. Each batch is cast to
-  fp64, and the next batch's `apply_M` is dispatched before the host GEMM of the current one.
+  Only the last batch is zero-padded, so there is one compile per width and $\lceil n/w\rceil w$
+  columns go through `apply_M`. Each batch is cast to fp64, and the next batch's `apply_M` is
+  dispatched before the host GEMM of the current one. fp32 inputs are cast per batch (and in row
+  blocks for the GEMM), never copied whole.
 
 ## Normalization
 
@@ -87,9 +90,13 @@ $$\lambda_{i+1} - \lambda_i \le \text{rtol}\,|\lambda_{i+1}| + \text{atol}.$$
   distinct modes only coarsens a row; it never makes it wrong.
 - The solver merges at $\lambda_i - \lambda_{i-1} < 100\,t_{i-1}|\lambda_{i-1}|$, with
   $t_j \ge$ tol its per-mode acceptance threshold ($r_\text{acc}$ in place of $t_j$ in
-  shift-invert slices). `cluster_rtol(info)` $= 100\max(10^{-6}, \max_j t_j, r_\text{acc})$ reproduces that
-  from a converged `solve_modes` info, and the recipe passes `max(1e-4, cluster_rtol(info))`.
+  shift-invert slices). `cluster_rtol(info)` $= 100\max(10^{-6}, \max_j t_j, r_\text{acc})$
+  reproduces that from a converged `solve_modes` info, and the recipe passes
+  `max(1e-4, cluster_rtol(info))`.
   The looser $|\lambda_{i+1}|$ and $\le$ never split a solver cluster.
+- `clusters` raises unless `lam` is a finite, ascending 1-D array. `frequency_table` needs one
+  `m_eff` row per `lam` entry, rigid rows included (prepend zeros to `lam` for them), and `total`
+  of shape `(6,)`.
 - **Basis invariance.** Per cluster $C$, $\sum_{i\in C} m^\text{eff}_{ik} = r_k^\top MP_Cr_k$,
   with $P_C$ the M-orthogonal projector onto the cluster's span, so cluster sums do not depend on
   the basis inside a degenerate cluster. Per-mode values do.
@@ -124,11 +131,11 @@ $u^\top K_e u = \sum_q w_q\,\varepsilon_q\cdot\sigma_q$.
   returns per block `{"points" (n_e, nq, 3), "weights" (n_e, nq), "eps", "sigma" (n_e, nq, 6)}`.
   `ssh8` padded plies have weight 0. Use it for quadrature-point detail on a few modes and for
   per-ply values on laminates.
-- `element_stress(mesh, materials, U, orientations=None, chunk=1024, batch=64)` returns the
-  volume averages $\bar\sigma_e = \sum_q w_q\sigma_q/\sum_q w_q$ and $\bar\varepsilon_e$,
-  `(n_el, k, 6)` in element order (1-D `U`: `(n_el, 6)`). On laminates the average mixes the
-  plies. For hex elements the kernel averages the gradients first, $\bar\varepsilon_e =
-  S(\bar G_e^\top u_e)$ with $\bar G_e = \sum_q w_q G_q/\sum_q w_q$, and $\bar\sigma_e =
+- `element_stress(mesh, materials, U, orientations=None, chunk=1024, batch=64)` returns the volume
+  averages `(eps, sigma)`, $\bar\varepsilon_e$ and $\bar\sigma_e = \sum_q w_q\sigma_q/\sum_q w_q$,
+  each `(n_el, k, 6)` in element order (1-D `U`: `(n_el, 6)`). On laminates the average mixes the
+  plies. For hex elements the kernel averages the gradients first, $\bar\varepsilon_e = S(\bar
+  G_e^\top u_e)$ with $\bar G_e = \sum_q w_q G_q/\sum_q w_q$, and $\bar\sigma_e =
   C_e\bar\varepsilon_e$ ($\varepsilon$ is linear in $u$ and $C_e$ constant), which equals the
   weighted mean of `hex_recover` without the per-point work per column; `ssh8` averages
   `shell_recover`'s points (per-ply $C$).
@@ -198,28 +205,34 @@ Stacking the small `(n, 6)` outputs avoids `np.hstack([info["rigid"], V])`, whic
 | function | `apply_M` columns | host | device |
 |---|---|---|---|
 | `normalize(V, M)` | n | the output (a copy of V) | $\approx (3 + \text{ws})\,w\,n_\text{dof}\cdot 8$ B |
-| `mac(A, B, M)` | $n_A + n_B$ ($n_B$ when `B is A`) | $n_A n_B$ | same |
+| `mac(A, B, M)` | $n_A + n_B$ ($n_B$ when `B is A`) | $8\,n_A n_B$ B | same |
 | `participation(V, M, r)` | $n + 6$ | $O(6\,n_\text{dof})$ | same |
 | `element_stress` | none | $96\,n_\text{el}(k + kb)$ B | $8\,n_\text{dof}\,kb$ B + one chunk |
 
 - $w = \min(\text{batch}, n)$, ws the operator's own workspace per column; the device holds
   the batch, its product and the product dispatched ahead. Host memory is the inputs plus
   $O(w\,n_\text{dof})$ per batch (`normalize` works on 64-column blocks for its sign and max
-  norms). Device input is pulled to the host once.
+  norms). Device input is pulled to the host once. Column counts are padded to
+  $\lceil n/w\rceil w$. On CPU a host batch passed to the device stays referenced until Python's
+  garbage collector runs, so up to two extra batches can be live.
 - $kb = \min(\text{batch}, k)$; `element_stress` holds the outputs plus one block's
   `(n_e, kb, 6)` pair on the host, and the column batch `(n_dof, kb)` on the device.
 - The host GEMM of `_gram` ($A^\top MB$) is $2 n_A w\,n_\text{dof}$ flops per batch.
 - `element_stress` runs `ceil(k / batch)` × (blocks × chunks) kernel calls; geometry and the
-  `ssh8` EAS factorization are computed once per chunk and column batch (not per column). `recover` is one pass
-  per field.
-- VTU size: about $24\,n_\text{nodes}$ B per mode before zlib; what zlib gains depends on the
-  field (little on noisy fields, about 17× on smooth synthetic fields on a structured box). meshio builds each array in memory, so export `V[:, sel]` for large models.
+  `ssh8` EAS factorization are computed once per chunk and column batch (not per column).
+  `recover` is one pass per field.
+- VTU size: $24\,n_\text{nodes}$ B per mode raw; meshio base64-encodes the zlib blocks, so mode
+  shapes take about 28–31 B per node (0.85 of raw for `solve_modes` modes, 0.78 for random
+  fields; only smooth synthetic fields compress 2.6–3.8×). meshio builds each array in memory,
+  so export `V[:, sel]` for large models.
 - Compiles: one `apply_M` per batch width, one recovery kernel per (type, chunk, kb) and per ply
   count for `ssh8`; repeat calls compile nothing.
 
 Measured once (M-series laptop CPU, 64 GB, hex20 $43^3$ box, 1.0M DOF, 79.5k elements, 256
 random columns): `_gram` $V^\top MV$ 1.6 s (0.41 s per 64-column batch, of which the host GEMM
 is 0.06 s, overlapped with the next `apply_M`; the GEMM grows with $n_A$), `participation`
-1.7 s, `normalize` 2.4 s with a host peak of 1.25× V, `element_stress` of 64 columns 0.33 s
-(4.2 ms per 1024-element chunk; `ssh8` one ply: 16 ms) with a host peak of 0.97 GB. Process peak
-RSS 6.8 GB, of which V is 1.9 GB and the operator and mesh 1.7 GB.
+1.7 s (fp32 V: `_gram` 1.7 s, host peak 1.5 GB), `normalize` 2.3 s with a host peak of 1.25× V,
+`element_stress` of 64 columns 0.32 s (about 55 ms setup plus 2.2–2.9 ms of kernel per
+1024-element chunk; `ssh8` one ply: 16 ms) with a host peak of 0.97 GB. Process peak RSS 6.8 GB,
+of which V is 1.9 GB and the operator and mesh 1.7 GB; outputs kept afterwards (the `normalize`
+copy) come on top.

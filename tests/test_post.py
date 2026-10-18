@@ -237,6 +237,8 @@ def test_mac():
     A, B = (rng.standard_normal((len(free), k)) for k in (5, 7))
     assert np.abs(post.mac(A, B, M) - exact_mac(A, B, M)).max() <= 1e-13
     assert np.abs(post.mac(A, B, op) - exact_mac(A, B, M)).max() <= 1e-13
+    A2 = A + 0.1 * A[:, ::-1]  # same shape as A, not A
+    assert np.abs(post.mac(A, A2, op) - exact_mac(A, A2, M)).max() <= 1e-13
     assert np.abs(post.mac(jnp.asarray(A), jnp.asarray(B), op) - exact_mac(A, B, M)).max() <= 1e-13
     G = A.T @ B
     expect = G**2 / (np.sum(A * A, 0)[:, None] * np.sum(B * B, 0))
@@ -272,8 +274,21 @@ def test_gram_batches():
     spy = Spy(op)
     post.mac(A, B, spy)
     assert spy.widths == [64, 64, 64, 9]  # M once per column of B and of A
+    spy = Spy(op)
+    post.mac(B, B, spy)
+    assert spy.widths == [64, 64, 64]  # B is A: one pass
     G32 = _gram(A.astype(np.float32), op, B.astype(np.float32), batch=7)[0]
     assert G32.dtype == np.float64 and rel(G32, A.T @ (M @ B)) <= 1e-6
+    B32 = B.astype(np.float32)
+    assert (
+        rel(
+            post.participation(B32, op, B[:, :6])[1],
+            post.participation(B32.astype(float), op, B[:, :6])[1],
+        )
+        <= 1e-12
+    )
+    N32 = post.normalize(B32, op)
+    assert N32.dtype == np.float64 and rel(N32, post.normalize(B32.astype(float), op)) <= 1e-12
 
 
 COMPILES = """
@@ -413,6 +428,8 @@ def test_ssh8_patch_recovery(name):
         uA, sig = linear_field(C, Q, s, hexes.points)
         out = post.recover(shells, {0: Material(C, 1.0)}, uA, {0: Q})["ssh8"]
         assert np.abs(out["sigma"] - sig).max() <= 1e-10 * np.abs(sig).max()
+        CQ = np.asarray(rotate(C, Q))
+        assert np.abs(out["sigma"] - out["eps"] @ CQ.T).max() <= 1e-12 * np.abs(sig).max()
     vol = [sum(np.linalg.det(ref.jac(shells.points[c], np.array(p))) for p in GAUSS2) for c in conn]
     assert rel(out["weights"].sum(1), vol) <= 1e-12
 
@@ -496,11 +513,11 @@ def test_element_stress_linear(t):
         assert rel(sig[e], C @ voigt(A)) <= 1e-10
 
 
-@pytest.mark.parametrize("case", ["hex20", "mixed"])
+@pytest.mark.parametrize("case", ["hex8", "hex20", "hex27", "mixed"])
 def test_element_stress(case, monkeypatch):
     rng = np.random.default_rng(13)
-    if case == "hex20":
-        mesh, mats, ori = hex_mixed("hex20", True, rng), MATS, {1: R}
+    if case != "mixed":
+        mesh, mats, ori = hex_mixed(case, True, rng), MATS, {1: R}
     else:
         (mesh, mats), ori = mixed(), {0: TILT}
     t0, widths = next(iter(mesh.blocks)), []
@@ -521,8 +538,10 @@ def test_element_stress(case, monkeypatch):
         for key, got in (("eps", eps), ("sigma", sig)):
             mean = (w * b[key]).sum(1) / w.sum(1)
             assert np.abs(got[e, 3] - mean).max() <= 1e-13 * np.abs(mean).max()
-    single = np.stack([post.element_stress(mesh, mats, U[:, j], ori)[1] for j in range(70)], 1)
-    assert np.abs(single - sig).max() <= 1e-13 * np.abs(sig).max()
+    single = [post.element_stress(mesh, mats, U[:, j], ori) for j in range(70)]
+    for i, got in enumerate((eps, sig)):
+        one = np.stack([x[i] for x in single], 1)
+        assert np.abs(one - got).max() <= 1e-13 * np.abs(got).max()
 
 
 def test_von_mises():
@@ -670,6 +689,7 @@ def test_errors(tmp_path):
         (lambda: post.mac(V, V[:-3], M), "shape"),
         (lambda: post.normalize(np.c_[V, np.zeros(n)], M), "zero"),
         (lambda: post.normalize(np.zeros(n), kind="max"), "zero"),
+        (lambda: post.normalize(np.r_[np.inf, np.ones(n - 1)], kind="max"), "non-finite"),
         (lambda: post.mac(V, np.zeros((n, 1))), "zero"),
         (lambda: post.participation(np.zeros((n, 1)), M, r), "zero"),
         (lambda: post.normalize(V, M, kind="unit"), "kind"),

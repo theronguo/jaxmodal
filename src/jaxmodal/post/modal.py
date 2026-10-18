@@ -50,28 +50,36 @@ def _mbatches(M, B, batch):
         yield pull(*pending)
 
 
+def _dot(A, B, rows=1 << 16):
+    """A^T B in fp64; a lower-precision A is upcast in row blocks, not copied whole."""
+    if A.dtype == np.float64:
+        return A.T @ B
+    blocks = range(0, len(A), rows)
+    return sum(A[s : s + rows].astype(np.float64).T @ B[s : s + rows] for s in blocks)
+
+
 def _gram(A, M, B, batch=64):
     """Host A^T M B and diag(B^T M B) (fp64), M applied once to batches of B."""
     A = np.asarray(A)
     G, d = np.zeros((A.shape[1], B.shape[1])), np.zeros(B.shape[1])
     for cols, MB in _mbatches(M, B, batch):
-        G[:, cols] = A.T @ MB
-        d[cols] = np.einsum("ij,ij->j", np.asarray(B[:, cols], np.float64), MB)
+        G[:, cols] = _dot(A, MB)
+        d[cols] = np.einsum("ij,ij->j", B[:, cols], MB)
     return G, d
 
 
 def _mdiag(M, B, batch=64):
     """diag(B^T M B)."""
-    return _gram(B[:, :0], M, B, batch)[1]
+    return _gram(B[:, :0], M, B, batch)[1]  # an empty A: the diagonal only
 
 
 def _nonzero(d, what):
-    bad = np.flatnonzero(~(d > 0))
+    bad = np.flatnonzero(~(np.isfinite(d) & (d > 0)))
     if len(bad):
-        raise ValueError(f"{what} has zero (non-positive or NaN M-norm) columns {bad}")
+        raise ValueError(f"{what} has zero or non-finite (M-)norm columns {bad}")
 
 
-def _blocks(n, size=64):
+def _colblocks(n, size=64):
     return (slice(c, min(c + size, n)) for c in range(0, n, size))
 
 
@@ -86,10 +94,10 @@ def normalize(V, M=None, kind="mass", batch=64):
         raise ValueError("normalize(kind='mass') needs M: pass M or kind='max'")
     check_x64("normalize")
     one = np.ndim(V) == 1
-    V = np.asarray(_cols(V), np.float64)  # no copy for host fp64
+    V = _cols(V)  # not upcast: the output is the only fp64 copy
     n = V.shape[1]
     j, s = np.zeros(n, int), np.zeros(n)
-    for c in _blocks(n):  # column blocks: temporaries of 64 columns, not of V
+    for c in _colblocks(n):  # column blocks: temporaries of 64 columns, not of V
         a = np.abs(V[:, c])
         j[c] = np.argmax(a >= (1 - 1e-6) * a.max(0, initial=0), axis=0)
         if kind == "max":
@@ -144,24 +152,21 @@ def participation(V, M, r, batch=64):
     check_x64("participation")
     r = _cols(r)
     V = _cols(V, r.shape[0])
-    Mr = np.zeros(r.shape)
-    for cols, MB in _mbatches(M, r, batch):
-        Mr[:, cols] = MB
-    b = V.T @ Mr
+    b, total = _gram(V, M, r, batch)  # V^T M r and r^T M r
     mu = _mdiag(M, V, batch)
     _nonzero(mu, "V")
-    return b / mu[:, None], b**2 / mu[:, None], np.einsum("ij,ij->j", r, Mr)
+    return b / mu[:, None], b**2 / mu[:, None], total
 
 
 def clusters(lam, rtol=1e-4, atol=0.0):
     """Index arrays of clusters of the ascending lam: neighbours join when
     lam[i+1] - lam[i] <= rtol |lam[i+1]| + atol."""
     lam = np.asarray(lam, float)
-    if lam.ndim != 1 or not np.isfinite(lam).all() or (np.diff(lam) < 0).any():
+    d = np.diff(lam) if lam.ndim == 1 else None
+    if d is None or not np.isfinite(lam).all() or (d < 0).any():
         raise ValueError("lam must be a finite, ascending 1-D array")
     if len(lam) == 0:
         return []
-    d = np.diff(lam)
     split = np.flatnonzero(d > rtol * np.abs(lam[1:]) + atol) + 1
     return np.split(np.arange(len(lam)), split)
 
@@ -178,14 +183,13 @@ def frequency_table(lam, m_eff, total, rtol=1e-4, atol=0.0):
     """Per cluster: indices, mean lam, f (Hz), summed m_eff (basis invariant), fraction of the
     total (0 where the total is 0) and its cumulative sum; total echoed. After an n_modes solve
     the last cluster (and after a band from f1 > 0 the first) may be incomplete."""
-    m_eff, total = np.asarray(m_eff, float), np.asarray(total, float)
-    if m_eff.shape != (len(lam), 6) or total.shape != (6,):
+    lam, m_eff, total = (np.asarray(a, float) for a in (lam, m_eff, total))
+    if lam.ndim != 1 or m_eff.shape != (len(lam), 6) or total.shape != (6,):
         raise ValueError(
             f"m_eff must be (len(lam), 6) = ({len(lam)}, 6) and total (6,), got {m_eff.shape} "
             f"and {total.shape} (prepend zeros to lam for the rigid modes' rows)"
         )
     cl = clusters(lam, rtol, atol)
-    lam = np.asarray(lam, float)
     lam_c = np.array([lam[c].mean() for c in cl])
     m = np.array([m_eff[c].sum(0) for c in cl]).reshape(-1, 6)
     with np.errstate(invalid="ignore", divide="ignore"):
