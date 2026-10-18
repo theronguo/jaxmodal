@@ -87,16 +87,27 @@ slender beams" entry of `docs/open_items.md`.
   - **Memory form:** the shell step, step_low, polish and count are $8n(am + c) + K_0$, with
     $K_0$ independent of $m$ (the chunk-bounded gathers: about 120 MB at flat $64^2$ for
     $m$ = 8 and 25 alike); the hex family's $8mK$ under-estimated 25k DOF by 19–35 blocks at
-    $m$ = 8 when fitted from 100k. Fitted on 25k–396k; tightness within 1 block on each $m$'s
+    $m$ = 8 when fitted from 100k. Fitted on 25k–396k (count 25k–200k); tightness within 1 block on each $m$'s
     binding case.
   - **`stop` given:** no switch and no `_final_rr` on any exit (`_precond_sigma`'s fallback
-    `sigma_estimate(maxit=10)` always ends by `maxit`; with the RR its σ moved).
+    `sigma_estimate(maxit=10)` ends by `maxit`; with the RR its σ moved).
   - **Implementation notes:** `_explicit` keeps both branches, keyed on the current step kind;
     the next chunk's start from `_iterate`'s X before `_reortho`; only X and λ live at the
     polish; the switch check after the convergence check; the Ritz bound stated correctly.
   - **Tests:** three existing tests added (`test_defaults_snapshot`, `test_option_sets_pinned`,
     `test_solve_boundary_one`); the cluster test made discriminating; boundary groups in test
     2; the live-bytes slack 0.5 block.
+- **Revision 8 (plan review round 7; correctness, simplicity, docs satisfied):**
+  - **Fit range in $m$:** the defaults reach $m$ = 60 (50 modes) and 120 (100 modes), where
+    the $m$ = 8 / 15 / 25 envelope under-estimated by up to 2.6 blocks; the step, low step
+    and polish are fitted at $m$ = 6 / 8 / 15 / 25 / 60 / 120 and stated valid for
+    $6 \le m \le 120$.
+  - **Tests that did not discriminate:** the cluster-extension start (high-frequency noise
+    on every multiplet column, `want` 1 or 4 on the cube pencil; pre-polish asserts); the
+    `_precond_sigma` check made structural (main and the fix differ by 2e-8 there, at the
+    Rayleigh-quotient noise level).
+  - **Simpler:** one storage constant per hex-only DOF ($n_\text{hex} = 3 n_h$ made two
+    collinear).
 
 ## Goal (18b)
 
@@ -118,7 +129,7 @@ slender beams" entry of `docs/open_items.md`.
 - Band mode reuses the AMG aggregates on shells as on hex meshes (`return_aggregates`, already
   generic).
 
-## Findings (sizing study and review rounds 1–5, CPU fp64, M3 Max)
+## Findings (sizing study and review rounds 1–7, CPU fp64, M3 Max)
 
 ### `solve_modes` with shell AMG works as is below $L/t \approx 200$
 
@@ -249,9 +260,8 @@ round 4).
 - **LOBPCG step extra** (`memory_analysis`, $m = 15$, no basis; with a basis the AMG steps are
   unchanged, review round 2): 9-block 27.4 / 16.4 / 12.5 (flat $64^2$ / $128^2$ / $256^2$),
   12.4 (stack ×3), 11.4 (stack ×10), 21.6 (T 3/3), 18.2 (block $32^3$); low 40.3 / 20.4 /
-  17.5, 16.4, 15.8, 24.9, 22.1. The $n$-independent part (per column at $m$ = 15; review round 6
-  found it independent of $m$, about 120 MB at flat $64^2$, hence $K_0$ in the Design) is about
-  $5\cdot10^5$ DOF-equivalents (the coarse levels' chunk-bounded Schwarz gathers and unpacked inverses, which
+  17.5, 16.4, 15.8, 24.9, 22.1. The $n$-independent part is a constant $K_0$ of about 120–150 MB
+  (independent of $m$, review round 6; the coarse levels' chunk-bounded Schwarz gathers and unpacked inverses, which
   also covers 18a's Schwarz apply temporaries $2\,\texttt{CHUNK\_BYTES}\,k/24$), so the
   rev 4 fit used the cases from 100k DOF up (rev 7: $K_0$, fitted from 25k). Degree 3: within ±1.1 blocks of degree 2. The low total
   (11 + low extra) exceeds the 9-block total (16 + extra) on small meshes (flat $64^2$: 51.3 vs
@@ -270,8 +280,8 @@ round 4).
   | hex8 $40^3$ (AMG) | 15 | | below | 27.2 (1.7–2 below) |
 
   PCG with the barrier: 100 iterations 3.50 s instead of 8.02 s at $64^2$, 12.69 vs 12.79 s at
-  $128^2$. The polish's excess is $n$-independent (about $2.5\cdot10^5$ DOF-equivalents per
-  column at $m$ = 15; independent of $m$ as the step's, review round 6).
+  $128^2$. The polish's excess is $n$-independent: $K_{0,P}$ about 150–190 MB (independent of $m$, as
+  the step's; review rounds 6–7).
 - **Host setup peak** (fresh subprocess, above the built operator, CPU: includes the device
   storage): flat 0.46 / 1.33 / 2.61 / 5.14 GB at 100k / 396k / 791k / 1.58M DOF, stack ×3
   $128^2$ 3.8 kB/DOF, stack ×10 $64^2$ 4.8 kB, T 3/3 $48^2$ 283 MB (45k DOF), block $32^3$ /
@@ -280,8 +290,8 @@ round 4).
   about 150 MB), growing by 2.77–2.78 kB per hex DOF from block $32^3$ to $64^3$. Coarse levels
   per hex-only node: 2.18 kB on blocks $48^3$ / $64^3$ (three levels), 1.70–1.76 kB on the
   two-level $24^3$ / $32^3$. Flat $362^2$ (791k): 5.93 kB per fiber, $T_0$ 533 B/DOF.
-- **Count:** not measured yet (the PR 14 recurrence with the V-cycle; `memory_analysis` as for
-  `AMG_COUNT`). The chunk-bounded part needs an $n$-independent term.
+- **Count:** prototype-measured at flat $64^2$ (the PR 14 recurrence with the V-cycle, both
+  barriers: $K_0$ about 138 MB, independent of $b$); fitted in implementation.
 
 
 ## Design (18b)
@@ -313,8 +323,8 @@ round 4).
   leak builds up only after the switch point (measured at the switch on free $24^2$, $L/t$ 50
   and 1000, and the cylinder: $\|R^\top MX\|$ 0 to 4 digits, $\operatorname{diag}(X^\top MX)$
   = $1 - 10^{-15}$). No switch and no `_final_rr` when a `stop` callback is given, on any exit
-  (`_precond_sigma`'s fallback `sigma_estimate(maxit=10)` always ends by `maxit`, since `stop`
-  needs 10 Ritz sums: with the RR its σ moved in the 12th digit at $L/t$ = 50 and the main
+  (`_precond_sigma`'s fallback `sigma_estimate(maxit=10)` ends by `maxit`, since `stop`
+  needs 11 Ritz sums: with the RR its σ moved in the 12th digit at $L/t$ = 50 and the main
   solve went 150 → 230 iterations at $L/t$ = 1000; review round 6).
 - **Where the check sits:** in `_iterate` after the progress update and after the
   convergence check (a check that passes on the same iteration wins). `_explicit` (the
@@ -334,7 +344,11 @@ round 4).
   left out of both sums (it feeds `counting.py:155`'s bound, made for the 9-block step).
 - `lobpcg_step` and `STEP_FIT["9-block"]` are unchanged: a 9-block solve that never gets
   stuck for 5 iterations is bitwise unchanged.
-- `rec["switched"]`: the iteration of the switch (None if never), in `info["chunks"]`.
+- `rec["switched"]`: the iteration of the switch, 1-based like `iterations` (None if never),
+  in `info["chunks"]`. No switch on the last iteration (`it + 1 == maxit`: the low step would
+  never run).
+- `_to_low` projects with the solve's `c` (the capacity is a multiple of it); its peak (X, P,
+  MX, an $n\times c$ slice, B) is below the 9-block step's.
 
 ### `_iterate`'s exits (`eigen/lobpcg.py`)
 
@@ -353,7 +367,7 @@ chunk's start `X0 = Xi[:, j:]` is taken before `X, g = _reortho(...)`, which zer
   $\mu_i \ge \lambda_i$ always, and $\mu_i \ge \lambda_{\text{count}+i}$ (the bound for the
   wanted index) exactly for the first chunk and later up to the locked basis' accuracy, also
   when X held leaked rigid components. Explicit $r$, $t$ (`_confirm`).
-  `_final_rr` and the polish's `_start` use the solve's 9-block `c` (reusing `_begin`'s
+  `_final_rr` and the polish's `_start` use the solve's `c` from `_capacity` (reusing `_begin`'s
   compiled `_start`). If SVQB drops a column, λ and X stay as
   they were (today's behaviour). The polish's step 4 acceptance runs on this result first (a
   `STALL` exit whose Ritz vectors already pass converges, `stagnated` True; a `maxit` exit
@@ -373,7 +387,8 @@ chunk's start `X0 = Xi[:, j:]` is taken before `X, g = _reortho(...)`, which zer
 
 - `lobpcg(..., polish=None)`, also `_solve`. `polish`: a host callable `X -> (Y, iterations)`
   with $Y \approx A_P(\sigma)^{-1} M_m X$ (masked), $A_P$ SPD.
-- From `_final_rr`'s X, λ, r, t, one step:
+- The polish runs in `_solve` after `_iterate` returns (so `_iterate`'s state is gone).
+  From `_final_rr`'s X, λ, r, t, one step:
   1. $Y$, its = `polish(X)` on the whole block ($m$ columns); only X and λ of the chunk are
      live (`_iterate` returned no state, the start block was dropped, and `_final_rr`'s and
      `_confirm`'s KX, MX are deleted before the call);
@@ -396,7 +411,8 @@ chunk's start `X0 = Xi[:, j:]` is taken before `X, g = _reortho(...)`, which zer
   σ)` once and uses LOBPCG's own `P` and σ: `X -> pcg(A_P, m M X, P, ptol, maxit)` returning
   $Y$ and the max iterations over columns. Band mode and the chunked driver get it too. Not
   offered: Jacobi (its PCG needs thousands of iterations), GMG and p-MG (no stagnating case
-  measured; logged).
+  measured; logged). Hex AMG gets it because the rule is one branch (`precond == "amg"`),
+  not from a measured need; it costs nothing there (test 6).
 - `solve_modes(..., polish_options=None)` and `solve_modes_memory(..., polish_options=None)`:
   `on` (default True), `tol` (default $\min(10^{-7}, 0.1\,\mathrm{tol})$), `maxit` (default
   500). Validated like the other option dicts (unknown keys, `on` a bool, `tol` > 0, `maxit` ≥
@@ -425,8 +441,8 @@ chunk's start `X0 = Xi[:, j:]` is taken before `X, g = _reortho(...)`, which zer
   GMG or Jacobi; review round 3); it applies to every preconditioner.
 - polish $= f\cdot\text{ws} + \texttt{pc["polish"]}$ when the preconditioner estimate has a
   `polish` key (the AMG shell family only): `pc["polish"]` $= 8n(a_P m + c_P) + K_{0,P}$, the
-  `_pcg` temporaries with the barrier plus its output block, X and b, fitted at $m$ = 8 / 15 /
-  25 (upper envelope; flat $64^2$–$256^2$, stack ×3 and ×10, web $64^2$, block $32^3$: the
+  `_pcg` temporaries with the barrier plus its output block, X and b, fitted at $m$ = 6 / 8 /
+  15 / 25 / 60 / 120, valid for $6 \le m \le 120$ (upper envelope; flat $64^2$–$256^2$, stack ×3 and ×10, web $64^2$, block $32^3$: the
   polish exceeds the larger step by up to 13.7 blocks on web $64^2$ at $m$ = 8; fitted on
   25k–396k, valid from 25k DOF, as the step fit). The envelope's slack: up to about 9
   blocks above the steps at $m$ = 8 near 100k (every shell AMG estimate carries it, since
@@ -440,16 +456,16 @@ chunk's start `X0 = Xi[:, j:]` is taken before `X, g = _reortho(...)`, which zer
 Meshes with `ssh8` blocks (and `hex8`), at the defaults' structure:
 
 - **storage** $= \texttt{schwarz.nbytes}(\text{level-0 patch sizes}) + \alpha_{T,s} n_\text{shell}
-  + \alpha_{T,h} n_\text{hex} + \alpha_s n_s + \alpha_h n_h + 8\min(n_\text{coarse},
+  + \alpha_s n_s + \alpha_h n_\text{hex} + 8\min(n_\text{coarse},
   \max(\texttt{max\_coarse}, 1000))^2$, with $n_\text{shell}$ / $n_\text{hex}$ the DOFs of nodes
-  in / not in `ssh8` elements, $n_s$ the shell fiber groups, $n_h$ the nodes in no `ssh8`
-  element, and the coarse term as the hex family's. The level-0 sizes come from a mesh scan
+  in / not in `ssh8` elements, $n_s$ the shell fiber groups, and the coarse term as the hex family's. The level-0 sizes come from a mesh scan
   (`_shell_scan(mesh)`, cached like `_amg_scan`): `_fibers(E, n_nodes)` and `_columns(E, group,
   n_nodes)` on the mesh's `ssh8` connectivity (`amg` calls the same functions on the operator's
   tables). Constants (named like `AMG_STEP` / `AMG_BUILD`; the docs list them by name): $\alpha_{T,s}$ = 880 B (700 measured max, non-monotone, 1.25×; includes the
-  8 B/DOF rest), $\alpha_{T,h}$ = 650 B (501–618 on the blocks), $\alpha_s$ = 6.5 kB (5.93 kB at
-  791k; increments shrink), $\alpha_h$ = 2.6 kB (2.18 kB at three levels); fitted per leaf
-  group, not on totals (single-layer plates have $n_s = n/6$, so a total fit is collinear). The
+  8 B/DOF rest), $\alpha_s$ = 6.5 kB (5.93 kB at 791k; increments shrink), $\alpha_h$ =
+  1.52 kB per hex-only DOF (level-0 650 B + coarse 2.6 kB per node / 3: the two are
+  collinear, $n_\text{hex} = 3 n_h$, as the hex family's single `AMG_STORAGE["hex8"]`; the
+  per-component numbers stay in the docs table); fitted per leaf group, not on totals (single-layer plates have $n_s = n/6$, so a total fit is collinear). The
   calibration adds the sweep-built cylinder, the L-fold (non-box meshes) and block $64^3$.
 - **build** $=$ **host_build** $= \beta + \text{storage} + \gamma_s n_\text{shell} +
   \gamma_h n_\text{hex}$, the PR 13 convention (process peak above the operator; on a GPU the
@@ -462,11 +478,16 @@ Meshes with `ssh8` blocks (and `hex8`), at the defaults' structure:
 - **step**, **step_low** $= 8n(a m + c) + K_0$, with $K_0$ in bytes independent of $m$ (the
   chunk-bounded gathers and unpacked inverses of the coarse levels: about 120 MB at flat
   $64^2$ for $m$ = 8 and 25 alike; the hex family's $8mK$ form fits there because its $K$ is
-  small, review round 6), fitted at $m$ = 8 / 15 / 25 on flat $64^2$–$256^2$, web $64^2$,
+  small, review round 6), fitted at $m$ = 6 / 8 / 15 / 25 / 60 / 120 (valid for $6 \le m \le
+  120$: 50 and 100 modes give 60 and 120; the $m \le 25$ fit under-estimated $m$ = 120 by
+  2.6 blocks at 25k, review round 7) on flat $64^2$–$256^2$, web $64^2$,
   block $32^3$, stack ×10 $64^2$ and ×3 $128^2$ (25k–396k; upper envelope, with and without a
   basis), valid from 25k DOF; `AMG_LOOP_K` re-measured for degree > 2. Measured slack of an
   all-case envelope: ≤ 7 blocks at 25k for $m$ ≥ 15, 2.3 / 4.5 / 9.2 blocks on flat $128^2$
-  at $m$ = 25 / 15 / 8.
+  at $m$ = 25 / 15 / 8 (1–2 blocks more at $m$ = 25 once 60 / 120 are in the fit). $c$ is a
+  fit parameter and may be negative (the LP gives −8 to −44 bytes per DOF over 8: $c$ and
+  $K_0/n$ both multiply $1/m$); the model holds only for $m \ge 6$ together with $K_0$, as the
+  constants' comment states.
 - **count** $= 8n(a b + c) + K_0$ from `_recurrence` (with both barriers) with the shell
   V-cycle, $b$ = 4–32, fitted on flat $64^2$, $128^2$ and stack ×3 $128^2$ (25k–200k; about
   138 MB independent of $b$ at flat $64^2$), and the same constants checked against the shell MINRES temps
@@ -527,7 +548,9 @@ skip for the build-peak tests; no wall-time asserts (no `serial`).
    - `_project` unit test: a capacity of 10, `c` = 4, count 8, 9 and 10: $B^\top M Z$ ≤
      $10^{-13}$ (fails today at 9 and 10: 1.44), and bitwise unchanged where `c` divides the
      capacity; a band solve with `chunk` chosen so a switched chunk starts with count + k >
-     cap (monkeypatched `SWITCH` = 1 if needed) matches the reference;
+     cap (monkeypatched `SWITCH` = 1 if needed) matches the reference; the test asserts the
+     clamp condition $\lceil \text{count}/k\rceil k > \text{cap}$ on that chunk (a spy), so it
+     cannot silently miss it;
    - `_to_low` unit test (fp64 basis): an injected rigid / basis component ($10^{-6}$) in X and
      P is gone ($\le 10^{-13}$) and the low step continues from it;
    - `test_compiles`: a switch adds exactly one low-step compile (and one `_to_low`) per
@@ -547,9 +570,9 @@ skip for the build-peak tests; no wall-time asserts (no `serial`).
      measured before pinning);
    - live bytes: `gc.collect()` and a baseline of `jax.live_arrays()` bytes just before the
      `lobpcg` call; a fake `polish` runs `gc.collect()` and records the bytes on entry on a
-     stalling diagonal case ($n$ large enough that a block dominates, $k \ge 4$); entry −
-     baseline ≤ basis + X + 0.5 block (R, MR are in the baseline; a leaked KX, MX or P
-     fails);
+     stalling diagonal case with `R=None` ($n$ large enough that a block dominates, $k \ge 4$;
+     the $n\times 1$ mask fits in the slack); entry − baseline ≤ basis + X + 0.5 block (a
+     leaked KX, MX or P fails);
    - dense unit tests on a PR 9 pencil, `STALL` forced (a small monkeypatched `STALL` and a
      zero preconditioner), `X0` = the $m$ lowest exact eigenvectors + $\delta\,V_\text{hi} G /
      \sqrt{n_\text{hi}}$ ($V_\text{hi}$ the upper half of the dense eigenvectors, $G$ Gaussian,
@@ -562,14 +585,17 @@ skip for the build-peak tests; no wall-time asserts (no `serial`).
      - a rank-deficient Y is discarded the same way, no raise;
      - a `maxit` exit never calls the fake;
      - one case with `low_memory=True`;
-     - cluster extension by the polish: `test_multiplicities`' cube pencil with an exact
-       multiplet split by `want`, the boundary partner columns started with $10^{-2}$ noise
-       (so $r^2 > t$ before the polish and `_iterate`'s `near` does not extend $j$), an
-       oracle fake returning the exact block eigenvectors: $j$ > `want` only after the
-       polish;
+     - cluster extension by the polish: `test_multiplicities`' cube pencil (R, zero
+       preconditioner, `STALL` = 3, tol $10^{-6}$), `want` = 1 (cluster [0, 1]) or 4 (cluster
+       [2, 3, 4]; a 3.3% gap above it against a 1.3% Ritz shift), high-frequency noise
+       ($\delta V_\text{hi} G/\sqrt{n_\text{hi}}$) on every column of the multiplet (noise on
+       the outside partners only converges at once, review round 7); pre-polish asserts with
+       `on=False`: `converged` False and an `_extent` spy sees no call; with an oracle fake
+       returning the exact block eigenvectors: `chunks[0]["locked"]` > `want`;
      - the failed-exit guard check runs only after a polish that did not accept;
-   - `t_iteration`: with `SWITCH` monkeypatched small and the per-iteration times spied, it
-     equals the mean of the warm 9-block iterations;
+   - `t_iteration`: with `SWITCH` monkeypatched small and `lob.time.perf_counter`
+     monkeypatched with a scripted counter, it equals the mean of the warm 9-block
+     iterations;
    - option errors (`on` not a bool, `tol` ≤ 0, non-int `maxit`, unknown keys, with
      `precond="jacobi"`, with "auto" on `ssh8` + `hex20` (label "auto (resolved to
      jacobi)")).
@@ -583,17 +609,21 @@ skip for the build-peak tests; no wall-time asserts (no `serial`).
    `sigma_estimate`: spies assert neither `_final_rr` nor `_to_low` runs with `stop` given,
    including `_precond_sigma`'s fallback with `estimate_maxit=10` (a `maxit` exit).
    `_precond_sigma` on the free $24^2$ plate at $L/t$ = 1000: σ ≥ $\lambda_{1,\text{ref}}(1 -
-   10\varepsilon\lambda_\max/\lambda_1)$ (the `check_lam` floor; passes on `main` too), and a
-   spy sees at least one `maxit` round (two measured) whose λ equals the Rayleigh quotient of
-   its vector to rtol $10^{-6}$ (the half that fails on `main`, its deviation recorded). `test_stagnation`'s maxit-exit residual
+   10\varepsilon\lambda_\max/\lambda_1)$ (the `check_lam` floor; passes on `main` too); a spy
+   sees `_final_rr` run on every `maxit` round of `_precond_sigma` (at least one; two
+   measured) and that round's returned λ bitwise equal to its output (the structural half,
+   which fails on `main`); the λ against the Rayleigh quotient of its vector to rtol
+   $10^{-6}$ as a sanity check only (main and the fix differ by $2\cdot10^{-8}$ here, at the
+   Rayleigh-quotient noise level). `test_stagnation`'s maxit-exit residual
    check still holds (its `_confirm` counting spy adjusted).
 6. **Memory:**
    - `lobpcg_memory`: step = max(9-block, low, polish) and max(low, polish); no polish term
      for Jacobi, GMG, p-MG, hex AMG or with `on=False`; one case where the low term wins
-     (hex8 AMG, 100k) and one where the polish wins (flat $64^2$);
+     (hex8 AMG, 100k); the polish winning on flat $64^2$ is part of the tightness test below;
    - the polish model ≥ the measured `_pcg` temporaries (with the barrier) + output + X + b
-     on flat $64^2$ and $128^2$, web $64^2$, block $32^3$ and stack ×10 at $m$ = 8 / 15 / 25,
-     within 1 block on each $m$'s binding case; hex AMG: the modelled step ≥ the measured polish on hex20
+     on flat $64^2$ and $128^2$, web $64^2$, block $32^3$ and stack ×10 at $m$ = 8 / 15 / 25
+     and on flat $64^2$ and $128^2$ at $m$ = 6 / 60 / 120, within 1 block on each $m$'s
+     binding case; hex AMG: the modelled step ≥ the measured polish on hex20
      $14^3$, hex8 $24^3$ and $40^3$ at $m$ = 8 / 25 (measured: 10–29 blocks above);
    - shell MINRES temps ($b$ = 6, flat $64^2$ and $128^2$) ≤ `si_memory`'s minres phase;
      `test_counting::test_step_memory` and the slice-memory tests re-run (barriers);
@@ -602,14 +632,15 @@ skip for the build-peak tests; no wall-time asserts (no `serial`).
      sizes equal the built hierarchy's; total within 1.3× on flat $128^2$ and block $32^3$
      (slow); `_shell_scan` cached (as `test_amg_scan_cached`);
    - step and step_low ≥ the measured step at $m$ = 8 / 15 / 25 (flat $64^2$ and $128^2$, web
-     $64^2$, stack, T, block) and with a basis present, within 1 block on each $m$'s binding
+     $64^2$, stack, T, block) and at $m$ = 6 / 60 / 120 (flat $64^2$ and $128^2$) and with a basis present, within 1 block on each $m$'s binding
      case (measured binders: block $32^3$, web $64^2$, stack ×3 $128^2$; slow), a degree-3
      case;
    - count ≥ the measured recurrence at $b$ = 4, 16 and 32 on flat $64^2$ and $128^2$,
      within 1.3× at 16 on $128^2$;
    - build ≥ the host peak in fresh subprocesses on flat $128^2$, T 3/3 and block $32^3$;
      block $64^3$ (837k): ≥ the peak and ≤ 1.35× (model 1.27×); flat $362^2$ (791k), one
-     subprocess running `solve_modes` (20 modes, tol $10^{-6}$): storage ≥ the owned device
+     subprocess running `solve_modes` (20 modes, tol $10^{-6}$, $L/t$ ≤ 100: no switch, no
+     polish; runtime measured before pinning, a few minutes as the 13b precedent): storage ≥ the owned device
      bytes (the out-of-fit size), the build model ≥ the peak after the AMG build (above the
      operator) and ≤ 1.3× it (model 1.20×), the final process peak within ±20% of
      `solve_modes_memory` (measured before pinning; `peak`, slow, darwin; the 13b precedent;
@@ -635,8 +666,13 @@ skip for the build-peak tests; no wall-time asserts (no `serial`).
      `LOBPCG_FORWARDED` and in the exempt set, built internally like `precond`;
      `POLISH_OPTIONS == {"on", "tol", "maxit"}` pinned); `tests/test_strategy.py::
      test_solve_boundary_one` (its `_iterate` wrapper unpacks the new tuple);
-   - re-run, may move: the hex AMG estimate tests (`test_mac_acceptance`, peak, slow: the
-     low-step max adds up to 4% below 240k DOF; est/peak 1.00 → about 1.04, band ±20%),
+   - re-run, may move: the hex AMG estimate tests (`test_mac_acceptance` runs hex20 $44^3$,
+     1.08M DOF, where the low term does not win: a re-run only; the hex8 AMG peak tests below
+     240k DOF may rise by up to 4%), `test_api.py::test_sigma_estimate`, `::test_amg_sigma`
+     and `test_options.py::test_sigma_options_real` (`_precond_sigma`'s `maxit` rounds go
+     through the final RR and can switch), `test_counting.py::test_sampling_memory` (Jacobi
+     `_pcg` temps under the barrier), the `test_shift_invert` slice-peak tests (the 0.8 lower
+     bound, GMG MINRES under the barrier),
      free-body pinned results (the failed-exit RR), `test_counting::test_step_memory`; the
      chunks a switch reaches (prototype regression log, round 5: `test_floor[clamped]` at
      230, whose history-minimum ratio assert 0.1–10 may move, `test_multiplicities[beam]`
@@ -668,17 +704,23 @@ skip for the build-peak tests; no wall-time asserts (no `serial`).
     Rayleigh–Ritz), `:316` (deflation: plus the one at the switch), `:320` (`low_memory`: a
     9-block solve can end in the low step);
   - `:361` (RECOMPUTE step 7: the switch to the low step after 5 stuck iterations), `:374`
-    (Failed chunk: λ, V, r, t from `_final_rr`), `:376` (Projector: the clamped start and the
+    (Failed chunk: λ, V, r, t from `_final_rr`; "a no-progress or `maxit` exit ends the solve"
+    becomes: a `STALL` / `maxit` exit that passes after `_final_rr` or an accepted polish locks
+    and continues, otherwise it ends the solve), `:376` (Projector: the clamped start and the
     masked coefficients, `c = k` after a switch), `:391` (Low-memory mode: also the switch
     target; a pointer);
   - new subsections under Convergence: "Low-memory switch" and "Polish" (the three causes, κ ∝
-    $(L/t)^4$, the measured tables, the defaults; inverse iteration accepts on residuals and
+    $(L/t)^4$, the measured tables from `benchmarks/shell_solve_study.py` and its JSON, the
+    defaults; inverse iteration accepts on residuals and
     does not recover a mode missing from the block, so the completeness checks still apply; a
     `maxit` exit is not polished; a switch costs one extra compile);
   - `:333`/`:337` (one compiled variant per shape: plus the low step and `_to_low` after a
     switch), `:404–415` (Memory model: step = max(9-block, low, polish); with shell AMG
     `low_memory` saves less, the polish's PCG being above the low step on small meshes;
-    `:415` the `solve_modes_memory` signature: `polish_options`), `:419–430` (Convergence
+    `:408` / `:411` the AMG step term per family: the shell family's $K_0$ form, a pointer to
+    preconditioners.md; `:415` the `solve_modes_memory` signature: `polish_options`), `:428`
+    (the "no progress for 50 iterations" row: the window resets at the switch, up to 5
+    iterations in the 9-block step then 50 in the low step), `:419–430` (Convergence
     exit table: rows for "`STALL` / `maxit`, final Rayleigh–Ritz passes" and "polished,
     accepted", `converged` and `stagnated`), `:462` (σ pre-estimate step 2: Ritz values on
     `maxit` rounds, the bound up to the floor; rounds can switch), `:466` (the tests' σ
@@ -694,7 +736,8 @@ skip for the build-peak tests; no wall-time asserts (no `serial`).
   `:510`, `:565`, `:570`, `:615` (the `test_refusals` sentence; `tests/test_shell_solve.py`):
   the `amg_memory` shell family (formulas, the constants listed by name, measured tables, the
   `polish` key), the "AMG on solid shells" `solve_modes` sentence, the degree-3 note
-  (`precond_options={"degree": 3}` for curved panels, as 18a promised, `open_items.md:251`);
+  (`:548`; `precond_options={"degree": 3}` for curved panels, as 18a promised,
+  `open_items.md:251`); the shell-family tables from `benchmarks/shell_solve_study.py`;
   `:88` and `:97` (PCG and MINRES "Memory" bullets: the barrier, also in the count
   recurrence).
 - `docs/open_items.md`: `:16–22` (the solid-shell part moves to a Resolved entry at the end,
@@ -710,14 +753,17 @@ skip for the build-peak tests; no wall-time asserts (no `serial`).
   1000, $\|R^\top MV\| \le 10^{-10}$ on free shells, the 791k / block $64^3$ peak checks), `:784` (the 18a host-peak check: CPU calibration done, the
   GPU part kept as one entry); Deferred GPU checks: the shell step / polish fits and the
   barrier's effect on a GPU.
-- Code: `eigen/api.py:311–313` (`precond`, `polish_options`), `memory.py:396–410`
+- Code: `eigen/api.py:311–317` (`precond`, `polish_options`; the allowed-keys list gains
+  `POLISH_OPTIONS`), `memory.py:396–410`
   (`solve_modes_memory` docstring: `polish_options`), the `pcg` / `_minres` comments in
   `linalg/krylov.py` and `counting._recurrence` (the barrier), `memory.py:144–152`
   (`lobpcg_memory` docstring: the max) and `:338–345` (`amg_memory`), `eigen/lobpcg.py:18`
   (RECOMPUTE), `:23` (STALL: before the polish), the new `SWITCH` comment, `:113–114`
   (`_project`: clamped start, masked coefficients), `:403` (`_iterate` returns `(X, λ, r, t,
-  j, rec)`), `eigen/api.py:226` (`_precond_sigma`: an upper bound up to the floor), `:368` and the
-  `lobpcg` docstring (`polish`, `low_memory` and the switch, flags), `examples/m4_shell.py:2`.
+  j, rec)`), `eigen/api.py:226` (`_precond_sigma`: an upper bound up to the floor), `eigen/lobpcg.py:368` and the
+  `lobpcg` docstring (`polish`, `low_memory` and the switch, flags), the shell constants'
+  comment in `memory.py` ($c$ a fit parameter, valid $6 \le m \le 120$),
+  `examples/m4_shell.py:2`.
 - `docs/elements.md:218`; `README.md:5` (status), `:82` ("`solve_modes` (Jacobi-preconditioned
   …"), `:91` and `:95` (the laminate snippet's thickness comment and the snippet: `maxit=2000` dropped; the 4 mm plate can come back),
   `:242` (AMG on unstructured meshes: solid shells since 18b), `:252` (options reachable
@@ -729,14 +775,14 @@ skip for the build-peak tests; no wall-time asserts (no `serial`).
 - **Done here:** the dispatch, the σ pre-estimate check, band-mode reuse, the `amg_memory`
   shell family, the storage checks on every platform, the accuracy cases (plies included).
 - **Changed:**
-  - the storage form: $\alpha_T$ per DOF (split shell / hex-only) instead of
+  - the storage form: $\alpha_{T,s}$ per shell DOF and one $\alpha_h$ per hex-only DOF instead of
     $\alpha_P n_{c,\text{shell}}$; the step's level-0 chunk temporaries fitted ($8n(am+c) +
     K_0$) instead of exact from `schwarz.nbytes` (the $K_0$ term covers the Schwarz apply
     temporaries $2\,\texttt{CHUNK\_BYTES}\,k/24$); the hex-constant extrapolation decision
     kept for the hex family only;
   - the 1.3× tightness gate: on totals (flat $128^2$, block $32^3$) instead of "the n-scaling
     part", with hex-dominant meshes no longer upper-bound only (block $32^3$: model / measured
-    total 1.26× with the split $\alpha_T$);
+    total 1.26× with the per-DOF constants);
   - the build convention: `pc_dev` = 0 instead of the device inversion temporaries (about
     7 × `CHUNK_BYTES`, negligible against the step);
   - the Jacobi stagnation test: Jacobi converges at $L/t = 50$ (840–1307 iterations), so the
@@ -800,12 +846,17 @@ clamp: `plan18b-r4-correctness/clamp.py`; MINRES and the recurrence:
   uses); same arithmetic, different scheduling.
 - **`_project` clamp-safe** for chunk widths that do not divide the capacity.
 - **Memory:** `lobpcg_memory`'s max with the low step for every preconditioner; the polish term
-  for the AMG shell family only; storage with $\alpha_T$ per DOF split shell / hex-only
+  for the AMG shell family only, on by default, so every shell AMG estimate carries its
+  envelope slack (up to about 9 blocks at $m$ = 8 near 100k); storage per shell DOF, fiber
+  group and hex-only DOF
   (instead of 18a's $\alpha_P n_{c,\text{shell}}$); the step's level-0 Schwarz temporaries
   fitted, not exact from `schwarz.nbytes`; the shell step, polish and count as $8n(am + c) +
-  K_0$ (not the hex $8mK$), fitted on 25k–396k and valid from 25k DOF; storage
+  K_0$ (not the hex $8mK$), fitted on 25k–396k (count 25k–200k), valid from 25k DOF and for
+  $6 \le m \le 120$; storage
   tightness gated on totals; block $64^3$ build gate 1.35×; `pc_dev` = 0; the constants carry margins for
   levels beyond the measured sizes (10M extrapolation from 1.58M); the count constants are
-  measured in implementation; the deferred GPU checks of 18a stay.
-- **Tests:** the Jacobi wall-time test replaced by an iteration count on the curved panel; the degree-3 fallback
+  fitted in implementation; the deferred GPU checks of 18a stay.
+- **Tests:** the Jacobi wall-time test replaced by an iteration count on the curved panel;
+  `test_m4_reference`'s "reference sharper" assertion replaced by the residual-bounded
+  $\sin\theta$ check; the degree-3 fallback
   dropped as a default.
