@@ -24,12 +24,18 @@ meshes", and the `docs/verification.md` entries ("reference levels, elements per
   classifies by a ratio and asserts the kept count; a strip recompute key, a multi-chunk hex27
   recompute, equivalence tests through the builders, a synthetic `analyze` test, a fuller digest;
   the benchmark split into parts `srao`, `cyl`, `skew`; the docs minors.
+- rev 4 (round 3: all 5 satisfied; minors folded in, no further round): the crossing guard in
+  its monotone form with a 7th mode on the hex27 levels; the observed-$p_z$ gate as a ratio
+  comparison; the torsion check per element; `analyze` pinned to sizing values instead of a
+  synthetic record; a rounded digest with a sensitivity test; filter and builder unit tests; the
+  hex8 no-locking negative control; the `pag` $L/t = 100$ recompute dropped; corrected part times;
+  the remaining doc locations and logged departures.
 
 ## Sizing study (shipped `ssh8`, 2026-10-18)
 
 Shipped code only (`solid_shell`, `assemble`, `reference_modes`), on the Mac (64 GB). Errors
 are relative in $f$. Peaks are the child's maximum RSS. Times include the
-$\hat\lambda_\max$ `eigsh(which="LA", tol=1e-3)` (30–40% of a run) unless stated. Scripts and
+$\hat\lambda_\max$ `eigsh(which="LA", tol=1e-3)` (15–40% of a run) unless stated. Scripts and
 logs: the session scratchpad `s16c/` (`srao.py`, `cases.py`, `analyze3.py`); the round 1 perf
 reviewer reproduced the smallest-margin cases bit for bit.
 
@@ -40,13 +46,14 @@ Each label on its half-wave sub-plate quarter ($q$ in-plane elements per quarter
 
 | laminate | $L/t$ | $q$, $k$ ($n_z$) | worst (label, error) | margin | solve time per run, peak | part (solve only) |
 |---|---|---|---|---|---|---|
-| `pag` | 10 | 32, 12 (36) | (1,3) $5.77\cdot10^{-4}$ | 1.73 | 58–95 s, 9.65 GB | 11.5 min |
+| `pag` | 10 | 32, 12 (36) | (1,3) $5.77\cdot10^{-4}$ | 1.73 | 58–95 s, 9.65 GB | 7.5 min |
 | `ortho` | 10 | 32, 24 (24) | (3,1) $4.99\cdot10^{-4}$ | 2.00 | 42–58 s, 5.3 GB | 6.5 min |
-| `pag` | 100 | 48, 3 (9) | (1,5) $4.19\cdot10^{-4}$ | 2.39 | 15–31 s, 4.3 GB | 4.2 min |
+| `pag` | 100 | 48, 3 (9) | (1,5) $4.19\cdot10^{-4}$ | 2.39 | 15–31 s, 4.3 GB | 3.1 min |
 | `ortho` | 100 | 48, 4 (4) | (2,4) $3.37\cdot10^{-4}$ | 2.97 | 3–4 s | 0.5 min |
 
 - Times are solve only (srao.py had no $\hat\lambda_\max$; it adds about 39 s per 113k-DOF run,
-  18 s per 77k, 5 s per 69k): the part is about 23 min solve plus about 7 min $\hat\lambda_\max$.
+  18 s per 77k, 5 s per 69k): the part is about 18 min solve plus about 7 min $\hat\lambda_\max$.
+  The zero-index strips take 0.1 s each.
 - Lowest 10 at $L/t = 10$: the frame's lists; at $L/t = 100$: `pag` (1,1), (1,2), (1,3), (2,1),
   (2,2), (1,4), (2,3), (2,4), (1,5), (2,5); `ortho` (1,1), (1,2), (2,1), (2,2), (1,3), (2,3), (3,1),
   (1,4), (3,2), (2,4) (no zero-index or family-1 label).
@@ -101,8 +108,17 @@ $24\times12\times3$, $48\times24\times3$, $96\times48\times3$; $n_z$ runs $24\ti
   approaches a one-layer floor of about $6.2\cdot10^{-4}$ (round 1 perf: $7.80$ at $384\times128$,
   $7.18$ at $512\times96$ against the $n_z = 2$ reference). The margins with the reference
   (1.14–1.48) are reported, not gated.
-- Per class: hex27 1, 6, 43, 361–381 s (385k DOF, 25.7 GB at the finest), $n_z$ runs 6, 11, 16,
-  43, 80 s, `ssh8` 66 s (8.9 GB): about 10 min, 40 min for 4.
+- Per class: hex27 levels 1, 6, 43, 361–381 s (385k DOF, 25.7 GB at the finest), extra $n_z$ runs
+  11, 16, 80 s (the $n_z = 3$ runs at the coarse and mid levels are the level runs: each unique key
+  runs once), `ssh8` 66 s (8.9 GB): about 10 min, 40 min for 4.
+- The $n_z$ term levels off in $h$ (round 3 math): the per-level term (mode 1 of the skew) is 1.90,
+  3.58, 4.54, $4.63\cdot10^{-4}$ at 6/12/24/48, and the cylinder S/A term at $48\times48$ is only
+  3–8% above $48\times24$; the rule's extrapolated $t$ is $\ge 1.31\times$ the finest-level term on
+  both. This, not asymptotics, justifies the rate-1.42 extrapolation (on S/A the increments from 12
+  to 48 grow, pre-asymptotic). The observed $p_z$ falls with $h$ (S/A 1.64–3.11 at 48, skew
+  1.83–2.22 at 24), so the coarse-level check is weak; it stays as a sanity check. Fixing $p_z$ at
+  1.42 over-counts the smooth components ($p_z \approx 3$–4) by 1.7–2.5×, the source of the
+  skew's margin.
 
 ### Skew plate
 
@@ -120,8 +136,11 @@ $12\times\{3,4,5\}$ (coarse) and $24\times\{3,4\}$ (mid); `ssh8` $192\times192\t
   reference); $128\times128$ gives 1.26.
 - Modes 5 and 6 are $0.22\%$ apart in $f$ (hex27 48) and $0.23\%$ (`ssh8`), so sorted matching pairs
   them consistently; a swap would give $5.1$ and $9.7\cdot10^{-3}$, still within the gate.
-- Times: hex27 0.6, 2, 17, 147 s (48: 190k DOF, 16.6 GB), $n_z$ runs 3, 5, 33 s; `ssh8` 28 s. About
-  4 min.
+- In-plane rate: the 150° clamped-clamped plan-view corner has exponent 1.083 (anti-plane 1.2);
+  the cosine grading (radical $\beta = 2 > 2/1.083$) keeps the asymptotic rate at hex27's 4, which
+  the uniform mesh would cut to about 2.2.
+- Times: hex27 0.6, 2, 17, 147 s (48: 190k DOF; 16.6 GB measured on the uniform mesh of the same
+  size), extra $n_z$ runs 3, 5, 33 s; `ssh8` 28 s. About 4 min.
 
 ### No locking
 
@@ -144,24 +163,27 @@ it on $f$ errors is conservative by 2×.
   safety factor for three-level studies). No round-off branch (no gated mode is near round-off;
   the frame's branch misfired on the cylinder).
 - **One-level-back check:** the same rule on the coarser triplet (levels 0, 1, 2) must bound the
-  middle-level error $|f_2/f_3 - 1| + \text{est}_3$ for every mode whose coarser $p \in [1, 4]$
-  (measured $\ge 1.39$); `analyze` returns the number of checked modes, and the tests pin it
+  middle-level error $|f_2/f_3 - 1| + \text{est}_3$ for every mode the crossing guard passes on the
+  first pair (measured $\ge 1.39$; those modes have coarser $p \in [2.25, 3.52]$); `analyze`
+  returns the number of checked modes, and the tests pin it
   (S/A 5 of 6, all others 6 of 6).
-- **Mode-crossing guard:** per mode at the finest pair, $|\Delta_2|/f_3$ is below the relative gap
-  to its nearest neighbour at the finest level (measured $\le 0.10$ on the cylinder, 0.72 on the
-  skew modes 5–6), so sorted matching cannot have swapped modes between the last two levels; the
-  coarser pairs are covered by the $p$ checks (a crossing gives an erratic $p$, as S/A mode 5).
-  The record holds no vectors, so no MAC.
+- **Mode-crossing guard** (monotone form, round 3 math): $f$ decreases at every level pair (hex27
+  approaches from above), and for each adjacent pair $(i, i+1)$, $|f_{i+1}^{(k)} - f_{i+1}^{(k+1)}|$
+  is below the gap $f_{i+1}^{(k)} - f_i^{(k)}$ at the coarser level $k$; a crossing between levels
+  $k$ and $k+1$ would force the upper mode to move at least that gap. Asserted on the last two
+  pairs (measured ratio $\le 0.10$ cylinder, 0.67 skew modes 5–6); on the first pair it marks
+  exactly the modes the back-check skips (S/A mode 5 at $12\times6$: 1.03), replacing
+  "$p \in [1, 4]$" as the skip rule. The hex27 level and $n_z$ runs compute 7 modes so mode 6 has an
+  upper neighbour. The record holds no vectors, so no MAC.
 - **$n_z$ term:** the thickness error converges at $p_z = 2\lambda_s = 1.42$, the rate of the
   clamped-free corner singularity in plane strain ($\nu = 0.3$, $\lambda_s \approx 0.711$); smooth
   modes converge faster, so the fixed rate is conservative. At an in-plane level with runs at
   $n_z$, $n_z + 1$: term $|\Delta_1|/(1 - (n_z/(n_z+1))^{1.42})$. It is evaluated at the coarse
   ($t_c$) and mid ($t_m$) levels and extrapolated in $h$ at the same rate:
-  $t = 1.25\,(t_m + |t_m - t_c|/(2^{1.42} - 1))$. Check: the observed $p_z$ at the coarse level
-  (runs $n_z$, $n_z + 1$, $n_z + 2$; `brentq` on
-  $\frac{n_z^{-p} - (n_z+1)^{-p}}{(n_z+1)^{-p} - (n_z+2)^{-p}} = \Delta_1/\Delta_2$ over
-  $[0.05, 20]$; no sign change in the bracket or non-monotone data fails explicitly) is
-  $\ge 1.42$ on every mode.
+  $t = 1.25\,(t_m + |t_m - t_c|/(2^{1.42} - 1))$. Check at the coarse level (runs $n_z$,
+  $n_z + 1$, $n_z + 2$): $\Delta_1\Delta_2 > 0$ and $\Delta_1/\Delta_2 \ge r(1.42)$ with
+  $r(p) = \frac{n_z^{-p} - (n_z+1)^{-p}}{(n_z+1)^{-p} - (n_z+2)^{-p}}$, increasing in $p$; the
+  observed $p_z$ (`brentq` on $r(p) = \Delta_1/\Delta_2$) is reported only.
 - **Reference error** per mode: Richardson + $n_z$ term + $f_\lambda$ of the finest level; the max
   over modes meets the roadmap criterion ($\le 0.02\%$ cylinder, $\le 0.2\%$ skew), else stop and
   ask. Gates compare against the finest level.
@@ -181,15 +203,17 @@ it on $f$ errors is conservative by 2×.
   `pythonpath = ["."]`, and `tests/exact.py` has no other test-local import), so the benchmark can
   import `tests.exact`.
 - **`benchmarks/shell_accuracy.py`** (`python -m benchmarks.shell_accuracy --parts srao cyl skew`,
-  merged into `benchmarks/results/shell_accuracy.json`, per-run progress lines; runs sequential in
-  one process, the peak is the largest single run):
+  merged into `benchmarks/results/shell_accuracy.json`, per-run progress lines with the process
+  `ru_maxrss`; runs sequential in one process, `run` keeps only $\lambda$ and scalars, so the peak
+  is about the largest single run, +5% per repeat measured):
   - Module constants: the label lists per (laminate, $L/t$), $q$, $k$, levels and $n_z$ sets.
   - Builders `srao_case(name, Lt, label, q, k)`, `cylinder(typ, cls, nt, na, nz)`,
     `skew(typ, n, nz)`, each returning (mesh, materials, bcs).
-  - `run(builder, args, lmax=True)` solves one case: a fixed mode count (6, or 6 + rank + 1 on a
-    zero-index strip, filtered), $\hat\lambda_\max$ unless `lmax=False` (the recompute tests use
-    the recorded one). The record is a list of `{"builder", "args", "lam", "flam", "dof", "time",
-    "digest", "removed"}`; each part stores its commit.
+  - `run(builder, args, lmax=True)` solves one case: a fixed mode count (6 on Srinivas–Rao
+    quarters and `ssh8` runs, 7 on hex27, 6 + rank + 1 on a zero-index strip, filtered; asserts
+    rank < count), $\hat\lambda_\max$ unless `lmax=False` (the recompute tests use the recorded
+    one). The record is a list of `{"builder", "args", "lam", "lmax", "dof", "time", "digest",
+    "removed"}` ($f_\lambda$ derived in `analyze`); each part stores its commit.
   - `analyze(rec) -> dict`: numbers only, per case: errors, Richardson and $n_z$ terms, reference
     errors, $p$, observed $p_z$, back-check ratios and counts, crossing ratios (Srinivas–Rao
     targets via `tests.exact.plate_modes`). The benchmark prints it; the tests hold the gate
@@ -197,15 +221,19 @@ it on $f$ errors is conservative by 2×.
   - **Zero-index filter** (`filter_strip(mesh, label, V)`): per mode, the free in-plane component
     ($u_y$ on an $(m, 0)$ strip, $u_x$ on $(0, n)$) on the two cut faces gives $s = \|u_{lo} -
     u_{hi}\|/\|u_{lo} + u_{hi}\|$; keep $s \le 10^{-6}$, drop $s \ge 10^6$, fail in between; assert
-    the kept count $>$ the target rank and the target's component $\ge 0.1\|v\|$. The frame's
+    the kept count $>$ the target rank (on a one-element strip the free component is the only free
+    DOF, so no component check). The frame's
     assertion "no label $m' \ge 1$ below the target" is replaced by this classification (logged).
     The record keeps the filtered $\lambda$ and the count removed.
-  - Reported only (printed, in `docs/verification.md`): one layered element per laminate (each
-    label's quarter at the same $q$, one `ssh8` layer with the whole `Laminate`; about 1 min).
-  - Parts: `srao` about 30 min, `cyl` about 40 min, `skew` about 4 min (sizing times plus
-    $\hat\lambda_\max$); each under the 1 h limit.
-- **Builder digest:** a SHA-256 over the mesh points, connectivity, block type, free mask, material
-  ids, and per material $C$, $\rho$, ply angles and fractions of each run. The frame's source hash
+  - Reported only (printed, in `docs/verification.md`, stated there as not regression-checked):
+    one layered element per laminate (each label's quarter at the same $q$, one `ssh8` layer with
+    the whole `Laminate`; about 1 min).
+  - Parts: `srao` about 25 min (solve times plus $\hat\lambda_\max$), `cyl` about 40 min, `skew`
+    about 4 min (sizing times); each under the 1 h limit.
+- **Builder digest:** a SHA-256 over the mesh points and orientation (rounded to 12 significant
+  digits, so ulp differences of `sin`/`cos` across platforms do not trip it), connectivity, block
+  type, free mask, material ids, and per material $C$, $\rho$, ply angles and fractions (rounded
+  likewise) of each run. The frame's source hash
   is replaced (logged): the per-path recomputes catch numeric changes in any module (`assemble`,
   kernels, `reference_modes` included), and the digests catch builder drift for every recorded run.
 
@@ -213,43 +241,56 @@ it on $f$ errors is conservative by 2×.
 
 - **Record test** (fast, about 2 s to rebuild every key without assembly): load the record;
   rebuild every key with the builders and assert the digest; assert the recorded key set equals
-  the module constants and the label constants equal the live `plate_modes` lowest 10; `analyze`
-  and assert every gate and reference criterion, the matched labels, the back-check counts, the
-  crossing guard, the zero-index filter counts, and $2f_\lambda \le 0.1\times$ gate.
+  the module constants and the label constants equal the live `plate_modes` lowest 10 (as sets
+  within degenerate groups: (1,0)/(0,1) and (2,0)/(0,2) are degenerate); `analyze` and assert every
+  gate and reference criterion, the matched labels, the back-check counts, the crossing guard, the
+  zero-index filter counts, and $2f_\lambda \le 0.1\times$ gate. A few `analyze` outputs are pinned
+  to the sizing study (`analyze3.py`) to 1%: cylinder S/A reference error $1.17\cdot10^{-4}$ and its
+  mode-1 $n_z$ term, skew reference error $1.13\cdot10^{-3}$, `pag` $L/t = 10$ (1,3)
+  $5.77\cdot10^{-4}$; a swapped level or coarse/mid level changes them (this replaces a synthetic
+  record).
 - **Slow recompute** (one per code path, `run(..., lmax=False)` against the record to
-  $\max(10^{-9}, 2f_\lambda)$): `pag` $L/t = 100$ (1,5) (laminate, 90° ply, 31 s); `ortho` $L/t =
-  100$ (2,4) (4 s); `pag` $L/t = 10$ (2,0) (zero-index strip and filter, a few seconds); cylinder S/A
-  `ssh8` (66 s) and S/A $24\times12\times3$ hex27 (6 s); skew `ssh8` (28 s) and hex27 24 graded
-  (1728 elements, several chunks, 17 s). About 2.5 min. The selection (one key per builder path,
-  laminate, strip, element type, multi-chunk) is logged.
+  $\max(10^{-9}, 2f_\lambda)$): `pag` $L/t = 10$ (2,0) (laminate, 90° ply, zero-index strip and
+  filter); `ortho` $L/t = 100$ (2,4) (two mirror cuts, 4 s); cylinder S/A `ssh8` (66 s) and S/A
+  $24\times12\times3$ hex27 (6 s); skew `ssh8` (28 s) and hex27 24 graded (1728 elements, 2 chunks of
+  1024, 17 s). About 2 min. The selection (one key per builder path, laminate, strip, element type,
+  multi-chunk, instead of the frame's smallest-margin case per test) is logged.
 - **Fast tests** (small meshes, to $\max(10^{-10}, 2f_\lambda)$):
   - Estimators on synthetic data: $f_h = f^* + Ch^p$ ($p$ = 2, 3.5) recovers the exact error
-    (times 1.25); non-monotone data and $p < 1$ raise; $p > 4$ uses 4. The observed $p_z$ recovers
-    $p$ = 1.5, 3 from $f(n_z) = f^* + Cn_z^{-p}$ (closed form); a ratio outside the bracket raises.
-    The $n_z$ term on $f = f^* + Ah^4 + Bn_z^{-1.42}(1 + h)$ bounds the exact thickness error.
-  - `analyze` on a synthetic record with known answers (one case per family, values from the
-    formulas above), so its wiring (level order, coarse vs mid, the floor) is tested without runs.
-  - Srinivas–Rao, through `srao_case` and `filter_strip`: the full $2N\times N$ plate ($N = 4$,
-    `pag`, $n_z = 3$) has an eigenvalue among its lowest 6 equal to the $N\times N$ sub-plate's
-    (1,1); the quarter equals the sub-plate for (1,1).
-  - Zero-index strip on a wide strip ($h = 2$, `pag`, $q = 4$), one test: spurious modes fall below
-    the target and are removed; the kept modes equal the full sub-plate's $(m', 0)$ modes, the
-    (1,0) one the full plate's. The wide strip is the only case with spurious modes below the
-    target, so it is the filter's one check (the record holds no vectors).
-  - Cylinder classes, through `cylinder`: a half model ($\theta \in [0, \pi]$, full length,
-    $u_y = 0$ on both $\theta$ faces, both ends clamped, mirrored grading), `ssh8` $8\times4\times1$
-    and hex27 $8\times4\times2$: its lowest 16 equal the sorted union of the 4 class spectra on the
-    1/8 model; on the $y$-antisymmetric half model every mode below $0.9\lambda_T$ lies in that
-    spectrum, where $\lambda_T = (\pi/L)^2 G/\rho \approx 0.949$ is the $n = 0$ torsion mode the 1/8
-    model excludes (above every gated mode, $\le 0.560$), and one mode within 1% of $\lambda_T$ is
-    the torsion mode. About 3 s.
-  - Skew builder sanity: the corner angle is 30° and every boundary face is `"xyz"`.
+    (times 1.25); non-monotone data and $p < 1$ raise; $p > 4$ uses 4. The $p_z$ check passes on
+    $f(n_z) = f^* + Cn_z^{-1.5}$ and fails on $n_z^{-1.3}$; the reported $p_z$ recovers 1.5 and 3.
+    The $n_z$ term on $f = f^* + Ah^4 + Bn_z^{-1.42}(1 \pm h)$ bounds the exact thickness error
+    (both signs). The crossing guard flags a synthetic swap.
+  - Srinivas–Rao, through `srao_case` and `run`: the full $2N\times N$ plate ($N = 4$, `pag`,
+    $n_z = 3$) has an eigenvalue among its lowest 6 equal to the $N\times N$ sub-plate's (1,1); the
+    quarter equals the sub-plate for (1,1).
+  - `filter_strip` on synthetic vectors: $u_{lo} = u_{hi}$ kept, $u_{lo} = -u_{hi}$ dropped, a mix
+    raises.
+  - Zero-index strips through `run`, wide strip ($h = 2$, `pag`, $q = 4$): for (1,0) spurious modes
+    fall below the target and are removed, and the kept modes equal the full sub-plate's $(m', 0)$
+    modes, the (1,0) one the full plate's; for (0,1) (the $u_x$ branch, other faces) the
+    classification is asserted and the target equals the full plate's. The record holds no
+    vectors, so these are the filter's checks.
+  - Cylinder classes, through `cylinder` and `run`: a half model ($\theta \in [0, \pi]$, full
+    length, $u_y = 0$ on both $\theta$ faces, both ends clamped, mirrored grading), meshed as two
+    mirrored 1/8 meshes of `ssh8` $8\times4\times1$ and hex27 $8\times4\times2$: its lowest 16 equal
+    the sorted union of the 4 class spectra (16 modes each) on the 1/8 model; on the
+    $y$-antisymmetric half model (36 modes) every mode below $0.9\lambda_T$ lies in that spectrum,
+    and exactly one mode in $[0.9, 1.1]\lambda_T$ is not in it: the torsion mode, within 1% of
+    $\lambda_T$ for hex27 and 6% for `ssh8` (measured $+0.08\%$, $+5.2\%$, the linear-element error
+    on 4 axial elements). $\lambda_T = (\pi/L)^2 G/\rho \approx 0.949$ ($L = 2$ the full length) is
+    the $n = 0$ torsion mode the 1/8 model excludes, above every gated mode ($\le 0.561$). About 5 s.
+  - Builder sanity: skew corner angle 30°, thickness 1/20, every boundary face `"xyz"`; cylinder
+    radii in $[0.99, 1.01]$, axial extent $L/2 = 1$, $\theta \in [0, \pi/2]$, class faces on the
+    planes $y = 0$, $x = 0$, $z = 0$ (clamped) and $z = 1$.
+  - Digest sensitivity: a perturbed point, ply angle, free mask entry or material id changes it.
   - **No locking** runs directly (6 s): the rules above, every mode classified even or odd,
-    $\ge 6$ bending; the hex8 baseline printed.
+    $\ge 6$ bending; the hex8 baseline as negative control: its ratio far above 1.5 (threshold set
+    from its measured value).
   - `plate_modes` oracle at every (laminate, sub-plate) used, slow and deduplicated: $P = 24$
     equals $P = 12$ to $10^{-9}$ at $L/t = 10$ and $10^{-5}$ at 100 (round-off in the z-Ritz:
     measured $\le 3.6\cdot10^{-6}$, no trend in $P$), and `mmax = 10` gives the same target.
-  - A smoke test: `run` on one tiny key per builder (no `analyze`; tiny levels break the rules).
+  - A smoke test: `run` on a tiny skew key (the other builders run through `run` above).
 
 ## Docs
 
@@ -257,29 +298,42 @@ it on $f$ errors is conservative by 2×.
   per laminate and $L/t$, the tables from the record (time columns labelled), the rules (amending
   "Richardson extrapolation is not used" for PR 16's reference estimates), the stacking note, the
   one-layer floors, the reported one-layer laminate results; only 0° and 90° plies here (the
-  ply-angle sign is covered by 16a). The frame's `plate_fe` generalization is superseded by
+  ply-angle sign is covered by 16a). Setups include the cylinder class definitions and exclusions
+  and the strip filter thresholds. The frame's `plate_fe` generalization is superseded by
   `srao_case`.
-- `docs/eigensolvers.md` ("The largest supported size" paragraph and the "PR 8 `eigsh`" bullet),
-  all times including $\hat\lambda_\max$: thin hex27 meshes with `points` reach 385k free DOF at
-  $n_z = 3$ (25.7 GB, 6 min); 190k at $n_z = 3$ on the skew plate (16.6 GB, 2.5 min); 276k at
-  $n_z = 2$ (14.2–15.4 GB, 2.5 min). Memory grows with the DOF and $n_z$.
-- `docs/elements.md` "Locking" points to the new section.
+- `docs/eigensolvers.md` ("The largest supported size" paragraph, the "PR 8 `eigsh`" bullet and
+  the "check ... runs to about 100k DOF" sentence), all times including $\hat\lambda_\max$: thin
+  hex27 meshes with `points` reach 385k free DOF at $n_z = 3$ (25.7 GB, 6 min); 190k at $n_z = 3$ on
+  the skew plate (16.6 GB, 2.5 min); 276k at $n_z = 2$ (14.2–15.4 GB, 2.5 min). Memory grows with the
+  DOF and $n_z$. The explicit-σ sentence states that the default σ rule certified every 16c
+  reference (or names the case that needed one). The same pointer in `docs/operators.md` ("Size"),
+  the ROADMAP PR 8 sizes bullet and the PR 4 status entry.
+- `docs/elements.md` "Locking" points to the new section, with one sentence of meshing guidance:
+  $n_z = 2$ is no better than 1 on bending, one layer is soft at clamped edges with $\nu \ne 0$, and
+  the one-layer floors (about 0.06% cylinder, 0.6% skew).
 - ROADMAP status for PR 16c and the M4 line; a PR 18 Contents bullet for the `COUNT_STEP` refit at
-  $\ge 1$M DOF; README status; `docs/open_items.md` (below, and the 16b Reader entry rewritten as
-  "re-deferred to PR 18"). No deferred GPU checks.
+  $\ge 1$M DOF (estimate within its band on a $\ge 1$M `ssh8`/hex20 case, linked to the 14a
+  "Memory constants" fit-range item); README status; `docs/open_items.md`: a "Without user input
+  (16c)" entry with the frame's 16c decisions as amended (sub-plate quarters, the cylinder classes
+  and exclusions, axial grading, no-locking in $\lambda$, the one-layer floors, 0°/90° plies only)
+  plus the changes below; the 16b Reader entry rewritten as "re-deferred to PR 18"; the thin-plates
+  item retitled to PR 18 when M4 closes. No deferred GPU checks.
 
 ## Changes from the frame and decisions (logged in `docs/open_items.md`)
 
 1. Srinivas–Rao $L/t = 100$: $k = 3$ (`pag`), $k = 4$ (`ortho`); `ortho` $L/t = 10$ at $n_z = 24$.
-2. The Richardson rule above (cap 4, factor 1.25, no round-off branch, back-check level, crossing
-   guard).
+2. The Richardson rule above (cap 4 instead of the frame's fail above 5, factor 1.25, no round-off
+   branch, back-check level, crossing guard).
 3. Skew reference graded, levels 6 (back-check)/12/24/48; cylinder reference at $n_z = 3$ with
    $12\times6\times3$ added.
-4. The $n_z$ term at the fixed corner rate 1.42, extrapolated in $h$; observed $p_z$ only checked.
+4. The $n_z$ term at the fixed corner rate 1.42, from the coarse and mid levels (the frame: the
+   middle level) and extrapolated in $h$; observed $p_z$ only checked.
 5. `ssh8` meshes: cylinder $512\times96\times1$, skew $192\times192\times1$.
 6. No-locking bounded-ratio gate; run directly, not from the record.
 7. The source hash replaced by builder digests and per-path recomputes; the recompute selection.
-8. The full-plate report dropped (the fast equivalence test proves sub-plate = full plate).
+8. The full-plate report dropped (the fast equivalence test proves sub-plate = full plate); the
+   equivalence tests run (1,1) and wide (1,0)/(0,1) strips instead of the frame's narrow
+   (1,0)/(0,1); `plate_fe` superseded by `srao_case`.
 9. The strip assertion "no label $m' \ge 1$ below the target" replaced by the filter's
    classification and kept-count assertion.
 10. The half-cylinder antisymmetric check limited below the torsion mode.
@@ -288,3 +342,5 @@ it on $f$ errors is conservative by 2×.
 13. The stacking note ($n_z = 2$ no better than 1 on bending; one layer soft at clamped edges).
 14. `COUNT_STEP` refit (open_items, 16b): re-deferred to PR 18 (performance), which fits the
     estimators at $\ge 1$M DOF; 16c is accuracy only.
+15. Three benchmark parts (`srao` 25, `cyl` 40, `skew` 4 min) instead of the frame's two runs;
+    no-locking in the tests only.
