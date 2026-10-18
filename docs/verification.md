@@ -236,7 +236,7 @@ Gated: regular $\ge 0.95$ for extension, in-plane and out-of-plane; parallelogra
 
 ## Solid-shell accuracy (PR 16c)
 
-Frequencies of `ssh8` meshes against 3D elasticity: `benchmarks/shell_accuracy.py` (parts `srao` 23 min, `cyl` 39 min, `skew` 4 min on the Mac) writes `benchmarks/results/shell_accuracy.json`; `tests/test_shell_accuracy.py` gates the record, recomputes one key per code path and runs the fast checks. Plan and sizing: `docs/plans/pr-16c-accuracy.md`. All solves are the PR 8 `eigsh` (`reference_modes`; Jacobi LOBPCG is impractical at $\kappa \approx 10^{12}$). Errors are relative in $f$, $|f^h/f - 1|$, except the no-locking test (in $\lambda$).
+Frequencies of `ssh8` meshes against 3D elasticity: `benchmarks/shell_accuracy.py` (parts `srao` 23 min, `cyl` 39 min, `skew` 4 min on the Mac) writes `benchmarks/results/shell_accuracy.json`; `tests/test_shell_accuracy.py` gates the record, recomputes one key per code path and runs the fast checks. Plan and sizing: `docs/plans/pr-16c-accuracy.md`. All solves are the PR 8 `eigsh` (`reference_modes`; Jacobi LOBPCG is impractical at $\kappa \approx 10^{12}$, and the PR 18b solid-shell AMG came after the record). Errors are relative in $f$, $|f^h/f - 1|$, except the no-locking test (in $\lambda$).
 
 ### Reference rules
 
