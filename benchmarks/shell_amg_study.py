@@ -35,7 +35,7 @@ from jaxmodal.mesh import box_mesh
 from jaxmodal.operators import ap_operator, dof_mask, unstructured
 from jaxmodal.precond import amg, jacobi
 
-B = {"zmin": "xyz"}
+ZMIN = {"zmin": "xyz"}
 
 
 def cases():
@@ -65,7 +65,7 @@ def cases():
     m = T.web(32, 50)[0]
     yield "web32", m, lam1(m, dof_mask(m, SS)), SS, STEEL, 100
     m = T.block(16)[0]
-    yield "block16", m, lam1(m, dof_mask(m, B)), B, STEEL, 100
+    yield "block16", m, lam1(m, dof_mask(m, ZMIN)), ZMIN, STEEL, 100
     m, t = T.plate(32, 50)
     yield "clamped32", m, T.kirchhoff(t, 35.99), T.CLAMPED, STEEL, 100
     yield "clamped32-0", m, 0.0, T.CLAMPED, STEEL, 100
@@ -148,12 +148,12 @@ def main(out=harness.RESULTS, write=True):
     print(json.dumps(plate), flush=True)
     jax.clear_caches()
     m16 = T.block(16)[0]
-    s = lam1(m16, dof_mask(m16, B))
-    skin = cost(T.block(32)[0], s, B)
+    s = lam1(m16, dof_mask(m16, ZMIN))
+    skin = cost(T.block(32)[0], s, ZMIN)
     print(json.dumps(skin), flush=True)
     jax.clear_caches()
     cube = box_mesh((32, 32, 32), spacing=(1 / 32,) * 3)
-    hex8 = cost(cube, s, B)
+    hex8 = cost(cube, s, ZMIN)
     print(json.dumps(hex8), flush=True)
     result = dict(
         runs=runs,

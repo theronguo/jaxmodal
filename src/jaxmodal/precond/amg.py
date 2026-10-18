@@ -169,9 +169,10 @@ def amg(
 
     return_aggregates=True returns (P, AMGAggregates); aggregates= reuses one from the same mesh
     and mask (connectivity and free are checked, points are not): it skips the pattern,
-    strength, aggregation and the tentative fit and recomputes everything that depends on the
-    values. For new materials, s_K, s_M or sigma the result equals a fresh setup; for moved
-    points it keeps the old near-null space (an approximation). max_coarse is then ignored."""
+    strength, aggregation and the tentative fit (on solid shells also fibers and frames) and
+    recomputes everything that depends on the values. For new materials, s_K, s_M or sigma
+    the result equals a fresh setup; for moved points it keeps the old near-null space (an
+    approximation). max_coarse is then ignored."""
     if not is_count(max_coarse):
         raise ValueError(f"max_coarse must be an int >= 1, got {max_coarse!r}")
     sigma = _check("amg", op, sigma, nonsingular)
@@ -222,11 +223,11 @@ def amg(
 def _shell_amg(op, free, sigma, points, degree, ratio, max_coarse, pattern, shell):
     """(GMG, pattern, shell): the solid-shell V-cycle, Chebyshev over additive Schwarz on
     every level (the matrix-free A_P on level 0, A_b = A_P there), down to a dense Cholesky."""
-    from .shell import B, _shell_levels
+    from .shell import B, _shell_levels  # shell imports amg's constants
 
     A = ap_operator(op, free, sigma)
     Ab, pattern = _hex8_galerkin(A, pattern)
-    levels, coarsest, shell, _ = _shell_levels(op, Ab, A.free, points, max_coarse, shell)
+    levels, coarsest, shell = _shell_levels(op, Ab, A.free, points, max_coarse, shell)[:3]
     out, transfers = [], []
     for i, (Al, (blocks, sel), P) in enumerate(levels):
         S = schwarz.build(Al, blocks, sel)

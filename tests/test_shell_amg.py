@@ -533,6 +533,27 @@ def test_schwarz(name):
     check_schwarz(A1, b1, s1, rings(S1, zero, flags), A1.toarray(), np.ones(A1.shape[0], bool), cb)
 
 
+def test_schwarz_large_keys():
+    """Test 3: block keys past int32 (nb > 46340 blocks, int32 patch indices): patches at the
+    end of a block-tridiagonal 9 x 9 BSR matrix against dense inverses."""
+    nb, b = 50_000, 9
+    rng = np.random.default_rng(0)
+    off = sp.kron(sp.eye(nb, k=1) + sp.eye(nb, k=-1), -np.eye(b))
+    A = sp.bsr_array(sp.kron(sp.eye(nb), 4 * np.eye(b)) + off, blocksize=(b, b))
+    A.data[:] *= 1 + 0.1 * rng.random((len(A.data), 1, 1))
+    A = sp.bsr_array((A + A.T) / 2, blocksize=(b, b))
+    A.sort_indices()
+    blocks = np.array([[nb - 2, nb - 1], [0, nb - 1], [nb - 1, -1]], np.int32)
+    sel = np.repeat(blocks >= 0, b, axis=1)
+    r = rng.standard_normal((nb * b, 1))
+    y = np.asarray(SW.build(A, blocks, sel)(jnp.asarray(r)))
+    ref, Ac = np.zeros_like(r), A.tocsr()
+    for row in blocks:
+        d = (b * row[row >= 0][:, None] + np.arange(b)).ravel()
+        ref[d] += np.linalg.solve(Ac[d][:, d].toarray(), r[d])
+    assert np.abs(y - ref).max() <= 1e-12 * np.abs(ref).max()
+
+
 def test_schwarz_layout():
     """Test 3: size classes on hand-computed cases (one class for uniform 24 and for a
     plate's coarse 27/45/63/81 mix, two for 24 and 3, the cap at 8), the bound and a
@@ -594,6 +615,9 @@ def test_groups(name):
     """Test 4: the level-0 graph, the aggregation (pyamg plus singletons), the one-ring
     level-1 graph and the level-1 patches against NumPy loops; identity DOFs only in their own
     group's patch."""
+    edge = sp.csr_array((np.ones(2), ([0, 1], [1, 0])), shape=(3, 3))
+    assert (SH._aggregate(SH._graph(sp.csr_array((5, 5)))) == np.arange(5)).all()  # no edges
+    assert (SH._aggregate(SH._graph(edge)) == [0, 0, 1]).all()  # one isolated vertex
     mesh, bcs = SCHWARZ_MESHES[name]()
     op, free, A, Ab, lv, Ac, shell, info = levels_of(mesh, 1e4, bcs, max_coarse=20)
     group = shell[0]
@@ -690,6 +714,7 @@ def test_lmax_bound(name):
     sigma = 1e4
     op, free, A, Ab, lv, Ac, shell, info = levels_of(mesh, sigma, bcs, max_coarse=20)
     P = amg(op, free, sigma, mesh.points, max_coarse=20)
+    n_id = 0
     for i, (Al, (blocks, sel), _) in enumerate(lv):
         Ad = ap_dense(mesh, free, sigma, A) if i == 0 else Al.toarray()
         S = SW.build(Al, blocks, sel)
@@ -700,6 +725,8 @@ def test_lmax_bound(name):
             zero = shell[1][i - 1][2]
             e = np.eye(len(Ad))[:, zero]
             assert np.abs(DA @ e - e).max() <= 1e-12
+            n_id += 1
+    assert n_id > 0 or name == "clamped"
 
 
 def test_one_level():

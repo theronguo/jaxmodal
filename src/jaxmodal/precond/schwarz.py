@@ -85,15 +85,15 @@ def _apply(S, r):
 
 
 @functools.partial(jax.jit, donate_argnums=0)
-def _invert(buf, ok, B, valid, off):
-    """buf with the packed inverses of the chunk B (c, s, s) written at row off (valid (c, s):
-    real slots; pads get the identity in the factorization and zero rows and columns), and
-    ok and-ed with their finiteness."""
+def _invert(buf, ok, B, valid, k):
+    """buf (n_chunks, c, s (s + 1) / 2) with the packed inverses of the chunk B (c, s, s)
+    written as chunk k (valid (c, s): real slots; pads get the identity in the factorization and
+    zero rows and columns), and ok and-ed with their finiteness."""
     inv, m = _inverse_blocks(B, valid)
     inv = inv * m[:, :, None] * m[:, None, :]
     iu = np.triu_indices(B.shape[1])
     packed = inv[:, iu[0], iu[1]]
-    return lax.dynamic_update_slice(buf, packed, (off, 0)), ok & jnp.isfinite(packed).all()
+    return lax.dynamic_update_slice(buf, packed[None], (k, 0, 0)), ok & jnp.isfinite(packed).all()
 
 
 def _extract(A, keys, blk, J):
@@ -103,6 +103,7 @@ def _extract(A, keys, blk, J):
     b = A.blocksize[0]
     nb = A.shape[0] // b
     c, m = blk.shape
+    blk = blk.astype(np.int64)  # keys reach nb^2
     k = blk[:, :, None] * nb + blk[:, None, :]
     pos = np.minimum(np.searchsorted(keys, k), len(keys) - 1)
     hit = (blk[:, :, None] >= 0) & (blk[:, None, :] >= 0) & (keys[pos] == k)
@@ -119,8 +120,7 @@ def build(A, blocks, sel, chunk_bytes=CHUNK_BYTES):
     a non-finite inverse, raises ValueError."""
     b = A.blocksize[0]
     n = A.shape[0]
-    rows = np.repeat(np.arange(n // b, dtype=np.int64), np.diff(A.indptr))
-    keys = rows * (n // b) + A.indices
+    keys = np.repeat(np.arange(n // b, dtype=np.int64) * (n // b), np.diff(A.indptr)) + A.indices
     size = sel.sum(1)
     bound = int(np.sqrt(chunk_bytes / 8))
     if size.max() > bound:
@@ -132,11 +132,11 @@ def build(A, blocks, sel, chunk_bytes=CHUNK_BYTES):
     for k, (s, nc, ch) in enumerate(cls):
         p = np.flatnonzero(which == k)
         idx = np.full((nc * ch, s), n, np.int32)
-        buf, ok = jnp.zeros((nc * ch, s * (s + 1) // 2)), jnp.asarray(True)
+        buf, ok = jnp.zeros((nc, ch, s * (s + 1) // 2)), jnp.asarray(True)
         for o in range(0, nc * ch, ch):
             q = p[o : o + ch]
             blk = blocks[q]
-            blk = blk[:, : max(-(-s // b), int((blk >= 0).sum(1).max()))]
+            blk = blk[:, : max(-(-s // b), int((blk >= 0).sum(1).max()))]  # >= s DOF slots for J
             J = np.argsort(~sel[q, : blk.shape[1] * b], axis=1, kind="stable")[:, :s]
             valid = np.zeros((ch, s), bool)
             valid[: len(q)] = np.arange(s) < size[q, None]
@@ -144,9 +144,9 @@ def build(A, blocks, sel, chunk_bytes=CHUNK_BYTES):
             B[: len(q)] = _extract(A, keys, blk, J)
             dof = np.take_along_axis(blk, J // b, 1) * b + J % b
             idx[o : o + len(q)] = np.where(valid[: len(q)], dof, n)
-            buf, ok = _invert(buf, ok, jnp.asarray(B), jnp.asarray(valid), o)
+            buf, ok = _invert(buf, ok, jnp.asarray(B), jnp.asarray(valid), o // ch)
         if not bool(ok):
             raise ValueError("Schwarz patch inverses are not finite")
         idxs.append(jnp.asarray(idx.reshape(nc, ch, s)))
-        invs.append(buf.reshape(nc, ch, -1))
+        invs.append(buf)
     return Schwarz(tuple(idxs), tuple(invs))

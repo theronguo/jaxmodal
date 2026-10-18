@@ -627,7 +627,7 @@ Split into three parts with unchanged acceptance criteria: **8a** the reference 
 Split into five parts (2026-10-18, the PR 18a plan `docs/plans/pr-18a-shell-amg.md`): 18a, then 18b; 18c and 18d after 18b; 18e last. Each part has its own reviewed plan.
 
 #### PR 18a: Solid-shell AMG core
-- Status: merged (`pr-18a-shell-amg`). The flat $128^2$ plate takes 12 / 21 iterations at $L/t$ = 10 / 1000 (1.75×, the configuration that ships: degree 2, $d$ = 1 / 2 smoothing steps); the curved $128^2$ panel 11 / 30 (reported); details in `docs/preconditioners.md`.
+- Status: done (`pr-18a-shell-amg`). The flat $128^2$ plate takes 12 / 21 iterations at $L/t$ = 10 / 1000 (1.75×, the configuration that ships: degree 2, $d$ = 1 / 2 smoothing steps); the curved $128^2$ panel 11 / 30 (reported); details in `docs/preconditioners.md`.
 - Contents:
   - AMG on the assembled A_P for solid-shell meshes (`ssh8`, and `ssh8` + `hex8`), and iteration counts vs L/t: fiber groups, per-level curvature candidates, additive Schwarz smoothers, aggregate reuse. `ssh8` with `hex20`/`hex27` (nonconforming) raises.
 - Tests:
@@ -644,6 +644,7 @@ Split into five parts (2026-10-18, the PR 18a plan `docs/plans/pr-18a-shell-amg.
   - Morton reordering and reordering tuning.
   - Kernel fusion checks (HLO inspection, report-only, recorded in `docs/performance.md`).
   - fp32 option for p-MG and AMG (as in PR 11), modelled by the PR 13 estimator, and its validation.
+  - σ-round reuse of the solid-shell AMG aggregates across `_precond_sigma`'s rebuilds (18a, `docs/open_items.md`).
   - Compile-time benchmark: full `solve_modes` compile time with GMG/AMG vs size, recorded in `docs/performance.md`.
   - Performance follow-ups (`docs/open_items.md`): the refill through `device_put(V[:, i:i+c].T).T` (2.4× faster on CPU), caching `layout` for the gather path, the verify skips before the gather.
 - Docs: `docs/performance.md`.
