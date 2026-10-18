@@ -38,6 +38,69 @@ Revisions:
   - Tests pinned: setups, directions, sign-rule cases, compile counts in a subprocess, the
     docs recipe executed.
 
+- rev 4 (review round 3: all 5 satisfied; minors folded in, implementation next):
+  - **Recipe rtol:** `post.cluster_rtol(info)` = `100 * max(1e-6, np.max(info["thresholds"],
+    initial=0), info.get("r_acc", 0))`, valid for converged solves only (docs). It covers the
+    si_band merge at $100 r_{acc}$ and empty bands.
+  - **`element_stress`:**
+    - gains `batch=64` (columns), with `chunk` for elements;
+    - inner vmap uses the default `out_axes=0` (a chunk is `(c, kb, 6)`);
+    - the kernel's `p` pytree carries element DOF indices, and the column batch `U_b (n_dof, kb)`
+      is a whole jit argument gathered inside (`U_b[dofs_e]`). So host and device memory stay
+      bounded by batch and chunk (no `(n_el, k_e, kb)` host gather). `recover` works the same
+      way.
+  - **`check_x64`** at the top of `normalize`, `mac`, `participation`, `recover` and
+    `element_stress`.
+  - **`_mbatches`:**
+    - fp64 cast without copying fp64 input; on the device for device input;
+    - old references dropped;
+    - device memory about $(3 + \text{workspace})\,w\,n_\text{dof}\cdot8$ B.
+  - **`_chunked`:** preallocates after the first chunk (`assemble`'s block concatenation is
+    unchanged: no doubling per block only). Chunk overlap goes to the Deferred GPU checks.
+  - **`normalize`:** the docs say `solve_modes` V is already M-orthonormal, so the recipe skips
+    `normalize` for large models (the copy doubles host V).
+  - **`write_modes`:**
+    - names must be `str` without `<>&"'`;
+    - cell data dtype kind must be in `iuf`;
+    - 3-D cell data raises because meshio silently flattens it to `(n,)` on read;
+    - n = 0 is allowed;
+    - the recipe exports tensors with the VTK reorder, which test 8 asserts (component 3 = σ12;
+      eps 3–5 = $(A_{ij}+A_{ji})/2$), plus an `(n_el, 6)` and an integer cell array.
+  - **Docs:**
+    - `docs/conventions.md` gets one line on the VTK order;
+    - `docs/mesh.md` notes the merge happens only with no hex20/hex27 between, and that re-read
+      element order changes (ssh8 → hex8 block);
+    - the ROADMAP dependency table: row 17 "9, 16a", rows 19 and 21 gain 17;
+    - the ROADMAP PR 17 MAC bullet reads "checked against the PR 8 test oracle
+      `tests/exact.mac`";
+    - PR 21 "uses the same rule (`post.clusters`, host)";
+    - the README gets a status line, a small snippet reusing earlier names, and a link.
+  - **Measured lines in the docs:**
+    - kernel times (hex20 about 25–35 ms, ssh8 14/32 ms per 1024-element chunk at kb = 64);
+    - one measured peak of `participation`/`mac` and `element_stress` at 1M DOF hex20, against
+      the formula.
+  - **Tests:**
+    - 5(c) compares `recover` with `shell_ref.recover` on a random u, with
+      `orientations={0: TILT}`, `R_o=TILT`, and `rotate(C, TILT)` on hex8 (a linear-u laminate
+      has α/‖ε‖ of only 3e-7–4e-4);
+    - compile counts start after building the operator and inputs, with host B; the first
+      `_gram` adds exactly one `jit(_apply_M)` and a repeat adds 0; 3 and 5(d) share one
+      subprocess script;
+    - the docs recipe is the single block after a `<!-- recipe -->` marker in
+      `docs/postprocessing.md`; it is exec'd in a namespace seeded with `mesh, materials, bcs`
+      (it calls `solve_modes` itself) after `monkeypatch.chdir(tmp_path)`, for the
+      sliding-base and the clamped setups;
+    - the sign rule adds an outside-band case: $|v_a| = 1 - 10^{-5}$, $|v_b| = 1$, so $v_b > 0$;
+    - the exact `normalize(v) == normalize(-v)` check uses the matrix M;
+    - tolerances: k = 70 vs single calls $\le 10^{-13}$ of max|σ|; element_stress vs the host
+      mean $10^{-13}$; chunk 5 vs 1024 $10^{-13}$; 1(e) relative to `total_k`;
+    - `frequency_table` gets a zero-total case;
+    - test 3 non-orthogonal V: `normalize(V, M) == V * s / sqrt(diag(VᵀMV))` to $10^{-14}$;
+    - test 8's mixed mesh is built as disjoint blocks (`ssh8` from `solid_shell` on a hex8 box);
+      the name-width cases use a one-element mesh;
+    - test 6 uses a random u only;
+    - 1(c): on the two-density mesh the node centroid is not the centre of mass.
+
 ## Scope
 
 1. Mode normalization.
@@ -104,7 +167,8 @@ participation(V, M, r, batch=64)                     # -> gamma (n, 6), m_eff (n
 clusters(lam, rtol=1e-4, atol=0.0)                   # -> list of index arrays
 frequency_table(lam, m_eff, total, rtol=1e-4, atol=0.0)  # -> dict; format_table(t) -> str
 recover(mesh, materials, u, orientations=None, chunk=1024)        # -> {type: dict}
-element_stress(mesh, materials, U, orientations=None, chunk=1024) # -> eps, sigma (n_el, k, 6)
+element_stress(mesh, materials, U, orientations=None, chunk=1024, batch=64)  # -> eps, sigma (n_el, k, 6)
+cluster_rtol(info)                                   # -> rtol for a converged solve_modes result
 von_mises(sigma)                                     # -> (...,)
 write_modes(path, mesh, V, cell_data=None)           # .vtu
 ```
@@ -186,7 +250,7 @@ $$\mathrm{MAC}_{ij} = \frac{(a_i^\top M b_j)^2}{(a_i^\top M a_i)(b_j^\top M b_j)
     makes it wrong.
   - The solver merges at $\lambda_i - \lambda_{i-1} < 100\,t_{i-1}|\lambda_{i-1}|$, with
     $t_j \ge$ tol the per-mode acceptance threshold. The recipe therefore passes
-    `rtol=max(1e-4, 100 * info["thresholds"].max())`.
+    `rtol=max(1e-4, cluster_rtol(info))` (rev 4).
   - The rule uses $|\lambda_{i+1}|$ and $\le$ on purpose: it is slightly looser, so it never
     splits a solver cluster, and it handles exact rigid zeros.
 - **Basis invariance:** per cluster $C$, $\sum_{i\in C}m^\text{eff}_{ik} = r_k^\top MP_Cr_k$
@@ -248,8 +312,8 @@ $$\mathrm{MAC}_{ij} = \frac{(a_i^\top M b_j)^2}{(a_i^\top M a_i)(b_j^\top M b_j)
     w_q\sigma_q/\sum_q w_q$ and $\bar\varepsilon_e$, `(n_el, k, 6)` in element order
     (`mesh.offsets`).
   - Reduced inside the kernel, so only `(c, kb, 6)` per chunk leaves the device. Columns are
-    batched inside the kernel: `jax.jit(jax.vmap(jax.vmap(rec, in_axes=(None, None, 1),
-    out_axes=1)))` with `kb = min(64, k)`, the last column batch zero-padded.
+    batched inside the kernel: `jax.jit(jax.vmap(jax.vmap(rec, in_axes=(None, None, 1))))`
+    with `kb = min(batch, k)`, the last column batch zero-padded (rev 4).
   - The geometry, B, det J and the `ssh8` Kaa factorization do not depend on u, so they are
     computed once per chunk (the reviewer measured 6× over a per-column loop). Implementation
     confirms the `ssh8` case with one timing.
