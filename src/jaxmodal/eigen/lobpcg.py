@@ -368,7 +368,7 @@ def _capacity(n_modes, chunk, k, low):
 
 def lobpcg(
     op, free, n_modes, tol=1e-6, R=None, precond=None, X0=None, maxit=500, seed=0, *,
-    chunk=None, guards=None, basis_dtype="float64", low_memory=False,
+    chunk=None, guards=None, basis_dtype="float64", low_memory=False, polish=None,
 ):  # fmt: skip
     """Lowest n_modes eigenpairs of the masked pencil (K_m, M_m). Returns lam (n_modes,)
     ascending (NumPy), V (n_dof, n_modes) M-orthonormal with constrained rows 0 (NumPy fp64),
@@ -380,16 +380,20 @@ def lobpcg(
     max(5, chunk // 5)); converged chunks are locked into a basis of dtype basis_dtype
     ("float64" or "float32"; with float32, chunks after the first accept at
     max(tol, 1.2e-7)). maxit counts per chunk. low_memory: the low-memory step (11 instead of
-    16 blocks, about 1.4-1.9x the time); a 9-block chunk stuck for SWITCH iterations switches to it
-    (info["chunks"][i]["switched"]). A STALL or maxit exit returns the Rayleigh-Ritz block of the
-    last X (Ritz values: upper bounds), accepted if its explicit residuals pass. Never raises on
-    non-convergence: check info["converged"] and info["stagnated"]; a failed chunk ends the solve,
-    so fewer than n_modes can come back. Breakdowns raise: RuntimeError (start block rank-deficient
-    after 3 refills, a locked column in the span of the earlier ones), FloatingPointError
-    (non-finite step)."""
+    16 blocks, about 1.4-1.9x the time); a 9-block chunk stuck for SWITCH iterations switches
+    to it (info["chunks"][i]["switched"]). A STALL or maxit exit returns the Rayleigh-Ritz
+    block of the last X (Ritz values: upper bounds), accepted if its explicit residuals pass.
+    polish: a host callable X -> (Y, iterations), Y ~ A^-1 M_m X for an SPD A (e.g. PCG on
+    K + sigma M), masked: one inverse-iteration step on a STALL exit that has not passed,
+    accepted if the new block's explicit residuals pass, else discarded (chunks[i]["polish"]:
+    its iterations, None if none ran). Never raises on non-convergence: check
+    info["converged"] and info["stagnated"]; a failed chunk ends the solve, so fewer than
+    n_modes can come back. Breakdowns raise: RuntimeError (start block rank-deficient after 3
+    refills, a locked column in the span of the earlier ones), FloatingPointError (non-finite
+    step)."""
     return _solve(
         op, free, n_modes, tol, R, precond, X0, maxit, seed,
-        chunk=chunk, guards=guards, basis_dtype=basis_dtype, low=low_memory,
+        chunk=chunk, guards=guards, basis_dtype=basis_dtype, low=low_memory, polish=polish,
     )  # fmt: skip
 
 
@@ -434,6 +438,28 @@ def _final_rr(X, lam, args, consts, c):
     Xs = KX = MX = None
     r, t = _confirm(X, lam, op, m, consts)[2:]
     return X, np.asarray(lam), np.asarray(r), np.asarray(t)
+
+
+def _polish(polish, X, lam, r, t, j, rec, args, consts, want, guards, lock, c):
+    """One inverse-iteration step Y = polish(X) on a stalled chunk, then deflation, SVQB and
+    Rayleigh-Ritz: (X, lam, r, t, j) of Y if its explicit residuals pass (rec converged), else
+    the inputs unchanged. rec["polish"]: the polish's iterations."""
+    op, m, _, R, MR, B, cnt = args
+    Y, its = polish(X)
+    rec["polish"] = int(its)
+    if not jnp.isfinite(Y).all():
+        return X, lam, r, t, j
+    Y, KY, MY, keep = _start(Y, op, m, R, MR, B, cnt, c=c)
+    if not keep.all():
+        return X, lam, r, t, j
+    Y, _, _, mu = _rr_start(Y, KY, MY)
+    KY = MY = None
+    rn, tn = (np.asarray(a) for a in _confirm(Y, mu, op, m, consts)[2:])
+    mu = np.asarray(mu)
+    if (jn := _accept(mu, rn, tn, want, j, guards, lock)) is None:
+        return X, lam, r, t, j
+    rec.update(converged=True, locked=jn)
+    return Y, mu, rn, tn, jn
 
 
 def _iterate(state, args, consts, want, lock, guards, tol, maxit, low, c, stop):
@@ -506,7 +532,7 @@ def _iterate(state, args, consts, want, lock, guards, tol, maxit, low, c, stop):
             j, converged = jn, True
             stagnated = stagnated or bool((r[:j] > tol).any())
     rec = dict(want=want, locked=j if converged else 0, iterations=it + 1, converged=converged,
-               stagnated=stagnated, switched=switched, history=hist, drops=drops,
+               stagnated=stagnated, switched=switched, polish=None, history=hist, drops=drops,
                t_warm=t_warm / n_warm if n_warm else 0.0)  # fmt: skip
     return X, lam, r, t, j, rec
 
@@ -522,16 +548,16 @@ def _explicit(state, op, m, consts, low):
 
 def _solve(
     op, free, n_modes, tol, R, precond, X0, maxit, seed, chunk=None, guards=None,
-    basis_dtype="float64", low=False, stop=None, lam_stop=None, max_capacity=None,
+    basis_dtype="float64", low=False, stop=None, lam_stop=None, max_capacity=None, polish=None,
 ):  # fmt: skip
-    """lobpcg's solve; stop: a callback on the Ritz-sum history ending a chunk (sigma_estimate).
-    lam_stop (band mode, solve_modes(band=...)): every chunk is lockable and the solve stops at
-    the first chunk with a converged mode beyond the band [0, lam_stop] (_band_count); n_modes is
-    the expected count (the basis grows past it, up to max_capacity columns, required) and chunk
-    may exceed it. A lock needing more than max_capacity columns stops the solve
-    (info["stopped"] = "capacity", the stopping chunk dropped). Returns every converged mode,
-    info["n_band"] of them in the band; band mode returns its preallocated (n_dof, max_capacity
-    + block) F-order V, of which the first len(lam) columns are valid."""
+    """lobpcg's solve (polish as lobpcg's); stop: a callback on the Ritz-sum history ending a chunk
+    (sigma_estimate). lam_stop (band mode, solve_modes(band=...)): every chunk is lockable and the
+    solve stops at the first chunk with a converged mode beyond the band [0, lam_stop]
+    (_band_count); n_modes is the expected count (the basis grows past it, up to max_capacity
+    columns, required) and chunk may exceed it. A lock needing more than max_capacity columns stops
+    the solve (info["stopped"] = "capacity", the stopping chunk dropped). Returns every converged
+    mode, info["n_band"] of them in the band; band mode returns its preallocated (n_dof,
+    max_capacity + block) F-order V, of which the first len(lam) columns are valid."""
     check_x64("lobpcg")
     band = lam_stop is not None
     if band and max_capacity is None:
@@ -601,6 +627,10 @@ def _solve(
             state, args, consts, want, lock, guards, tol, maxit, low, c, stop
         )
         state = None
+        if polish is not None and rec["stagnated"] and not rec["converged"]:  # a STALL exit
+            Xi, lam, r, t, j = _polish(
+                polish, Xi, lam, r, t, j, rec, args, consts, want, guards, lock, c
+            )
         # wanted columns near convergence but a failed chunk: a split cluster (guard error)
         if not rec["converged"] and lock and (r[:want] ** 2 <= t[:want]).all():
             _extent(lam, r, t, want, guards, lock, failed=True)

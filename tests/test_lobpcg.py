@@ -2,6 +2,7 @@
 
 import dataclasses
 import functools
+import gc
 import importlib
 import json
 import subprocess
@@ -359,11 +360,12 @@ import json, jax
 from jaxmodal import config
 config.enable_x64()
 jax.config.update("jax_enable_compilation_cache", False)
-n = {"jit(lobpcg_step)": 0, "jit(lobpcg_step_low)": 0}
+n = {"jit(lobpcg_step)": 0, "jit(lobpcg_step_low)": 0, "jit(_to_low)": 0}
 def count(event, duration, **kw):
     if "backend_compile" in event and kw.get("fun_name") in n:
         n[kw["fun_name"]] += 1
 jax.monitoring.register_event_duration_secs_listener(count)
+from jax.tree_util import Partial
 from jaxmodal.eigen import jacobi, lobpcg, sigma_estimate
 from jaxmodal.materials import Material, isotropic
 from jaxmodal.memory import lobpcg_memory, unstructured_memory
@@ -384,13 +386,22 @@ solve(op, free, 9, tol=1e-8, chunk=3, guards=3)
 solve(op2, free, 9, tol=1e-6, chunk=3, guards=3, precond=jacobi(op2, free, 0.5))
 solve(op, free, 9, tol=1e-8, chunk=3, guards=3, low_memory=True)
 solve(op2, free, 9, tol=1e-8, chunk=3, guards=3, low_memory=True)
-print(json.dumps([[d["jit(lobpcg_step)"], d["jit(lobpcg_step_low)"]] for d in out]))
+zero = Partial(jax.numpy.zeros_like)  # W = 0: stuck, both switch
+for o in (op, op2):
+    _, _, info = lobpcg(o, free, 6, tol=1e-10, maxit=20, precond=zero)
+    assert info["chunks"][0]["switched"]
+    out.append(dict(n))
+print(json.dumps([[d["jit(lobpcg_step)"], d["jit(lobpcg_step_low)"], d["jit(_to_low)"]]
+                  for d in out]))
 """
 
 
 def test_compiles():
     """One step compile per solve shape; new data (operator, preconditioner, tol) and the
-    chunk count (traced) never recompile; the low-memory step is one more variant."""
+    chunk count (traced) never recompile; the low-memory step is one more variant, and a switch
+    adds it (and _to_low) once per shape. Measured: [[1, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0],
+    [3, 0, 0], [3, 1, 0], [3, 1, 0], [4, 2, 1], [4, 2, 1]] (the zero preconditioner is a new
+    pytree: one 9-block compile)."""
     res = subprocess.run(
         [sys.executable, "-c", COMPILES], capture_output=True, text=True, check=True
     )
@@ -398,7 +409,8 @@ def test_compiles():
     nine = [o[0] for o in out]
     assert nine[:2] == [1, 1] and nine[2] - nine[1] <= 1  # sigma_estimate: one mode
     assert nine[3] - nine[2] == 1 and nine[4] == nine[3]  # chunked: 3 chunks, one compile
-    assert [o[1] for o in out] == [0, 0, 0, 0, 0, 1, 1] and nine[6] == nine[4]
+    assert [o[1] for o in out] == [0, 0, 0, 0, 0, 1, 1, 2, 2] and nine[6] == nine[4]
+    assert [o[2] for o in out] == [0] * 7 + [1, 1] and nine[8] == nine[7]
 
 
 @pytest.mark.parametrize(
@@ -895,3 +907,315 @@ def test_precond_composition():
     )
     got = solve_modes_memory(box, {}, 4, precond="jacobi")
     assert got == lobpcg_memory(um, n_box, 4, n_rigid=6)
+
+
+# ---------------------------------------------------------------- PR 18b: switch, polish, RR
+
+PENCIL = ("hex20", (4, 4, 4), "clamped")
+ZERO = Partial(jnp.zeros_like)  # W = 0: only X and P move, the chunk stalls
+
+
+@functools.cache
+def dense_modes(p_args):
+    p = problem(*p_args)
+    return sl.eigh(p.Kf.toarray(), p.Mf.toarray())
+
+
+def near_start(p_args, k, delta, cols=None, seed=0):
+    """The k lowest exact eigenvectors (full rows) plus delta V_hi G / sqrt(n_hi) on cols."""
+    p = problem(*p_args)
+    _, U = dense_modes(p_args)
+    nr = 0 if p.R is None else p.R.shape[1]
+    hi = U[:, U.shape[1] // 2 :]
+    G = np.random.default_rng(seed).standard_normal((hi.shape[1], k))
+    X = U[:, nr : nr + k].copy()
+    cols = range(k) if cols is None else cols
+    X[:, cols] += delta * (hi @ G[:, cols]) / np.sqrt(hi.shape[1])
+    X0 = np.zeros((p.op.n_dof, k))
+    X0[p.idx] = X
+    return X0
+
+
+def exact_polish(p_args, calls=None):
+    """Y = (K_f + lam_1 M_f)^-1 M_f X on the free rows: an exact inverse-iteration step."""
+    p = problem(*p_args)
+    lu = sl.lu_factor((p.Kf + dense_modes(p_args)[0][0] * p.Mf).toarray())
+
+    def polish(X):
+        if calls is not None:
+            calls.append(X.shape)
+        Y = np.zeros(X.shape)
+        Y[p.idx] = sl.lu_solve(lu, p.Mf @ np.asarray(X)[p.idx])
+        return jnp.asarray(Y), 7
+
+    return polish
+
+
+def stalled(monkeypatch, polish=None, n=6, tol=1e-10, **kw):
+    """A STALL exit on the PR 9 pencil from a near-exact start (zero preconditioner)."""
+    monkeypatch.setattr(lob, "STALL", 3)
+    p = problem(*PENCIL)
+    k = lob._block_size(kw.get("chunk") or n, kw.get("chunk"), None)[2]
+    X0 = near_start(PENCIL, k, 1e-2 * tol)
+    return lobpcg(p.op, p.free, n, tol, precond=ZERO, X0=X0, polish=polish, **kw)
+
+
+@pytest.mark.parametrize("low", [False, True], ids=["9-block", "low"])
+def test_polish_accepts(monkeypatch, low):
+    lam0, V0, info0 = stalled(monkeypatch, low_memory=low)
+    assert not info0["converged"] and info0["stagnated"]
+    assert info0["chunks"][0]["polish"] is None
+    calls = []
+    lam, V, info = stalled(monkeypatch, exact_polish(PENCIL, calls), low_memory=low)
+    assert info["converged"] and info["stagnated"] and info["chunks"][0]["polish"] == 7
+    assert len(calls) == 1 and info["iterations"] == info0["iterations"]
+    assert np.all(info["residuals"] <= info["thresholds"])
+    p, lr = problem(*PENCIL), dense_modes(PENCIL)[0][:6]
+    assert np.all(np.abs(lam - lr) / lr <= f_lam(p, lr))
+    Vf = V[p.idx]
+    assert np.abs(Vf.T @ (p.Mf @ Vf) - np.eye(6)).max() <= 1e-12
+
+
+@pytest.mark.parametrize("bad", ["noise", "rank"])
+def test_polish_reverts(monkeypatch, bad):
+    """A polish that does not pass leaves the result bitwise equal to no polish."""
+    lam0, V0, info0 = stalled(monkeypatch)
+    exact = exact_polish(PENCIL)
+
+    def polish(X):
+        Y, its = exact(X)
+        if bad == "noise":
+            return X + jax.random.normal(jax.random.key(3), X.shape) * (X != 0), its
+        return Y.at[:, 1].set(Y[:, 0]), its
+
+    lam, V, info = stalled(monkeypatch, polish)
+    assert not info["converged"] and info["chunks"][0]["polish"] == 7
+    assert np.array_equal(lam, lam0) and np.array_equal(V, V0)
+    assert np.array_equal(info["residuals"], info0["residuals"])
+
+
+def test_polish_not_on_maxit(monkeypatch):
+    calls = []
+    _, _, info = stalled(monkeypatch, exact_polish(PENCIL, calls), maxit=2)
+    assert not info["converged"] and not info["stagnated"] and not calls
+    assert info["chunks"][0]["polish"] is None
+
+
+def test_polish_guard_check(monkeypatch):
+    """Locked chunks (12 modes, chunks of 6): the failed-exit guard check (_extent with
+    failed=True) runs after a polish that did not accept, never after one that did."""
+    extent, failed = lob._extent, []
+
+    def spy(*a, **kw):
+        failed.append(kw.get("failed", False))
+        return extent(*a, **kw)
+
+    monkeypatch.setattr(lob, "_extent", spy)
+    _, _, info = stalled(monkeypatch, lambda X: (X, 1), n=12, chunk=6)
+    assert not info["converged"] and True in failed
+    failed.clear()
+    _, _, info = stalled(monkeypatch, exact_polish(PENCIL), n=12, chunk=6, maxit=60)
+    assert info["chunks"][0]["converged"] and info["chunks"][0]["polish"] == 7
+    assert True not in failed
+
+
+@pytest.mark.parametrize("want", [1, 4])
+def test_polish_extends_cluster(monkeypatch, want):
+    """The cube's clusters [0, 1] and [2, 3, 4]: noise on the whole multiplet, so only the
+    polish (here an oracle returning the exact block) shows the cluster and extends j."""
+    monkeypatch.setattr(lob, "STALL", 3)
+    p = problem(*CUBE)
+    k = lob._block_size(want, None, None)[2]
+    cols = [0, 1] if want == 1 else [2, 3, 4]
+    X0 = near_start(CUBE, k, 1e-2, cols)
+    extent, calls = lob._extent, []
+
+    def spy(*a, **kw):
+        calls.append(kw.get("failed", False))
+        return extent(*a, **kw)
+
+    monkeypatch.setattr(lob, "_extent", spy)
+    kw = dict(R=p.R, precond=ZERO, X0=X0)
+    _, _, info = lobpcg(p.op, p.free, want, 1e-6, **kw)
+    assert not info["converged"] and False not in calls
+    exact = jnp.asarray(near_start(CUBE, k, 0.0))
+    _, _, info = lobpcg(p.op, p.free, want, 1e-6, polish=lambda X: (exact, 1), **kw)
+    assert info["converged"] and info["chunks"][0]["locked"] > want
+
+
+@pytest.mark.parametrize("low", [False, True], ids=["9-block", "low"])
+def test_t_iteration_switch(monkeypatch, low):
+    monkeypatch.setattr(lob, "SWITCH", 2)
+    _, _, info = stalled(monkeypatch, low_memory=low)
+    assert (info["chunks"][0]["switched"] is None) == low
+    assert low or info["chunks"][0]["switched"] >= 2
+    assert np.isfinite(info["t_iteration"]) and info["t_iteration"] > 0
+
+
+def test_final_rr(monkeypatch):
+    """A STALL exit returns the Rayleigh-Ritz block of the last X (Ritz values ascending, V^T K
+    V diagonal); an SVQB drop in _final_rr's own _start leaves X and lam as they were."""
+    p = problem(*PENCIL)
+    lam, V, info = stalled(monkeypatch)
+    assert not info["converged"] and np.all(np.diff(lam) >= 0)
+    Vf = V[p.idx]
+    G = Vf.T @ (p.Kf @ Vf)
+    assert np.abs(G - np.diag(np.diag(G))).max() <= 1e-10 * np.abs(np.diag(G)).max()
+    assert np.allclose(np.diag(G) / np.einsum("ij,ij->j", Vf, p.Mf @ Vf), lam, rtol=1e-12)
+    final, start, n_start, seen = lob._final_rr, lob._start, [], []
+
+    def drop(*a, **kw):  # every call after _begin's (_final_rr's): one column dropped
+        X, KX, MX, keep = start(*a, **kw)
+        n_start.append(1)
+        return X, KX, MX, keep.at[0].set(len(n_start) == 1)
+
+    def spy(X, lam, *a):
+        seen.append((np.asarray(X), lam))
+        return final(X, lam, *a)
+
+    monkeypatch.setattr(lob, "_start", drop)
+    monkeypatch.setattr(lob, "_final_rr", spy)
+    lam, V, info = stalled(monkeypatch)
+    ((X_in, lam_in),) = seen
+    assert len(n_start) == 2 and not info["converged"]
+    assert np.array_equal(lam, lam_in[: len(lam)]) and np.array_equal(V, X_in[:, : len(lam)])
+
+
+def test_no_rr_or_switch_with_stop(monkeypatch):
+    calls = []
+    for name in ("_final_rr", "_to_low"):
+        real = getattr(lob, name)
+        monkeypatch.setattr(
+            lob, name, lambda *a, _r=real, _n=name, **kw: calls.append(_n) or _r(*a, **kw)
+        )
+    p = problem(*PENCIL)
+    sigma_estimate(p.op, p.free)
+    sigma_estimate(p.op, p.free, maxit=10)  # a maxit exit
+    assert not calls
+
+
+def test_project_clamp():
+    """Capacity 10, c = 4: the last chunk starts at cap - c and masks the columns before i c."""
+    n, k, cap, c = 200, 3, 10, 4
+    rng = np.random.default_rng(0)
+    f = jax.jit(lob._project, static_argnums=4)
+    for count in (8, 9, 10):
+        B = np.zeros((n, cap))
+        B[:, :count] = np.linalg.qr(rng.standard_normal((n, count)))[0]
+        Y = jnp.asarray(rng.standard_normal((n, k)))
+        Z = f(jnp.asarray(B), jnp.int32(count), Y, Y, c)
+        assert np.abs(B.T @ np.asarray(Z)).max() <= 1e-13, count
+    B = jnp.asarray(np.linalg.qr(rng.standard_normal((n, 12)))[0])  # c divides 12: unmasked
+
+    def plain(B, count, Y, MY, c):
+        def body(i, Y):
+            Bc = jax.lax.dynamic_slice_in_dim(B, i * c, c, 1)
+            return Y - Bc @ (Bc.T @ MY)
+
+        return jax.lax.fori_loop(0, (count + c - 1) // c, body, Y)
+
+    Y = jnp.asarray(rng.standard_normal((n, k)))
+    assert np.array_equal(
+        f(B, jnp.int32(10), Y, Y, 4), jax.jit(plain, static_argnums=4)(B, jnp.int32(10), Y, Y, 4)
+    )
+
+
+def test_to_low():
+    """_to_low removes a locked-basis component from X and P."""
+    p = problem(*PENCIL)
+    n = p.op.n_dof
+    m = jnp.asarray(p.free, float)[:, None]
+    _, U = dense_modes(PENCIL)
+    B = np.zeros((n, 8))
+    B[p.idx, :4] = U[:, :4]
+    B = jnp.asarray(B)
+    Q = np.zeros((n, 6))
+    Q[p.idx] = U[:, 10:16]
+    X = jnp.asarray(Q) + 1e-6 * B[:, :1]
+    P = jnp.asarray(Q[:, ::-1]) + 1e-6 * B[:, 1:2]
+    R = jnp.zeros((n, 0))
+    X, P = lob._to_low(X, P, p.op, m, R, R, B, jnp.int32(4), c=4)
+    for Y in (X, P):
+        assert np.abs(np.asarray(B).T @ np.asarray(p.op.apply_M(Y))).max() <= 1e-13
+
+
+def test_polish_live_bytes(monkeypatch):
+    """At the polish only the chunk's X (and the basis) is live: a leaked KX, MX or P fails."""
+    monkeypatch.setattr(lob, "STALL", 3)
+    n = 200_000
+    op = Diagonal(jnp.asarray(1 + np.arange(n) / n), jnp.ones(n))
+    seen = []
+
+    def live():
+        gc.collect()
+        return sum(a.nbytes for a in jax.live_arrays())
+
+    def polish(X):
+        seen.append(live())
+        return X, 1
+
+    base = live()
+    _, _, info = lobpcg(op, np.ones(n, bool), 1, 1e-10, precond=ZERO, polish=polish)
+    k = 6  # block of one mode
+    assert info["chunks"][0]["polish"] == 1 and info["stagnated"]
+    assert seen[0] - base <= 1.5 * 8 * n * k, (seen[0] - base) / (8 * n * k)
+
+
+def _converging(name):
+    """A representative converging solve: (lam, info)."""
+    from jaxmodal.eigen import solve_modes
+    from jaxmodal.precond import pmg
+
+    if name == "pmg":
+        p = problem(*PENCIL)
+        lam, _, info = lobpcg(p.op, p.free, 6, 1e-8, precond=pmg(p.op, p.free, 1.0))
+        return lam, info
+    if name == "gmg":
+        mesh, bcs = voxel_mesh((10, 8, 6), (0.1,) * 3), {"xmin": "xyz"}
+    elif name == "amg-gap":  # test_gap_band's pencil
+        mesh, bcs = box_mesh((6, 3, 3), (2 / 6, 1 / 3, 1.002 / 3), type="hex20"), {"xmin": "xyz"}
+    else:
+        mesh, bcs = box_mesh((4, 4, 4), (0.25,) * 3, type="hex20"), {"xmin": "xyz"}
+    lam, _, info = solve_modes(mesh, MAT, bcs, 6, tol=1e-10 if name == "amg-gap" else 1e-8)
+    return lam, info
+
+
+@pytest.mark.parametrize("name", ["amg-gap", "amg-box", "gmg", "pmg"])
+def test_no_switch_when_converging(monkeypatch, name):
+    """Converging AMG / GMG / p-MG chunks never switch: bitwise equal to SWITCH = infinity."""
+    lam, info = _converging(name)
+    assert info["converged"] and all(c["switched"] is None for c in info["chunks"])
+    monkeypatch.setattr(lob, "SWITCH", 10**9)
+    assert np.array_equal(_converging(name)[0], lam)
+
+
+def test_band_clamp(monkeypatch):
+    """Band mode, chunks of 40 (block 48, c = 64, capacity 128): the 4th chunk starts at count
+    120 with ceil(120 / 48) 48 = 144 > 128 and switches (the clamped _project); an oracle polish
+    (the exact block) locks every chunk: no mode twice, the band complete."""
+    monkeypatch.setattr(lob, "STALL", 3)
+    monkeypatch.setattr(lob, "SWITCH", 1)
+    n = 3000
+    d = 1 + np.arange(n, dtype=float)
+    op = Diagonal(jnp.asarray(d), jnp.ones(n))
+    calls, seen, real = [], [], lob._iterate
+
+    def oracle(X):  # chunk i (40 locked per chunk): the unit vectors 40 i ... 40 i + 47
+        i = len(calls)
+        calls.append(i)
+        return jnp.eye(n, 48, -40 * i), 1
+
+    def spy(state, args, *a):
+        out = real(state, args, *a)
+        B, cnt, k = args[5], int(args[6]), state[0].shape[1]
+        seen.append((out[-1]["switched"], -(-cnt // k) * k > B.shape[1]))
+        return out
+
+    monkeypatch.setattr(lob, "_iterate", spy)
+    lam, V, info = lob._solve(op, np.ones(n, bool), 80, 1e-8, None, ZERO, None, 100, 0,
+                              chunk=40, guards=8, lam_stop=160.5, max_capacity=1024,
+                              polish=oracle)  # fmt: skip
+    assert seen[3][0] is not None and seen[3][1]
+    assert info["n_band"] == 160 and np.allclose(lam[:160], d[:160], rtol=1e-12)
+    W = V[:, :160]
+    assert np.abs(W.T @ W - np.eye(160)).max() <= 1e-12
