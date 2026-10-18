@@ -199,7 +199,7 @@ points, weights, eps, sigma = shell_recover(X, table_e, u)  # (8L, 3), (8L,), (8
 - **ANS, thickness** (Betsch–Stein): $E_{33}$ bilinear from the 4 corner lines at $\zeta = 0$.
 - **EAS**, 5 covariant parameters: $\tilde E_{11} = \xi\alpha_1$, $\tilde E_{22} = \eta\alpha_2$, $2\tilde E_{12} = \xi\alpha_3 + \eta\alpha_4$, $\tilde E_{33} = \zeta\alpha_5$, so $\tilde\varepsilon = (\det J_0/\det J)\,T_0M\alpha$ with $T_0 = \mathrm{bond\_strain}(J_0^{-\top})$.
 - **Condensation:** $K_e = K_{uu} - K_{u\alpha}K_{\alpha\alpha}^{-1}K_{\alpha u}$ (5×5 Cholesky), symmetrized; $\alpha = -K_{\alpha\alpha}^{-1}K_{\alpha u}u_e$ in recovery.
-- **Quadrature:** 2×2 in-plane times 2 Gauss points per ply. Ply $k$ occupies $\zeta \in [-1 + 2\sum_{j<k}f_j,\ -1 + 2\sum_{j\le k}f_j]$; its points map linearly with weights scaled by $f_k$, so a padded fraction-0 ply has weight 0. Two points per ply are exact in $\zeta$ only on prismatic elements (top face = bottom face + a constant vector). `shell_stiffness` accumulates $K_{uu}, K_{u\alpha}, K_{\alpha\alpha}$ by `lax.scan` over plies.
+- **Quadrature:** 2×2 in-plane times 2 Gauss points per ply. Ply $k$ occupies $\zeta \in [-1 + 2\sum_{j<k}f_j,\ -1 + 2\sum_{j\le k}f_j]$; its points map linearly with weights scaled by $f_k$, so a padded fraction-0 ply has weight 0. Two points per ply are exact in $\zeta$ only on prismatic elements (top face = bottom face + a constant vector). `shell_stiffness` accumulates $K_{uu}, K_{u\alpha}, K_{\alpha\alpha}$ by `lax.scan` over plies, and `shell_mass` accumulates $m_e$ the same way.
 - **Mass:** $m_e = \sum_k\rho_k\int_{\text{ply }k}N^\top N\det J$ on the same points; one ply equals hex8's consistent block. Consistent mass only.
 - **Frame and plies:** ply $k$ uses $C_k' = \mathrm{rotate}(C_k, R_\text{shell}R_z(\theta_k))$, with $R_\text{shell}$ from $R_o$ and the element normal (`docs/materials.md`).
 
@@ -214,6 +214,6 @@ points, weights, eps, sigma = shell_recover(X, table_e, u)  # (8L, 3), (8L,), (8
 ## Not covered
 
 - Wedges and tets: later, one registry entry each.
-- Solid-shell (PR 16): the matrix-free operator and `solve_modes` arrive in 16b (`unstructured` raises "ssh8 operators arrive in PR 16b"; otf mode is refused permanently), solid-shell AMG in PR 18, the forms in PR 21.
+- Solid-shell (PR 16): the matrix-free operator is stored mode only (otf is refused permanently, `docs/operators.md`); solid-shell AMG arrives in PR 18 (`solve_modes` uses Jacobi), the forms in PR 21.
 - Stress recovery: `ssh8` has `RECOVER`; PR 17 adds the hex entries and the postprocessor.
 - The element-wise $M_e$ Cholesky for probes: PR 14.

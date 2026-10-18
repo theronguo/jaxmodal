@@ -211,6 +211,11 @@ def _hex8_galerkin(A, pattern=None):
     return Ab, pattern
 
 
+def no_shell(name):
+    """The refusal of AMG-family preconditioners on solid-shell blocks."""
+    return ValueError(f"{name} does not support ssh8 blocks; solid-shell AMG arrives in PR 18")
+
+
 def _check(name, op, sigma, nonsingular=False):
     """The shared argument checks of pmg and amg; returns sigma as a float. sigma = 0 needs
     nonsingular (the caller's proof that A_P(0) is nonsingular)."""
@@ -219,6 +224,8 @@ def _check(name, op, sigma, nonsingular=False):
         raise TypeError(
             f"{name} needs an Unstructured operator, got {type(op).__name__} (voxel stencils: gmg)"
         )
+    if any(b.type == "ssh8" for b in op.blocks):
+        raise no_shell(name)
     _check_sigma(sigma)
     sigma = float(sigma)
     if sigma == 0 and not nonsingular:

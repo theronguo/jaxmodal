@@ -50,6 +50,7 @@ Both approximate $A_P$ of $K + \sigma M$ with $\sigma \ge 0$, are pytree callabl
   $$B_n = K_{nn} + \sigma\,\mathrm{diag}(M)_n I_3,$$
   constrained rows and columns replaced by the identity. On the free entries $B_n$ is the 3×3 diagonal block of $A_P$. The blocks are inverted by a batched Cholesky (a non-SPD block gives NaN, which then shows up as NaN in the solver's `residuals`). Storage: 9 values per node.
 - A concrete $\sigma < 0$ or NaN raises `ValueError` in both (a traced σ is not checked). For the indefinite $K - \sigma_b M$, build the preconditioner at $+\sigma_b$.
+- **Solid shells:** `jacobi` is the `solve_modes` default on `ssh8` meshes until PR 18 (iterations grow about like $(L/t)^2$: 57, 232, 1644 at $L/t$ = 10, 20, 50, `docs/eigensolvers.md`); `amg` and `pmg` raise "… does not support ssh8 blocks; solid-shell AMG arrives in PR 18".
 - **Internal entry for level blocks:** `precond.jacobi._inverse_blocks(B, free)` masks and inverts any `(n, b, b)` SPD blocks with an `(n·b,)` mask and returns `(inv, mask)`; PRs 11 and 13 feed it their coarse-level 3×3 and 6×6 blocks.
 
 ## Chebyshev

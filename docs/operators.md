@@ -34,7 +34,7 @@ K, M = assemble(
 
 1. **Host checks:** `chunk >= 1`; x64 must be on (`jaxmodal.config.enable_x64()`), else `ValueError`, so the oracle is never silently fp32. Then `phases(mesh)`, `check_materials` and `check_elements(mesh, mass)`, the `nodal_mass` checks below, and `s_K`, `s_M`: `None` or finite, non-negative `(n_el,)` arrays in global element order (zeros allowed).
 2. **Element matrices:** per block, in chunks of $c = \min(\text{chunk}, n_\text{el})$ elements, the jitted PR 3 kernels `stiffness` and `mass` (or `lumped_mass`) with the rotated per-phase $C$ and $\rho$ from `phase_table`. The last chunk is padded with its first element and sliced off, so a block compiles once per (type, $c$). Each element's $K_e$ is multiplied by $s_{K,e}$ and its consistent $M_e$ (or lumped diagonal) by $s_{M,e}$ before summation; `None` is bit-identical to ones. `chunk` bounds the $K_e$ temporaries and the XLA workspace, not total memory; 1024 is as fast as 4096 and peaks about 0.5 GB lower for hex20/hex27.
-   **Solid shells:** with an `ssh8` block, `ply_table` gives the per-phase plies, and the `ssh8` branch calls the jitted, `vmap`ped one-element kernels `shell_stiffness` (condensed $K_e$) and `shell_mass` ($m_e\otimes I_3$) on each element's ply slice, chunked and padded the same way (`_chunked` slices the ply pytree). A `Laminate` on a hex block raises after `check_materials` ("material $m$ is a Laminate on $t$ elements; laminates need ssh8"); `mass="lumped"` raises on `ssh8` (`docs/elements.md`). `unstructured` and the memory estimators raise on `ssh8` until PR 16b ("ssh8 operators arrive in PR 16b"; `mode="otf"`: "solid-shell elements support stored mode only (mode='otf')").
+   **Solid shells:** with an `ssh8` block, `ply_table` gives the per-phase plies, and the `ssh8` branch calls the jitted, `vmap`ped one-element kernels `shell_stiffness` (condensed $K_e$) and `shell_mass` ($m_e\otimes I_3$) on each element's ply slice, chunked and padded the same way (`_chunked` slices the ply pytree). A `Laminate` on a hex block raises after `check_materials` ("material $m$ is a Laminate on $t$ elements; laminates need ssh8"); `mass="lumped"` raises on `ssh8` (`docs/elements.md`). The matrix-free operator takes `ssh8` blocks in stored mode only ([below](#solid-shell-blocks)).
 3. **Global matrices:** COO triplets with int32 rows/cols from `element_dofs` → `csr_array` (duplicates summed) → $\tfrac12(A + A^\top)$. Each $K_e$ is exactly symmetric, but the summed CSR is symmetric only to ~1e-16 (summation order of duplicates), so the result is symmetrized and then satisfies `(K != K.T).nnz == 0`. K is built before M, so only one matrix's triplets are alive at a time.
 4. **Lumped mass** (`mass="lumped"`): a diagonal M from the PR 3 lumped diagonals (row-sum for hex8/hex27, HRZ for hex20), scaled by $s_M$.
 5. **Nodal (point) masses:** `nodal_mass` is `None` or a finite, non-negative `(n_nodes,)` array, isotropic: after symmetrization,
@@ -96,8 +96,9 @@ dK, dM = op.diag_K(), op.diag_M()  # (n_dof,)
 |---|---|---|
 | `blocks[b].dofs` | `(n_pad, k)` int32 | always |
 | `blocks[b].phase` | `(n_pad,)` int32 | always |
-| `blocks[b].Ke` | `(n_pad, k(k+1)/2)` packed upper triangle | stored |
-| `blocks[b].wdet` | `(n_pad, nq)` $w_q \det J_q$ | stored |
+| `blocks[b].Ke` | `(n_pad, k(k+1)/2)` packed upper triangle (`ssh8`: the condensed $K_e$) | stored |
+| `blocks[b].wdet` | `(n_pad, nq)` $w_q \det J_q$ | stored, hex |
+| `blocks[b].me` | `(n_pad, 36)` packed upper triangle of the nodal $m_e$, $\rho$ included | `ssh8` |
 | `blocks[b].geo` | `(n_pad, nq, 10)` $J_q^{-1}$ (9) and $w_q \det J_q$ | otf |
 | `blocks[b].starts` | `(n_ranges,)` int32 window starts | gather |
 | `C` | `(P, 6, 6)` rotated stiffness per phase | otf |
@@ -109,6 +110,15 @@ dK, dM = op.diag_K(), op.diag_M()  # (n_dof,)
 Static: per block `type`, `offset`, `n_el`, `chunk`, window width `W`; global `n_nodes`, `mode`, `mass`, `path`, `R`, `n_ranges`. Replacing `s_K`, `s_M`, `rho`, `nodal` (and `C` in otf mode) never recompiles (tested). Blocks are padded to `n_pad`, a multiple of their chunk, by repeating their first element; padded elements get $s = 0$ inside every apply, so they contribute nothing.
 
 **Build on the device.** Per block, one module-level `jax.jit` (static type and mode) runs `lax.map` over chunks of the padded connectivity; the stacked output is the padded leaf itself, with no slice and no host copy (a host fill or a sliced output doubles the build peak). The build blocks until done, so its temporaries are freed before the next block or the first apply. Stored $K_e$ comes from PR 3's `kernels.stiffness`, the same kernel as the oracle; otf is the independent check of the stiffness.
+
+### Solid-shell blocks
+
+An `ssh8` block (`docs/elements.md`) is stored only: `mode="otf"` raises "solid-shell elements support stored mode only (mode='otf')", in `unstructured` and `unstructured_memory`. The build calls the one-element kernels on `ply_table`'s per-phase plies (a one-phase table is doubled first: XLA turns a size-1 gather into broadcasts that take 1.35× the temporaries at 1 ply). The leaves are the packed condensed $K_e$ (300) and the packed nodal mass $m_e$ (36), 336 floats per element, with no `wdet`.
+
+- `apply_K`, `diag_K`, `block_diag_K` and `scaled` are the stored hex paths.
+- `apply_M` is $s_{M,e}\, m_e\, u_e$ per node block ($(c,8,8)$ times $(c,8,3m)$); `diag_M` is $s_{M,e}\,\mathrm{diag}\,m_e$ (×3); `element_matrices` gives $s_{K,e}K_e$ and $s_{M,e}\, m_e\otimes I_3$.
+- $\rho$ is baked into $m_e$, so `op.rho` is not read by `ssh8` blocks (replacing it changes only the hex rows).
+- `mass="lumped"` raises (`check_elements`; in `unstructured_memory` too). Padded elements repeat element 0's $m_e$ and are zeroed by $s_M = 0$.
 
 ### Element kernels (per chunk of $c$ elements)
 
@@ -180,11 +190,13 @@ Call it on the mesh that will be used (after `rcm`, if any), with the same keywo
 - `workspace`: the apply temporaries. Scatter, stored: $8c(2km + k^2)$ ($u_e$, $y_e$, unpacked $K_e$). Otf: a fitted per-element envelope of apply_K, $c(a_t + b_t(m-1))$ (XLA's fusion of the strain and stress fields varies with $m$), or `diag_K`'s $B$ matrices, $c\,t_t^\text{stored}$, whichever is larger. Gather: $8\sum_b W_b k_b m$ plus the larger of the gathered rows $8\cdot 3R\cdot\text{valence}\cdot m$ (XLA does not fuse the gather with the sum) and the chunk temporaries (they are never live together).
 - `build` (counted on the host in the per-space entries; its one chunk of build-kernel temporaries is small and sits on the device on a GPU, a simplification): the padded connectivity and phase on the host, the phase index (and the int64 inverse map) plus one chunk of the build kernel's XLA temporaries, $c\,t_t$, with $t$ per element exactly linear in $c$:
 
-  | | hex8 | hex20 | hex27 |
-  |---|---|---|---|
-  | stored build $t$ | 29.95 KB | 241.06 KB | 322.70 KB |
-  | otf build $t$ | 1.22 KB | 4.10 KB | 4.10 KB |
-  | otf apply_K $a_t$, $b_t$ | 6.1, 1.28 KB | 41.0, 3.17 KB | 54.6, 2.55 KB |
+  | | hex8 | hex20 | hex27 | ssh8 |
+  |---|---|---|---|---|
+  | stored build $t$ | 29.95 KB | 241.06 KB | 322.70 KB | 57.5 KB |
+  | otf build $t$ | 1.22 KB | 4.10 KB | 4.10 KB | – |
+  | otf apply_K $a_t$, $b_t$ | 6.1, 1.28 KB | 41.0, 3.17 KB | 54.6, 2.55 KB | – |
+
+  The estimators take no materials, so the `ssh8` value is an envelope: 1.02× the 32-ply measurement. Measured: 44.6 KB at 1 ply, 51.3 KB at 16 plies, 56.4 KB at 32 (both shell kernels scan the plies, so the build stays nearly flat in the ply count). It over-estimates by up to 1.29× and under-estimates above about 35 plies (by about 0.32 KB per extra ply). `storage` counts 336 floats per `ssh8` element. The slow 4M-DOF test checks storage and vectors; the build term is below its 20% tolerance, so `test_build_envelope` checks the build.
 
 - `overhead`: 10 MB, the only constant fitted to measured peaks ($t$, $a$, $b$ come from `memory_analysis`; measured on hex20 $30^3$ and hex8 $60^3$; the formulas match `memory_analysis` without factors).
 - `total = overhead + storage + max(build, vectors + workspace)`.
@@ -257,7 +269,7 @@ est = stencil_memory(mesh, m, mass="consistent", slab=None)  # same keys as unst
 
 `mass_sample(op, xi)` and `mass_sample_keys(op, keys)` (module `operators/sampling.py`) return $g$ of shape $(n_\text{dof}, b)$ with $\mathrm{Cov}(g) = M$, for either operator; the completeness count draws its probes from them ([`eigensolvers.md`](eigensolvers.md#completeness-count)).
 
-- **Consistent mass, quadrature factor.** The nodal element mass is $m_e = \sum_q (w\det J)_q N_q N_q^\top = B_eB_e^\top$ with $B_e = N^\top\mathrm{diag}\big(\sqrt{(w\det J)_q}\big)$ of size $(k/3)\times n_q$, so $\sqrt{\rho s_M}\,B_e \otimes I_3$ is an exact factor of $M_e$. It replaces the roadmap's Cholesky factors: no factorization, no breakdown at $s_M = 0$, padded elements ($w\det J = 0$) give $B_e = 0$. `element_factor(op, block, chunk)` returns $\sqrt{\rho s_M}\,B_e$ for one chunk (the scatter loop uses it); voxels share one reference $B$ (`reference_factor`, hex8 $2^3$ Gauss points, VTK corner order).
+- **Consistent mass, quadrature factor.** The nodal element mass is $m_e = \sum_q (w\det J)_q N_q N_q^\top = B_eB_e^\top$ with $B_e = N^\top\mathrm{diag}\big(\sqrt{(w\det J)_q}\big)$ of size $(k/3)\times n_q$, so $\sqrt{\rho s_M}\,B_e \otimes I_3$ is an exact factor of $M_e$. It replaces the roadmap's Cholesky factors: no factorization, no breakdown at $s_M = 0$, padded elements ($s_M = 0$) give a zero factor. `element_factor(op, block, chunk)` returns $\sqrt{\rho s_M}\,B_e$ for one chunk (the scatter loop uses it); an `ssh8` block stores $m_e$ itself (layered, not of this form), so its factor is $\sqrt{s_M}\,\mathrm{chol}(m_e)$ of shape $(c, 8, 8)$, equally exact (the draw width 8 is the registry's hex8 rule); voxels share one reference $B$ (`reference_factor`, hex8 $2^3$ Gauss points, VTK corner order).
 - $g = \sum_e P_e\sqrt{\rho s_M}(B_e \otimes I_3)\xi_e + \sqrt{m_\text{nodal}}\,\xi_n$ with standard-normal $\xi_e$ of shape $(n_q, 3)$ per element and $\xi_n$ per DOF. **Lumped mass** is diagonal: $g = \sqrt{\mathrm{diag}\,M}\,\xi_n$.
 - `mass_sample(op, xi)` is linear in a dict `xi` shaped by `xi_shapes(op)` plus the probe axis (one entry per scatter-loop step: element chunks, or voxel slabs). `mass_sample_keys(op, keys)` draws column $j$ from `keys[j]` alone, the element inputs per loop step from `fold_in`, so they never exist for the whole mesh (sampling temporaries: the operator workspace plus 1–2 vectors per probe).
 

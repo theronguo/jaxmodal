@@ -29,7 +29,7 @@ from jaxmodal.materials import (
     ply_table,
     rotate,
 )
-from jaxmodal.memory import amg_memory, unstructured_memory
+from jaxmodal.memory import unstructured_memory
 from jaxmodal.mesh import (
     Mesh,
     box_mesh,
@@ -723,12 +723,8 @@ def test_refusals():
         box_mesh((2, 2, 1), type="ssh8")
     assert "ssh8" not in str(err.value).split("got")[0]  # no error text lists ssh8
     for f in (unstructured, lambda m, mat, mode: unstructured_memory(m, 4, mode=mode)):
-        with pytest.raises(ValueError, match="ssh8 operators arrive in PR 16b"):
-            f(shells, mat, mode="stored")
         with pytest.raises(ValueError, match=r"stored mode only \(mode='otf'\)"):
             f(shells, mat, mode="otf")
-    with pytest.raises(ValueError, match="ssh8 operators arrive in PR 16b"):
-        amg_memory(shells, 4)
 
 
 def test_check_elements_thickness():

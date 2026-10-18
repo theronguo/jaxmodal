@@ -207,7 +207,9 @@ def _read_inp(path):
                 m = re.fullmatch(r"C3D(8|20)[A-Z]*", t)
                 if m:
                     sec = ("element", opt.get("ELSET"), "hex" + m[1])
-                elif t.startswith("C3D"):
+                elif t == "SC8R":  # nodes 1-4 bottom, 5-8 top: VTK zeta, file order
+                    sec = ("element", opt.get("ELSET"), "ssh8")
+                elif t.startswith(("C3D", "SC")):
                     raise ValueError(f"unsupported solid element type {t}")
                 elif t not in skipped:
                     skipped.add(t)

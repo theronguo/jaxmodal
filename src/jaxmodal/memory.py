@@ -12,6 +12,7 @@ from .eigen.api import (
     PRECOND_OPTIONS,
     _check_options,
     check_band,
+    precond_label,
     resolve_precond,
 )
 from .eigen.lobpcg import _block_size, _capacity, band_defaults  # shared with the solver
@@ -23,11 +24,13 @@ from .operators.common import check_shell, is_count
 from .operators.matfree import layout
 from .operators.voxel import grid_layout
 from .precond.gmg import _ell_rows, _islands
-from .precond.pmg import _w8
+from .precond.pmg import _w8, no_shell
 
 # XLA temporaries of the build kernel per element (memory_analysis, exactly linear in chunk).
+# ssh8: an envelope, 1.02 x the 32-ply value (44.6 KB at 1 ply, 56.4 KB at 32; above about 35
+# plies it underestimates by about 0.32 KB per ply).
 BUILD_BYTES = {
-    "stored": {"hex8": 29.95e3, "hex20": 241.06e3, "hex27": 322.70e3},
+    "stored": {"hex8": 29.95e3, "hex20": 241.06e3, "hex27": 322.70e3, "ssh8": 57.5e3},
     "otf": {"hex8": 1.22e3, "hex20": 4.10e3, "hex27": 4.10e3},
 }
 GATHER_FLOATS = 15  # stencil: per-cell slab buffers besides the 24 k m GEMM ones (memory_analysis)
@@ -59,6 +62,8 @@ def unstructured_memory(
     storage + workspace and count overhead once.
     """
     check_shell(mesh, mode)
+    if "ssh8" in mesh.blocks and mass == "lumped":
+        raise ValueError("solid-shell elements are consistent-mass only")
     lay = layout(mesh, path, chunk, range_nodes)
     n_dof, n_el = 3 * lay["n_nodes"], mesh.n_el
     gather = lay["path"] == "gather"
@@ -68,8 +73,9 @@ def unstructured_memory(
     for b in lay["blocks"]:
         n, k, c, n_pad = b["k"] // 3, b["k"], b["chunk"], b["n_pad"]
         nq = len(ELEMENTS[b["type"]].weights)
-        per_el = k * (k + 1) // 2 + nq if mode == "stored" else 10 * nq
-        storage += n_pad * (4 * k + 4 + 8 * per_el)  # dofs, phase, Ke + wdet or geo
+        per_el = k * (k + 1) // 2 + (36 if b["type"] == "ssh8" else nq)  # Ke + (me or wdet)
+        per_el = per_el if mode == "stored" else 10 * nq
+        storage += n_pad * (4 * k + 4 + 8 * per_el)  # dofs, phase, Ke + (wdet or me) or geo
         host += 8 * n_pad * (n + 1)  # padded connectivity and phase, alive during the build
         kernel = max(kernel, c * BUILD_BYTES[mode][b["type"]])
         temps = max(temps, _chunk_temps(mode, b["type"], c, m))
@@ -338,7 +344,7 @@ def amg_memory(mesh, m, max_coarse=1000, degree=2):
     Calibrated on box meshes at max_coarse 1000; the coarse term uses max(max_coarse, 1000) (an
     upper bound, loose above 1000)."""
     if "ssh8" in mesh.blocks:
-        raise ValueError("ssh8 operators arrive in PR 16b")
+        raise no_shell("amg")
     n_nodes = len(mesh.points)
     fam, n_c, tables = _amg_scan(mesh)
     n_dof = 3 * n_nodes
@@ -367,7 +373,8 @@ def _models(mesh, mass, precond, precond_dtype, operator_options, precond_option
     op_opts = _check_options(
         "operator", operator_options, OPERATOR_OPTIONS["stencil" if voxel else "unstructured"]
     )
-    pc_opts = _check_options(f"{name} precond", precond_options, PRECOND_OPTIONS[name])
+    label = precond_label(precond, name)
+    pc_opts = _check_options(f"{label} precond", precond_options, PRECOND_OPTIONS[name])
     for key in ("degree", "max_coarse"):
         if key in pc_opts and not is_count(pc_opts[key]):
             raise ValueError(f"{key} must be an int >= 1, got {pc_opts[key]!r}")
@@ -417,9 +424,10 @@ def solve_modes_memory(
 # Count (docs/eigensolvers.md#completeness-count). Recurrence step with Jacobi (memory_analysis
 # temporaries of _recurrence): workspace + 8 n (a b + c), and on the stencil at least
 # 2 workspace + 8 n a_dup b (the slab workspace appears twice while a slab covers most of the
-# grid); upper envelope of hex20 12^3-28^3 and voxel 16^3-64^3, b = 4-32 (hex20 below about
-# 20k DOF, where one chunk holds the whole mesh, is outside it). Plus w0 and u (2 blocks).
-COUNT_STEP = {"unstructured": (10.2, 3.0, 0.0), "stencil": (10.2, 1.0, 2.2)}
+# grid); upper envelope of hex20 12^3-28^3, ssh8 120^2-200^2 and voxel 16^3-64^3, b = 4-32
+# (meshes below about 20k DOF, where one chunk holds the whole mesh, are outside it). Plus w0
+# and u (2 blocks).
+COUNT_STEP = {"unstructured": (10.3, 3.0, 0.0), "stencil": (10.2, 1.0, 2.2)}
 # Sampling: the y PCG on M_P, workspace + 6 vectors per probe (memory_analysis, hex20 20^3,
 # voxel 64^3), plus g and y.
 COUNT_SAMPLE = 8.0

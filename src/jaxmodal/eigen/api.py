@@ -15,6 +15,7 @@ import scipy.sparse as sp
 from ..operators import dof_mask, m_orthonormalize, rigid_modes, stencil, unstructured
 from ..operators.common import is_count
 from ..precond import SingularShiftError, amg, gmg, jacobi
+from ..precond.pmg import no_shell
 from . import counting
 from .counting import count, count_degree
 from .lobpcg import (
@@ -31,11 +32,13 @@ from .shift_invert import si_band
 
 def resolve_precond(mesh, precond, precond_dtype):
     """The preconditioner name solve_modes uses for these options; raises on bad options."""
-    voxel = mesh.voxel is not None
+    voxel, shell = mesh.voxel is not None, "ssh8" in mesh.blocks
     if precond == "auto":
-        precond = "gmg" if voxel else "amg"
+        precond = "gmg" if voxel else "jacobi" if shell else "amg"
     if precond not in ("gmg", "amg", "jacobi"):
         raise ValueError(f"precond must be 'auto', 'gmg', 'amg' or 'jacobi', got {precond!r}")
+    if precond == "amg" and shell:
+        raise no_shell("amg")
     if precond == "gmg" and not voxel:
         raise ValueError("precond 'gmg' needs a voxel mesh (voxel_mesh)")
     if precond == "amg" and voxel:
@@ -45,6 +48,11 @@ def resolve_precond(mesh, precond, precond_dtype):
     if precond != "gmg" and precond_dtype != "float64":
         raise ValueError("precond_dtype 'float32' needs precond 'gmg'")
     return precond
+
+
+def precond_label(requested, name):
+    """name for error messages, "auto (resolved to name)" when the caller asked for auto."""
+    return f"auto (resolved to {name})" if requested == "auto" else name
 
 
 # Options solve_modes forwards (docs/eigensolvers.md#options); tests pin them to the signatures.
@@ -300,12 +308,13 @@ def solve_modes(
 
     Voxel meshes get the stencil operator, all others the unstructured one (both run the
     material and element checks first). The rigid modes left by bcs are deflated and returned
-    in info["rigid"] (M-orthonormal). precond: "auto" (GMG on voxel meshes, else AMG), "gmg",
-    "amg" or "jacobi". The multigrid is built at sigma (a hint >= 0) or at the refined lam_1
-    pre-estimate; precond_dtype "float32" runs the GMG V-cycle in fp32. X0 (n_dof, j <= block
-    size) seeds lobpcg's first chunk. operator_options, precond_options and sigma_options are
-    dicts forwarded to the operator builder, the preconditioner builder and the pre-estimate
-    (allowed keys: OPERATOR_OPTIONS, PRECOND_OPTIONS, SIGMA_OPTIONS; docs/eigensolvers.md#options).
+    in info["rigid"] (M-orthonormal). precond: "auto" (GMG on voxel meshes, Jacobi with ssh8
+    blocks, else AMG), "gmg", "amg" or "jacobi". The multigrid is built at sigma (a hint >= 0)
+    or at the refined lam_1 pre-estimate; precond_dtype "float32" runs the GMG V-cycle in fp32.
+    X0 (n_dof, j <= block size) seeds lobpcg's first chunk. operator_options, precond_options
+    and sigma_options are dicts forwarded to the operator builder, the preconditioner builder
+    and the pre-estimate (allowed keys: OPERATOR_OPTIONS, PRECOND_OPTIONS, SIGMA_OPTIONS;
+    docs/eigensolvers.md#options).
     Returns lam (ascending), V (n_dof, n_modes; with band one column per band mode) and
     lobpcg's info plus operator, n_rigid, rigid, frequencies (sqrt(lam) / 2 pi), precond,
     sigma, sigma_iterations and time["precond"].
@@ -350,14 +359,18 @@ def solve_modes(
     _check_count_options(cn_opts)
     sl_opts = _check_options("slice", slice_options, SLICE_OPTIONS)
     _check_slice_options(sl_opts)
-    precond = resolve_precond(mesh, precond, precond_dtype)
+    requested, precond = precond, resolve_precond(mesh, precond, precond_dtype)
+    label = precond_label(requested, precond)
     voxel = mesh.voxel is not None
     name, build = ("stencil", stencil) if voxel else ("unstructured", unstructured)
     op_opts = _check_options("operator", operator_options, OPERATOR_OPTIONS[name])
-    pc_opts = _check_options(f"{precond} precond", precond_options, PRECOND_OPTIONS[precond])
+    pc_opts = _check_options(f"{label} precond", precond_options, PRECOND_OPTIONS[precond])
     sg_opts = _check_options("sigma", sigma_options, SIGMA_OPTIONS)
     if sg_opts and (sigma is not None or precond == "jacobi"):
-        raise ValueError("sigma_options need the pre-estimate: no sigma= and no precond 'jacobi'")
+        raise ValueError(
+            f"sigma_options need the pre-estimate: no sigma= and no precond 'jacobi' (precond: "
+            f"{label})"
+        )
     _check_sigma_options(sg_opts)
     if sigma is not None:
         if not (math.isfinite(sigma) and sigma >= 0):
@@ -434,7 +447,7 @@ def solve_modes(
             out.append(f"basis_dtype='float32' (C_max {c_max(c, dtype='float32')})")
         if precond == "gmg" and precond_dtype != "float32":
             out.append(f"precond_dtype='float32' (C_max {c_max(c, pc_m=models('float32')[1])})")
-        if not voxel and op_opts.get("mode") != "otf":
+        if not voxel and "ssh8" not in mesh.blocks and op_opts.get("mode") != "otf":
             otf = models(precond_dtype, op_opts | {"mode": "otf"})[0]
             out.append(f"operator_options={{'mode': 'otf'}} (C_max {c_max(c, op_m=otf)})")
         return ", ".join(out)

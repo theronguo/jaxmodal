@@ -1,6 +1,8 @@
-"""Matrix-free K and M on unstructured hex8/hex20/hex27 meshes. See docs/operators.md.
+"""Matrix-free K and M on unstructured hex8/hex20/hex27 and ssh8 meshes. See docs/operators.md.
 
 The operator is a pytree: every array is a jit argument, only sizes and flags are static.
+ssh8 (solid-shell) blocks are stored only: the condensed K_e and the 8x8 nodal mass m_e with
+rho included (op.rho is not read); M_e = s_M m_e (x) I_3.
 """
 
 import dataclasses
@@ -12,7 +14,8 @@ import numpy as np
 from jax import lax
 
 from ..elements import ELEMENTS, check_elements, kernels
-from ..materials import check_materials, phase_table, phases
+from ..elements.shell import shell_mass, shell_stiffness
+from ..materials import check_materials, phase_table, phases, ply_table
 from .common import (
     check_laminates,
     check_nodal_mass,
@@ -144,7 +147,8 @@ class Block:
     dofs: jax.Array  # (n_pad, k) int32
     phase: jax.Array  # (n_pad,) int32
     Ke: jax.Array | None  # stored: (n_pad, k(k+1)/2) packed upper triangle
-    wdet: jax.Array | None  # stored: (n_pad, nq) w det J
+    wdet: jax.Array | None  # stored hex: (n_pad, nq) w det J
+    me: jax.Array | None  # ssh8: (n_pad, 36) packed upper triangle of m_e (rho included)
     geo: jax.Array | None  # otf: (n_pad, nq, 10) J^-1 (9) and w det J
     starts: jax.Array | None  # gather: (n_ranges,) int32 window starts
     type: str
@@ -211,11 +215,23 @@ def _packed_index(k):
 
 @partial(jax.jit, static_argnums=(0, 1))
 def _build(t, mode, points, conn, phase, C):
-    """Per-element leaves for one block; conn (n_chunks, c, n), so the output is the padded leaf."""
+    """Per-element leaves for one block; conn (n_chunks, c, n), so the output is the padded leaf.
+    C is phase_table's C, or for ssh8 (always stored) ply_table's (plies, R_o): leaves (Ke,
+    me)."""
+    if t == "ssh8" and len(C[1]) == 1:
+        # one phase: XLA turns the size-1 gather into broadcasts (1.35x the temporaries at 1
+        # ply); the doubled table has the same entries at the same indices
+        C = jax.tree.map(lambda a: jnp.concatenate([a, a]), C)
 
     def f(args):
         cn, ph = args
         X = points[cn]
+        if t == "ssh8":
+            iu = np.triu_indices(24)
+            ie = np.triu_indices(8)
+            tab = jax.tree.map(lambda a: a[ph], C)
+            Ke = jax.vmap(shell_stiffness)(X, tab)[:, iu[0], iu[1]]
+            return Ke, jax.vmap(shell_mass)(X, tab[0])[:, ie[0], ie[1]]
         if mode == "stored":
             k = 3 * cn.shape[1]
             iu = np.triu_indices(k)
@@ -257,6 +273,7 @@ def unstructured(
         sizes |= {"inv": lay["inv"].size, "window": lay["window"] + 1}
     check_int32(**sizes)
     C, rho = phase_table(pairs, materials, orientations)
+    plies = ply_table(pairs, materials, orientations) if "ssh8" in mesh.blocks else None
     points = jnp.asarray(mesh.points)
     blocks = []
     for b in lay["blocks"]:
@@ -269,16 +286,17 @@ def unstructured(
             points,
             jnp.asarray(conn.reshape(-1, c, conn.shape[1]), jnp.int32),
             jnp.asarray(ph.reshape(-1, c)),
-            C,
+            plies if b["type"] == "ssh8" else C,
         )
         jax.block_until_ready(out)  # build temporaries freed before the next block or apply
-        stored = mode == "stored"
+        stored, shell = mode == "stored", b["type"] == "ssh8"
         blocks.append(
             Block(
                 dofs=jnp.asarray(conn_dofs(conn)),
                 phase=jnp.asarray(ph),
                 Ke=out[0] if stored else None,
-                wdet=out[1] if stored else None,
+                wdet=out[1] if stored and not shell else None,
+                me=out[1] if shell else None,
                 geo=None if stored else out[0],
                 starts=jnp.asarray(b["starts"], jnp.int32) if "starts" in b else None,
                 type=b["type"],
@@ -364,9 +382,17 @@ def _m_scale(op, d):
     return op.rho[d["phase"]] * d["s_M"]
 
 
+def _me(d):
+    """ssh8: the (c, 8, 8) nodal mass m_e (rho included, s_M not)."""
+    return d["me"][:, _packed_index(8)]
+
+
 def _m_apply(op, b, d, v):
     u = v[d["dofs"]]
     c, k, m = u.shape
+    if b.type == "ssh8":
+        y = jnp.einsum("eab,ebim->eaim", _me(d), u.reshape(c, 8, 3, m)).reshape(c, k, m)
+        return d["s_M"][:, None, None] * y
     N = jnp.asarray(ELEMENTS[b.type].N)
     Nu = jnp.einsum("qb,ebim->eqim", N, u.reshape(c, k // 3, 3, m))
     y = jnp.einsum("eq,qa,eqim->eaim", _wdet(b, d), N, Nu).reshape(c, k, m)
@@ -375,13 +401,17 @@ def _m_apply(op, b, d, v):
 
 def element_matrices(op, block, chunk):
     """(s_K K_e, rho s_M M_e), each (c, k, k), for one chunk of a block (a slice of
-    _block_data); M_e consistent or lumped as op.mass. Padded elements give zeros."""
+    _block_data); M_e consistent or lumped as op.mass (ssh8: s_M m_e (x) I_3). Padded elements
+    give zeros."""
     k = block.dofs.shape[1]
     if op.mode == "stored":
         Ke = chunk["Ke"][:, _packed_index(k)]
     else:
         B = _bmat(block, chunk)
         Ke = jnp.einsum("eq,eqvk,evw,eqwl->ekl", chunk["geo"][..., 9], B, op.C[chunk["phase"]], B)
+    if block.type == "ssh8":
+        Me = jnp.einsum("eab,ij->eaibj", _me(chunk), jnp.eye(3)).reshape(Ke.shape)
+        return chunk["s_K"][:, None, None] * Ke, chunk["s_M"][:, None, None] * Me
     wdet = _wdet(block, chunk)
     if op.mass == "lumped":
         mn = jax.vmap(jnp.diag)(kernels.lumped_nodal(block.type, wdet))
@@ -393,6 +423,9 @@ def element_matrices(op, block, chunk):
 
 
 def _m_diag(op, b, d):
+    if b.type == "ssh8":
+        nodal = d["s_M"][:, None] * jnp.diagonal(_me(d), axis1=1, axis2=2)
+        return jnp.repeat(nodal, 3, axis=1)[..., None]
     wdet = _wdet(b, d)
     if op.mass == "lumped":
         nodal = kernels.lumped_nodal(b.type, wdet)
@@ -407,7 +440,7 @@ def _m_diag(op, b, d):
 def _block_data(op, b):
     n_pad = b.dofs.shape[0]
     d = {"dofs": b.dofs, "phase": b.phase}
-    for name in ("Ke", "wdet", "geo"):
+    for name in ("Ke", "wdet", "me", "geo"):
         if getattr(b, name) is not None:
             d[name] = getattr(b, name)
     for name in ("s_K", "s_M"):  # padded elements get s = 0
