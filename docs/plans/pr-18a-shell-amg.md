@@ -142,8 +142,32 @@ PR 16 rule "until PR 18, `solve_modes` on solid-shell meshes uses Jacobi".
     - $n_c$ as corner DOFs throughout;
     - the remaining wording.
 
-Line numbers in this plan refer to `main` (identical to this branch outside the plan at
-f56abd8). The implementation finds each entry by
+- **Revision 7** (round 6: four satisfied; tests three major findings, all in test specs):
+  - **Junction sizes:** the 5-layer/5-layer T has largest patch $s = 252$ (84 nodes). The guard
+    admits T's up to 6 layers each ($s = 336$). Test 1 computes the expected $s$ with an
+    independent NumPy union-find. Multi-layer webs need $k_w$ skin intervals of width $t/k_w$.
+  - **Storage gates as `test_amg_memory_storage`:**
+    - `got ≤ est` everywhere;
+    - the 1.3× bound only on the $n$-scaling part, and only on meshes near the envelope;
+    - hex-dominant meshes upper-bound only;
+    - `shell-hex` extrapolated from the steeper 36³–48³ segment;
+    - a 64³ hex-dominant storage check beside the 1M plate.
+  - **Singletons** from plates of very different sizes (4² and 32²).
+  - **Smaller fixes:**
+    - exact level-0 chunk temporaries from `schwarz.nbytes`;
+    - a stated `AMG_LOOP_K` fallback;
+    - α_shell's growth per decade;
+    - $c \ge 1$;
+    - $K + \sigma M$;
+    - `len(P.levels) ≥ 3`;
+    - the identity-row count on the clamped plate reported, not asserted;
+    - the reuse spy;
+    - the corner-level matrix folded into a fitted constant;
+    - `shell` in the module lists;
+    - the laminate snippet back to $L/t = 100$;
+    - the line table summed.
+
+Line numbers in this plan refer to `main` (identical to this branch outside `docs/plans/`). The implementation finds each entry by
 `grep "PR 18"` and treats the lists as checklists.
 
 ## PR 18 split
@@ -288,10 +312,10 @@ New code:
 
 | piece | about |
 |---|---|
-| `precond/schwarz.py`: `Schwarz`, `_extract`, chunked inversion, size classes, `nbytes` | 170 lines |
-| `precond/shell.py`: `_fibers`, `_columns`, frames, candidates and `_shell_levels` (setup loop) | 220 lines |
+| `precond/schwarz.py`: `Schwarz`, `_extract`, chunked inversion, size classes, `nbytes` | 180 lines |
+| `precond/shell.py`: `_fibers`, `_columns`, frames, candidates and `_shell_levels` (setup loop) | 280 lines |
 | `amg()` wiring and `AMGAggregates` fields | 30 lines |
-| `amg_memory`'s shell family (calling `shell._fibers`, `shell._columns` and `schwarz.nbytes`, no second copy) | 50 lines |
+| `amg_memory`'s shell family (calling `shell._fibers`, `shell._columns` and `schwarz.nbytes`, no second copy) | 70 lines |
 | `resolve_precond`, the `pmg` refusal | 10 lines |
 
 That is about 550–650 source lines, plus about 700–800 test lines. `_shell_levels` covers
@@ -337,8 +361,10 @@ loop, classes, chunks and `nbytes`.
 - **Size guard:** a level-0 patch with $s > 384$ (more than 128 distinct nodes in an element's
   fibers) raises `ValueError` ("ssh8 patch of N DOFs: check solid_shell's direction, or the
   stack is too deep").
-  - It allows 31-layer stacks and multi-layer junctions: a T of a 5-layer skin and a 5-layer
-    web merges $6 \cdot 6 = 36$ nodes, with largest patch $s = 336$.
+  - It allows 31-layer stacks and multi-layer junctions up to 6 layers per member. A T of a
+    5-layer skin and a 5-layer web merges $6 \cdot 6 = 36$ nodes, with largest patch $s = 252$
+    (84 nodes: a web element on the interface row, or a skin element at the web's footprint
+    edge; review). Two 6-layer members give $s = 336$, and 7 layers give 432, which raises.
   - It catches a consistently wrong axis, for example `direction=(1, 0, 0)` on a $40^2$ plate
     ($s = 4 \cdot 41 \cdot 3 = 492$), whose in-plane chains would make dense column patches.
   - A wrong axis on smaller meshes is not detectable, as the docs state.
@@ -476,8 +502,8 @@ SPD matrix, so $D^{-1}$ is SPD and the V-cycle stays symmetric.
   - Its level 1 (27/45/63/81, 95% at 81) is one class.
   - A hex-dominant level 0 (24 and 3) is two classes.
 - **Chunks** are sized by bytes and balanced:
-  - the target is $c = \lfloor \texttt{chunk\_bytes}/(8 s \max(s, 24)) \rfloor$ (≥ 28 under
-    the guard), which bounds both the unpacked chunk ($c s^2$) and the gathers per column
+  - the target is $c = \max(1, \lfloor \texttt{chunk\_bytes}/(8 s \max(s, 24)) \rfloor)$ (≥ 28
+    on level 0 under the guard; coarse ring patches have no guard and can grow at hubs), which bounds both the unpacked chunk ($c s^2$) and the gathers per column
     ($c s$). `chunk_bytes` defaults to `matfree.CHUNK_BYTES` (32 MiB);
   - then $n_\text{chunks} = \lceil n_p/c \rceil$ and chunk = $\lceil n_p / n_\text{chunks}
     \rceil$ ≤ $c$;
@@ -531,7 +557,10 @@ At $n = 256$ (396k DOF), $t_A$ = 59.6 ms (stored-Ke $A_P$), per fine DOF:
 - The stored-Ke operator is 0.47 kB per DOF, so the preconditioner is about 4×.
 - At 1M DOF that is about 2 GB; at 10M about 20 GB (fp64).
 - Device PCG counts reproduce the host prototype: 24 / 21–22 / 18–19 at $n$ = 64 / 128 / 256.
-- Packed against full inverses: the unpack costs about 11% of the patch apply.
+- Packed against full inverses: the unpack costs about 11% of the patch apply on CPU. On a
+  bandwidth-bound GPU the packed apply moves about 2.5× the bytes of full inverses. "Packed vs
+  full inverses (fp32 full = fp64 packed bytes)" joins the deferred GPU check on Schwarz speed
+  and 18b's fp32 Schwarz item.
 - Host setup without the per-patch loop: about 4 s at 396k DOF.
 - The implementation records its own numbers through `benchmarks/shell_amg_study.py` →
   `benchmarks/results/shell_amg_study.json` (counts, storage, V-cycle cost, setup time, the
@@ -568,10 +597,10 @@ A family `"shell"` (any `ssh8` block). `_amg_scan` calls `_fibers`, `_columns` a
 - **storage:**
   - the p-level term as today (hex20/hex27 meshes only: node-block inverses, its mask and the
     transfer);
-  - the corner-level matrix `block_ell(A_b, 3)` on hex20/hex27 meshes, exactly: 72 B per
-    corner-graph block plus indices, with the ELL padding, from the corner pairs `_amg_scan`
-    already builds for the `Hex8Pattern`. PR 13's `"p"` constant included it; the shell family
-    counts it explicitly;
+  - the corner-level matrix `block_ell(A_b, 3)` on hex20/hex27 meshes, as a fitted constant
+    `AMG_STORAGE["shell-p"]` per corner DOF on the `ssh8` + `hex20` calibration mesh, as PR 13's
+    `"p"` constant includes it. `_amg_scan` builds no corner graph, and an exact count would copy
+    `block_ell`'s layout rules;
   - the free mask, $24\,n_\text{nodes}$ bytes;
   - the level-0 Schwarz exactly, by `schwarz.nbytes`;
   - $\alpha_{P}\,n_{c,\text{shell}}$ ($P_0$, $P_0^\top$; they scale with the corner DOFs);
@@ -581,22 +610,31 @@ A family `"shell"` (any `ssh8` block). `_amg_scan` calls `_fibers`, `_columns` a
     DOF, review), so a per-$n_c$ constant would overestimate stacks about 1.4×;
   - `AMG_STORAGE["shell-hex"]` $\cdot\,n_{c,\text{hex}}$ for hex corners, fitted on the
     hex-dominant mesh. On the shell path, hex regions keep 9 coarse DOF per aggregate (3 of
-    them identity rows), use BSR(9) blocks, $d = 2$ and 9×9 patches. They measure 1.19× the
-    PR 13 hex8 hierarchy (925 against 777 B per DOF on a $24^3$ cube, review), so the PR 13
-    constant would not bound them;
+    them identity rows), use BSR(9) blocks, $d = 2$ and 9×9 patches. They measure 1.19–1.24×
+    the PR 13 hex8 hierarchy (24³–48³, growing with depth; 925 against 777 B per DOF on a
+    $24^3$ cube, review), so the PR 13 constant would not bound them;
   - the coarsest factor.
 - **host_build:** $\beta + \max(\alpha_\text{shell}, \alpha_t \text{ of the other types present})
   \cdot n_c$. `AMG_BUILD`'s dict gains `"shell"`, β is shared, and the hex constants stay a floor
-  on hex20-dominated meshes.
+  on hex20-dominated meshes. α_shell's growth per decade is fitted on the 64²–416² plates and
+  extrapolated to 10M as `AMG_BUILD` does. A measured flat trend is logged in
+  `docs/open_items.md` instead.
 - **build** (device): the inversion chunk's temporaries, as a constant
   `SCHWARZ_BUILD_K` · `matfree.CHUNK_BYTES`, taken from `memory_analysis` of the jitted chunk inversion
   at the largest class (`_inverse_blocks` holds about 5–6 copies). The class buffers are
   already in storage. `build` and `host_build` are no longer the same value.
 - **step / step_low / count:** `AMG_STEP[("shell", ...)]` and an `AMG_COUNT` entry for shells,
-  fitted, plus a constant `matfree.CHUNK_BYTES` (the unpacked chunk) independent of $m$, and the
-  gathers, $2 \cdot$ `CHUNK_BYTES`/24 per column. `AMG_LOOP_K`
-  stays shared with its hex value (the hex estimates are unchanged), and the shell fit checks
-  that it bounds shells at degree 3.
+  fitted, plus the chunk temporaries, independent of $n$:
+  - level 0 exactly, from `schwarz.nbytes`, which also returns the level's maximum
+    chunk·$s^2$ and chunk·$s$ (balanced chunks fall anywhere in $(c/2, c]$, so a smooth
+    envelope cannot absorb them);
+  - coarse levels bounded by `CHUNK_BYTES` (unpacked) and $2 \cdot$ `CHUNK_BYTES`/24 per
+    column (gathers).
+
+  `AMG_LOOP_K` stays shared with its hex value, so the hex estimates are unchanged. If it does
+  not bound shells at degree > 2 (the Schwarz gathers in the Chebyshev body reach about 350k
+  DOF-equivalents per column), the shell family's loop term is the Schwarz gather term per
+  column instead.
 
 Constants are fitted as in PR 13b (upper envelope +2–4%). Calibration meshes:
 - SS plates $64^2$, $128^2$, $256^2$, $416^2$ (1.04M DOF) at $L/t$ 100;
@@ -604,11 +642,12 @@ Constants are fitted as in PR 13b (upper envelope +2–4%). Calibration meshes:
   plates and stacks);
 - the curved panel $128^2$;
 - an `ssh8` + `hex20` mesh;
-- the hex-dominant mesh at two sizes, a $24^3$ and a $48^3$ `hex8` block with an `ssh8` skin
-  (about 360k DOF, a few minutes on the host). Shell-path hex storage per DOF grows with depth
-  (raw 925 / 976 / 1026 B at $24^3$ / $36^3$ / $48^3$, review), so `AMG_STORAGE["shell-hex"]`
-  and the hex part of `host_build` take the 48³ value plus the per-decade growth extrapolated
-  to 10M DOF, as `AMG_BUILD` does;
+- the hex-dominant mesh at three sizes, $24^3$, $36^3$ and $48^3$ `hex8` blocks with an `ssh8`
+  skin at $L/t = 100$ (up to about 360k DOF, a few minutes on the host).
+  - Shell-path hex storage per DOF grows with depth, and the growth is speeding up (raw
+    925 / 976 / 1026 B, review).
+  - So `AMG_STORAGE["shell-hex"]` and the hex part of `host_build` take the 48³ value plus the
+    36³–48³ per-decade slope extrapolated to 10M DOF, as `AMG_BUILD` does;
 - a T-junction.
 
 The fit range goes into `docs/open_items.md`.
@@ -626,12 +665,14 @@ The fit range goes into `docs/open_items.md`.
   `hex8`/`hex20` webs are `box_mesh` pieces glued by `np.unique` on the key
   `np.round(pts / (1e-6 * t))`, as `helpers.mixed_mesh` does. Its `rint(2*pts)` key fails on the
   width-$t$ intervals.
-  - The skin's in-plane `coords` have one interval of width $t$ at the web, so the web's fiber
-    nodes coincide with skin nodes.
+  - The skin's in-plane `coords` have $k_w$ intervals of width $t/k_w$ at a $k_w$-layer web,
+    so the web's fiber nodes coincide with skin nodes. With one interval, the interior fiber
+    nodes of a multi-layer web would hang and the merge would come out wrong.
   - `direction` is given per element, in sorted selected order.
   - The `hex20` web interface is nonconforming (hanging midside nodes), like `mixed_mesh`. That
     is acceptable algebraically, and test 9 states it.
-- **Hex-dominant block:** one `box_mesh(coords=...)` with `cz = r_[linspace(0, 1, n), 1 + t]`,
+- **Hex-dominant block:** one `box_mesh(coords=...)` with `cz = r_[linspace(0, 1, n + 1), 1 + t]` ($n^3$ hex
+  elements plus the skin, $L/t = 100$),
   then `solid_shell(elements=top layer, direction=(0, 0, 1))`. No gluing.
 
 **Conventions:**
@@ -657,14 +698,17 @@ The fit range goes into `docs/open_items.md`.
    - the 3-layer stack has $n_\text{el}/3$ level-0 shell patches, each of size
      $48 = 12(k+1)$ (deduplicated across a column);
    - `direction=(1, 0, 0)` on a $40^2$ plate ($s = 492$) raises the size-guard `ValueError`;
-   - a T-junction with a 5-layer skin and a 5-layer web builds, and its largest patch has
-     $s = 3 \cdot$ |distinct fiber nodes| $= 336$.
+   - guard boundary: a $2^2$ plate with 31 layers builds ($s = 384$), and 32 layers raise;
+   - a T-junction with a 5-layer skin and a 5-layer web builds. Its largest patch equals
+     3 × the distinct nodes of each element's groups, maximized over elements, from an
+     independent NumPy union-find (252 by the review's count).
 2. **Candidates:**
    - **Flat plate:** $\|(I - T_0 T_0^\top) B^{(1)}_\text{fine}\|$ ≤ 1e-10 relative (rigid and
      curvature columns). Per aggregate, the level-0 span equals the global
      $[\text{rigid}, \kappa]$ span (principal angles ≤ 1e-10). Same on the 3-layer stack.
-   - **Level 2:** on a $16^2$ plate with `max_coarse` 20 (about 288 / 36 / 9 coarse DOF),
-     asserting `len(levels) ≥ 4`,
+   - **Level 2:** on a $16^2$ plate with `max_coarse` 20 (levels about 1734 / 324 / 36 / 9),
+     asserting `len(P.levels) ≥ 3` (smoothing levels, so $A_2$ exceeds `max_coarse` and $T_2$
+     exists),
      $\|(I - T_0 T_1 T_1^\top T_0^\top) B^{(2)}_\text{fine}\|$ ≤ 1e-10 relative.
    - **Sweep-built 270° cylinder** (`solid_shell(direction=None)`, orientations flip):
      - the vectorized normals equal a per-aggregate NumPy `eigh` of $\sum v v^\top$ up to sign,
@@ -677,10 +721,11 @@ The fit range goes into `docs/open_items.md`.
 3. **Schwarz apply** equals a dense NumPy $\sum_i R_i^\top A_i^{-1} R_i r$ to 1e-12:
    - on level 0 of an `ssh8` + `hex8` mesh, the stack, the T-junction, and a coarse level;
    - symmetric to 1e-12;
-   - balanced multi-chunk against single chunk to 1e-14;
-   - a padded class against an unpadded one to 1e-14;
+   - balanced multi-chunk against single chunk to 1e-14 relative (the scatter order differs);
+   - a padded class against an unpadded one to 1e-14 relative;
    - padded slots inert (exactly 0 contribution).
-4. **Extraction:** `A[s][:, s]` of `assemble(mesh, mats)` ($K - \sigma M$, masked; independent of
+4. **Extraction:** `A[s][:, s]` of `assemble(mesh, mats)` ($K + \sigma M$ with the constrained diagonal $s$, as
+   `amg.py:150`; independent of
    the `Hex8Pattern` source, so it also checks $A_b = A_P$ on `ssh8`) equals the extracted
    patches to 1e-12 on every class, on a clamped plate (zero blocks) and the T-junction. Level
    $\ell \ge 1$ against SciPy's $A_\ell$ to 1e-14.
@@ -694,9 +739,9 @@ The fit range goes into `docs/open_items.md`.
      with the build's λ_max, dense Cholesky) to 1e-10. `cheb` and `vcycle` move from
      `tests/test_amg.py:195-235` to `tests/helpers.py`; only a dense-Schwarz helper is new;
    - symmetric to 1e-12, positive on the free DOFs, exactly 0 on constrained ones;
-   - on every level of the hex-web mesh and of a clamped $8^2$ plate (`max_coarse` 20; assert
-     it has identity rows in shell groups, whose overlap count is up to 1 + their ring), the
-     dense $\lambda_\max(D^{-1}A_\ell)$ ≤ the Chebyshev
+   - on every level of the hex-web mesh and of a clamped $8^2$ plate (`max_coarse` 20; its
+     count of identity rows in shell groups, whose overlap count is up to 1 + their ring, is
+     reported, not asserted, since it depends on pyamg's leftovers), the dense $\lambda_\max(D^{-1}A_\ell)$ ≤ the Chebyshev
      upper bound (1.1 × the build's λ_max), which covers the identity rows' overlap counts.
 6. **$L/t$ growth (roadmap test, slow):** flat SS plate $128^2$ (99.8k DOF), default
    `max_coarse`.
@@ -749,26 +794,37 @@ The fit range goes into `docs/open_items.md`.
       35.99 instead of the SS 19.74) and a bottom-face-supported plate (partly constrained
       fibers; σ from `eigsh` on the same mesh): V-cycle SPD on free DOFs, exactly 0 on constrained ones, counts
       gated (prototype clamped $64^2$: 11 / 24);
-    - two separate supported plates: singleton aggregates appear, the count is gated;
+    - two separate supported plates of very different sizes ($4^2$ and $32^2$), with a
+      `max_coarse` small enough that the small plate becomes one isolated group while the large
+      one keeps coarsening (the value is stated in the test): a singleton aggregate appears in
+      the stored group → aggregate map, and the count is gated. Equal plates reach isolation
+      together, so CAP or STALL stops first (review);
     - a free $24^2$ plate: `solve_modes` against `eigsh` with `n_rigid` = 6, σ from
       `sigma_estimate`'s start in [λ₁, 2λ₁].
 11. **Stacks:** the 3-layer $32^2$ at $L/t$ 10 / 100, counts gated (prototype 11 / 15); 300 /
     1000 reported (40 / 117).
 12. **Reuse:**
     - `aggregates=` with new materials, $s_K$ or σ equals a fresh setup (V-cycle to 1e-12);
-    - a spy confirms fibers, aggregation, fits and patch sets are skipped;
+    - a spy confirms fibers, aggregation and fits are skipped, and the patch sets are rebuilt;
     - a connectivity or mask change raises;
     - two fresh builds are equal exactly.
 13. **Hex path unchanged:** `test_amg.py` passes, unmodified except for importing
     `cheb`/`vcycle` from helpers. A spy (monkeypatch
     `_shell_levels` and `Schwarz` to raise) runs a hex20 and a hex8 `amg` build and their PCG.
 14. **`amg_memory`, shell family:**
-    - `test_shell_amg_storage`: the level-0 term equals the built `Schwarz`'s leaf bytes
-      exactly; storage ≥ owned bytes and ≤ 1.3×, on the $64^2$ plate, the 3- and 6-layer
-      stacks, the `ssh8` + `hex20` mesh and the hex-dominant mesh (fast);
-    - the same bound on meshes outside the fit set (a 2-layer stack $48^2$, the L-fold, and the
-      hex-dominant $36^3$ block, slow);
-    - `build` ≥ `memory_analysis` of the jitted chunk inversion at the largest class;
+    - `test_shell_amg_storage`, as `test_amg_memory_storage` (`tests/test_amg.py:523-541`):
+      - the level-0 term equals the built `Schwarz`'s leaf bytes exactly;
+      - `got ≤ est` on every mesh: the $64^2$ plate, the 3- and 6-layer stacks, the
+        `ssh8` + `hex20` mesh, the hex-dominant $24^3$, the L-fold and a 2-layer stack $48^2$
+        (out of fit);
+      - the coarse term ≥ the coarsest factor;
+      - the 1.3× bound only on the $n$-scaling part ($\text{est} - \text{coarse}$ against
+        $\text{got} - $ the coarsest factor), and only on the largest fast plate and stack;
+      - hex-dominant meshes are upper-bound only. The tight hex check (48³) is in the
+        benchmark and calibration record;
+    - a 42³ hex-dominant block (slow, out of fit): `got ≤ est`;
+    - a constant check: `build` ≥ `memory_analysis` of the jitted chunk inversion at the
+      largest class (the fit's own source; the subprocess peak test bounds it independently);
     - `test_shell_amg_step_tight` (slow): on $128^2$ at $m = 15$, model − 1 block ≤ extra
       ≤ model, as `test_amg_step_tight`;
     - `test_shell_amg_build_peak` (`slow`, `peak`, `skipif` not darwin like
@@ -779,7 +835,8 @@ The fit range goes into `docs/open_items.md`.
     - `solve_modes_memory(..., "auto")` on `ssh8` reports AMG;
     - `test_shell_amg_memory_1m` (slow, `peak`, `LONG`, darwin only): on the $416^2$ plate, storage and
       host_build each within [1, 1.3]× of the owned bytes and the subprocess host peak, no
-      `solve_modes` (expected about 2 GB device, 4–6 GB host, 1–2 min).
+      `solve_modes` (expected about 2 GB device, 4–6 GB host, 1–2 min). Beside it, a $64^3$
+      hex-dominant block (about 830k DOF) checks storage only: `got ≤ est`.
 15. **Refusals and labels** (`test_shell_ops.py`):
     - `test_refusals`: the amg, amg_memory and `solve_modes(precond="amg")` blocks are
       deleted, `pmg` raises the new message, otf on `ssh8` still raises;
@@ -791,7 +848,7 @@ The fit range goes into `docs/open_items.md`.
 
 **Runtime:** tests 6 (including about 10 s of $64^2$ `eigsh` for the panel σ), 7 and
 `test_shell_amg_memory_1m` are slow (about 6–10 min together; the 1M one in the `peak`
-stage). The rest are fast (≤ 30 s each, plates ≤ $70^2$).
+stage). The rest are fast (≤ 30 s each, plates ≤ $64^2$).
 The Jacobi comparison is `serial`. `test_mac_acceptance`'s timing margin is checked to hold
 with the 1M test in the same peak stage.
 
@@ -805,7 +862,10 @@ All statements that become false are updated:
     patches with block-key chunked extraction, packed inverses, size classes and balanced
     chunks; the level structure for mixed meshes; the storage and cost table; setup time;
     `amg_memory`'s shell family;
-  - the module table (`precond/schwarz.py`) and the Tests section (`tests/test_shell_amg.py`);
+  - the module table (`precond/schwarz.py`, `precond/shell.py`) and the Tests section
+    (`tests/test_shell_amg.py`);
+  - the source line for the new section: `benchmarks/shell_amg_study.py` →
+    `benchmarks/results/shell_amg_study.json`, as :168/:301/:423;
   - the AMG hierarchy list (:369–:372: a solid-shell entry);
   - `AMGAggregates` (:416: shell fields, no drop) and its use by `solve_modes`' band mode
     (:419);
@@ -822,13 +882,15 @@ All statements that become false are updated:
   - the `precond` row (:79);
   - `max_coarse` (:88);
   - the σ pre-estimate section (:438; the text at :459: shells now use it);
-  - :160 retag.
-- **`README.md`:** the status line (:5), the solid-shell line (:82), the laminate snippet, :227
+  - :160 retag;
+  - a "PR 18a" line in the Tests list (:844ff) for the `solve_modes` cases of test 8.
+- **`README.md`:** the status line (:5), the solid-shell line (:82), the laminate snippet (back to
+  the 4 mm plate, $L/t = 100$, without `maxit=2000`; open_items :211 rewritten to match), :227
   (`amg` also covers solid shells) and :242 (`"auto"` → AMG on `ssh8` too).
 - **`docs/elements.md`:** :218.
 - **`docs/mesh.md`:** :162–:166 (`solid_shell`'s `direction`): a wrong thickness axis is not
   checked by `solid_shell`; AMG raises on level-0 patches of more than 384 DOFs and otherwise converges
-  worse; T-junctions and L-folds are fine.
+  worse; T-junctions and L-folds are fine, multi-layer junctions up to 6 layers per member.
 - **`docs/ROADMAP.md`:**
   - the status paragraph (:18): the merged-PR history stays, the 18a status is appended, and
     only the forward-looking "M4 / PR 18" mention is retagged;
@@ -838,7 +900,7 @@ All statements that become false are updated:
     - the `COUNT_STEP` bullet goes to 18c;
     - roofline, fp32, Morton, compile time and `docs/performance.md` go to 18b;
   - :474, :493, :579;
-  - the package layout (:226: `schwarz`);
+  - the package layout (:226: `schwarz`, `shell`);
   - the Preconditioners key decision (:121–:123: the shell variant);
   - the split, CalculiX, dependencies and deferred GPU entries (above);
   - new deferred GPU checks: the shell AMG at 10M (about 20 GB fp64 by `amg_memory`, the
@@ -913,7 +975,7 @@ counts by ±1 (review).
   level 0 (about 2.1 kB per DOF at 10 layers). Documented; the patch guard allows it.
 - **Hex regions** of mixed meshes get 9-DOF block patches on coarse levels, not one-rings
   (one-rings would cost about 3.2 kB per DOF there), and shell one-rings skip hex neighbours.
-  Hex regions still cost about 1.19× PR 13's hex8 hierarchy (9 coarse DOF per aggregate,
+  Hex regions still cost about 1.19–1.24× PR 13's hex8 hierarchy (9 coarse DOF per aggregate,
   BSR(9)). Test 9 reports the PR 13 hex8 count of the same block for comparison.
 - **GPU scan steps:** the Schwarz apply is a scan over chunks; its per-step overhead is a
   deferred GPU check. The lever is the internal `chunk_bytes`, a public option in 18b if the
