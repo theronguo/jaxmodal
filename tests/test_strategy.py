@@ -1307,12 +1307,15 @@ def state_reach(name, S, c, B, start=None):
                       need=start)  # fmt: skip
 
 
-def spy_choose(monkeypatch, seen, pick=None):
-    """api._choose wrapped: its reach table recorded; pick (S, chunk) replaces its answer."""
+def spy_choose(monkeypatch, seen, pick=None, needs_seen=None):
+    """api._choose wrapped: its reach table (and needs, into needs_seen) recorded; pick (S,
+    chunk) replaces its answer."""
     real = api._choose
 
     def choose(reach, needs, chunks):
         seen.append(reach)
+        if needs_seen is not None:
+            needs_seen.append(needs)
         return real(reach, needs, chunks) if pick is None else pick
 
     monkeypatch.setattr(api, "_choose", choose)
@@ -1330,7 +1333,7 @@ def test_levers_known(fake_builds, monkeypatch, case):
     B = B_PC if case == "pc" else B_PCLOW
     r = {S: state_reach("short", S, 5, B, 40) for S in [(), (0,), (2,), (0, 2)]}
     S = (0,) if case == "pc" else (0, 2)
-    assert all(state_reach("short", S, c, B, 50) is None for S in r for c in (40, 20, 10))
+    assert all(state_reach("short", T, c, B, 50) is None for T in r for c in (40, 20, 10))
     if case == "pc":
         assert r[()] == 40 and r[(0,)] >= 48
         want = {"precond_dtype": "float32"}
@@ -1407,6 +1410,7 @@ def test_levers_applied(fake_builds, monkeypatch):
                          verify=False)  # fmt: skip
     assert builds == ["otf"] and info["reason"] == "capacity"
     assert info["levers"] == {"precond_dtype": "float32", "operator_options": {"mode": "otf"}}
+    assert info["levers"]["operator_options"] is not api.LEVERS[3][1]  # a copy
     mesh = prob("short")[0]
     otf = mem._models(mesh, "consistent", "auto", "float64", {"mode": "otf"}, None)
     assert caps == [(otf[0](6), otf[1](6))]
@@ -1496,10 +1500,23 @@ def test_levers_rows(fake_builds, monkeypatch):
     assert rows("short", (f1, f2), memory_budget=1.1e8, tol=1e-7)[0] == {0, 2, 3}
     assert rows("short", (f1, f2), memory_budget=1.1e8, tol=1e-6)[0] == {0, 1, 2, 3}
     assert rows("short", (f1, f2), memory_budget=1.1e8, low_memory=True)[0] == {0, 3}
+    got = rows("short", (f1, f2), memory_budget=1.1e8, tol=1e-6, precond_dtype="float32",
+               basis_dtype="float32")  # fmt: skip
+    assert got[0] == {2, 3}
     got = rows("short", (f1, f2), memory_budget=1.1e8, operator_options={"mode": "stored"})
     assert got[0] == {0, 2}
     fake_builds["name"] = "tiny"
     assert rows("tiny", (0.0, 1e9), memory_budget=1e6, precond="jacobi")[0] == {2, 3}
+    # each state's need is rounded with its own low_memory: n_modes 54 = n_avail, the free-space
+    # cap at chunk 10 is 83 columns without low_memory and 75 with it
+    seen, nds = [], []
+    spy_choose(monkeypatch, seen, needs_seen=nds)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        run("tiny", (0.0, 1e9), n_modes=n_avail("tiny"), memory_budget=1e6, precond="jacobi",
+            **kw)  # fmt: skip
+    assert nds[0][0][()][10] == nds[0][0][(3,)][10] == 83
+    assert nds[0][0][(2,)][10] == nds[0][0][(2, 3)][10] == 75
     shell = solid_shell(box_mesh((3, 3, 1), spacing=(1.0, 1.0, 0.1)), direction=(0, 0, 1))[0]
     seen = []
     spy_choose(monkeypatch, seen)

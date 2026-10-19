@@ -399,8 +399,8 @@ def solve_modes(
     ceil(1.25 n_modes) + 2); f1 > 0: the slice store, chunk default 40). verify: True runs the
     completeness count(s), False only predicts the cost, None (default) counts when predicted to
     cost no more than the solve; count_options (COUNT_OPTIONS) go to count. levers: when no
-    LOBPCG chunk fits or the top chunk misses a known depth, set the memory levers at their
-    defaults (LEVERS: fp32 V-cycle, fp32 basis at tol >= 1e-6, low_memory, the on-the-fly
+    LOBPCG chunk fits or the top chunk misses a known depth, set the memory levers still at
+    their defaults (LEVERS: fp32 V-cycle, fp32 basis at tol >= 1e-6, low_memory, the on-the-fly
     operator) by _choose; False keeps the options as given. A slice-path capacity error or
     max_slices raises with err.result = (lam, V, info) of the band so far. V is the solver's
     own array compacted in place. info adds band, strategy, reason, levers (the options set),
@@ -459,7 +459,8 @@ def solve_modes(
 
     # before the build: a GPU pool's bytes_in_use would count the operator a second time
     budget, host_budget = mem._default_budget(memory_budget) if band is not None else (None, None)
-    k, choice = rigid_modes(mesh, free).shape[1], {}  # R itself after the build
+    choice = {}
+    k = rigid_modes(mesh, free).shape[1] if band is not None else 0  # R after the build
     if band is not None:  # the ladder and the levers: before the build, which uses their options
         lam_lo, lam_hi = (2 * np.pi * f1) ** 2, (2 * np.pi * f2) ** 2
         n, n_avail = len(free), int(free.sum()) - k
@@ -478,6 +479,7 @@ def solve_modes(
         otf_ok = not voxel and "ssh8" not in mesh.blocks
 
         def rows(hint=False):  # the LEVERS rows still at their defaults (applicable unless hint)
+            # the hint also names the fp32 basis below tol 1e-6 and otf over a given non-otf mode
             mode = op_opts.get("mode") != "otf" if hint else "mode" not in op_opts
             ok = (precond != "jacobi" and precond_dtype == "float64",
                   basis_dtype == "float64" and (hint or tol >= 1e-6), not low_memory,
@@ -504,7 +506,7 @@ def solve_modes(
                               basis_dtype=o["basis_dtype"], n_rigid=k, n_avail=n_avail,
                               budget=budget, host_budget=host_budget, need=start)  # fmt: skip
 
-        def _lever_hint(c):  # the memory levers not set, with their C_max at chunk c
+        def lever_hint(c):  # the memory levers not set, with their C_max at chunk c
             out = []
             for i in rows(hint=True):
                 key, val, _ = LEVERS[i]
@@ -554,7 +556,7 @@ def solve_modes(
             if ch is None and strategy == "lobpcg":
                 raise ValueError(
                     f"no LOBPCG chunk fits memory_budget = {budget:.4g} bytes (C_max {reach}):"
-                    f" raise memory_budget, or pass {_lever_hint(min(reach))}, or"
+                    f" raise memory_budget, or pass {lever_hint(min(reach))}, or"
                     " strategy='shift_invert'"
                 )  # fmt: skip
         op_memory, pc = models(precond_dtype)
@@ -562,6 +564,7 @@ def solve_modes(
     op = build(mesh, materials, orientations, mass=mass, nodal_mass=nodal_mass, **op_opts)
     t0 = time.perf_counter()
     aggs, R = None, jnp.asarray(rigid_modes(mesh, free))
+    k = R.shape[1]
     if k:
         R = m_orthonormalize(R, op.apply_M(R))  # consumes its first argument
     Rd = R if k else None
@@ -651,7 +654,7 @@ def solve_modes(
                 raise ValueError(
                     f"LOBPCG reached its basis cap C_max = {reach[ch]} at {depth} locked modes"
                     f" below f2: raise memory_budget (now {budget:.4g} bytes), or pass"
-                    f" {_lever_hint(ch)}, or strategy='shift_invert' or 'auto'"
+                    f" {lever_hint(ch)}, or strategy='shift_invert' or 'auto'"
                 )  # fmt: skip
             L = depth - _keep(lam, info["thresholds"], lam_lo, depth)
             out["mu1_ub"] = min(float(lam[0]), math.inf if pre is None else pre)
@@ -663,7 +666,7 @@ def solve_modes(
                 f"LOBPCG stopped at its basis cap C_max = {reach[ch]} with {depth} modes locked"
                 f" below f2: the band continues with shift-invert slices"
                 + (" (MINRES may stagnate at this depth)" if risk else "")
-                + f"; levers: {_lever_hint(ch)}", stacklevel=2,
+                + f"; levers: {lever_hint(ch)}", stacklevel=2,
             )  # fmt: skip
     if ch is not None and stopped != "capacity":  # LOBPCG reached the band's end
         nb, n_eff, m = info.pop("n_band"), info.pop("n_modes"), info.pop("block")
@@ -702,7 +705,7 @@ def solve_modes(
                 out["reason"] = "memory"
                 warnings.warn(
                     f"no LOBPCG chunk fits memory_budget = {budget:.4g} bytes: the band is solved"
-                    f" by shift-invert slices; levers: {_lever_hint(min(reach))}", stacklevel=2,
+                    f" by shift-invert slices; levers: {lever_hint(min(reach))}", stacklevel=2,
                 )  # fmt: skip
         out["strategy"] = "shift_invert"
         if f1 > 0 and out["mu1_ub"] is None:  # no LOBPCG bound: the pre-estimate
@@ -724,7 +727,8 @@ def solve_modes(
                 raise ValueError(
                     f"the smallest shift-invert slice does not fit memory_budget = {budget:.4g}"
                     " bytes: raise memory_budget"
-                    + (", or pass operator_options={'mode': 'otf'}" if 3 in rows(hint=True) else "")
+                    + (", or pass operator_options={'mode': 'otf'}"
+                       if 3 in rows(hint=True) else "")  # 3: the otf row
                 )  # fmt: skip
             if C < SLICE_MIN:
                 warnings.warn(
@@ -774,7 +778,8 @@ def solve_modes(
     info.update(residuals=info["residuals"][i0:i1], thresholds=info["thresholds"][i0:i1])
     # compacted in place (the destination never runs ahead of the source), then shrunk: V must
     # have no other reference. jaxlib holds the last host view it transferred (the count's W
-    # chunks, LOBPCG's _grow) until a collection, so no jax op runs between _verify and the resize
+    # chunks, LOBPCG's _grow) until the next jax op or a collection, so no jax op runs
+    # between _verify and the resize
     if i0:
         for j in range(i1 - i0):
             V[:, j] = V[:, i0 + j]

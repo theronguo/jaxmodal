@@ -592,7 +592,8 @@ def count_memory(
     """Estimated peak device bytes of count(...) at probe block b. op_memory: m -> the operator
     estimate (unstructured_memory or stencil_memory, voxel=True for the latter);
     precond_memory: m -> gmg_memory or amg_memory (its "count" term), None for Jacobi. W stays
-    on the host: one chunk of `chunk` columns is on the device at a time.
+    on the host: one chunk of `chunk` columns is on the device at a time. The unstructured step
+    (COUNT_STEP) is fitted to 1.6M DOF and checked to 6M (10M: a deferred GPU check).
 
     Returns storage, sampling, step, projector, total = overhead + storage + max(phases) and
     the per-space entries of lobpcg_memory (all device; exact: operator storage, R and M R)."""

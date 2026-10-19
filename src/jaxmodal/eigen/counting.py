@@ -244,7 +244,9 @@ def _chunks(Ws):
             w = Wc.shape[1]
             Wt = jax.device_put(Wc.T) if isinstance(Wc, np.ndarray) else Wc.T
             del Wc  # a device slice: not alive while the consumer runs
-            yield (jnp.pad(Wt, ((0, CHUNK - w), (0, 0))) if w < CHUNK else Wt), w
+            if w < CHUNK:
+                Wt = jnp.pad(Wt, ((0, CHUNK - w), (0, 0)))
+            yield Wt, w
 
 
 def _project(op, m, Ws, R, MR, Y):

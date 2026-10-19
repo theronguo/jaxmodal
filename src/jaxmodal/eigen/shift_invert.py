@@ -20,7 +20,9 @@ from .counting import _check_ortho, band_count, count
 from .lobpcg import _K, _M, C_FLOOR, _deflate, _insert, _norms, _resid, _svqb_t
 
 SIGMA_MOVE = 0.01  # sigma moves by this fraction of the slice width when it hits an eigenvalue
-STAGNATION = 1e3  # first-solve residual (relative to max(tau, TAU_MIN)) above which sigma moves
+STAGNATION = (
+    1e3  # first-solve residual (relative to max(stag_tau, TAU_MIN)) above which sigma moves
+)
 TAU_MIN = 1e-10  # above the fp64 MINRES floor (2e-14 - 1e-12): a tiny tau does not move sigma
 INNER_GROWTH = 10  # later inner solves are capped at this multiple of the first one
 TAU0 = 1e-8  # si_slice's default tau, the per-slice tau's ceiling in si_band
