@@ -167,12 +167,10 @@ def test_parts():
     # contacts
     for cells in ([(0, 0, 0), (1, 1, 0)], [(0, 0, 0), (1, 1, 1)]):  # edge, vertex
         m = blocks(cells, (2, 2, 2))
-        for f in (parts, rigid_modes):
+        for f in (parts, generic, rigid_modes):
             with pytest.raises(ValueError, match="without sharing a whole face"):
                 f(m)
     assert parts(blocks([(0, 0, 0), (1, 0, 0)], (2, 2, 2))).max() == 0
-    big = blocks([np.s_[:30], np.s_[31:]], (61, 40, 25))  # the larger voxel-vs-generic case
-    assert len(big.points) > 2**16 and (parts(big) == (big.points[:, 0] > 30.5)).all()
     assert parts(mesh("mixed")).max() == 0  # faces match across hex8/hex20 blocks
     b = box_mesh((2, 1, 1))
     for i, j in ((1, 0), (5, 4)):  # bottom and top face
@@ -200,7 +198,7 @@ def generic(m):
 
 def test_parts_voxel(monkeypatch):
     """Voxel meshes label the cell mask (ndimage.label): the same labels as the generic face
-    search, also after rcm and a random renumber; contacts raise on both paths."""
+    search, also after rcm and a random renumber (contacts on both paths: test_parts)."""
     import scipy.ndimage
 
     calls = []
@@ -213,6 +211,7 @@ def test_parts_voxel(monkeypatch):
     lshape = voxel_mesh((6, 3, 2), spacing=(1.0, 0.5, 2.0), mask=mask)
     two = blocks([np.s_[:2], np.s_[3:]], (5, 2, 2))
     big = blocks([np.s_[:30], np.s_[31:]], (61, 40, 25))
+    assert len(big.points) > 2**16 and (parts(big) == (big.points[:, 0] > 30.5)).all()  # key range
     rng = np.random.default_rng(1)
     cases = [lshape, two, big, rcm(lshape)[0]]
     cases.append(
@@ -227,9 +226,6 @@ def test_parts_voxel(monkeypatch):
     generic(lshape)
     parts(mixed_mesh(np.random.default_rng(2)))
     assert not calls
-    for cells in ([(0, 0, 0), (1, 1, 0)], [(0, 0, 0), (1, 1, 1)]):  # edge, vertex
-        with pytest.raises(ValueError, match="without sharing a whole face"):
-            parts(blocks(cells, (2, 2, 2)))
 
 
 def test_projector():

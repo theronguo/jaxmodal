@@ -1807,6 +1807,10 @@ def test_budget_recorded(fake_builds, monkeypatch):
     fake_gpu(monkeypatch, lambda: None)  # no bytes_limit: memory_budget passes the raise
     _, _, info = run("short", band, n_modes=12, verify=False, memory_budget=5e9)
     assert info["budget"] == (5e9, ram)
+    fake_builds["builds"].clear()
+    with pytest.raises(ValueError, match="memory_budget"):
+        run("short", band, n_modes=12, verify=False)
+    assert not fake_builds["builds"]
 
 
 def test_options_reach(fake_builds, monkeypatch):
