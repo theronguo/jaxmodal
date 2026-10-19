@@ -421,10 +421,11 @@ def test_c_max_need_floor(fake_builds):
 
 
 def test_ladder_real(fake_builds):
-    """Test 3: an interior band on "short" at a budget between chunk 20's and chunk 40's needs:
-    the chunk is the reach rule's on the searched C_max table, below the top chunk (measured:
-    C_max 960 / 1320 / 1360 at chunks 20 / 10 / 5, so chunk 10)."""
-    B = (chunk_need("short", 20) + chunk_need("short", 40)) / 2
+    """Test 3: an interior band on "short" at a budget a tenth of the way from chunk 20's need to
+    chunk 40's: the chunk is the reach rule's on the searched C_max table, below the top chunk
+    (measured: C_max 704 / 1980 / 2000 at chunks 20 / 10 / 5, so chunk 10)."""
+    a, b = chunk_need("short", 20), chunk_need("short", 40)
+    B = a + 0.1 * (b - a)
     reach = {c: c_max("short", c, B) for c in (40, 20, 10, 5)}
     assert reach[40] is None and reach[20] is not None
     f1, f2 = fband("short", 15, 25)

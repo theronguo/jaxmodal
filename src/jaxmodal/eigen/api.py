@@ -496,7 +496,7 @@ def solve_modes(
 
     def levers(c):  # the memory levers not set, with their C_max at chunk c
         out = [f"low_memory=True (C_max {c_max(c, low=True)})"] if not low_memory else []
-        # a polish term (shell AMG, fp32 hex AMG) sets the step, so low_memory alone saves
+        # a polish term (every AMG family) can set the step, so low_memory alone saves
         # little there; its presence does not depend on m
         if pc is not None and "polish" in pc(1):
             off = models(precond_dtype, po={"on": False})[1]

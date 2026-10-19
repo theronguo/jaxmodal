@@ -722,6 +722,49 @@ def test_amg_step_tight32():
         assert g <= est <= d["fit"]["gates"].get(f"p/{key}", F.GATE) * g, (key, est / g)
 
 
+@pytest.mark.slow
+def test_amg_polish_tight64():
+    """PR 18d, an independent check of POLISH64 (with test_hex_polish_bounded): at the TIGHT point
+    (hex20 24^3, m = 25) the fp64 polish model fl ws + amg_memory's polish is 1-1.3x the measured
+    (1.280 on jaxlib 0.11.2; a jaxlib bump that breaks it widens the gate to 1.4, no refit)."""
+    from benchmarks import shell_solve_study as SSS
+
+    mesh, op, free, P = step_case("hex20", 24)
+    est = MEM.STEP_FIT["low"][1] * unstructured_memory(mesh, 25)["workspace"]
+    est += amg_memory(mesh, 25)["polish"]
+    got = SSS.polish(op, jnp.asarray(free), P, 25)
+    assert got <= est <= 1.3 * got, est / got
+
+
+def test_polish64_pinned():
+    """PR 18d, the data pin: max(low, fl ws + polish) bounds the 11 recorded fp64 polish64 rows of
+    amg_fp32_study.json (the data POLISH64 was chosen from), from the row fields as
+    amg_fp32_study.fit computes polish64_slack; no mesh is built."""
+    d, F = fp32_study()
+    rows = [r for r in d["steps_hex"] if "polish64" in r]
+    assert len(rows) == 11
+    Al, fl = MEM.STEP_FIT["low"]
+    for r in rows:
+        fam, n, m = F.LONG[r["case"]], r["n_dof"], r["m"]
+        al, cl, Kl = MEM.AMG_STEP[(fam, "low")]
+        a, c, K = MEM.AMG_STEP32[(fam, "polish")]
+        low = Al * 8 * n * m + fl * r["ws"] + 8 * n * (al * m + cl) + 8 * m * Kl
+        polish = fl * r["ws"] + MEM.POLISH64 * (8 * n * (a * m + c) + 8 * m * K)
+        assert max(low, polish) >= r["polish64"], (r["case"], r["size"], m)
+
+
+def test_polish64_off():
+    """PR 18d: polish_options={"on": False} drops the fp64 hex polish term."""
+    box, bcs = box_mesh((8, 8, 8), (1 / 8,) * 3), {"xmin": "xyz"}
+    pc = functools.partial(amg_memory, box)
+    assert "polish" in pc(10)
+    om, n = functools.partial(unstructured_memory, box), 3 * len(box.points)
+    off = solve_modes_memory(box, bcs, 10, polish_options={"on": False})
+    no = functools.partial(MEM._no_polish, pc)
+    assert off == lobpcg_memory(om, n, 10, precond_memory=no)
+    assert off["step"] < solve_modes_memory(box, bcs, 10)["step"]
+
+
 def test_fp32_constants_pinned():
     """PR 18c test 7: STORAGE32, AMG_STEP32 and SHELL_STEP32 are the recorded fits as stored
     (ratio32 and rounded), the recorded gate flags hold, and every recorded upper-gate ratio

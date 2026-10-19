@@ -183,8 +183,8 @@ def lobpcg_memory(
     estimate (e.g. lambda m: gmg_memory(mesh, m)), None for the default Jacobi. capacity: the
     basis columns (default _capacity's for n_modes).
 
-    step = max(9-block, low, polish) (low_memory: max(low, polish); polish for the shell AMG
-    family and fp32 hex AMG). Returns step, basis, rigid, host, precond (its storage),
+    step = max(9-block, low, polish) (low_memory: max(low, polish); polish for every AMG
+    family). Returns step, basis, rigid, host, precond (its storage),
     total = overhead + storage + precond + basis + rigid + host + max(build, precond build, step)
     and per memory space (a GPU; the CPU uses total): device_total (the device terms and the
     device builds), host_total (the host peak: max(operator build, V + AMG build, V + 2 chunks
@@ -202,7 +202,7 @@ def lobpcg_memory(
     step = Al * b + fl * ws + pc["step_low"]  # the low step, also after a 9-block switch
     if not low_memory:
         step = max(step, A * b + f * ws + pc["step"])
-    if "polish" in pc:  # the polish's PCG (shell AMG, fp32 hex AMG)
+    if "polish" in pc:  # the polish's PCG (AMG)
         step = max(step, fl * ws + pc["polish"])
     out = dict(
         step=step,
@@ -391,6 +391,10 @@ AMG_STEP32 = {
     ("p", "low"): (8.70, 14.5, 576_100),
     ("p", "polish"): (20.70, 4.0, 830_500),
 }
+# fp64 hex AMG polish: the fp32 polish term (with its f_l ws) scaled by POLISH64, chosen from
+# the 11 measured fp64 polish rows of amg_fp32_study.json (max(low, polish) 1.04-1.15 of
+# measured); the degree > 2 loop term is added unscaled.
+POLISH64 = 1.05
 SHELL_STEP32 = {
     "9-block": (5.2, 16.0, 37e6),
     "low": (11.1, 18.9, 65e6),
@@ -460,8 +464,8 @@ def amg_memory(mesh, m, max_coarse=1000, degree=2, dtype="float64"):
     max_coarse=max_coarse, dtype=dtype) applied to (n_dof, m) blocks: storage (the p-level
     exact from the mesh, the AMG levels per corner DOF, the coarsest factor), build and
     host_build (the setup host peak, fp64 for both dtypes), step and step_low (extra LOBPCG
-    step bytes over Jacobi), count (extra count-recurrence bytes, an fp64 build); meshes with
-    ssh8 blocks, and fp32 on hex, also polish (the polish's PCG). Calibrated on box meshes at
+    step bytes over Jacobi), count (extra count-recurrence bytes, an fp64 build) and polish
+    (the polish's PCG; fp64 hex: POLISH64 x the fp32 term). Calibrated on box meshes at
     max_coarse 1000 (the shell family on flat, stacked, web and block meshes); the coarse term
     uses max(max_coarse, 1000) (an upper bound, loose above 1000)."""
     if dtype not in ("float64", "float32"):
@@ -494,6 +498,9 @@ def amg_memory(mesh, m, max_coarse=1000, degree=2, dtype="float64"):
     )
     if fp32:
         out["polish"] = term("polish")
+    else:
+        a, c, K = AMG_STEP32[(fam, "polish")]
+        out["polish"] = POLISH64 * (8 * n_dof * (a * m + c) + 8 * m * K) + 8 * m * loop
     return {k: int(v) for k, v in out.items()}
 
 
