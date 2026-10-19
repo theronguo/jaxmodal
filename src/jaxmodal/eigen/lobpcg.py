@@ -514,7 +514,7 @@ def _iterate(state, args, consts, want, lock, guards, tol, maxit, low, c, stop):
             stagnated = True
             break
         if (r[:j] <= t[:j]).all():
-            state, r2, t2 = _explicit(state, op, m, consts, low or switched)
+            state, r2, t2 = _explicit(state, op, m, consts, low or switched is not None)
             if (r2[:j] <= t2[:j]).all():
                 r, t, converged = r2, t2, True
                 stagnated = bool((r[:j] > tol).any())

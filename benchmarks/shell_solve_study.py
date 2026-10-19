@@ -58,14 +58,15 @@ MESHES = {
     "L": lambda n: T.junction("L", n, 100)[0],
     "cylinder": lambda n: T.cylinder(False),
 }
-# the fit cases (25k-396k DOF) and block widths of the step, low step and polish
-FIT = [("flat", 64), ("flat", 128), ("flat", 256), ("web", 64), ("block", 32), ("stack10", 64),
-       ("stack3", 128)]  # fmt: skip
+# the fit cases (25k-837k DOF) and block widths of the step, low step and polish
+FIT = [("flat", 64), ("flat", 128), ("flat", 256), ("web", 64), ("block", 32), ("block", 64),
+       ("stack10", 64), ("stack3", 128)]  # fmt: skip
 MS = (6, 8, 15, 25, 60, 120)
 # compile-only extras (case, size, m, degree): T, degree 3, the 791k and 1.58M plates
 EXTRA = (("T", 48, 15, 2), ("flat", 128, 15, 3), ("flat", 362, 6, 2), ("flat", 362, 120, 2),
          ("flat", 512, 6, 2), ("flat", 512, 120, 2))  # fmt: skip
-COUNT = [("flat", 64), ("flat", 128), ("flat", 256), ("flat", 362), ("flat", 512), ("stack3", 128)]
+COUNT = [("flat", 64), ("flat", 128), ("flat", 256), ("flat", 362), ("flat", 512), ("stack3", 128),
+         ("block", 64)]  # fmt: skip
 STORAGE = FIT + [("T", 48), ("L", 48), ("cylinder", 0), ("flat", 48), ("block", 64),
                  ("flat", 362)]  # fmt: skip
 PEAKS = [("flat", 128), ("flat", 256), ("flat", 362), ("flat", 512), ("stack3", 128),
@@ -103,7 +104,7 @@ def measure(op, free, P, m):
     the polish at block width m, in bytes."""
     out = {"polish": polish(op, free, P, m)}
     for low in (False, True):
-        c = m if low else max(m, min(4 * m, 64))
+        c = LOB._capacity(100, 1, m, low)[0]
         out["low" if low else "9-block"] = max(
             step(op, P, low, m), step(op, P, low, m, c * -(-2 * m // c))
         )
@@ -125,7 +126,7 @@ def steps(cases=FIT, ms=MS, extra=EXTRA):
     return out
 
 
-def count(cases=COUNT, bs=(4, 8, 16, 32)):
+def count(cases=COUNT, bs=(4, 8, 16, 32, 50)):
     """The count recurrence's temporaries with the V-cycle at probe blocks bs, and the shell
     MINRES temporaries at b = 6 (A_P at a negative shift)."""
     out = []
@@ -221,8 +222,7 @@ def peaks(cases=PEAKS):
 
 def solve_peak(case="flat", n=362, n_modes=20):
     """One cold solve_modes (tol 1e-6, synchronous CPU dispatch) in a fresh subprocess: its info,
-    time and process peak
-    above the built operator, next to solve_modes_memory's total."""
+    time and process peak above the built operator, next to solve_modes_memory's total."""
     root = str(harness.RESULTS.parents[1])
     # replace, not format: measure_json formats the code once more (its {out})
     code, setup = SOLVE.replace("N_MODES", str(n_modes)), SETUP.format(root=root, case=case, n=n)

@@ -432,7 +432,7 @@ def solve_modes(
             return None
         ptol, pmax = po_opts.get("tol", min(1e-7, 0.1 * tol)), po_opts.get("maxit", 500)
 
-        def run(X):  # A_P built on first use: most solves never polish
+        def run(X):  # A_P built only when a chunk polishes
             A, mf = ap_operator(op, free, sigma), jnp.asarray(free, jnp.float64)[:, None]
             Y, inf = pcg(A, mf * op.apply_M(mf * X), P, ptol, pmax)
             return Y, int(inf["iterations"].max())

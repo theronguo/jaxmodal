@@ -333,15 +333,16 @@ SHELL_STORAGE = {"shell": 500, "fiber": 6300, "hex": 1250}
 SHELL_BUILD = (150e6, {"shell": 1400, "hex": 3300})
 # pc terms 8 n (a m + c) + K0 (K0 bytes, independent of m): the upper envelope (linear
 # programming, c, K0 >= 0) of memory_analysis minus lobpcg_memory's STEP_FIT part (A b + f ws;
-# the polish with the low f) on flat 64^2-512^2, web 64^2, block 32^3, stack x10 64^2 and x3
-# 128^2 (25k-1.58M DOF), m = 6-120, rounded up, c + 0.5 against rounding. count: _recurrence
-# minus COUNT_STEP's part, b = 4-32 on flat 64^2-512^2 and stack x3 128^2, and si_memory's
+# the polish with the low f) on flat 64^2-512^2, web 64^2, block 32^3 and 64^3, stack x10 64^2
+# and x3 128^2 (25k-1.58M DOF), m = 6-120, rounded up, c + 0.5 against rounding. count:
+# _recurrence minus COUNT_STEP's part, b = 4-50 on flat 64^2-512^2, stack x3 128^2 and block
+# 64^3, and si_memory's
 # minres (SI_MINRES b + count) at b = 6 on the flat plates.
 SHELL_STEP = {
-    "9-block": (9.7, 5.5, 72e6),
-    "low": (14.0, 4.8, 108e6),
-    "polish": (26.8, 0.5, 129e6),
-    "count": (15.2, 0.5, 117e6),
+    "9-block": (9.6, 17.1, 70e6),
+    "low": (13.9, 13.9, 106e6),
+    "polish": (26.7, 4.0, 128e6),
+    "count": (15.2, 5.8, 116e6),
 }
 
 

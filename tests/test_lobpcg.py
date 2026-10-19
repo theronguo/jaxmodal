@@ -990,8 +990,11 @@ def test_polish_reverts(monkeypatch, bad):
             return Y * jnp.nan, its
         return Y.at[:, 1].set(Y[:, 0]), its
 
+    rr, real = [], lob._rr_block
+    monkeypatch.setattr(lob, "_rr_block", lambda *a: rr.append(1) or real(*a))
     lam, V, info = stalled(monkeypatch, polish)
     assert not info["converged"] and info["chunks"][0]["polish"] == 7
+    assert len(rr) == (1 if bad == "nan" else 2)  # a NaN Y never reaches _rr_block
     assert np.array_equal(lam, lam0) and np.array_equal(V, V0)
     assert np.array_equal(info["residuals"], info0["residuals"])
 
@@ -1044,6 +1047,7 @@ def test_polish_extends_cluster(monkeypatch, extent_calls, want):
     exact = jnp.asarray(near_start(CUBE, k, 0.0))
     _, _, info = lobpcg(p.op, p.free, want, 1e-6, polish=lambda X: (exact, 1), **kw)
     assert info["converged"] and info["chunks"][0]["locked"] > want
+    assert info["chunks"][0]["polish"] is not None
 
 
 @pytest.mark.parametrize("low", [False, True], ids=["9-block", "low"])

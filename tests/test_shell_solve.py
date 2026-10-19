@@ -417,7 +417,7 @@ def measured(case, n, m, degree=2):
 GATE = 1.3  # model <= GATE x measured at large n (see test_shell_steps)
 STEP_CASES = [(c, n, m) for c, n in [("flat", 64), ("flat", 128), ("web", 64), ("block", 32),
               ("stack10", 64), ("stack3", 128)] for m in (6, 25, 120)]  # fmt: skip
-STEP_CASES += [("T", 48, 15), ("flat", 64, 15)]
+STEP_CASES += [("T", 48, 15), ("flat", 64, 15), ("L", 48, 25)]
 
 
 def slow_if(cond, *args):
@@ -435,7 +435,8 @@ def test_shell_steps(case, n, m):
     measured temporaries; at large n (flat 128^2, stack x3 128^2, m 25 and 120) <= GATE x
     measured (up to 1.28x, the polish on flat 128^2 at m = 25; K0, about 70-130 MB, is most of
     the slack there; a fit of the totals without STEP_FIT's part would be about 16 + 2.5 ws
-    blocks above it). Every point is a fit point: the lower bound is a regression check."""
+    blocks above it). Every point but L 48^2 is a fit point: there the lower bound is a
+    regression check."""
     mesh = built(case, n)[0]
     model, got = modelled(mesh, m, amg_memory(mesh, m)), measured(case, n, m)
     blk = 8 * 3 * len(mesh.points) * m
@@ -466,6 +467,16 @@ def test_hex_polish_below_step(t, n):
         pc = amg_memory(mesh, m)
         assert "polish" not in pc
         assert modelled(mesh, m, pc)["9-block"] >= S.polish(op, jnp.asarray(free), P, m)
+
+
+def test_band_probe_polish(monkeypatch):
+    """band_probe_block passes polish_options to both of its models."""
+    seen, real = [], MEM._models
+    monkeypatch.setattr(MEM, "_models", lambda *a: seen.append(a[6]) or real(*a))
+    MEM.band_probe_block(
+        T.plate(64, 100)[0], SS, 10, 50, 0, n_rigid=0, polish_options={"on": False}
+    )
+    assert len(seen) == 2 and all(s == {"on": False} for s in seen)
 
 
 def test_lobpcg_memory_max():
