@@ -316,10 +316,10 @@ def _choose(reach, needs, chunks):
     margined, else the unmargined need; unknown: per S the ladder's chunk and its reach r(S),
     the cheapest S with r(S) >= 0.95 max r. Cost: CHUNK_COST of the chunk's ladder position
     times the rows' costs; ties to fewer levers, a larger reach, then the row indices."""
-    pos = {c: CHUNK_COST[min(i, len(CHUNK_COST) - 1)] for i, c in enumerate(chunks)}
+    cost = {c: CHUNK_COST[min(i, len(CHUNK_COST) - 1)] for i, c in enumerate(chunks)}
 
     def key(S, c, r):
-        return pos[c] * math.prod(LEVERS[i][2] for i in S), len(S), -r, S, c
+        return cost[c] * math.prod(LEVERS[i][2] for i in S), len(S), -r, S, c
 
     for nd in needs:
         ok = [key(S, c, r) for S, rc in reach.items() for c, r in rc.items()
@@ -459,8 +459,7 @@ def solve_modes(
 
     # before the build: a GPU pool's bytes_in_use would count the operator a second time
     budget, host_budget = mem._default_budget(memory_budget) if band is not None else (None, None)
-    R = rigid_modes(mesh, free)
-    k, choice = R.shape[1], {}
+    k, choice = rigid_modes(mesh, free).shape[1], {}  # R itself after the build
     if band is not None:  # the ladder and the levers: before the build, which uses their options
         lam_lo, lam_hi = (2 * np.pi * f1) ** 2, (2 * np.pi * f2) ** 2
         n, n_avail = len(free), int(free.sum()) - k
@@ -479,9 +478,10 @@ def solve_modes(
         otf_ok = not voxel and "ssh8" not in mesh.blocks
 
         def rows(hint=False):  # the LEVERS rows still at their defaults (applicable unless hint)
+            mode = op_opts.get("mode") != "otf" if hint else "mode" not in op_opts
             ok = (precond != "jacobi" and precond_dtype == "float64",
                   basis_dtype == "float64" and (hint or tol >= 1e-6), not low_memory,
-                  otf_ok and "mode" not in op_opts)  # fmt: skip
+                  otf_ok and mode)  # fmt: skip
             return [i for i, x in enumerate(ok) if x]
 
         def state(S):  # the current options with the LEVERS rows S applied
@@ -489,8 +489,10 @@ def solve_modes(
                      op_opts=op_opts)  # fmt: skip
             for i in S:
                 key, val, _ = LEVERS[i]
-                o.update({"op_opts": {**op_opts, **val}} if key == "operator_options"
-                         else {key: val})  # fmt: skip
+                if key == "operator_options":
+                    o["op_opts"] = {**op_opts, **val}
+                else:
+                    o[key] = val
             return o
 
         def c_max(c, o=None, pc_m=None, start=None):  # at chunk c, state o (default the current)
@@ -520,7 +522,7 @@ def solve_modes(
             for c in chunks:
                 kc = _block_size(c, c, guards)[2]
                 cl = _capacity(0, c, kc, low)[0]
-                want = math.ceil(1.25 * n_modes) + kc if margin else n_modes + kc
+                want = (math.ceil(1.25 * n_modes) if margin else n_modes) + kc
                 out[c] = min(want, -(-(n_avail + kc) // cl) * cl)
             return out
 
@@ -547,7 +549,7 @@ def solve_modes(
                     o = state(S)
                     precond_dtype, basis_dtype = o["precond_dtype"], o["basis_dtype"]
                     low_memory, op_opts = o["low_memory"], o["op_opts"]
-                    reach, need = reach_s[S], need_of(low_memory) if known else None
+                    reach, need = reach_s[S], needs[0][S] if known else None
                     choice = {LEVERS[i][0]: copy.copy(LEVERS[i][1]) for i in S}
             if ch is None and strategy == "lobpcg":
                 raise ValueError(
@@ -559,7 +561,7 @@ def solve_modes(
         pc64 = models("float64")[1] if precond_dtype == "float32" else pc
     op = build(mesh, materials, orientations, mass=mass, nodal_mass=nodal_mass, **op_opts)
     t0 = time.perf_counter()
-    aggs, R = None, jnp.asarray(R)
+    aggs, R = None, jnp.asarray(rigid_modes(mesh, free))
     if k:
         R = m_orthonormalize(R, op.apply_M(R))  # consumes its first argument
     Rd = R if k else None
@@ -722,8 +724,7 @@ def solve_modes(
                 raise ValueError(
                     f"the smallest shift-invert slice does not fit memory_budget = {budget:.4g}"
                     " bytes: raise memory_budget"
-                    + (", or pass operator_options={'mode': 'otf'}"
-                       if otf_ok and op_opts.get("mode") != "otf" else "")
+                    + (", or pass operator_options={'mode': 'otf'}" if 3 in rows(hint=True) else "")
                 )  # fmt: skip
             if C < SLICE_MIN:
                 warnings.warn(
@@ -773,7 +774,7 @@ def solve_modes(
     info.update(residuals=info["residuals"][i0:i1], thresholds=info["thresholds"][i0:i1])
     # compacted in place (the destination never runs ahead of the source), then shrunk: V must
     # have no other reference. jaxlib holds the last host view it transferred (the count's W
-    # chunks) until a collection, so no jax op runs between _verify and the resize
+    # chunks, LOBPCG's _grow) until a collection, so no jax op runs between _verify and the resize
     if i0:
         for j in range(i1 - i0):
             V[:, j] = V[:, i0 + j]

@@ -925,6 +925,7 @@ def test_error_result_capacity(fake_builds):
     lam, V, info = e.value.result
     assert info["stopped"] == "capacity" and "lobpcg" in info["time"]
     assert info["reason"] == "capacity" and info["strategy"] == "shift_invert"
+    assert info["n_store"] == 22 and info["mu1_ub"] is not None  # as test_capacity
     check_partial("short", f1, lam, V, info)
 
 
@@ -1276,6 +1277,7 @@ def test_choose():
     assert api._choose(r, [nd, nd], [15, 7]) == ((), 7)
     assert api._choose(r, [{**nd, (2,): nd[()]}] * 2, [15, 7]) == ((2,), 15)
     # ties: |S|, then the reach, then the row order
+    assert known({(0,): {40: 50}, (0, 1): {40: 60}}, 48, chunks=top) == ((0,), 40)
     assert known({(0,): {40: 50}, (1,): {40: 50}}, 48, chunks=top) == ((0,), 40)
     assert known({(0,): {40: 50}, (1,): {40: 55}}, 48, chunks=top) == ((1,), 40)
     # the margined need unreached, the unmargined reached
@@ -1286,6 +1288,8 @@ def test_choose():
     # rule 3: the ladder chunk's reach ranks (92 at 40 for (0,), not its max 100)
     r = {(): {40: None, 20: None}, (0,): {40: 92, 20: 100}, (1,): {40: 97, 20: None}}
     assert api._choose(r, [], [40, 20]) == ((1,), 40)
+    r = {(0,): {40: 92, 20: 100}, (3,): {40: 97, 20: None}}  # by max reach: ((0,), 20)
+    assert api._choose(r, [], [40, 20]) == ((3,), 40)
     # +2% reach at 3x cost loses, +6% wins
     assert api._choose({(0,): {40: 100}, (0, 3): {40: 102}}, [], top) == ((0,), 40)
     assert api._choose({(0,): {40: 100}, (0, 3): {40: 106}}, [], top) == ((0, 3), 40)
@@ -1335,11 +1339,20 @@ def test_levers_known(fake_builds, monkeypatch, case):
         want = {"precond_dtype": "float32", "low_memory": True}
     f2 = fband("short", 0, 30)[1]
     kw = dict(n_modes=30, tol=1e-7, memory_budget=B, verify=False)
+    solves, real = [], api._solve
+
+    def solve(*a, **k):  # the band run gets the chosen low, basis and capacity
+        if k.get("lam_stop") is not None:
+            solves.append((k["low"], k["basis_dtype"], k["max_capacity"]))
+        return real(*a, **k)
+
+    monkeypatch.setattr(api, "_solve", solve)
     for strategy in ("auto", "lobpcg"):
         lam, V, info = run("short", (0.0, f2), strategy=strategy, **kw)
         assert info["levers"] == want and info["chunk"] == 5
         assert info["reason"] == ("fits" if strategy == "auto" else "forced")
         assert info["c_max"][5] == r[S]
+        assert solves[-1] == (case == "pc_low", "float64", r[S])
         check("short", 0.0, f2, lam, V, info)
     if case == "pc":
         monkeypatch.setattr(api, "si_band", stub_band({}))
@@ -1508,13 +1521,20 @@ def test_levers_rows(fake_builds, monkeypatch):
         solve_modes(prob("short")[0], MAT, MESHES["short"][1], n_modes=4, levers=False)
 
 
-def test_levers_basis(fake_builds):
+def test_levers_basis(fake_builds, monkeypatch):
     """Test 5: at tol 1e-6 the fp32 basis row is offered and, when picked, V stays M-orthonormal
     to 1e-5 ("short", f1 = 0, n_modes 30, the {precond, low} budget)."""
     f2 = fband("short", 0, 30)[1]
+    solves, real = [], api._solve
+
+    def solve(*a, **k):
+        solves.append(k["basis_dtype"])
+        return real(*a, **k)
+
+    monkeypatch.setattr(api, "_solve", solve)
     lam, V, info = run("short", (0.0, f2), n_modes=30, tol=1e-6, memory_budget=B_PCLOW,
                        verify=False)  # fmt: skip
-    assert "basis_dtype" in info["levers"]
+    assert "basis_dtype" in info["levers"] and solves[-1] == "float32"
     _, _, _, K, M, _, lr, _ = prob("short")
     assert np.abs(V.T @ (M @ V) - np.eye(len(lam))).max() <= 1e-5
     assert len(lam) == (lr <= (2 * np.pi * f2) ** 2).sum()

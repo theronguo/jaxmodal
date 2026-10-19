@@ -209,7 +209,7 @@ def _random_block(key, n, b):
 
 def si_slice(
     op, free, lo, hi, precond, *, capacity, sigma=None, R=None, W=None, lam_W=None, tol=1e-6,
-    tau=1e-8, block=6, maxit_inner=20000, seed=0, verbose=False, stag_tau=None,
+    tau=TAU0, block=6, maxit_inner=20000, seed=0, verbose=False, stag_tau=None,
 ):  # fmt: skip
     """Eigenpairs of the masked pencil (K_m, M_m) in the slice [lo, hi] (eigenvalues, 0 <= lo <
     hi) by block shift-invert Lanczos at sigma (default the midpoint). precond: SPD
@@ -758,7 +758,8 @@ def _span_count(op, free, P, lam_s, cols, x0, x1, r, nbs, R, verify, opts, *, bl
     parent's last run's Ritz neighbour nbs, beyond the chain gap) beyond each end its out-of-band
     pairs; P the parent's preconditioner. A verifiable count >= 0.5 is flagged (si_band reruns
     the span at most RESTARTS times in its lineage). verify as si_checked's, decided against the
-    parent run's t_leaf and t_minres (slice block width block)."""
+    parent run's t_leaf and t_minres (slice block width block). The pairs are gathered only when
+    a calibration or the count runs (nothing on a predicted skip)."""
     o = np.argsort(lam_s, kind="stable")
     ls = lam_s[o]
     i0, i1 = _extend_chain(ls, np.searchsorted(ls, x0), np.searchsorted(ls, x1, "right"), 100 * r)
@@ -851,7 +852,7 @@ def si_band(
         raise ValueError(f"capacity must be an int >= 2 block = {2 * block}, got {capacity!r}")
     if not (verify is None or isinstance(verify, bool)):
         raise ValueError(f"verify must be True, False or None, got {verify!r}")
-    if bad := sorted({"sigma", "count_precond"} & set(slice_options)):
+    if bad := sorted({"sigma", "count_precond", "stag_tau"} & set(slice_options)):
         raise ValueError(f"si_band sets {bad} per slice (sigma the midpoint, make(sigma))")
     b, c = block, _chunk(block)
     opts = {"verbose": verbose, **(count_options or {})}
@@ -862,8 +863,9 @@ def si_band(
     work = [(x0, x1, set(), 0) for x0, x1 in zip([lo, *cuts], [*cuts, hi], strict=True)]
     slices, leaves = [], []  # leaves: (interval, count info)
     r_s, tau_eff, converged, reason, i, warned = 0.0, 0.0, True, None, 0, False
-    err, stop, P, p_sig = None, [], None, None  # stop: lower edges of the failing slice
+    err, stop, P, p_sig = None, hi, None, None  # stop: the failing slice's lower edge
     tau0 = slice_options.pop("tau", None)
+    stag = TAU0 if tau0 is None else tau0  # the sigma-move test keeps the slices' own tau
 
     def cols(idx):  # F order: a column touches only its own pages, no transposing copies
         U = np.empty((n, len(idx)), order="F")
@@ -903,11 +905,11 @@ def si_band(
                 op, free, a, e, P, capacity=cap, W=cols(win) if len(win) else None,
                 lam_W=lam_s[win] if len(win) else None, count_options={**opts, "seed": c0 + sd},
                 verify=verify, seed=seed + sd, verbose=verbose, R=R, tol=tol, block=block,
-                tau=tau, stag_tau=TAU0 if tau0 is None else tau0, **slice_options,
+                tau=tau, stag_tau=stag, **slice_options,
             )  # fmt: skip
             rw = max(rw, inf["r_acc"])
         if err is not None:  # the rerun's block is discarded: V of the stored slice only
-            stop.append(a)
+            stop = a
             break
         lam_s, run_s = np.r_[lam_s, lam], np.r_[run_s, np.full(len(lam), i)]
         res_s, thr_s = np.r_[res_s, inf["residuals"]], np.r_[thr_s, inf["thresholds"]]
@@ -938,7 +940,7 @@ def si_band(
             if not inf["converged"]:  # the band stops with the pairs found
                 msg = why if why not in (None, "capacity full") else "slice not converged"
                 converged, reason = False, f"[{a:.6g}, {e:.6g}]: {msg}"
-                stop.append(a)
+                stop = a
                 break
             continue
         # a full slice: its verified span (a leaf without a run) and its remainders
@@ -947,13 +949,13 @@ def si_band(
         sp = _split(*inf["ritz"], inf["sigma"], a, e, r_l)
         if sp is None:
             err = _cap_error(a, e, capacity, "nothing converged")
-            stop.append(a)
+            stop = a
             break
         s_lo, s_hi, done_lo, done_hi = sp
         whole = s_lo is None and s_hi is None and not (done_lo and done_hi)  # requeued whole
         if whole and not n_new and not ((done_lo and a not in done) or (done_hi and e not in done)):
             err = _cap_error(a, e, capacity, "no progress", (done_lo, done_hi))
-            stop.append(a)
+            stop = a
             break
         if not (done_lo or s_lo or done_hi or s_hi):  # new pairs only: requeued, them deflated
             work.append((a, e, done, k))
@@ -1059,7 +1061,7 @@ def si_band(
         edge_rr_failed=rr_failed,
         duplicates=dup,
         count=_band_count(leaves),
-        complete_to=lo if rr_failed else min([*stop, *(x[0] for x in work)], default=hi),
+        complete_to=lo if rr_failed else min([stop, *(x[0] for x in work)]),
         time=dict(
             total=time.perf_counter() - t0,
             slices=t_slices,

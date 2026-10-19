@@ -301,7 +301,8 @@ def _pow2(n):
 
 def _check_ortho(op, m, W, seed):
     """Streamed sketch of W^T M W - I (W an array or a tuple of arrays, their columns side by
-    side): two passes over W, e = W^T M (W z) - z."""
+    side): two passes over W (transposed chunks, _chunks), e = W^T M (W z) - z; z from NumPy's
+    default_rng(seed), so no compile per width."""
     Ws = W if isinstance(W, tuple) else (W,)
     k = sum(A.shape[1] for A in Ws)
     z = np.random.default_rng(int(seed) % 2**64).standard_normal((k, SKETCH))

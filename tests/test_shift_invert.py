@@ -2537,7 +2537,7 @@ def test_band_error_merged(monkeypatch):
     lam, V, info = e.result
     assert info["duplicates"] == 1 and np.allclose(lam, lr[2:10], rtol=1e-10)
     assert info["complete_to"] == s[1] and not info["converged"]
-    assert len(info["count"]["estimates"]) == 2  # the two runs' leaves
+    assert len(info["count"]["estimates"]) == 2 and info["reason"] == str(e)  # two leaves
     assert np.abs(V.T @ (M @ V) - np.eye(len(lam))).max() <= 1e-8
     rng = np.random.default_rng(0)
     w = Vr[:, 4] + 1e-3 * np.where(free, rng.standard_normal(len(free)), 0)
@@ -2563,24 +2563,26 @@ def test_slice_tau(monkeypatch):
     def tau(a, e, tol):
         return max(si.TAU_MIN, min(si.TAU0, tol * a / (10 * e)))
 
-    for lo, hi, tol in ((lr[20], lr[25], 1e-6), (lr[1], lr[40], 1e-6), (lr[20], lr[25], 1e-10),
+    got = []
+    for lo, hi, tol in ((lr[20], lr[25], 1e-6), (lr[2], lr[40], 1e-6), (lr[20], lr[25], 1e-10),
                         (0.0, lr[10], 1e-6)):  # fmt: skip
         calls, _ = fake_band(monkeypatch, found)
         info = band_tol("short", *edges(lr, *np.searchsorted(lr, [lo, hi])), tol)[2]
         a, e = calls[0]["interval"]
         assert calls[0]["tau"] == tau(a, e, tol) == info["slices"][0]["tau"]
         assert calls[0]["stag_tau"] == si.TAU0
-    assert tau(lr[20], lr[25], 1e-6) == si.TAU0  # e / a <= 10 keeps TAU0
-    assert si.TAU_MIN < tau(lr[1], lr[40], 1e-6) < si.TAU0
-    assert tau(lr[20], lr[25], 1e-10) == tau(0.0, 1.0, 1e-6) == si.TAU_MIN
+        got.append(calls[0]["tau"])
+    # e / a <= 10 keeps TAU0; [0.96, 37.3] (e / a = 39) the formula's 2.6e-9; TAU_MIN below
+    assert got[0] == si.TAU0 and got[2] == got[3] == si.TAU_MIN
+    assert got[1] == pytest.approx(1e-6 * 0.9596645 / (10 * 37.308839), rel=1e-6)
     calls, _ = fake_band(monkeypatch, found)
     band_tol("short", *edges(lr, 3, 16), 1e-6, tau=1e-7)
     assert calls[0]["tau"] == calls[0]["stag_tau"] == 1e-7
     # a span rerun and the remainders: each its own interval's tau
     calls, _ = fake_band(monkeypatch, split_once, count=lambda j: (0.9, True, False) if j == 1
                          else (0.1, True, False))  # fmt: skip
-    info = band_tol("short", *edges(lr, 3, 16), 1e-6)
-    assert len(calls) >= 3
+    info = band_tol("short", *edges(lr, 2, 16), 1e-6)  # e / a = 15.8
+    assert len(calls) >= 3 and len({c["tau"] for c in calls}) > 1
     for c in calls:
         assert c["tau"] == tau(*c["interval"], 1e-6) and c["stag_tau"] == si.TAU0
 
