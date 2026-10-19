@@ -17,6 +17,7 @@ import scipy.sparse.linalg as spla
 from helpers import (
     MATERIALS,
     STEEL,
+    R,
     cheb,
     checkerboard,
     cube,
@@ -459,24 +460,145 @@ def sparse_count():
     return sum(isinstance(o, (sp.sparray, sp.spmatrix)) for o in gc.get_objects())
 
 
-def test_no_survivors():
+@pytest.mark.parametrize("dtype", ["float64", "float32"])
+def test_no_survivors(dtype):
     """13b test 11: after a warm-up build, a second amg leaves no SciPy matrix and no device
-    array beyond the returned pytree's leaves."""
+    array beyond the returned pytree's leaves (PR 18c: also no fp64 copy of an fp32 build)."""
     mesh = box_mesh((6,) * 3, type="hex20")
     op, free = unstructured(mesh, MATERIALS), dof_mask(mesh, SLIDE)
-    amg(op, free, SIGMA, mesh.points, max_coarse=100)
+    amg(op, free, SIGMA, mesh.points, max_coarse=100, dtype=dtype)
     gc.collect()
     before, n_sp = {id(a) for a in jax.live_arrays()}, sparse_count()
-    P = amg(op, free, SIGMA, mesh.points, max_coarse=100)
+    P = amg(op, free, SIGMA, mesh.points, max_coarse=100, dtype=dtype)
     gc.collect()
     leaves = {id(x) for x in jax.tree_util.tree_leaves(P)}
     assert {id(a) for a in jax.live_arrays()} - before - leaves == set()
     assert sparse_count() == n_sp
 
 
+# ---------------------------------------------------------------- 18c: fp32 V-cycle
+
+
+def fp32_box(t, n):
+    mesh = box_mesh((n,) * 3, type=t)
+    return unstructured(mesh, MATERIALS), dof_mask(mesh, SLIDE), SIGMA, mesh.points, 1e-5
+
+
+def fp32_mixed():
+    mesh = mixed_mesh(np.random.default_rng(0))
+    free = np.ones(3 * len(mesh.points), bool)
+    free[:12] = False  # no node sets: 4 nodes pinned
+    op = unstructured(mesh, MATERIALS, orientations={1: R})
+    return op, free, SIGMA, mesh.points, 1e-5
+
+
+def fp32_shell(name):
+    import test_shell_amg as TS
+
+    mesh = (TS.block(8) if name == "block" else TS.plate(32, 10))[0]
+    tol = 1e-5 if name == "block" else 2e-5
+    return unstructured(mesh, STEEL), dof_mask(mesh, {"xmin": "xyz"}), 1.0, mesh.points, tol
+
+
+# (op, free, sigma, points, tol) of PR 18c test 2
+FP32_CASES = {
+    "hex8": lambda: fp32_box("hex8", 8),
+    "hex20": lambda: fp32_box("hex20", 6),
+    "hex27": lambda: fp32_box("hex27", 4),
+    "mixed": fp32_mixed,
+    "block": lambda: fp32_shell("block"),
+    "plate": lambda: fp32_shell("plate"),
+}
+
+
+@pytest.mark.parametrize("name", list(FP32_CASES))
+def test_fp32_vcycle(name):
+    """PR 18c test 2 (max_coarse 100: 2-3 levels): the fp32 cycle returns fp64 within tol of
+    the fp64 cycle (relative Frobenius) and is symmetric to tol / 10 (2e-5 on the thin plate,
+    energy-normalized); its float leaves are fp32 except the fine A_P, the p-level transfer,
+    free and the coarsest factor; the int leaves equal fp64's; the Schwarz packed inverses
+    are the fp64 ones cast."""
+    op, free, sigma, points, tol = FP32_CASES[name]()
+    P64 = amg(op, free, sigma, points, max_coarse=100)
+    P32 = amg(op, free, sigma, points, max_coarse=100, dtype="float32")
+    assert P32.dtype == "float32" and len(P32.levels) >= 2
+    U = jnp.asarray(np.random.default_rng(0).standard_normal((op.n_dof, 4)) * free[:, None])
+    Y64, Y32 = P64(U), P32(U)
+    assert Y32.dtype == jnp.float64
+    assert np.linalg.norm(Y32 - Y64) <= tol * np.linalg.norm(Y64)
+    G = np.asarray(U.T @ Y32)
+    d = np.sqrt(np.diag(G))
+    assert (np.abs(G - G.T) / np.outer(d, d)).max() <= (2e-5 if name == "plate" else tol / 10)
+    shell = name in ("block", "plate")
+    keep = [P32.levels[0][0], P32.levels[0][1].A, P32.free, P32.coarse.L]
+    keep += [] if shell or name == "hex8" else [P32.transfers[0]]
+    keep = jax.tree_util.tree_leaves(keep)
+    assert all(
+        a.dtype == jnp.float64 for a in keep if isinstance(a, jax.Array) and a.dtype.kind == "f"
+    )
+    keep = {id(a) for a in keep}
+    f64 = [a for a in jax.tree_util.tree_leaves(P32) if isinstance(a, jax.Array)
+           and a.dtype == jnp.float64]  # fmt: skip
+    assert all(id(a) in keep for a in f64)
+    ints = [[a for a in jax.tree_util.tree_leaves(P) if isinstance(a, jax.Array)
+             and a.dtype.kind in "iub"] for P in (P64, P32)]  # fmt: skip
+    assert len(ints[0]) == len(ints[1]) and all(map(np.array_equal, *ints))
+    if shell:
+        for (_, S64), (_, S32) in zip(P64.levels, P32.levels, strict=True):
+            for a, b in zip(S64.precond.inv, S32.precond.inv, strict=True):
+                assert b.dtype == jnp.float32 and np.array_equal(a.astype(jnp.float32), b)
+
+
+def fp32_pcg(op, free, sigma, points, tol):
+    """PR 18c test 3: PCG on A_P with the fp64 and fp32 V-cycles (4 masked random columns): the
+    max iterations per dtype; both converge and the fp32 true residual is <= tol."""
+    A = ap_operator(op, free, sigma)
+    b = jnp.asarray(np.random.default_rng(1).standard_normal((op.n_dof, 4)) * free[:, None])
+    its = []
+    for dtype in ("float64", "float32"):
+        x, info = pcg(A, b, amg(op, free, sigma, points, dtype=dtype), tol, 1000)
+        assert np.asarray(info["converged"]).all(), dtype
+        its.append(int(np.asarray(info["iterations"]).max()))
+    res = np.linalg.norm(b - A(x), axis=0) / np.linalg.norm(b, axis=0)
+    assert res.max() <= tol, res
+    return its
+
+
+def test_fp32_pcg():
+    """PR 18c test 3 (roadmap): hex20 12^3, xmin clamped, sigma 3e5, tol 1e-8: the fp32
+    iterations within +-1 of fp64."""
+    mesh = box_mesh((12,) * 3, (1 / 12,) * 3, type="hex20")
+    op, free = unstructured(mesh, STEEL), dof_mask(mesh, {"xmin": "xyz"})
+    i64, i32 = fp32_pcg(op, free, 3e5, mesh.points, 1e-8)
+    assert abs(i32 - i64) <= 1, (i64, i32)
+
+
+def test_fp32_not_finite():
+    """PR 18c test 2: an operator scaled by 1e-40 / max|diag| has finite fp64 inverses above
+    the fp32 maximum, so the fp32 build raises: on the block from _invert's check, on hex8 8^3
+    at the default max_coarse (no assembled level) from the check after the cast."""
+    import test_shell_amg as TS
+
+    cases = [(TS.block(8)[0], STEEL, 1.0, "Schwarz patch inverses"),
+             (box_mesh((8,) * 3), MATERIALS, SIGMA, "AMG level smoother")]  # fmt: skip
+    for mesh, mats, sigma, match in cases:
+        op = unstructured(mesh, mats)
+        free = dof_mask(mesh, {"xmin": "xyz"})
+        c = 1e-40 / float(jnp.abs(ap_operator(op, free, sigma).op.diag_K()).max())
+        op = op.scaled(s_K=c * op.s_K, s_M=c * op.s_M)
+        P64 = amg(op, free, sigma, mesh.points)
+        assert match != "AMG level smoother" or len(P64.levels) == 1  # no assembled level
+        inv = jax.tree_util.tree_leaves(P64.levels[0][1].precond)
+        big = max(float(jnp.abs(x).max()) for x in inv if x.dtype == jnp.float64)
+        assert np.isfinite(big) and big > 3.4e38
+        with pytest.raises(ValueError, match=match):
+            amg(op, free, sigma, mesh.points, dtype="float32")
+
+
 # ---------------------------------------------------------------- 13b: amg_memory, benchmarks
 
 LOB = importlib.import_module("jaxmodal.eigen.lobpcg")
+MEM = importlib.import_module("jaxmodal.memory")
 
 
 STORAGE_CASES = {
@@ -492,16 +614,21 @@ STORAGE_CASES = {
 }
 
 
+@pytest.mark.parametrize("dtype", ["float64", "float32"])
 @pytest.mark.parametrize("name", list(STORAGE_CASES))
-def test_amg_memory_storage(name):
+def test_amg_memory_storage(name, dtype):
     """13b test 7: storage >= the preconditioner-owned device bytes, the coarse term >= the
     coarsest factor; at hex20 12^3 and hex8 16^3 (AMG part near the per-corner envelope) the
-    part that scales with n within 1.3x; elsewhere only the upper bound (box calibration)."""
+    part that scales with n within 1.3x; elsewhere only the upper bound (box calibration).
+    PR 18c test 5: fp32 too; the exact part (free mask, fine node-block inverses and mask) is
+    120 / 72 B per node."""
     make, bcs, tight = STORAGE_CASES[name]
     mesh = make()
     op, free = unstructured(mesh, MATERIALS), dof_mask(mesh, bcs)
-    P = amg(op, free, SIGMA, mesh.points)
-    got, est = owned_bytes(P, op), amg_memory(mesh, 15)["storage"]
+    P = amg(op, free, SIGMA, mesh.points, dtype=dtype)
+    got, est = owned_bytes(P, op), amg_memory(mesh, 15, dtype=dtype)["storage"]
+    exact = sum(x.nbytes for x in jax.tree_util.tree_leaves((P.free, P.levels[0][1].precond)))
+    assert exact == (72 if dtype == "float32" else 120) * len(mesh.points)
     n_c = 3 * len(np.unique(np.concatenate([c[:, :8].ravel() for c in mesh.blocks.values()])))
     coarse = 8 * min(n_c, 1000) ** 2
     assert got <= est and P.coarse.L.nbytes <= coarse, (got, est)
@@ -520,30 +647,35 @@ def test_amg_memory_build_mixed():
     assert amg_memory(mesh, 15)["build"] == int(beta + alpha["hex20"] * n_c)
 
 
-def step_case(t, n):
+def step_case(t, n, dtype="float64"):
     mesh = box_mesh((n,) * 3, (1 / n,) * 3, type=t)
     free = dof_mask(mesh, {"xmin": "xyz"})
     op = unstructured(mesh, STEEL)
-    return mesh, op, free, amg(op, free, 1e6, mesh.points)
+    return mesh, op, free, amg(op, free, 1e6, mesh.points, dtype=dtype)
 
 
-def step_model(mesh, op, low, n_modes=10):
-    """(lobpcg_memory's step with amg_memory, its block size)."""
+def step_model(mesh, op, low, n_modes=10, dtype="float64", polish=True):
+    """(lobpcg_memory's step with amg_memory, its block size); polish False drops the polish
+    term (the step's max would hide the 9-block and low terms)."""
     k = LOB._block_size(n_modes, None, None)[2]
+    pc = lambda w: {key: v for key, v in amg_memory(mesh, w, dtype=dtype).items()  # noqa: E731
+                    if polish or key != "polish"}  # fmt: skip
     est = lobpcg_memory(
         lambda w: unstructured_memory(mesh, w), op.n_dof, n_modes, low_memory=low,
-        precond_memory=lambda w: amg_memory(mesh, w),
+        precond_memory=pc,
     )["step"]  # fmt: skip
     return est, k
 
 
+@pytest.mark.parametrize("dtype", ["float64", "float32"])
 @pytest.mark.parametrize("t, n", [("hex20", 8), ("hex20", 12), ("hex27", 6), ("hex8", 12)])
 @pytest.mark.parametrize("low", [False, True], ids=["9-block", "low"])
-def test_amg_step(t, n, low):
+def test_amg_step(t, n, low, dtype):
     """13b test 8: the LOBPCG step with AMG <= lobpcg_memory's step (amg_memory), measured at
-    the block size lobpcg_memory derives from n_modes."""
-    mesh, op, _, P = step_case(t, n)
-    est, k = step_model(mesh, op, low)
+    the block size lobpcg_memory derives from n_modes (PR 18c test 6: fp32 too, without the
+    polish term, which is checked by test_hex_polish_fp32)."""
+    mesh, op, _, P = step_case(t, n, dtype)
+    est, k = step_model(mesh, op, low, dtype=dtype, polish=False)
     assert k == 15
     got = step_bytes(op, P, low, k)
     assert got <= est, (got, est)
@@ -562,6 +694,73 @@ def test_amg_step_tight(t, n):
         a, c, K = AMG_STEP[(fam, "low" if low else "9-block")]
         model = a + c / 15 + K / op.n_dof
         assert model - 1 <= extra <= model, (low, extra, model)
+
+
+def fp32_study():
+    """benchmarks/results/amg_fp32_study.json and the study module."""
+    import json
+
+    from benchmarks import amg_fp32_study as F
+    from benchmarks import harness
+
+    return json.load(open(harness.RESULTS / "amg_fp32_study.json")), F
+
+
+@pytest.mark.slow
+def test_amg_step_tight32():
+    """PR 18c test 6: at hex20 24^3, m = 25 (the fit's TIGHT point) the fp32 step terms at the
+    lobpcg_memory level (9-block, low, polish) are within the recorded gates of the measured."""
+    from benchmarks import shell_solve_study as SSS
+
+    d, F = fp32_study()
+    mesh, op, free, P = step_case("hex20", 24, "float32")
+    r = dict(n_dof=op.n_dof, m=25, ws=unstructured_memory(mesh, 25)["workspace"])
+    got = {"9-block": step_bytes(op, P, False, 25), "low": step_bytes(op, P, True, 25),
+           "polish": SSS.polish(op, jnp.asarray(free), P, 25)}  # fmt: skip
+    for key, g in got.items():
+        est = F.total("p", MEM.AMG_STEP32[("p", key)], r, key)
+        assert g <= est <= d["fit"]["gates"].get(f"p/{key}", F.GATE) * g, (key, est / g)
+
+
+def test_fp32_constants_pinned():
+    """PR 18c test 7: STORAGE32, AMG_STEP32 and SHELL_STEP32 are the recorded fits as stored
+    (ratio32 and rounded), the recorded gate flags hold, and every recorded upper-gate ratio
+    is <= its gate (1.3, or the logged widened gate <= 1.4)."""
+    d, F = fp32_study()
+    f = d["fit"]
+    assert F.ratio32(d["storage"]) == pytest.approx(MEM.STORAGE32, rel=1e-12)
+    assert f["storage32"] == pytest.approx(MEM.STORAGE32, rel=1e-12)
+    for name, c in f["consts"].items():
+        fam, key = name.split("/")
+        stored = MEM.SHELL_STEP32[key] if fam == "shell" else MEM.AMG_STEP32[(fam, key)]
+        assert F.rounded(fam, c["lp"]) == pytest.approx(stored, rel=1e-12), name
+        assert c["stored"] == pytest.approx(stored, rel=1e-12), name
+    assert len(f["consts"]) == len(MEM.AMG_STEP32) + len(MEM.SHELL_STEP32)
+    assert all(f["gate_ok"].values()), f["gate_ok"]
+    assert all(x >= 0 for x in f["margins"].values())  # blocks above every target
+    for name, rows in f["rows"].items():
+        assert all(r["ratio"] <= f["gates"].get(name, F.GATE) for r in rows), name
+    assert all(F.GATE <= g <= 1.4 for g in f["gates"].values())
+
+
+@pytest.mark.slow
+def test_fp32_study_smoke():
+    """PR 18c test 11: amg_fp32_study's accuracy, storage, steps (hex, and the shell steps the fit
+    needs) and fit on tiny cases record their keys."""
+    from benchmarks import amg_fp32_study as F
+
+    (r,) = F.accuracy([("hex8 6^3", lambda: F.hex_case("hex8", 6), 3e5, (1e-8,))])
+    assert {"1e-08", "vcycle_s"} <= set(r["float32"]) and r["float64"]["1e-08"]["iterations"]
+    data = dict(storage=F.storage({"hex8": (6,)}, [("flat", 8)]),
+                steps_hex=F.steps_hex({"hex8": (4, 8), "hex20": (2, 4)}, (6,),
+                                      [("hex8", 8, (10,))]),
+                steps_shell=F.steps_shell([("flat", 8), ("flat", 16)], (6,), (), ()))  # fmt: skip
+    assert {"owned", "exact", "coarse", "fitted64"} <= set(data["storage"][0])
+    assert {"9-block", "low", "polish", "jacobi_low", "ws"} <= set(data["steps_hex"][0])
+    assert "polish64" in data["steps_hex"][-1] and data["steps_hex"][-1]["storage"]
+    f = F.fit(data, tight=[("hex8", 8, 6)], report=[])
+    assert set(f["storage32"]) == {"hex8", "shell"} and len(f["consts"]) == 9
+    assert set(f["gate_ok"]) == {"storage", "steps", "upper"} and f["polish64_slack"]
 
 
 @pytest.mark.peak
@@ -605,16 +804,36 @@ def test_mac_acceptance():
     assert est >= 2e9 and abs(est - peak) <= 0.2 * peak, (peak, est)
 
 
+@pytest.mark.peak  # its time budget has a 10x margin
 @pytest.mark.slow
-def test_acceptance_smoke():
-    """13b test 10: amg_study.acceptance at 8^3 records the keys; the estimate is
-    solve_modes_memory's."""
+@pytest.mark.skipif(sys.platform != "darwin", reason="Mac acceptance")
+def test_mac_acceptance_fp32():
+    """PR 18c test 8 (roadmap): test_mac_acceptance with precond_dtype "float32": converged, the
+    cold run within 15 min, the larger warm peak within 20% of solve_modes_memory, which is
+    below the fp64 estimate."""
     from benchmarks import amg_study
 
-    r = amg_study.acceptance(8, n_modes=4)
+    r = amg_study.acceptance(44, dtype="float32")
+    assert r["converged"] and r["time_s"] <= 900, r["time_s"]
+    peak, est = max(r["peaks_bytes"]), r["estimate_bytes"]
+    assert est >= 2e9 and abs(est - peak) <= 0.2 * peak, (peak, est)
+    mesh = box_mesh((44,) * 3, (1 / 44,) * 3, type="hex20")
+    assert est < solve_modes_memory(mesh, {"xmin": "xyz"}, 20, n_rigid=0)["total"]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("dtype", ["float64", "float32"])
+def test_acceptance_smoke(dtype):
+    """13b test 10: amg_study.acceptance at 8^3 records the keys; the estimate is
+    solve_modes_memory's (PR 18c: per precond_dtype)."""
+    from benchmarks import amg_study
+
+    r = amg_study.acceptance(8, n_modes=4, dtype=dtype)
     assert r["converged"] and r["iterations"] > 0 and len(r["peaks_bytes"]) == 2
+    assert r["dtype"] == dtype
     mesh = box_mesh((8,) * 3, (1 / 8,) * 3, type="hex20")
-    assert r["estimate_bytes"] == solve_modes_memory(mesh, {"xmin": "xyz"}, 4)["total"]
+    est = solve_modes_memory(mesh, {"xmin": "xyz"}, 4, precond_dtype=dtype)["total"]
+    assert r["estimate_bytes"] == est
 
 
 # ---------------------------------------------------------------- 8: errors, cap, leaves
@@ -634,6 +853,10 @@ def test_errors():
             amg(op, free, bad, mesh.points)
     with pytest.raises(SingularShiftError):
         amg(op, free, 0.0, mesh.points)
+    with pytest.raises(ValueError, match="dtype must be"):  # PR 18c
+        amg(op, free, 1.0, mesh.points, dtype="float16")
+    with pytest.raises(ValueError, match="dtype must be"):
+        amg_memory(mesh, 15, dtype="float16")
     jax.config.update("jax_enable_x64", False)
     try:
         with pytest.raises(ValueError, match="float64"):

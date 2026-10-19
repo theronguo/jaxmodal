@@ -34,6 +34,7 @@ select = ["E", "F", "I", "UP", "B"]
 "benchmarks/shell_accuracy.py" = ["E402"]  # enable_x64 before the imports
 "benchmarks/shell_amg_study.py" = ["E402"]  # enable_x64 before the imports (test helpers)
 "benchmarks/shell_solve_study.py" = ["E402"]  # enable_x64 before the imports (test helpers)
+"benchmarks/amg_fp32_study.py" = ["E402"]  # enable_x64 before the imports (test helpers)
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

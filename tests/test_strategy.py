@@ -32,7 +32,7 @@ from test_shift_invert import (
 )
 
 from jaxmodal.eigen import counting, solve_modes
-from jaxmodal.mesh import voxel_mesh
+from jaxmodal.mesh import box_mesh, voxel_mesh
 from jaxmodal.precond import SingularShiftError
 
 api = importlib.import_module("jaxmodal.eigen.api")
@@ -369,12 +369,15 @@ def test_memory_block_sentinel(fake_builds, monkeypatch):
 def test_memory_no_lobpcg_build(fake_builds, monkeypatch, f1):
     """Test 3: on "memory" no LOBPCG preconditioner is built ("short", a budget below chunk 5's
     need, the slice capacity given): f1 = 0 builds nothing before si_band and never asks for
-    aggregates; f1 > 0 builds only inside _precond_sigma."""
+    aggregates; f1 > 0 builds (and asks for aggregates) only inside _precond_sigma, and the
+    aggregates are dead at si_band (the slices build without them)."""
     seen, inside = {}, []
     real_band, real_pre = api.si_band, api._precond_sigma
 
     def band(*a, **kw):
         seen["before"] = len(fake_builds["builds"])
+        gc.collect()
+        seen["dead"] = [r() is None for r in fake_builds["aggs"]]
         return real_band(*a, **kw)
 
     def pre(op, free, R, build, **kw):
@@ -392,7 +395,8 @@ def test_memory_no_lobpcg_build(fake_builds, monkeypatch, f1):
             slice_options={"capacity": 96})  # fmt: skip
     assert seen["before"] == sum(inside) and (f1 == 0) == (not inside)
     assert f1 == 0 or sum(inside) > 0
-    assert not any(ra for _, ra, _ in fake_builds["builds"])
+    assert any(ra for _, ra, _ in fake_builds["builds"]) == (f1 != 0)
+    assert f1 == 0 or (seen["dead"] and all(seen["dead"]))
 
 
 def chunk_need(name, c):
@@ -1100,15 +1104,19 @@ def test_levers(fake_builds, monkeypatch):
     monkeypatch.setattr(api, "si_band", stub_band({}))
     B = chunk_need("short", 20) - 1
     otf = mem._models(prob("short")[0], "consistent", "auto", "float64", {"mode": "otf"}, None)
-    _, pc = models("short")
+    op, pc = models("short")
     cm = mem._c_max(otf[0], pc, prob("short")[2].n_dof, chunk=20, guards=None, low=False,
                     basis_dtype="float64", n_rigid=0, n_avail=n_avail("short"), budget=B,
                     host_budget=None)  # fmt: skip
     with pytest.warns(UserWarning) as w:
         run("short", fband("short", 15, 25), chunk=20, memory_budget=B,
             slice_options={"capacity": 96})  # fmt: skip
+    vc = mem._c_max(op, models("short", dtype="float32")[1], prob("short")[2].n_dof, chunk=20,
+                    guards=None, low=False, basis_dtype="float64", n_rigid=0,
+                    n_avail=n_avail("short"), budget=B, host_budget=None)  # fmt: skip
     (msg,) = [str(x.message) for x in w if "levers" in str(x.message)]
-    assert f"operator_options={{'mode': 'otf'}} (C_max {cm})" in msg and "precond_dtype" not in msg
+    assert f"operator_options={{'mode': 'otf'}} (C_max {cm})" in msg
+    assert f"precond_dtype='float32' (C_max {vc})" in msg  # AMG too since PR 18c
 
 
 def est(e, m, de=0, dm=0, he=0, hm=0):
@@ -1794,10 +1802,11 @@ def test_slice_reason(fake_builds, monkeypatch):
     assert info["reason"] == "forced" and info["slice_reason"] == "si_band's"
 
 
-def test_fp32_slices(fake_builds, monkeypatch):
-    """Test 16: precond_dtype="float32" on voxel through a slice path: make builds fp64 and the
-    slice searches model the fp64 multigrid."""
-    fake_builds["name"] = "voxel"
+@pytest.mark.parametrize("name", ["voxel", "short"])
+def test_fp32_slices(fake_builds, monkeypatch, name):
+    """Test 16: precond_dtype="float32" through a slice path (voxel GMG; since PR 18c hex AMG):
+    make builds fp64 and the slice searches model the fp64 multigrid."""
+    fake_builds["name"] = name
     seen, kws, pcs = {}, [], []
     stub = stub_band(seen)
 
@@ -1806,19 +1815,20 @@ def test_fp32_slices(fake_builds, monkeypatch):
         return stub(op, free, a, b, make, **kw)
 
     monkeypatch.setattr(api, "si_band", band)
-    real_g, real_cap = api.gmg, mem._slice_capacity
-    monkeypatch.setattr(api, "gmg", lambda *a, **kw: kws.append(kw) or real_g(*a, **kw))
+    pc = "gmg" if name == "voxel" else "amg"
+    real_g, real_cap = getattr(api, pc), mem._slice_capacity
+    monkeypatch.setattr(api, pc, lambda *a, **kw: kws.append(kw) or real_g(*a, **kw))
     real_cb = mem._count_block
     monkeypatch.setattr(mem, "_slice_capacity", lambda *a, **kw: pcs.append(a[1]) or
                         real_cap(*a, **kw))  # fmt: skip
     monkeypatch.setattr(mem, "_count_block", lambda *a, **kw: pcs.append(a[1]) or
                         real_cb(*a, **kw))  # fmt: skip
-    run("voxel", fband("voxel", 3, 12), n_modes=10, strategy="shift_invert",
-        precond_dtype="float32")  # fmt: skip
+    run(name, fband(name, 3, 12), n_modes=10, strategy="shift_invert", precond_dtype="float32")
     assert seen and kws and all(kw.get("dtype", "float64") == "float64" for kw in kws)
-    want = mem.gmg_memory(prob("voxel")[0], 6, dtype="float64")
+    model = mem.gmg_memory if name == "voxel" else mem.amg_memory
+    want = model(prob(name)[0], 6, dtype="float64")
     assert len(pcs) == 2 and all(p(6) == want for p in pcs)
-    assert want != mem.gmg_memory(prob("voxel")[0], 6, "float32")
+    assert want != model(prob(name)[0], 6, dtype="float32")
 
 
 @pytest.mark.parametrize("depth, risk", [(999, False), (1000, True)])
@@ -2083,3 +2093,30 @@ def test_cost_record():
     lob = rec["lobpcg"]
     assert [x["depth"] for x in lob["crossover"]] == rec["constants"]["hex20"]["depths"]
     assert set(lob["per_chunk"]) == {"40", "20", "10", "5"} and lob["held_out"]["measured"] > 0
+
+
+def test_memory_part(tmp_path, monkeypatch):
+    """PR 18c test 4: ladder() has fp32 V-cycle rows on an AMG mesh; --parts memory (cases
+    monkeypatched to a tiny box) replaces only memory, adds memory_commit / memory_versions
+    and keeps the other records, commit and versions."""
+    import json
+    import shutil
+
+    from benchmarks import harness, strategy_study
+
+    mesh = box_mesh((3, 3, 3), type="hex20")
+    rows = strategy_study.ladder(mesh, 1e9, None)
+    assert {r["precond_dtype"] for r in rows} == {"float64", "float32"}
+    src = harness.RESULTS / "strategy_study.json"
+    shutil.copy(src, tmp_path / "strategy_study.json")
+    tiny = lambda: box_mesh((3, 3, 3), type="hex20")  # noqa: E731
+    monkeypatch.setattr(strategy_study, "MEMORY_CASES", [("tiny", tiny, 1e9, None)])
+    monkeypatch.setattr(strategy_study, "TARGETS", {"tiny": "none"})
+    strategy_study.main(["--parts", "memory", "--out", str(tmp_path)])
+    old, new = (json.loads(p.read_text()) for p in (src, tmp_path / "strategy_study.json"))
+    assert set(new) == set(old) | {"memory_commit", "memory_versions"}
+    assert list(new["memory"]) == ["tiny"] and new["memory"]["tiny"]["target"] == "none"
+    assert new["memory_commit"] == strategy_study.commit()
+    assert isinstance(new["memory_versions"], dict)
+    assert all(new[k] == old[k] for k in old if k not in ("memory", "memory_commit",
+                                                         "memory_versions"))  # fmt: skip

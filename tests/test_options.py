@@ -82,16 +82,26 @@ LOBPCG_FINAL = dict(
 )
 
 
+def amg_calls(calls):
+    """calls without the aggregate keys (PR 18c reuse); asserts the first AMG build asks for
+    the aggregates and every later one reuses them."""
+    builds = [kw for name, _, kw, _ in calls if name == "amg"]
+    assert builds[0].pop("return_aggregates") and "aggregates" not in builds[0]
+    assert all(kw.pop("aggregates") is not None for kw in builds[1:])
+    return [c[:3] for c in calls]
+
+
 def test_defaults_snapshot(calls):
     """Test 1: with every option None the calls equal today's (a clamped body: sigma = 0 is
-    accepted, one pre-estimate round)."""
+    accepted, one pre-estimate round; since PR 18c LOBPCG's AMG build reuses the aggregates
+    and passes dtype)."""
     lam, _, info = solve_modes(box(), MAT, CLAMP, 4)
     s = info["sigma"]
-    assert [c[:3] for c in calls] == [
+    assert amg_calls(calls) == [
         ("unstructured", [None], dict(mass="consistent", nodal_mass=None)),
         ("amg", [0.0], dict(nonsingular=True)),
         ("lobpcg", [1, 0.1, None], dict(maxit=20, seed=0)),
-        ("amg", [s], dict(nonsingular=True)),
+        ("amg", [s], dict(nonsingular=True, dtype="float64")),
         ("lobpcg", [4, 1e-6, None, None], LOBPCG_FINAL | {"polish": calls[-1][2]["polish"]}),
     ]
     assert callable(calls[-1][2]["polish"])  # AMG: the polish closure
@@ -105,6 +115,18 @@ def test_defaults_snapshot(calls):
         ("gmg", [s], dict(dtype="float64")),
         ("lobpcg", [4, 1e-6, None, None], LOBPCG_FINAL | {"polish": None}),
     ]
+
+
+def test_fp32_amg_builds(calls):
+    """PR 18c test 4: with precond_dtype "float32" the pre-estimate's AMG build is fp64 (no
+    dtype) and LOBPCG's is fp32."""
+    _, _, info = solve_modes(box(), MAT, CLAMP, 4, precond_dtype="float32")
+    builds = [c for c in amg_calls(calls) if c[0] == "amg"]
+    assert builds == [
+        ("amg", [0.0], dict(nonsingular=True)),
+        ("amg", [info["sigma"]], dict(nonsingular=True, dtype="float32")),
+    ]
+    assert info["converged"]
 
 
 OPERATOR_VALUES = {"mode": "otf", "path": "gather", "chunk": 7, "range_nodes": 64, "slab": 2}
@@ -318,6 +340,9 @@ def test_key_check_before_build(monkeypatch):
     monkeypatch.setattr(api, "unstructured", fail)
     with pytest.raises(ValueError, match="unknown"):
         solve_modes(box(), MAT, CLAMP, 1, precond_options={"degre": 3})
+    # PR 18c: AMG's dtype is reserved (set through precond_dtype)
+    with pytest.raises(ValueError, match=r"unknown .*'dtype'.*\(dtype: precond_dtype\)"):
+        solve_modes(box(), MAT, CLAMP, 1, precond_options={"dtype": "float32"})
 
 
 # ------------------------------------------------------------- 5: solve_modes_memory

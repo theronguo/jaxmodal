@@ -6,6 +6,7 @@ the solid-shell path (precond/shell.py, precond/schwarz.py). See docs/preconditi
 import dataclasses
 import hashlib
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
@@ -19,7 +20,7 @@ from ..operators.common import is_count, register
 from ..operators.constraints import ap_operator
 from . import schwarz
 from .chebyshev import chebyshev, lmax_estimate
-from .gmg import GMG, Cholesky
+from .gmg import GMG, Cholesky, _to32
 from .jacobi import _block_jacobi, _inverse_blocks
 from .pmg import Hex8Pattern, _check, _hex8_galerkin, _p_level
 
@@ -118,14 +119,28 @@ def _diag_blocks(A, b):
     return D
 
 
-def _level(A, b, degree, ratio):
-    """(BlockELL A, Chebyshev over its b x b diagonal block Jacobi) for an assembled level."""
-    E = block_ell(A, b)
+def _level(A, b, degree, ratio, dtype="float64"):
+    """(BlockELL A, Chebyshev over its b x b diagonal block Jacobi) for an assembled level, the
+    values stored in dtype (the Jacobi blocks stay fp64 until _cast)."""
+    E = block_ell(A, b, dtype)
     inv, m = _inverse_blocks(jnp.asarray(_diag_blocks(A, b)), jnp.ones(A.shape[0], bool))
     if not bool(jnp.isfinite(inv).all()):
         raise ValueError("AMG level smoother blocks are not finite")
     D = Partial(_block_jacobi, inv, m)
     return E, chebyshev(E, D, lmax_estimate(E, D), degree, ratio)
+
+
+def _cast(out, dtype):
+    """The levels with fp32 smoothers and Chebyshev scalars (gmg._to32; level 0 keeps its
+    A_P) when dtype is "float32", checked finite after the cast (the fine level's smoother
+    never passes _level's check)."""
+    if dtype == "float64":
+        return out
+    out = _to32(out)
+    leaves = jax.tree.leaves([(S.precond, S.lmax) for _, S in out])
+    if not all(bool(jnp.isfinite(x).all()) for x in leaves if x.dtype.kind == "f"):
+        raise ValueError("AMG level smoother blocks are not finite")
+    return out
 
 
 def _cholesky(A):
@@ -158,7 +173,7 @@ def _fingerprint(op):
 
 def amg(
     op, free, sigma, points, *, degree=2, ratio=30.0, max_coarse=1000, nonsingular=False,
-    aggregates=None, return_aggregates=False,
+    aggregates=None, return_aggregates=False, dtype="float64",
 ):  # fmt: skip
     """Multilevel V-cycle for A_P = m (K + sigma M) m + s (I - m) of an Unstructured operator, as
     a GMG pytree callable on (n_dof, k) blocks (masked output): the p-level (Chebyshev over
@@ -178,7 +193,13 @@ def amg(
     strength, aggregation and the tentative fit (on solid shells also fibers and frames) and
     recomputes everything that depends on the values. For new materials, s_K, s_M or sigma
     the result equals a fresh setup; for moved points it keeps the old near-null space (an
-    approximation). max_coarse is then ignored."""
+    approximation). max_coarse is then ignored.
+
+    dtype "float32" runs the V-cycle in fp32: the assembled levels, transfers and smoothers
+    are stored in fp32; the fine A_P (shared with the caller), the p-level transfer, the
+    coarsest factor and the mask stay fp64. Aggregates are dtype-independent."""
+    if dtype not in ("float64", "float32"):
+        raise ValueError(f"dtype must be 'float64' or 'float32', got {dtype!r}")
     if not is_count(max_coarse):
         raise ValueError(f"max_coarse must be an int >= 1, got {max_coarse!r}")
     sigma = _check("amg", op, sigma, nonsingular)
@@ -201,7 +222,7 @@ def amg(
             raise ValueError(SHELL_BLOCKS)
         shell = aggregates.shell if aggregates is not None else None
         P, pattern, shell = _shell_amg(
-            op, free, sigma, points, degree, ratio, max_coarse, pattern, shell
+            op, free, sigma, points, degree, ratio, max_coarse, pattern, shell, dtype
         )
         if return_aggregates:
             return P, AMGAggregates(pattern, (), mask.copy(), key, shell)
@@ -218,15 +239,17 @@ def amg(
     out, transfers = ([], []) if hex8 else ([fine], [pattern.T])
     for i, (Al, P) in enumerate(levels):
         # all-hex8: the matrix-free A_P stands in for the assembled first SA level
-        out.append(fine if hex8 and i == 0 else _level(Al, 3 if i == 0 else 1, degree, ratio))
-        transfers.append(ELLTransfer(block_ell(P, 1), block_ell(P.T.tocsr(), 1)))
-    P = GMG(tuple(out), tuple(transfers), _cholesky(coarsest), A.free, None)
+        b = 3 if i == 0 else 1
+        out.append(fine if hex8 and i == 0 else _level(Al, b, degree, ratio, dtype))
+        transfers.append(ELLTransfer(block_ell(P, 1, dtype), block_ell(P.T.tocsr(), 1, dtype)))
+    out = _cast(out, dtype)
+    P = GMG(tuple(out), tuple(transfers), _cholesky(coarsest), A.free, None, dtype)
     if return_aggregates:
         return P, AMGAggregates(pattern, tents, mask.copy(), key)
     return P
 
 
-def _shell_amg(op, free, sigma, points, degree, ratio, max_coarse, pattern, shell):
+def _shell_amg(op, free, sigma, points, degree, ratio, max_coarse, pattern, shell, dtype):
     """(GMG, pattern, shell): the solid-shell V-cycle, Chebyshev over additive Schwarz on
     every level (the matrix-free A_P on level 0, A_b = A_P there), down to a dense Cholesky."""
     from .shell import B, _shell_levels  # shell imports amg's constants
@@ -236,10 +259,11 @@ def _shell_amg(op, free, sigma, points, degree, ratio, max_coarse, pattern, shel
     levels, coarsest, shell = _shell_levels(op, Ab, A.free, points, max_coarse, shell)[:3]
     out, transfers = [], []
     for i, (Al, (blocks, sel), P) in enumerate(levels):
-        S = schwarz.build(Al, blocks, sel)
-        E = A if i == 0 else block_ell(Al, B)
+        S = schwarz.build(Al, blocks, sel, dtype=dtype)
+        E = A if i == 0 else block_ell(Al, B, dtype)
         out.append((E, chebyshev(E, S, lmax_estimate(E, S), degree, ratio)))
         b = 3 if i == 0 else B
-        transfers.append(ELLTransfer(block_ell(P, b), block_ell(P.T.tocsr(), b)))
-    P = GMG(tuple(out), tuple(transfers), _cholesky(coarsest), A.free, None)
+        transfers.append(ELLTransfer(block_ell(P, b, dtype), block_ell(P.T.tocsr(), b, dtype)))
+    out = _cast(out, dtype)
+    P = GMG(tuple(out), tuple(transfers), _cholesky(coarsest), A.free, None, dtype)
     return P, pattern, shell

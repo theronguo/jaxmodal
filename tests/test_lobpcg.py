@@ -907,6 +907,10 @@ def test_precond_composition():
     )
     got = solve_modes_memory(box, {}, 4, precond="jacobi")
     assert got == lobpcg_memory(um, n_box, 4, n_rigid=6)
+    amg32 = functools.partial(amg_memory, box, dtype="float32")  # PR 18c
+    assert solve_modes_memory(box, {}, 4, precond="amg", precond_dtype="float32") == lobpcg_memory(
+        um, n_box, 4, n_rigid=6, precond_memory=amg32
+    )
 
 
 # ---------------------------------------------------------------- PR 18b: switch, polish, RR

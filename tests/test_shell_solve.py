@@ -121,6 +121,52 @@ def test_accuracy(name):
         assert info["iterations"] <= 35  # measured 28
 
 
+PLATE_PCG = [(100, {"xmin": "xyz"}, 1e-8), (1000, {"xmin": "xyz", "xmax": "xyz"}, 1e-6)]
+
+
+@pytest.mark.parametrize("Lt, bcs, tol", PLATE_PCG)
+def test_fp32_pcg(Lt, bcs, tol):
+    """PR 18c test 3 (roadmap): the ssh8 plate 64^2 at sigma 1: the fp32 iterations <= 1.05 x
+    fp64 + 1 (L/t = 1000 clamps both edges: with xmin alone both dtypes stagnate at 2-3e-6)."""
+    from test_amg import fp32_pcg
+
+    mesh = T.plate(64, Lt)[0]
+    op, free = unstructured(mesh, STEEL), dof_mask(mesh, bcs)
+    i64, i32 = fp32_pcg(op, free, 1.0, mesh.points, tol)
+    assert i32 <= 1.05 * i64 + 1, (i64, i32)
+
+
+@pytest.mark.slow
+def test_fp32_thin():
+    """PR 18c test 3: the 32^2 plate at L/t = 1000, tol 1e-6, with precond_dtype "float32": the
+    fp32 polish runs and the result passes test_polish_thin's checks."""
+    mesh = T.plate(32, 1000)[0]
+    lam, V, info = solve_modes(mesh, STEEL, SS, 20, tol=1e-6, maxit=3000,
+                               precond_dtype="float32")  # fmt: skip
+    (ch,) = info["chunks"]
+    assert info["converged"] and ch["polish"] is not None
+    K, M = assemble(mesh, STEEL)
+    free = dof_mask(mesh, SS)
+    Kf, Mf, idx = restrict(K, M, free)
+    Vf = V[idx]
+    MV = Mf @ Vf
+    r = np.linalg.norm(Kf @ Vf - MV * lam, axis=0) / (lam * np.linalg.norm(MV, axis=0))
+    assert np.all(r <= info["thresholds"]), r / info["thresholds"]
+    lr = reference_modes(K, M, 24, free, points=mesh.points)[0]
+    check_lam(lam, lr, helpers.lmax(Kf, Mf), 1e-6)
+
+
+@pytest.mark.slow
+def test_fp32_stack():
+    """PR 18c test 3: CASES["stack"] with precond_dtype "float32", 20 modes at tol 1e-10, against
+    reference_modes (fp32 does not polish there: no polish pin)."""
+    mesh, bcs, mats = CASES["stack"]()
+    lam, V, info = solve_modes(mesh, mats, bcs, 20, tol=1e-10, maxit=3000,
+                               precond_dtype="float32")  # fmt: skip
+    assert info["converged"] and info["precond"] == "amg"
+    check_reference(mesh, mats, bcs, lam, V, info, 1e-10)
+
+
 # ---------------------------------------------------------------- 1: dispatch
 
 
@@ -129,6 +175,9 @@ def test_resolve():
     assert API.resolve_precond(flat, "auto", "float64") == "amg"
     assert API.resolve_precond(web, "auto", "float64") == "amg"
     assert API.resolve_precond(hex20_skin(), "auto", "float64") == "jacobi"
+    assert API.resolve_precond(flat, "auto", "float32") == "amg"  # PR 18c
+    with pytest.raises(ValueError, match="needs precond 'gmg' or 'amg'"):  # auto: Jacobi
+        API.resolve_precond(hex20_skin(), "auto", "float32")
 
 
 def test_amg_raises_up_front(monkeypatch):
@@ -351,7 +400,7 @@ def test_polish_chunks(mode):
 
 @pytest.mark.slow
 def test_band(monkeypatch):
-    """band=(0, f) on the flat 32^2 plate: every band mode, the count's AMG reuses LOBPCG's
+    """band=(0, f) on the flat 32^2 plate: every band mode, the count's AMG reuses the solve's
     aggregates."""
     mesh = T.plate(32, 50)[0]
     lr = _ref(mesh)[0]
@@ -398,9 +447,9 @@ def study():
 
 
 @functools.cache
-def built(case, n, degree=2):
+def built(case, n, degree=2, dtype="float64"):
     """(mesh, op, free, P) of the benchmark's AMG build at sigma 1."""
-    return study().build(case, n, degree)
+    return study().build(case, n, degree, dtype)
 
 
 def modelled(mesh, m, pc):
@@ -413,9 +462,9 @@ def modelled(mesh, m, pc):
     return out
 
 
-def measured(case, n, m, degree=2):
+def measured(case, n, m, degree=2, dtype="float64"):
     """The benchmark's measure on the cached build."""
-    return study().measure(*built(case, n, degree)[1:], m)
+    return study().measure(*built(case, n, degree, dtype)[1:], m)
 
 
 GATE = 1.3  # model <= GATE x measured at large n (see test_shell_steps)
@@ -450,6 +499,31 @@ def test_shell_steps(case, n, m):
             assert model[key] <= GATE * got[key], (key, model[key] / got[key])
 
 
+@pytest.mark.parametrize(
+    "case, n, m",
+    [slow_if(c in ("stack3", "block") or n >= 128 or m == 120, c, n, m)
+     for c, n, m in STEP_CASES if m in (6, 25, 120)],
+)  # fmt: skip
+def test_shell_steps32(case, n, m):
+    """PR 18c test 6: with fp32 AMG the step, low step and polish at the lobpcg_memory level
+    >= the measured; at flat and stack x3 128^2, m 25 and 120 (the fit's TIGHT points) <= the
+    recorded gate (1.3, or the logged widened gate) x measured."""
+    import json
+
+    from benchmarks import harness
+
+    gates = json.load(open(harness.RESULTS / "amg_fp32_study.json"))["fit"]["gates"]
+    mesh = built(case, n, dtype="float32")[0]
+    pc = amg_memory(mesh, m, dtype="float32")
+    model, got = modelled(mesh, m, pc), measured(case, n, m, dtype="float32")
+    blk = 8 * 3 * len(mesh.points) * m
+    for key in got:
+        assert model[key] >= got[key], (key, (model[key] - got[key]) / blk)
+        if n == 128 and m >= 25:
+            gate = gates.get(f"shell/{key}", GATE)
+            assert model[key] <= gate * got[key], (key, model[key] / got[key])
+
+
 @pytest.mark.slow
 def test_shell_steps_degree3():
     """Degree 3 on flat 128^2 (on 64^2 its step is 12 MB, 4 blocks, above the model)."""
@@ -462,7 +536,7 @@ def test_shell_steps_degree3():
 @pytest.mark.slow
 @pytest.mark.parametrize("t, n", [("hex20", 14), ("hex8", 24), ("hex8", 40)])
 def test_hex_polish_below_step(t, n):
-    """Hex AMG has no polish term: its modelled step covers the measured polish."""
+    """fp64 hex AMG has no polish term: its modelled step covers the measured polish."""
     S = study()
     mesh = box_mesh((n,) * 3, (1 / n,) * 3, type=t)
     op, free = unstructured(mesh, STEEL), dof_mask(mesh, {"xmin": "xyz"})
@@ -471,6 +545,25 @@ def test_hex_polish_below_step(t, n):
         pc = amg_memory(mesh, m)
         assert "polish" not in pc
         assert modelled(mesh, m, pc)["9-block"] >= S.polish(op, jnp.asarray(free), P, m)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("t, n", [("hex20", 14), ("hex8", 24), ("hex8", 40)])
+def test_hex_polish_fp32(t, n):
+    """PR 18c test 6: the fp32 hex polish <= fl ws + amg_memory's polish term, and lobpcg_memory
+    takes that term (with and without low_memory)."""
+    S = study()
+    mesh = box_mesh((n,) * 3, (1 / n,) * 3, type=t)
+    op, free = unstructured(mesh, STEEL), dof_mask(mesh, {"xmin": "xyz"})
+    P = API.amg(op, free, 1.0, mesh.points, dtype="float32")
+    pc = functools.partial(amg_memory, mesh, dtype="float32")
+    for m in (8, 25):
+        assert modelled(mesh, m, pc(m))["polish"] >= S.polish(op, jnp.asarray(free), P, m)
+    om, nd = functools.partial(unstructured_memory, mesh), op.n_dof
+    terms = modelled(mesh, 15, pc(15))
+    assert lobpcg_memory(om, nd, 10, precond_memory=pc)["step"] == max(terms.values())
+    low = lobpcg_memory(om, nd, 10, precond_memory=pc, low_memory=True)["step"]
+    assert low == max(terms["low"], terms["polish"])
 
 
 @pytest.mark.parametrize("off", [False, True])
@@ -486,6 +579,22 @@ def test_polish_lever(off):
     assert ("polish_options={'on': False}" in msg) != off
 
 
+@pytest.mark.parametrize("dtype", ["float64", "float32"])
+def test_polish_lever_hex(dtype):
+    """PR 18c test 4: hex AMG names polish_options={'on': False} as a lever only in fp32 (its
+    polish term; the fp64 hex polish stays below the step), and both name precond_dtype unless
+    it is already fp32. The budget is fp64-based for both: on this tiny mesh the fp32 step
+    intercepts make the fp32 estimate the larger one."""
+    mesh, bcs = box_mesh((6,) * 3, (1 / 6,) * 3, type="hex20"), {"xmin": "xyz"}
+    budget = 0.8 * solve_modes_memory(mesh, bcs, 20)["total"]
+    with pytest.warns(UserWarning, match="levers") as w, pytest.raises(ValueError, match="slice"):
+        solve_modes(mesh, STEEL, bcs, band=(0, 1e4), memory_budget=budget, verify=False,
+                    precond_dtype=dtype)  # fmt: skip
+    msg = [str(x.message) for x in w if "levers" in str(x.message)][0]
+    assert ("polish_options={'on': False}" in msg) == (dtype == "float32")
+    assert ("precond_dtype='float32'" in msg) == (dtype == "float64")
+
+
 def test_band_probe_polish(monkeypatch):
     """band_probe_block passes polish_options to both of its models."""
     seen, real = [], MEM._models
@@ -498,7 +607,7 @@ def test_band_probe_polish(monkeypatch):
 
 def test_lobpcg_memory_max():
     """step = max(9-block, low, polish) (low_memory: max(low, polish)); no polish term with
-    {"on": False}, Jacobi, GMG, hex AMG; on flat 64^2 at m = 15 the polish term wins; on hex8
+    {"on": False}, Jacobi, GMG, fp64 hex AMG; on flat 64^2 at m = 15 the polish term wins; on hex8
     AMG at 100k and m = 60 the low term wins."""
     mesh = T.plate(64, 100)[0]
     n = 3 * len(mesh.points)
@@ -538,21 +647,30 @@ STORAGE_CASES = [("flat", 64), ("stack3", 64), ("stack10", 32), ("T", 24), ("web
                  ("block", 16), ("cylinder", 0), ("L", 24), ("flat", 48)]  # fmt: skip
 
 
+@pytest.mark.parametrize("dtype", ["float64", "float32"])
 @pytest.mark.parametrize("case, n", STORAGE_CASES)
-def test_shell_storage(case, n):
-    """amg_memory's storage >= the owned device bytes; the mesh scan's patches equal amg's."""
-    mesh, op, _, P = built(case, n)
-    assert amg_memory(mesh, 6)["storage"] >= owned_bytes(P, op)
+def test_shell_storage(case, n, dtype):
+    """amg_memory's storage >= the owned device bytes; the mesh scan's patches equal amg's and
+    the fine Schwarz bytes equal schwarz.nbytes (its exact part; PR 18c test 5: fp32 too)."""
+    mesh, op, _, P = built(case, n, dtype=dtype)
+    assert amg_memory(mesh, 6, dtype=dtype)["storage"] >= owned_bytes(P, op)
     sizes = MEM._shell_scan(mesh)[0]
+    S = P.levels[0][1].precond
+    assert sum(a.nbytes for a in S.idx + S.inv) == T.SW.nbytes(sizes, dtype)
     assert np.array_equal(np.sort(sizes), np.sort(3 * (T.columns(op) >= 0).sum(1)))
 
 
 @pytest.mark.slow
+@pytest.mark.parametrize("dtype", ["float64", "float32"])
 @pytest.mark.parametrize("case, n", [("flat", 128), ("block", 32)])
-def test_shell_storage_tight(case, n):
-    mesh, op, _, P = built(case, n)
+def test_shell_storage_tight(case, n, dtype):
+    """Within 1.3x; fp32 block 32^3 within 1.35x (measured 1.31x: the fp64 coarse factor, floored
+    at 1000 DOF, is a larger share once the fitted part shrinks, and the family's one STORAGE32
+    ratio is set by the T junction; logged in docs/open_items.md)."""
+    mesh, op, _, P = built(case, n, dtype=dtype)
     got = owned_bytes(P, op)
-    assert got <= amg_memory(mesh, 6)["storage"] <= 1.3 * got
+    gate = 1.35 if (case, dtype) == ("block", "float32") else 1.3
+    assert got <= amg_memory(mesh, 6, dtype=dtype)["storage"] <= gate * got
 
 
 def test_shell_scan_cached():
@@ -602,6 +720,37 @@ def test_shell_build_peak():
         assert pc["storage"] >= r["owned"] and pc["build"] >= r["peak_bytes"], r
         if r["case"] == "block" and r["size"] == 64:
             assert pc["build"] <= 1.35 * r["peak_bytes"], pc["build"] / r["peak_bytes"]
+
+
+@pytest.mark.peak
+@pytest.mark.slow
+@pytest.mark.skipif(sys.platform != "darwin", reason="peak_bytes needs macOS")
+def test_shell_build_peak32():
+    """PR 18c test 9: the fp32 build peak (fresh subprocesses, above the built operator) <=
+    amg_memory's build (fp64 storage) and >= build / 1.35 on flat 362^2 and block 64^3; the
+    fp64 rebuild with the aggregates held (the sigma rounds): its peak plus the aggregates'
+    bytes <= build on flat 256^2."""
+    from benchmarks import amg_fp32_study as F
+
+    for r in F.peaks([("flat", 362), ("block", 64)], [], [("flat", 256)]):
+        if r.get("rebuild"):
+            assert r["peak_bytes"] + r["aggs"] <= r["build"], r
+        else:
+            assert r["build"] / 1.35 <= r["peak_bytes"] <= r["build"], r
+
+
+@pytest.mark.peak
+@pytest.mark.slow
+@pytest.mark.skipif(sys.platform != "darwin", reason="peak_bytes needs macOS")
+def test_shell_791k_peak32():
+    """PR 18c test 9: the 791k plate solve with precond_dtype "float32" (synchronous dispatch).
+    Its peak is bimodal on identical runs (4.75 GB, the memory_analysis model's regime, or
+    6.9-7.1 GB with a timing-dependent extra that fp64 shows too; docs/open_items.md), so the
+    check covers both: 0.75 x peak <= solve_modes_memory <= 1.2 x peak (>= 2 GB)."""
+    r = study().solve_peak(dtype="float32")
+    assert np.all(r["converged"]) and r["precond"] == "amg"
+    est, peak = r["estimate_bytes"], r["peak_bytes"]
+    assert est >= 2e9 and 0.75 * peak <= est <= 1.2 * peak, (peak, est)
 
 
 @pytest.mark.peak

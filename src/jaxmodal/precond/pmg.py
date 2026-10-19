@@ -47,10 +47,10 @@ class NodalTransfer:
     cweight: jax.Array  # (n_coarse, w')
 
     def __call__(self, x):
-        return _gather(self.parent, self.weight, x)
+        return _gather(self.parent, self.weight, x).astype(x.dtype)  # fp64 tables, fp32 cycles
 
     def restrict(self, r):
-        return _gather(self.child, self.cweight, r)
+        return _gather(self.child, self.cweight, r).astype(r.dtype)
 
 
 register(NodalTransfer, [])

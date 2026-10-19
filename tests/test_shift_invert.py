@@ -534,6 +534,10 @@ def test_errors():
             run(lo, hi)
     with pytest.raises(ValueError, match="fp64"):
         si.si_slice(op, free, 1.0, 2.0, gmg_like(), capacity=60)
+    mesh = prob("short")[0]  # PR 18c: an fp32 AMG is refused too
+    with pytest.raises(ValueError, match="a GMG or AMG with fp32 levels"):
+        si.si_slice(op, free, 1.0, 2.0, amg(op, free, 1.0, mesh.points, dtype="float32"),
+                    capacity=60)  # fmt: skip
     with pytest.raises(ValueError, match="block"):
         run(1.0, 2.0, block=0)
     with pytest.raises(ValueError, match="capacity"):

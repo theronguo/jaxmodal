@@ -152,7 +152,7 @@ def lobpcg_memory(
     basis columns (default _capacity's for n_modes).
 
     step = max(9-block, low, polish) (low_memory: max(low, polish); polish for the shell AMG
-    family only). Returns step, basis, rigid, host, precond (its storage),
+    family and fp32 hex AMG). Returns step, basis, rigid, host, precond (its storage),
     total = overhead + storage + precond + basis + rigid + host + max(build, precond build, step)
     and per memory space (a GPU; the CPU uses total): device_total (the device terms and the
     device builds), host_total (the host peak: max(operator build, V + AMG build, V + 2 chunks
@@ -170,7 +170,7 @@ def lobpcg_memory(
     step = Al * b + fl * ws + pc["step_low"]  # the low step, also after a 9-block switch
     if not low_memory:
         step = max(step, A * b + f * ws + pc["step"])
-    if "polish" in pc:  # the polish's PCG (the shell AMG family)
+    if "polish" in pc:  # the polish's PCG (shell AMG, fp32 hex AMG)
         step = max(step, fl * ws + pc["polish"])
     out = dict(
         step=step,
@@ -345,6 +345,25 @@ SHELL_STEP = {
     "polish": (26.7, 4.0, 128e6),
     "count": (15.2, 5.8, 116e6),
 }
+# fp32 V-cycles (amg dtype "float32", PR 18c; benchmarks/amg_fp32_study.py): the fitted storage
+# times one ratio per family (the maximum over the storage grid, rounded up), and the step
+# terms refitted as above (hex: 8 n (a m + c) + 8 m K; shell: 8 n (a m + c) + K0) with
+# asymptote rows on the long series. The polish's PCG keeps fp64 vectors around the fp32
+# cycle, so hex gains a polish term. Counts and builds stay fp64.
+STORAGE32 = {"hex8": 0.636, "p": 0.548, "shell": 0.574}
+AMG_STEP32 = {
+    ("hex8", "9-block"): (3.26, 55.4, 351_800),
+    ("hex8", "low"): (8.74, 53.1, 433_600),
+    ("hex8", "polish"): (20.44, 40.1, 505_500),
+    ("p", "9-block"): (3.64, 21.9, 525_400),
+    ("p", "low"): (8.70, 14.5, 576_100),
+    ("p", "polish"): (20.70, 4.0, 830_500),
+}
+SHELL_STEP32 = {
+    "9-block": (5.2, 16.0, 37e6),
+    "low": (11.1, 18.9, 65e6),
+    "polish": (23.5, 10.0, 89e6),
+}
 
 
 @functools.lru_cache(maxsize=1)  # Mesh hashes by identity; keeps the last mesh alive
@@ -360,20 +379,24 @@ def _shell_scan(mesh):
     return sizes, 3 * int(shell.sum()), 3 * int((~shell).sum()), len(np.unique(group[shell]))
 
 
-def _shell_amg_memory(mesh, m, max_coarse, degree):
+def _shell_amg_memory(mesh, m, max_coarse, degree, dtype):
     if unsupported_shell(mesh.blocks):
         raise ValueError(SHELL_BLOCKS)
     sizes, n_s, n_h, n_f = _shell_scan(mesh)
     n = 3 * len(mesh.points)
     st = SHELL_STORAGE
-    storage = (schwarz.nbytes(sizes) + st["shell"] * n_s + st["fiber"] * n_f + st["hex"] * n_h
-               + 8 * min(n, max(max_coarse, 1000)) ** 2)  # fmt: skip
+    fitted = st["shell"] * n_s + st["fiber"] * n_f + st["hex"] * n_h
+    coarse = 8 * min(n, max(max_coarse, 1000)) ** 2
+    storage = schwarz.nbytes(sizes) + fitted + coarse
     beta, g = SHELL_BUILD
-    hb = beta + storage + g["shell"] * n_s + g["hex"] * n_h
+    hb = beta + storage + g["shell"] * n_s + g["hex"] * n_h  # the setup runs in fp64
+    fp32 = dtype == "float32"
+    if fp32:
+        storage = schwarz.nbytes(sizes, dtype) + STORAGE32["shell"] * fitted + coarse
     loop = 8 * m * AMG_LOOP_K if degree > 2 else 0
 
     def term(key):
-        a, c, K0 = SHELL_STEP[key]
+        a, c, K0 = SHELL_STEP32[key] if fp32 and key != "count" else SHELL_STEP[key]
         return 8 * n * (a * m + c) + K0 + loop
 
     out = dict(storage=storage, build=hb, host_build=hb, step=term("9-block"),
@@ -400,35 +423,45 @@ def _amg_scan(mesh):
     return fam, 3 * len(corner), tables
 
 
-def amg_memory(mesh, m, max_coarse=1000, degree=2):
+def amg_memory(mesh, m, max_coarse=1000, degree=2, dtype="float64"):
     """Estimated bytes of amg(unstructured(mesh, ...), free, sigma, mesh.points, degree=degree,
-    max_coarse=max_coarse) applied to (n_dof, m) blocks: storage (the p-level exact from the
-    mesh, the AMG levels per corner DOF, the coarsest factor), build and host_build (the setup
-    host peak), step and step_low (extra LOBPCG step bytes over Jacobi), count (extra
-    count-recurrence bytes); meshes with ssh8 blocks also polish (the polish's PCG).
-    Calibrated on box meshes at max_coarse 1000 (the shell family on flat, stacked, web and
-    block meshes); the coarse term uses max(max_coarse, 1000) (an upper bound, loose above
-    1000)."""
+    max_coarse=max_coarse, dtype=dtype) applied to (n_dof, m) blocks: storage (the p-level
+    exact from the mesh, the AMG levels per corner DOF, the coarsest factor), build and
+    host_build (the setup host peak, fp64 for both dtypes), step and step_low (extra LOBPCG
+    step bytes over Jacobi), count (extra count-recurrence bytes, an fp64 build); meshes with
+    ssh8 blocks, and fp32 on hex, also polish (the polish's PCG). Calibrated on box meshes at
+    max_coarse 1000 (the shell family on flat, stacked, web and block meshes); the coarse term
+    uses max(max_coarse, 1000) (an upper bound, loose above 1000)."""
+    if dtype not in ("float64", "float32"):
+        raise ValueError(f"dtype must be 'float64' or 'float32', got {dtype!r}")
     if "ssh8" in mesh.blocks:
-        return _shell_amg_memory(mesh, m, max_coarse, degree)
+        return _shell_amg_memory(mesh, m, max_coarse, degree, dtype)
     n_nodes = len(mesh.points)
     fam, n_c, tables = _amg_scan(mesh)
     n_dof = 3 * n_nodes
-    storage = 120 * n_nodes + tables  # free mask, node-block Jacobi inverses and mask (fp64)
-    storage += AMG_STORAGE[fam] * n_c + 8 * min(n_c, max(max_coarse, 1000)) ** 2
+    fp32 = dtype == "float32"
+    # free mask (fp64), node-block Jacobi inverses and mask (dtype); the tables stay fp64
+    storage = (72 if fp32 else 120) * n_nodes + tables
+    storage += (STORAGE32[fam] if fp32 else 1) * AMG_STORAGE[fam] * n_c
+    storage += 8 * min(n_c, max(max_coarse, 1000)) ** 2
     beta, alpha = AMG_BUILD
-    a9, c9, K9 = AMG_STEP[(fam, "9-block")]
-    al, cl, Kl = AMG_STEP[(fam, "low")]
     loop = AMG_LOOP_K if degree > 2 else 0
     hb = beta + max(alpha[t] for t in mesh.blocks) * n_c
+
+    def term(key):
+        a, c, K = (AMG_STEP32 if fp32 else AMG_STEP)[(fam, key)]
+        return 8 * n_dof * (a * m + c) + 8 * m * (K + loop)
+
     out = dict(
         storage=storage,
         build=hb,
         host_build=hb,  # pyamg runs on the host
-        step=8 * n_dof * (a9 * m + c9) + 8 * m * (K9 + loop),
-        step_low=8 * n_dof * (al * m + cl) + 8 * m * (Kl + loop),
+        step=term("9-block"),
+        step_low=term("low"),
         count=8 * n_dof * (AMG_COUNT[0] * m + AMG_COUNT[1]) + 8 * m * loop,
     )
+    if fp32:
+        out["polish"] = term("polish")
     return {k: int(v) for k, v in out.items()}
 
 
@@ -458,7 +491,7 @@ def _models(mesh, mass, precond, precond_dtype, operator_options, precond_option
     elif name == "amg":
         pc = functools.partial(
             amg_memory, mesh, max_coarse=pc_opts.get("max_coarse", 1000),
-            degree=pc_opts.get("degree", 2),
+            degree=pc_opts.get("degree", 2), dtype=precond_dtype,
         )  # fmt: skip
     if not check_polish_options(polish_options, name, label).get("on", True):
         pc = functools.partial(_no_polish, pc)

@@ -86,4 +86,4 @@ Each mechanism exists because of a measured failure, and each has a test that fa
 - Footprint counts compressed pages at their compressed size, so estimator checks use non-constant data.
 - On macOS `time_s` includes the page faults of fresh mmaps, since freed large blocks are unmapped.
 - The STREAM triad counts 24 B per element ($a = b + s c$; write-allocate traffic is not counted).
-- `measure` records no compile time. Compile-time tests (PRs 5 and 18) time `jit(f).lower(...).compile()` in a fresh subprocess with the cache disabled.
+- `measure` records no compile time. Compile-time tests (PRs 5 and 18d) time `jit(f).lower(...).compile()` in a fresh subprocess with the cache disabled.

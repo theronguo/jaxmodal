@@ -4,8 +4,10 @@ results/shift_invert_study.json (frac 0.5, non-floor, the converged recheck_1005
 modes (chunk 40) and 200 modes (chunks 5, 10, 20), the crossover table against the measured slice
 cost and the held-out full slice; (3) the memory record (estimators only): the ladder's C_max and
 slice capacities per lever at 10M hex20 (76 GB pool), 1M hex20 and 2M voxel (the Mac budget), the
-reach lost to the fit test's factors and si_memory / LOBPCG chunk 5. About 12 min; progress on
-stdout. Writes results/strategy_study.json (with the git commit).
+reach lost to the fit test's factors and si_memory / LOBPCG chunk 5; at 10M also with a
+separate host (an 80 GB GPU node). About 12 min; progress on stdout. Writes
+results/strategy_study.json (with the git commit); --parts memory re-runs only (3) (seconds) and
+keeps the rest, recording memory_commit and memory_versions.
 """
 
 import argparse
@@ -13,6 +15,7 @@ import json
 import math
 import subprocess
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -172,7 +175,7 @@ def ladder(mesh, budget, host_budget, n_rigid=0):
     voxel = mesh.voxel is not None
     n = 3 * len(mesh.points)
     n_avail = int(dof_mask(mesh, BCS).sum()) - n_rigid
-    pcd = ("float64", "float32") if voxel else ("float64",)
+    pcd = ("float64", "float32")  # GMG or AMG V-cycles (fp32 AMG since PR 18c)
     modes = ({},) if voxel else ({}, {"mode": "otf"})
     out = []
     for oo in modes:
@@ -224,19 +227,25 @@ def si_ratio(mesh):
 
 
 TARGETS = {  # the roadmap's max locked modes (fp32 basis, low-memory step)
-    "hex20_10M": "700-1000 with fp32 AMG (PR 18): recorded with the fp64 AMG model plus levers",
+    "hex20_10M": "220 stored / 300 otf with fp32 AMG (PR 18c): unified 76 GB pool (Mac accounting)",
+    "hex20_10M_gpu": "690 stored / 940 otf with fp32 AMG (PR 18c): 76 GB device, separate host",
     "hex20_1M": "> 2000",
     "voxel_2M": "> 2000 (fp32 V-cycle)",
 }
+# (name, mesh, budget, host_budget); budget None: _default_budget() at run time
+MEMORY_CASES = [
+    ("hex20_10M", lambda: box_mesh((95,) * 3, type="hex20"), 76e9, None),
+    ("hex20_10M_gpu", lambda: box_mesh((95,) * 3, type="hex20"), 76e9, 0.8 * 512e9),
+    ("hex20_1M", lambda: box_mesh((44,) * 3, type="hex20"), None, None),
+    ("voxel_2M", lambda: voxel_mesh((86,) * 3), None, None),
+]
 
 
 def memory_part():
-    budget, host = mem._default_budget()
-    cases = [("hex20_10M", lambda: box_mesh((95,) * 3, type="hex20"), 76e9, None),
-             ("hex20_1M", lambda: box_mesh((44,) * 3, type="hex20"), budget, host),
-             ("voxel_2M", lambda: voxel_mesh((86,) * 3), budget, host)]  # fmt: skip
     out = {}
-    for name, make, b, h in cases:
+    for name, make, b, h in MEMORY_CASES:
+        if b is None:
+            b, h = mem._default_budget()
         log(f"memory record {name}")
         mesh = make()
         out[name] = dict(n_dof=3 * len(mesh.points), budget=b, host_budget=h, target=TARGETS[name],
@@ -247,12 +256,16 @@ def memory_part():
     return out
 
 
+def commit():
+    out = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True)
+    return out.stdout.strip()
+
+
 def run():
     config.enable_x64()
     si = json.loads((harness.RESULTS / "shift_invert_study.json").read_text())
     t = time.perf_counter()
-    r = dict(commit=subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
-                                   text=True).stdout.strip())  # fmt: skip
+    r = dict(commit=commit())
     r["constants"] = constants(si)
     log(f"constants: {json.dumps({k: (v['alpha'], v['D0']) for k, v in r['constants'].items()})}")
     r["lobpcg"] = lobpcg_part(si, r["constants"]["hex20"])
@@ -262,9 +275,20 @@ def run():
     return r
 
 
-if __name__ == "__main__":
+def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--out", default=harness.RESULTS)
-    a = p.parse_args()
-    r = run()
-    harness.write_result("strategy_study", r, a.out)
+    p.add_argument("--parts", choices=("all", "memory"), default="all")
+    a = p.parse_args(argv)
+    if a.parts == "all":
+        return harness.write_result("strategy_study", run(), a.out)
+    config.enable_x64()
+    path = Path(a.out) / "strategy_study.json"
+    r = json.loads(path.read_text())  # commit and versions stay those of the full run
+    r.update(memory=memory_part(), memory_commit=commit(), memory_versions=harness.versions())
+    path.write_text(json.dumps(r, indent=2) + "\n")
+    return path
+
+
+if __name__ == "__main__":
+    main()
