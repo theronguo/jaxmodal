@@ -1094,6 +1094,23 @@ def test_final_rr(monkeypatch):
     assert np.array_equal(lam, lam_in[: len(lam)]) and np.array_equal(V, X_in[:, : len(lam)])
 
 
+@pytest.mark.parametrize("maxit", [300, 160], ids=["stall", "maxit"])
+def test_final_rr_accepts(monkeypatch, maxit):
+    """In-loop explicit checks always fail (as under drift): the failed exit's Rayleigh-Ritz
+    accepts, after a STALL exit (235 iterations, switched at 165) or a maxit exit at 160."""
+    real = lob._explicit
+    monkeypatch.setattr(
+        lob, "_explicit", lambda s, *a: (lambda o: (o[0], o[1] + np.inf, o[2]))(real(s, *a))
+    )
+    p = problem(*PENCIL)
+    lam, V, info = lobpcg(p.op, p.free, 6, 1e-8, maxit=maxit)
+    assert info["converged"] and info["chunks"][0]["polish"] is None
+    assert info["stagnated"] == (maxit == 300) and info["iterations"] == (
+        235 if maxit == 300 else 160
+    )
+    assert np.allclose(lam, dense_modes(PENCIL)[0][:6], rtol=1e-10)
+
+
 def test_no_rr_or_switch_with_stop(monkeypatch):
     """sigma_estimate (a stop callback) neither switches nor runs _final_rr, also on maxit;
     SWITCH = 1 so that any iteration without progress would switch."""

@@ -329,15 +329,15 @@ AMG_COUNT = (11.5, 45.0)
 # level-0 Schwarz (exact from the mesh scan): bytes per shell DOF (T_0 and the rest), per shell
 # fiber group (the coarse levels) and per hex-only DOF (its level-0 and coarse share).
 SHELL_STORAGE = {"shell": 500, "fiber": 6300, "hex": 1250}
-# Setup host peak: beta + storage + gamma per shell / hex-only DOF (upper envelope, 45k-1.58M).
+# Setup host peak: beta + storage + gamma per shell / hex-only DOF (upper envelope, 45k-1.58M,
+# up to 10 layers: a 20-layer stack is 1.3% above it).
 SHELL_BUILD = (150e6, {"shell": 1400, "hex": 3300})
 # pc terms 8 n (a m + c) + K0 (K0 bytes, independent of m): the upper envelope (linear
 # programming, c, K0 >= 0) of memory_analysis minus lobpcg_memory's STEP_FIT part (A b + f ws;
 # the polish with the low f) on flat 64^2-512^2, web 64^2, block 32^3 and 64^3, stack x10 64^2
-# and x3 128^2 (25k-1.58M DOF), m = 6-120, rounded up, c + 0.5 against rounding. count:
-# _recurrence minus COUNT_STEP's part, b = 4-50 on flat 64^2-512^2, stack x3 128^2 and block
-# 64^3, and si_memory's
-# minres (SI_MINRES b + count) at b = 6 on the flat plates.
+# and x3 128^2 (25k-1.58M DOF), m = 6-120, and T 48^2 at m = 15, rounded up, c + 0.5 against
+# rounding. count: _recurrence minus COUNT_STEP's part, b = 4-50 on flat 64^2-512^2, stack x3
+# 128^2 and block 64^3, and si_memory's minres (SI_MINRES b + count) at b = 6 on the flat plates.
 SHELL_STEP = {
     "9-block": (9.6, 17.1, 70e6),
     "low": (13.9, 13.9, 106e6),

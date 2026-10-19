@@ -227,7 +227,7 @@ def solve_peak(case="flat", n=362, n_modes=20):
     # replace, not format: measure_json formats the code once more (its {out})
     code, setup = SOLVE.replace("N_MODES", str(n_modes)), SETUP.format(root=root, case=case, n=n)
     # synchronous CPU dispatch, set before the backend starts: with async dispatch the 791k peak
-    # varies with machine load (6.6 GB loaded, 7.9-9.4 GB idle), docs/preconditioners.md
+    # varies with machine load (6.6 GB loaded, intermittently 7.9-9.4 GB idle; preconditioners.md)
     setup = 'import jax\njax.config.update("jax_cpu_enable_async_dispatch", False)\n' + setup
     r = harness.measure_json(code, setup)
     est = solve_modes_memory(MESHES[case](n), SS, n_modes)["total"]

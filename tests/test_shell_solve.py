@@ -173,7 +173,11 @@ def test_polish_wiring(lobpcg_spy, precond):
 
 @pytest.mark.parametrize(
     ("tol", "opts", "want"),
-    [(1e-10, {}, (0.1 * 1e-10, 500)), (1e-8, {"tol": 1e-9, "maxit": 50}, (1e-9, 50))],
+    [
+        (1e-10, {}, (0.1 * 1e-10, 500)),
+        (1e-4, {}, (1e-7, 500)),
+        (1e-8, {"tol": 1e-9, "maxit": 50}, (1e-9, 50)),
+    ],
 )
 def test_polish_pcg_options(lobpcg_spy, monkeypatch, tol, opts, want):
     """The polish closure passes polish_options' tol and maxit (default min(1e-7, 0.1 tol), 500)
@@ -417,7 +421,7 @@ def measured(case, n, m, degree=2):
 GATE = 1.3  # model <= GATE x measured at large n (see test_shell_steps)
 STEP_CASES = [(c, n, m) for c, n in [("flat", 64), ("flat", 128), ("web", 64), ("block", 32),
               ("stack10", 64), ("stack3", 128)] for m in (6, 25, 120)]  # fmt: skip
-STEP_CASES += [("T", 48, 15), ("flat", 64, 15), ("L", 48, 25)]
+STEP_CASES += [("T", 48, 15), ("flat", 64, 15), ("L", 48, 25), ("block", 64, 120)]
 
 
 def slow_if(cond, *args):
@@ -435,14 +439,14 @@ def test_shell_steps(case, n, m):
     measured temporaries; at large n (flat 128^2, stack x3 128^2, m 25 and 120) <= GATE x
     measured (up to 1.28x, the polish on flat 128^2 at m = 25; K0, about 70-130 MB, is most of
     the slack there; a fit of the totals without STEP_FIT's part would be about 16 + 2.5 ws
-    blocks above it). Every point but L 48^2 is a fit point: there the lower bound is a
-    regression check."""
+    blocks above it). Every point but L 48^2 is a fit point (there the lower bound is a
+    regression check); L 48^2 is out of sample. Block 64^3 (slow) sets the c terms."""
     mesh = built(case, n)[0]
     model, got = modelled(mesh, m, amg_memory(mesh, m)), measured(case, n, m)
     blk = 8 * 3 * len(mesh.points) * m
     for key in got:
         assert model[key] >= got[key], (key, (model[key] - got[key]) / blk)
-        if n == 128 and m >= 25 and key != "low":
+        if n == 128 and m >= 25:
             assert model[key] <= GATE * got[key], (key, model[key] / got[key])
 
 
@@ -545,12 +549,12 @@ def test_shell_scan_cached():
 
 @pytest.mark.parametrize("n", [64, slow_if(True, 128)])
 def test_shell_count(n):
-    """count_memory's step (without its 2 b blocks) >= the measured recurrence at b = 4, 16, 32
+    """count_memory's step (without its 2 b blocks) >= the measured recurrence at b = 4-50
     (within 1.3x at 16 on 128^2); si_memory's minres phase >= the shell MINRES temps at b = 6."""
     mesh = built("flat", n)[0]
     nd = 3 * len(mesh.points)
     om, pc = functools.partial(unstructured_memory, mesh), functools.partial(amg_memory, mesh)
-    for r in study().count([("flat", n)], (4, 16, 32)):
+    for r in study().count([("flat", n)], (4, 16, 32, 50)):
         b = r["b"]
         model = count_memory(om, nd, b, precond_memory=pc)["step"] - 2 * 8 * nd * b
         assert model >= r["recurrence"], (b, model / r["recurrence"])
@@ -592,8 +596,8 @@ def test_shell_build_peak():
 @pytest.mark.skipif(sys.platform != "darwin", reason="peak_bytes needs macOS")
 def test_shell_791k_peak():
     """Flat 362^2 (791k, L/t 100, out of the build fit): storage >= the owned bytes, the build
-    model >= the setup peak and <= 1.3x it; a cold solve_modes (20 modes, tol 1e-6, no switch,
-    no polish, synchronous CPU dispatch) peaks within 20% of solve_modes_memory (>= 2 GB,
+    model >= the setup peak and <= 1.3x it; a cold solve_modes (20 modes, tol 1e-6,
+    synchronous CPU dispatch) peaks within 20% of solve_modes_memory (>= 2 GB,
     ROADMAP.md's rule)."""
     (b,) = study().peaks([("flat", 362)])
     pc = amg_memory(study().MESHES["flat"](362), 15)
