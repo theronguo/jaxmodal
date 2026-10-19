@@ -100,7 +100,7 @@ def _morton_keys(x, lo, hi, bits=21):
 def morton(mesh):
     """Morton (Z-order) node order, then elements by the Morton key of their centroid within
     each block. Returns (new mesh, p, q) like rcm. A benchmark helper: never faster than rcm
-    here and 11x slower on the gather path; prefer rcm (docs/mesh.md)."""
+    here and 13x slower on the gather path; prefer rcm (docs/performance.md)."""
     x = mesh.points
     lo, hi = x.min(0), x.max(0)
     p = np.argsort(_morton_keys(x, lo, hi), kind="stable")

@@ -1,0 +1,1089 @@
+{
+  "roofline": {
+    "system": {
+      "fp64_matmul_gflops": 475.0947516093432,
+      "triad_gbps": 185.9414320237445,
+      "c_triad": {
+        "gbps": 189.648,
+        "threads": 12
+      },
+      "c_triad_ratio": 1.0199340616876724
+    },
+    "B_gbps": 185.9414320237445,
+    "F_gflops": 475.0947516093432,
+    "large_cache": true,
+    "rows": [
+      {
+        "kernel": "stencil",
+        "size": 87,
+        "m": 1,
+        "n_el": 658503,
+        "n_nodes": 681472,
+        "apply_s": 0.015284875000361353,
+        "flops": 758595456,
+        "bytes": 43338580,
+        "intensity": 17.503929662670075,
+        "impl_bytes": 549068884,
+        "impl_intensity": 1.3816034346612145,
+        "roofline_gflops": 475.0947516093432,
+        "gflops": 49.6304651481982,
+        "pct_roofline": 10.446435154267482,
+        "pct_impl_roofline": 19.31918360608987,
+        "gemm_gflops": 307.2532810831559,
+        "pct_gemm": 16.15294878975306
+      },
+      {
+        "kernel": "stencil",
+        "size": 87,
+        "m": 4,
+        "n_el": 658503,
+        "n_nodes": 681472,
+        "apply_s": 0.04414554202230647,
+        "flops": 3034381824,
+        "bytes": 141470548,
+        "intensity": 21.448858910195217,
+        "impl_bytes": 2164391764,
+        "impl_intensity": 1.4019559094940264,
+        "roofline_gflops": 475.0947516093432,
+        "gflops": 68.73586063269414,
+        "pct_roofline": 14.467821502943831,
+        "pct_impl_roofline": 26.36773636802456,
+        "gemm_gflops": 338.17587876502233,
+        "pct_gemm": 20.325477051677737
+      },
+      {
+        "kernel": "stencil",
+        "size": 87,
+        "m": 16,
+        "n_el": 658503,
+        "n_nodes": 681472,
+        "apply_s": 0.1674602500279434,
+        "flops": 12137527296,
+        "bytes": 533998420,
+        "intensity": 22.729519117303756,
+        "impl_bytes": 8625683284,
+        "impl_intensity": 1.4071380662114281,
+        "roofline_gflops": 475.0947516093432,
+        "gflops": 72.48005000574561,
+        "pct_roofline": 15.255914690748652,
+        "pct_impl_roofline": 27.70164765938245,
+        "gemm_gflops": 333.77522107547827,
+        "pct_gemm": 21.715227922613025
+      },
+      {
+        "kernel": "hex8",
+        "size": 48,
+        "m": 1,
+        "n_el": 110592,
+        "n_nodes": 117649,
+        "apply_s": 0.013396291993558407,
+        "chunk": 4096,
+        "trips": 27,
+        "flops": 127401984,
+        "bytes": 282569520,
+        "intensity": 0.4508695205342742,
+        "impl_bytes": 1386720048,
+        "impl_intensity": 0.09187289401616844,
+        "roofline_gflops": 83.83532430400203,
+        "gflops": 9.510242391048292,
+        "pct_roofline": 11.34395610681058,
+        "pct_impl_roofline": 55.67087121408658
+      },
+      {
+        "kernel": "hex8",
+        "size": 48,
+        "m": 4,
+        "n_el": 110592,
+        "n_nodes": 117649,
+        "apply_s": 0.018316667003091425,
+        "chunk": 4096,
+        "trips": 27,
+        "flops": 509607936,
+        "bytes": 299510976,
+        "intensity": 1.7014666467515367,
+        "impl_bytes": 1658465472,
+        "impl_intensity": 0.3072767836314653,
+        "roofline_gflops": 316.3731448376194,
+        "gflops": 27.822088806549257,
+        "pct_roofline": 8.794074105382467,
+        "pct_impl_roofline": 48.6949375170348
+      },
+      {
+        "kernel": "hex8",
+        "size": 48,
+        "m": 16,
+        "n_el": 110592,
+        "n_nodes": 117649,
+        "apply_s": 0.0417942080530338,
+        "chunk": 4096,
+        "trips": 27,
+        "flops": 2038431744,
+        "bytes": 367276800,
+        "intensity": 5.550123895655811,
+        "impl_bytes": 2745447168,
+        "impl_intensity": 0.7424771336921971,
+        "roofline_gflops": 475.0947516093432,
+        "gflops": 48.77306782349791,
+        "pct_roofline": 10.265966453698612,
+        "pct_impl_roofline": 35.32814377118973
+      },
+      {
+        "kernel": "hex20",
+        "size": 32,
+        "m": 1,
+        "n_el": 32768,
+        "n_nodes": 140481,
+        "apply_s": 0.02326029201503843,
+        "chunk": 1024,
+        "trips": 32,
+        "flops": 235929600,
+        "bytes": 494593072,
+        "intensity": 0.47701759963188484,
+        "impl_bytes": 2444944432,
+        "impl_intensity": 0.09649691703095524,
+        "roofline_gflops": 88.69733557608188,
+        "gflops": 10.143019694140767,
+        "pct_roofline": 11.435540457064116,
+        "pct_impl_roofline": 56.52982734745958
+      },
+      {
+        "kernel": "hex20",
+        "size": 32,
+        "m": 4,
+        "n_el": 32768,
+        "n_nodes": 140481,
+        "apply_s": 0.025076332967728376,
+        "chunk": 1024,
+        "trips": 32,
+        "flops": 943718400,
+        "bytes": 514822336,
+        "intensity": 1.8330952913433811,
+        "impl_bytes": 2653917376,
+        "impl_intensity": 0.3555944915747068,
+        "roofline_gflops": 340.8483635083714,
+        "gflops": 37.633827929087744,
+        "pct_roofline": 11.041223006535995,
+        "pct_impl_roofline": 56.91768118883024
+      },
+      {
+        "kernel": "hex20",
+        "size": 32,
+        "m": 16,
+        "n_el": 32768,
+        "n_nodes": 140481,
+        "apply_s": 0.043565374973695725,
+        "chunk": 1024,
+        "trips": 32,
+        "flops": 3774873600,
+        "bytes": 595739392,
+        "intensity": 6.336451224632129,
+        "impl_bytes": 3489809152,
+        "impl_intensity": 1.081684824465725,
+        "roofline_gflops": 475.0947516093432,
+        "gflops": 86.6484817880995,
+        "pct_roofline": 18.238147547322956,
+        "pct_impl_roofline": 43.08082877049343
+      }
+    ],
+    "chunk512": {
+      "default": {
+        "kernel": "hex8",
+        "size": 48,
+        "m": 1,
+        "n_el": 110592,
+        "n_nodes": 117649,
+        "apply_s": 0.013396291993558407,
+        "chunk": 4096,
+        "trips": 27,
+        "flops": 127401984,
+        "bytes": 282569520,
+        "intensity": 0.4508695205342742,
+        "impl_bytes": 1386720048,
+        "impl_intensity": 0.09187289401616844,
+        "roofline_gflops": 83.83532430400203,
+        "gflops": 9.510242391048292,
+        "pct_roofline": 11.34395610681058,
+        "pct_impl_roofline": 55.67087121408658
+      },
+      "small": {
+        "kernel": "hex8",
+        "size": 48,
+        "m": 1,
+        "n_el": 110592,
+        "n_nodes": 117649,
+        "apply_s": 0.015931708039715886,
+        "chunk": 512,
+        "trips": 216,
+        "flops": 127401984,
+        "bytes": 282569520,
+        "intensity": 0.4508695205342742,
+        "impl_bytes": 1386720048,
+        "impl_intensity": 0.09187289401616844,
+        "roofline_gflops": 83.83532430400203,
+        "gflops": 7.996756134521279,
+        "pct_roofline": 9.538647581923339,
+        "pct_impl_roofline": 46.81125491758566
+      },
+      "result": "not determined"
+    }
+  },
+  "fusion": {
+    "stencil": {
+      "entry": "main.17",
+      "computations": {
+        "main.17": {
+          "fusions": 17,
+          "unfused": {},
+          "largest": [
+            [
+              10616832,
+              "fusion"
+            ],
+            [
+              10616832,
+              "fusion"
+            ],
+            [
+              1500000,
+              "fusion"
+            ],
+            [
+              1500000,
+              "fusion"
+            ],
+            [
+              1500000,
+              "fusion"
+            ]
+          ]
+        }
+      },
+      "temp_bytes": 21238272,
+      "vector_bytes": 1500000
+    },
+    "stored_ke": {
+      "entry": "main.9",
+      "computations": {
+        "main.9": {
+          "fusions": 2,
+          "unfused": {
+            "copy": 1,
+            "while": 1
+          },
+          "largest": [
+            [
+              3131080,
+              "while"
+            ],
+            [
+              1500000,
+              "fusion"
+            ],
+            [
+              131072,
+              "fusion"
+            ],
+            [
+              8,
+              "copy"
+            ]
+          ]
+        },
+        "region_0.6.sunk.clone": {
+          "fusions": 7,
+          "unfused": {
+            "copy": 1
+          },
+          "largest": [
+            [
+              18874368,
+              "fusion"
+            ],
+            [
+              3145728,
+              "fusion"
+            ],
+            [
+              3145728,
+              "fusion"
+            ],
+            [
+              3145728,
+              "fusion"
+            ],
+            [
+              1500000,
+              "fusion"
+            ]
+          ]
+        },
+        "region_2.7.clone": {
+          "fusions": 1,
+          "unfused": {},
+          "largest": [
+            [
+              1,
+              "fusion"
+            ]
+          ]
+        }
+      },
+      "temp_bytes": 25690272,
+      "vector_bytes": 1500000
+    },
+    "vcycle": {
+      "entry": "main.67",
+      "computations": {
+        "main.67": {
+          "fusions": 54,
+          "unfused": {
+            "copy": 27,
+            "dot": 11,
+            "while": 16,
+            "custom-call": 2
+          },
+          "largest": [
+            [
+              32080584,
+              "while"
+            ],
+            [
+              32080584,
+              "while"
+            ],
+            [
+              32080584,
+              "while"
+            ],
+            [
+              32080584,
+              "while"
+            ],
+            [
+              9009128,
+              "while"
+            ]
+          ]
+        },
+        "region_4.12.clone.2.clone": {
+          "fusions": 8,
+          "unfused": {
+            "copy": 1
+          },
+          "largest": [
+            [
+              2654208,
+              "fusion"
+            ],
+            [
+              2654208,
+              "fusion"
+            ],
+            [
+              1966080,
+              "fusion"
+            ],
+            [
+              1966080,
+              "fusion"
+            ],
+            [
+              1966080,
+              "fusion"
+            ]
+          ]
+        },
+        "region_6.13.clone.2.clone": {
+          "fusions": 1,
+          "unfused": {},
+          "largest": [
+            [
+              1,
+              "fusion"
+            ]
+          ]
+        },
+        "region_1.6.clone.2": {
+          "fusions": 7,
+          "unfused": {
+            "copy": 1
+          },
+          "largest": [
+            [
+              29491200,
+              "fusion"
+            ],
+            [
+              1966080,
+              "fusion"
+            ],
+            [
+              1966080,
+              "fusion"
+            ],
+            [
+              1966080,
+              "fusion"
+            ],
+            [
+              794976,
+              "fusion"
+            ]
+          ]
+        },
+        "region_3.7.clone.2": {
+          "fusions": 1,
+          "unfused": {},
+          "largest": [
+            [
+              1,
+              "fusion"
+            ]
+          ]
+        },
+        "region_4.12.clone.1.clone": {
+          "fusions": 8,
+          "unfused": {
+            "copy": 1
+          },
+          "largest": [
+            [
+              2654208,
+              "fusion"
+            ],
+            [
+              2654208,
+              "fusion"
+            ],
+            [
+              1966080,
+              "fusion"
+            ],
+            [
+              1966080,
+              "fusion"
+            ],
+            [
+              1966080,
+              "fusion"
+            ]
+          ]
+        },
+        "region_6.13.clone.1.clone": {
+          "fusions": 1,
+          "unfused": {},
+          "largest": [
+            [
+              1,
+              "fusion"
+            ]
+          ]
+        },
+        "region_1.6.clone.1": {
+          "fusions": 7,
+          "unfused": {
+            "copy": 1
+          },
+          "largest": [
+            [
+              29491200,
+              "fusion"
+            ],
+            [
+              1966080,
+              "fusion"
+            ],
+            [
+              1966080,
+              "fusion"
+            ],
+            [
+              1966080,
+              "fusion"
+            ],
+            [
+              794976,
+              "fusion"
+            ]
+          ]
+        },
+        "region_3.7.clone.1": {
+          "fusions": 1,
+          "unfused": {},
+          "largest": [
+            [
+              1,
+              "fusion"
+            ]
+          ]
+        },
+        "region_9.22.clone.2": {
+          "fusions": 5,
+          "unfused": {
+            "copy": 1
+          },
+          "largest": [
+            [
+              5308416,
+              "fusion"
+            ],
+            [
+              3981312,
+              "fusion"
+            ],
+            [
+              393216,
+              "fusion"
+            ],
+            [
+              196608,
+              "fusion"
+            ],
+            [
+              8,
+              "fusion"
+            ]
+          ]
+        },
+        "region_10.23.clone.2": {
+          "fusions": 1,
+          "unfused": {},
+          "largest": [
+            [
+              1,
+              "fusion"
+            ]
+          ]
+        },
+        "region_9.22.clone.1": {
+          "fusions": 5,
+          "unfused": {
+            "copy": 1
+          },
+          "largest": [
+            [
+              5308416,
+              "fusion"
+            ],
+            [
+              3981312,
+              "fusion"
+            ],
+            [
+              393216,
+              "fusion"
+            ],
+            [
+              196608,
+              "fusion"
+            ],
+            [
+              8,
+              "fusion"
+            ]
+          ]
+        },
+        "region_10.23.clone.1": {
+          "fusions": 1,
+          "unfused": {},
+          "largest": [
+            [
+              1,
+              "fusion"
+            ]
+          ]
+        },
+        "region_24.63": {
+          "fusions": 4,
+          "unfused": {
+            "copy": 1,
+            "dot": 1
+          },
+          "largest": [
+            [
+              1769472,
+              "fusion"
+            ],
+            [
+              442368,
+              "fusion"
+            ],
+            [
+              55296,
+              "fusion"
+            ],
+            [
+              27648,
+              "dot"
+            ],
+            [
+              8,
+              "fusion"
+            ]
+          ]
+        },
+        "region_25.64": {
+          "fusions": 1,
+          "unfused": {},
+          "largest": [
+            [
+              1,
+              "fusion"
+            ]
+          ]
+        },
+        "region_22.58": {
+          "fusions": 4,
+          "unfused": {
+            "copy": 1,
+            "dot": 1
+          },
+          "largest": [
+            [
+              1769472,
+              "fusion"
+            ],
+            [
+              442368,
+              "fusion"
+            ],
+            [
+              110592,
+              "fusion"
+            ],
+            [
+              55296,
+              "dot"
+            ],
+            [
+              8,
+              "fusion"
+            ]
+          ]
+        },
+        "region_23.59": {
+          "fusions": 1,
+          "unfused": {},
+          "largest": [
+            [
+              1,
+              "fusion"
+            ]
+          ]
+        },
+        "region_14.36": {
+          "fusions": 4,
+          "unfused": {
+            "copy": 1,
+            "dot": 1
+          },
+          "largest": [
+            [
+              1769472,
+              "fusion"
+            ],
+            [
+              442368,
+              "fusion"
+            ],
+            [
+              20736,
+              "fusion"
+            ],
+            [
+              6912,
+              "dot"
+            ],
+            [
+              8,
+              "fusion"
+            ]
+          ]
+        },
+        "region_15.37": {
+          "fusions": 1,
+          "unfused": {},
+          "largest": [
+            [
+              1,
+              "fusion"
+            ]
+          ]
+        },
+        "region_16.41": {
+          "fusions": 4,
+          "unfused": {
+            "copy": 1,
+            "dot": 1
+          },
+          "largest": [
+            [
+              1769472,
+              "fusion"
+            ],
+            [
+              442368,
+              "fusion"
+            ],
+            [
+              6912,
+              "fusion"
+            ],
+            [
+              3456,
+              "dot"
+            ],
+            [
+              8,
+              "fusion"
+            ]
+          ]
+        },
+        "region_17.42": {
+          "fusions": 1,
+          "unfused": {},
+          "largest": [
+            [
+              1,
+              "fusion"
+            ]
+          ]
+        },
+        "region_9.22.clone": {
+          "fusions": 5,
+          "unfused": {
+            "copy": 1
+          },
+          "largest": [
+            [
+              5308416,
+              "fusion"
+            ],
+            [
+              3981312,
+              "fusion"
+            ],
+            [
+              393216,
+              "fusion"
+            ],
+            [
+              196608,
+              "fusion"
+            ],
+            [
+              8,
+              "fusion"
+            ]
+          ]
+        },
+        "region_10.23.clone": {
+          "fusions": 1,
+          "unfused": {},
+          "largest": [
+            [
+              1,
+              "fusion"
+            ]
+          ]
+        },
+        "region_9.22": {
+          "fusions": 5,
+          "unfused": {
+            "copy": 1
+          },
+          "largest": [
+            [
+              5308416,
+              "fusion"
+            ],
+            [
+              3981312,
+              "fusion"
+            ],
+            [
+              393216,
+              "fusion"
+            ],
+            [
+              196608,
+              "fusion"
+            ],
+            [
+              8,
+              "fusion"
+            ]
+          ]
+        },
+        "region_10.23": {
+          "fusions": 1,
+          "unfused": {},
+          "largest": [
+            [
+              1,
+              "fusion"
+            ]
+          ]
+        },
+        "region_4.12.clone.clone": {
+          "fusions": 8,
+          "unfused": {
+            "copy": 1
+          },
+          "largest": [
+            [
+              2654208,
+              "fusion"
+            ],
+            [
+              2654208,
+              "fusion"
+            ],
+            [
+              1966080,
+              "fusion"
+            ],
+            [
+              1966080,
+              "fusion"
+            ],
+            [
+              1966080,
+              "fusion"
+            ]
+          ]
+        },
+        "region_6.13.clone.clone": {
+          "fusions": 1,
+          "unfused": {},
+          "largest": [
+            [
+              1,
+              "fusion"
+            ]
+          ]
+        },
+        "region_1.6.clone": {
+          "fusions": 7,
+          "unfused": {
+            "copy": 1
+          },
+          "largest": [
+            [
+              29491200,
+              "fusion"
+            ],
+            [
+              1966080,
+              "fusion"
+            ],
+            [
+              1966080,
+              "fusion"
+            ],
+            [
+              1966080,
+              "fusion"
+            ],
+            [
+              794976,
+              "fusion"
+            ]
+          ]
+        },
+        "region_3.7.clone": {
+          "fusions": 1,
+          "unfused": {},
+          "largest": [
+            [
+              1,
+              "fusion"
+            ]
+          ]
+        },
+        "region_4.12.clone.3": {
+          "fusions": 8,
+          "unfused": {
+            "copy": 1
+          },
+          "largest": [
+            [
+              2654208,
+              "fusion"
+            ],
+            [
+              2654208,
+              "fusion"
+            ],
+            [
+              1966080,
+              "fusion"
+            ],
+            [
+              1966080,
+              "fusion"
+            ],
+            [
+              1966080,
+              "fusion"
+            ]
+          ]
+        },
+        "region_6.13.clone.3": {
+          "fusions": 1,
+          "unfused": {},
+          "largest": [
+            [
+              1,
+              "fusion"
+            ]
+          ]
+        },
+        "region_1.6": {
+          "fusions": 7,
+          "unfused": {
+            "copy": 1
+          },
+          "largest": [
+            [
+              29491200,
+              "fusion"
+            ],
+            [
+              1966080,
+              "fusion"
+            ],
+            [
+              1966080,
+              "fusion"
+            ],
+            [
+              1966080,
+              "fusion"
+            ],
+            [
+              794976,
+              "fusion"
+            ]
+          ]
+        },
+        "region_3.7": {
+          "fusions": 1,
+          "unfused": {},
+          "largest": [
+            [
+              1,
+              "fusion"
+            ]
+          ]
+        }
+      },
+      "temp_bytes": 51443704,
+      "vector_bytes": 794976
+    }
+  },
+  "orders": {
+    "large_cache": true,
+    "rows": [
+      {
+        "case": "box",
+        "size": 44,
+        "order": "grid",
+        "n_dof": 1075275,
+        "span": 8146.0,
+        "apply_m1_s": 0.0615461659617722,
+        "apply_m16_s": 0.11668862501392141,
+        "vcycle_m16_s": 1.1426669999491423,
+        "gather_need_bytes": 1684593412,
+        "gather_m1_s": 0.08412291697459295
+      },
+      {
+        "case": "box",
+        "size": 44,
+        "order": "rcm",
+        "n_dof": 1075275,
+        "span": 14879.0,
+        "apply_m1_s": 0.06100599997444078,
+        "apply_m16_s": 0.11914650001563132,
+        "vcycle_m16_s": 1.1617196660372429,
+        "gather_need_bytes": 1684593412,
+        "gather_m1_s": 0.11595449998276308
+      },
+      {
+        "case": "box",
+        "size": 44,
+        "order": "morton",
+        "n_dof": 1075275,
+        "span": 326.0,
+        "apply_m1_s": 0.06220487505197525,
+        "apply_m16_s": 0.12298416602425277,
+        "vcycle_m16_s": 1.217330832965672,
+        "gather_need_bytes": 1684593456,
+        "gather_m1_s": 1.0866260830080137
+      },
+      {
+        "case": "box",
+        "size": 44,
+        "order": "shuffled",
+        "n_dof": 1075275,
+        "span": 328865.0,
+        "apply_m1_s": 0.08033391600474715,
+        "apply_m16_s": 0.23480412497883663,
+        "vcycle_m16_s": 2.1901444590184838,
+        "gather_need_bytes": 1684593456,
+        "gather_m1_s": 1.4561071249772795
+      },
+      {
+        "case": "plate",
+        "size": 256,
+        "order": "grid",
+        "n_dof": 396294,
+        "span": 66307.0,
+        "apply_m1_s": 0.009100332972593606,
+        "apply_m16_s": 0.02391004201490432,
+        "vcycle_m16_s": 0.3860872500226833
+      },
+      {
+        "case": "plate",
+        "size": 256,
+        "order": "rcm",
+        "n_dof": 396294,
+        "span": 729.0,
+        "apply_m1_s": 0.009030957997310907,
+        "apply_m16_s": 0.022846125008072704,
+        "vcycle_m16_s": 0.38557570800185204
+      },
+      {
+        "case": "plate",
+        "size": 256,
+        "order": "morton",
+        "n_dof": 396294,
+        "span": 66056.0,
+        "apply_m1_s": 0.009144375042524189,
+        "apply_m16_s": 0.023922499967738986,
+        "vcycle_m16_s": 0.3884068329934962
+      },
+      {
+        "case": "plate",
+        "size": 256,
+        "order": "shuffled",
+        "n_dof": 396294,
+        "span": 105630.0,
+        "apply_m1_s": 0.010810250008944422,
+        "apply_m16_s": 0.053233499987982213,
+        "vcycle_m16_s": 0.7283452089759521
+      }
+    ]
+  },
+  "versions": {
+    "jax": "0.11.2",
+    "jaxlib": "0.11.2",
+    "numpy": "2.5.3",
+    "platform": "macOS-27.2-arm64-arm-64bit",
+    "cpu_count": 16,
+    "p_cores": 12,
+    "e_cores": 4,
+    "xla_flags": null,
+    "jax_num_cpu_devices": true
+  }
+}
