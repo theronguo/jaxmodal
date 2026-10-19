@@ -32,7 +32,7 @@ from test_shift_invert import (
 )
 
 from jaxmodal.eigen import counting, solve_modes
-from jaxmodal.mesh import box_mesh, voxel_mesh
+from jaxmodal.mesh import box_mesh, solid_shell, voxel_mesh
 from jaxmodal.precond import SingularShiftError
 
 api = importlib.import_module("jaxmodal.eigen.api")
@@ -1022,15 +1022,51 @@ def test_count_si_terms():
     assert a["host_total"] == a["host"] + max(op(6)["build"], 0)  # GMG builds on the device
 
 
-def test_amg_scan_cached(monkeypatch):
-    """Test 11: amg_memory scans the mesh once per mesh."""
-    mem._amg_scan.cache_clear()
-    mesh = prob("short")[0]
+def test_amg_scan_cached():
+    """Test 11: amg_memory scans a mesh once (a fresh mesh: shared ones carry other keys)."""
+    mesh = box_mesh((3, 3, 3), type="hex20")
+    first = mem._amg_scan(mesh)
     for m in (6, 10, 15):
         mem.amg_memory(mesh, m)
-    info = mem._amg_scan.cache_info()
-    mem._amg_scan.cache_clear()
-    assert info.misses == 1 and info.hits == 2
+    assert mem._amg_scan(mesh) is first
+    assert [k for k in mem._CACHE[mesh] if k[0] == "_amg_scan"] == [("_amg_scan",)]
+
+
+def test_cache_lifetime():
+    """The per-mesh cache entries die with the mesh (no lru_cache keeping the last one alive)."""
+    mesh, other = box_mesh((3, 3, 3), type="hex20"), box_mesh((2, 2, 2))
+    shell = solid_shell(box_mesh((3, 3, 1), spacing=(1.0, 1.0, 0.1)), direction=(0, 0, 1))[0]
+    mem._amg_scan(mesh)
+    mem._amg_scan(other)
+    mem._shell_scan(shell)
+    for path in ("scatter", "gather"):
+        mem.unstructured_memory(mesh, 4, path=path)
+    assert mesh in mem._CACHE and shell in mem._CACHE
+    r, rs = weakref.ref(mesh), weakref.ref(shell)
+    del mesh, shell
+    gc.collect()
+    assert r() is None and rs() is None and other in mem._CACHE
+
+
+@pytest.mark.parametrize("path", ["scatter", "gather"])
+def test_layout_sizes(path):
+    """_layout_sizes keeps layout's scalars; the default path resolves before the cache."""
+    from jaxmodal.operators.matfree import DEFAULT_PATH, layout
+
+    mesh = box_mesh((4, 3, 2), type="hex20")
+    lay, got = layout(mesh, path, 7, None), mem._layout_sizes(mesh, path, 7, None)
+    assert got["path"] == lay["path"] and got["n_nodes"] == lay["n_nodes"]
+    for a, b in zip(got["blocks"], lay["blocks"], strict=True):
+        assert a == {k: b[k] for k in a} and set(a) == {"type", "k", "chunk", "n_pad", "W"} & set(b)
+    if path == "gather":
+        assert [got[k] for k in ("R", "n_ranges", "valence")] == [
+            lay[k] for k in ("R", "n_ranges", "valence")
+        ]
+        assert got["inv"] == lay["inv"].size
+    fresh = box_mesh((4, 3, 2), type="hex20")
+    a = mem.unstructured_memory(fresh, 4)
+    assert a == mem.unstructured_memory(fresh, 4, path=DEFAULT_PATH["cpu"])
+    assert len([k for k in mem._CACHE[fresh] if k[0] == "_layout_sizes"]) == 1
 
 
 @pytest.mark.peak
@@ -1721,21 +1757,33 @@ def test_given_chunk_no_fit(fake_builds, monkeypatch):
     assert info["reason"] == "memory" and info["c_max"] == {20: None}
 
 
-def fake_gpu(monkeypatch):
-    """memory.jax.devices()[0]: a GPU with 7e9 free bytes (10e9 limit, 3e9 in use)."""
-    stats = dict(bytes_limit=10e9, bytes_in_use=3e9)
-    gpu = types.SimpleNamespace(platform="gpu", memory_stats=lambda: stats)
+def fake_gpu(monkeypatch, stats=None):
+    """memory.jax.devices()[0]: a GPU with 7e9 free bytes (10e9 limit, 3e9 in use), or the given
+    memory_stats function."""
+    if stats is None:
+        stats = lambda: dict(bytes_limit=10e9, bytes_in_use=3e9)  # noqa: E731
+    gpu = types.SimpleNamespace(platform="gpu", memory_stats=stats)
     monkeypatch.setattr(mem, "jax", types.SimpleNamespace(devices=lambda: [gpu]))
 
 
 def test_default_budget(monkeypatch):
-    """Test 16: the default budgets: 0.8 x RAM on the CPU; a GPU's free pool and 0.8 x RAM."""
+    """Test 16: the default budgets: 0.8 x RAM on the CPU; a GPU's free pool and 0.8 x RAM; a
+    device whose memory_stats() raises, returns None or lacks bytes_limit gets the CPU rule."""
     pages = {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 2**20}  # 4 GiB
     monkeypatch.setattr(mem.os, "sysconf", lambda k: pages[k])
     ram = 0.8 * 2**32
     assert mem._default_budget() == (ram, None)
     fake_gpu(monkeypatch)
     assert mem._default_budget() == (7e9, ram)
+
+    def raises():
+        raise NotImplementedError
+
+    for stats in (raises, lambda: None, lambda: dict(bytes_in_use=3e9)):  # no pool limit: CPU rule
+        fake_gpu(monkeypatch, stats)
+        assert mem._default_budget() == (ram, None)
+    fake_gpu(monkeypatch, lambda: dict(bytes_limit=10e9))
+    assert mem._default_budget() == (10e9, ram)
 
 
 def test_budget_recorded(fake_builds, monkeypatch):

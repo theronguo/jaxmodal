@@ -65,10 +65,15 @@ def _windows(conn, R, n_nodes, n_ranges, c):
     return np.where(used, np.minimum(start, n_pad - W), 0), W
 
 
+def resolve_path(path):
+    """The apply path: path, or the backend's default when None."""
+    return DEFAULT_PATH.get(jax.default_backend(), "scatter") if path is None else path
+
+
 def layout(mesh, path=None, chunk=None, range_nodes=None):
     """Host layout shared by unstructured and unstructured_memory: resolved path, per-block chunk,
     padded size and connectivity, and (gather) R, window starts and widths, inverse map."""
-    path = DEFAULT_PATH.get(jax.default_backend(), "scatter") if path is None else path
+    path = resolve_path(path)
     if path not in ("scatter", "gather"):
         raise ValueError(f"path must be 'scatter' or 'gather', got {path!r}")
     for name, x in (("chunk", chunk), ("range_nodes", range_nodes)):

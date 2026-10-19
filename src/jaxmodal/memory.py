@@ -3,6 +3,7 @@
 import functools
 import math
 import os
+import weakref
 
 import jax
 import numpy as np
@@ -22,7 +23,7 @@ from .elements import ELEMENTS
 from .materials import phases
 from .operators import dof_mask, rigid_modes
 from .operators.common import check_shell, is_count
-from .operators.matfree import layout
+from .operators.matfree import layout, resolve_path
 from .operators.voxel import grid_layout
 from .precond import schwarz
 from .precond.amg import SHELL_BLOCKS, unsupported_shell
@@ -44,6 +45,37 @@ OVERHEAD = 10e6  # fixed JAX runtime overhead beyond the formulas, measured (hex
 # otf apply_K temporaries per element: a + b (m - 1) bytes, an upper envelope of memory_analysis
 # at m = 1, 4, 16 (XLA's fusion of the strain/stress fields varies with m).
 OTF_BYTES = {"hex8": (6.1e3, 1.28e3), "hex20": (41.0e3, 3.17e3), "hex27": (54.6e3, 2.55e3)}
+
+
+_CACHE = weakref.WeakKeyDictionary()  # mesh -> {key: value}; entries die with the mesh
+
+
+def _per_mesh(f):
+    """Cache f(mesh, *args) per mesh (meshes are treated as immutable; Mesh hashes by
+    identity). Cached values must not reference the mesh."""
+
+    @functools.wraps(f)
+    def g(mesh, *args):
+        d = _CACHE.setdefault(mesh, {})
+        key = (f.__name__, *args)
+        if key not in d:
+            d[key] = f(mesh, *args)
+        return d[key]
+
+    return g
+
+
+@_per_mesh
+def _layout_sizes(mesh, path, chunk, range_nodes):
+    """The scalars of layout(...) that unstructured_memory reads."""
+    lay = layout(mesh, path, chunk, range_nodes)
+    keys = ("type", "k", "chunk", "n_pad", "W")
+    out = dict(path=lay["path"], n_nodes=lay["n_nodes"],
+               blocks=[{k: b[k] for k in keys if k in b} for b in lay["blocks"]])  # fmt: skip
+    if lay["path"] == "gather":
+        out.update(R=lay["R"], n_ranges=lay["n_ranges"], valence=lay["valence"],
+                   inv=lay["inv"].size)  # fmt: skip
+    return out
 
 
 def _chunk_temps(mode, t, c, m):
@@ -68,7 +100,7 @@ def unstructured_memory(
     check_shell(mesh, mode)
     if "ssh8" in mesh.blocks and mass == "lumped":
         raise ValueError("solid-shell elements are consistent-mass only")
-    lay = layout(mesh, path, chunk, range_nodes)
+    lay = _layout_sizes(mesh, resolve_path(path), chunk, range_nodes)
     n_dof, n_el = 3 * lay["n_nodes"], mesh.n_el
     gather = lay["path"] == "gather"
     storage = 8 * (n_dof + 2 * n_el)  # nodal, s_K, s_M
@@ -87,7 +119,7 @@ def unstructured_memory(
             storage += 4 * lay["n_ranges"]
             window += 8 * b["W"] * k * m
     if gather:
-        inv = lay["inv"].size
+        inv = lay["inv"]
         storage += 4 * inv
         host += 8 * inv  # int64 inverse map, alive until the int32 copy
         workspace = window + max(8 * 3 * lay["R"] * lay["valence"] * m, temps)
@@ -366,7 +398,7 @@ SHELL_STEP32 = {
 }
 
 
-@functools.lru_cache(maxsize=1)  # Mesh hashes by identity; keeps the last mesh alive
+@_per_mesh
 def _shell_scan(mesh):
     """(level-0 patch sizes in DOFs, shell DOFs, hex-only DOFs, shell fiber groups) of the
     solid-shell AMG: the fibers and patches of amg's own scan, on the mesh's connectivity."""
@@ -404,7 +436,7 @@ def _shell_amg_memory(mesh, m, max_coarse, degree, dtype):
     return {k: int(v) for k, v in out.items()}
 
 
-@functools.lru_cache(maxsize=1)  # Mesh hashes by identity; keeps the last mesh alive
+@_per_mesh
 def _amg_scan(mesh):
     """(family, corner DOFs n_c, p-level table bytes) of amg_memory: the mesh scan alone."""
     n_nodes = len(mesh.points)
@@ -747,10 +779,16 @@ def _count_block(op_memory, pc64, n_dof, *, voxel, n_rigid, n_store, window, n_p
 
 def _default_budget():
     """(budget, host_budget): on a GPU its free pool (bytes_limit - bytes_in_use) and 0.8 x
-    physical RAM; on the CPU (unified) 0.8 x RAM and None."""
+    physical RAM; on the CPU (unified), or a device without bytes_limit in memory_stats() (Metal,
+    or memory_stats() raising or returning None), 0.8 x RAM and None."""
     ram = 0.8 * os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
     dev = jax.devices()[0]
     if dev.platform == "cpu":
         return ram, None
-    st = dev.memory_stats()
-    return st["bytes_limit"] - st["bytes_in_use"], ram
+    try:
+        st = dev.memory_stats()
+    except Exception:  # some plugins do not implement it
+        st = None
+    if not st or "bytes_limit" not in st:  # Metal: no pool limit, a unified pool as on the CPU
+        return ram, None
+    return st["bytes_limit"] - st.get("bytes_in_use", 0), ram

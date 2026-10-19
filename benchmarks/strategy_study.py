@@ -251,7 +251,6 @@ def memory_part():
         out[name] = dict(n_dof=3 * len(mesh.points), budget=b, host_budget=h, target=TARGETS[name],
                          ladder=ladder(mesh, b, h), reach_lost=reach_lost(mesh, b, h),
                          si_over_lobpcg=si_ratio(mesh))  # fmt: skip
-        mem._amg_scan.cache_clear()
         mesh = None
     return out
 
