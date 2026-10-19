@@ -1,0 +1,119 @@
+{
+  "rows": [
+    {
+      "case": "voxel",
+      "size": 20,
+      "n_dof": 27783,
+      "wall_s": 6.558712749974802,
+      "compile_s": 4.794989109039307,
+      "lowering_s": 0.4217984676361084,
+      "trace_s": 0.3827333450317383,
+      "compiles": 254,
+      "iterations": 17,
+      "slab": 20,
+      "slabs": 1,
+      "levels": 5
+    },
+    {
+      "case": "voxel",
+      "size": 40,
+      "n_dof": 206763,
+      "wall_s": 13.529253375018016,
+      "compile_s": 5.419264793395996,
+      "lowering_s": 0.5059514045715332,
+      "trace_s": 0.41090869903564453,
+      "compiles": 281,
+      "iterations": 17,
+      "slab": 40,
+      "slabs": 1,
+      "levels": 6
+    },
+    {
+      "case": "voxel",
+      "size": 80,
+      "n_dof": 1594323,
+      "wall_s": 72.30571745795896,
+      "compile_s": 6.410971164703369,
+      "lowering_s": 0.6012318134307861,
+      "trace_s": 0.47336506843566895,
+      "compiles": 308,
+      "iterations": 17,
+      "slab": 10,
+      "slabs": 8,
+      "levels": 7
+    },
+    {
+      "case": "box",
+      "size": 8,
+      "n_dof": 8019,
+      "wall_s": 3.404431624978315,
+      "compile_s": 2.5682733058929443,
+      "lowering_s": 0.28675198554992676,
+      "trace_s": 0.17556023597717285,
+      "compiles": 169,
+      "iterations": 17,
+      "ell_classes": [
+        1
+      ],
+      "levels": 3
+    },
+    {
+      "case": "box",
+      "size": 24,
+      "n_dof": 181875,
+      "wall_s": 13.785135249956511,
+      "compile_s": 3.147092580795288,
+      "lowering_s": 0.32396793365478516,
+      "trace_s": 0.23026823997497559,
+      "compiles": 204,
+      "iterations": 17,
+      "ell_classes": [
+        1,
+        1
+      ],
+      "levels": 4
+    },
+    {
+      "case": "plate",
+      "size": 64,
+      "n_dof": 25350,
+      "wall_s": 5.08844899997348,
+      "compile_s": 2.5415966510772705,
+      "lowering_s": 0.36272597312927246,
+      "trace_s": 0.30864524841308594,
+      "compiles": 144,
+      "iterations": 17,
+      "ell_classes": [
+        1
+      ],
+      "levels": 3
+    },
+    {
+      "case": "plate",
+      "size": 256,
+      "n_dof": 396294,
+      "wall_s": 30.84304945799522,
+      "compile_s": 3.1550772190093994,
+      "lowering_s": 0.37035250663757324,
+      "trace_s": 0.3665621280670166,
+      "compiles": 159,
+      "iterations": 17,
+      "ell_classes": [
+        1,
+        1
+      ],
+      "levels": 4
+    }
+  ],
+  "versions": {
+    "jax": "0.11.2",
+    "jaxlib": "0.11.2",
+    "numpy": "2.5.3",
+    "platform": "macOS-27.2-arm64-arm-64bit",
+    "cpu_count": 16,
+    "p_cores": 12,
+    "e_cores": 4,
+    "xla_flags": null,
+    "jax_num_cpu_devices": true
+  }
+}

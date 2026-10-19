@@ -1,6 +1,6 @@
 # Mesh
 
-`jaxmodal.mesh` holds the host-side mesh: a NumPy data model, file readers, a VTU writer, voxel and box generators, corner Jacobians, renumbering (`renumber`, `rcm`), the solid-shell conversion (`solid_shell`) and face-connected parts (`parts`, `docs/boundary_conditions.md`). There is no JAX here (a test imports it in a fresh interpreter and checks that `jax` is not loaded); `element_dofs` casts topology to int32 for the device (`docs/operators.md`).
+`jaxmodal.mesh` holds the host-side mesh: a NumPy data model, file readers, a VTU writer, voxel and box generators, corner Jacobians, renumbering (`renumber`, `rcm`, `morton`), the solid-shell conversion (`solid_shell`) and face-connected parts (`parts`, `docs/boundary_conditions.md`). There is no JAX here (a test imports it in a fresh interpreter and checks that `jax` is not loaded); `element_dofs` casts topology to int32 for the device (`docs/operators.md`).
 
 ```python
 from jaxmodal.mesh import read, write, voxel_mesh, corner_jacobians
@@ -46,7 +46,10 @@ Grid order is not an invariant, so node and element permutations (PR 5 RCM, PR 1
 - Element order: within each block, stably sorted by the element's min (new) node index.
 - **When it helps:** for arbitrarily ordered meshes (Gmsh, Abaqus). The grid order of `box_mesh` and `voxel_mesh` is already narrower: node-graph bandwidth on a hex8 $20^3$ box is 463 in grid order, 1261 after RCM and 9235 randomly shuffled. Neither the matrix-free operator nor its gather path requires RCM (`docs/operators.md`). Do not renumber voxel meshes for `gmg`: it needs the `voxel_mesh` node order and raises otherwise (`docs/preconditioners.md`).
 - **Cost:** at 10M hex20 DOF, $A$ has 196M nonzeros (≈ 1.6 GB on the host: int32 values and column indices) and RCM takes about 3 s.
+- **Shuffled meshes** (random node and per-block element order, the worst case for a file) cost +19–123% on apply_K and about +90% on the AMG V-cycle (box hex20 $44^3$, `ssh8` $256^2$; [performance](performance.md#node-and-element-order)); RCM recovers both. Call `rcm` on meshes read from files; `solve_modes` does not reorder or warn.
 - User arrays follow the new numbering: per-element arrays as `a[q]`, per-node arrays as `a[p]`.
+
+`morton(mesh)` (PR 18d) returns `(mesh, p, q)` like `rcm`: nodes sorted by their Morton (Z-order) key, elements within each block by the key of their corner centroid. The key quantizes every coordinate on one cube, the nodes' bounding box's largest side, to $2^{21} - 1$ levels (so a thin plate's thickness keeps few bits and the order stays in-plane) and interleaves the bits into a `uint64`, $x$ lowest. It is a benchmark helper: on the scatter path it is not faster than grid order or RCM (within 7%), and it makes the gather path 13× slower than grid order (its jumps between octants widen the gather windows), so prefer `rcm`. Tests (`tests/test_reorder.py`): the keys against a per-bit reference (with a coplanar case), node and element order against the reference on a box and a shuffled mixed mesh, a thin plate's span far below grid order's, and the renumbering checks on a voxel mesh; the operator equivalence is in [operators](operators.md).
 
 ## Node ordering
 

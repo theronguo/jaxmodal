@@ -32,7 +32,7 @@ from test_shift_invert import (
 )
 
 from jaxmodal.eigen import counting, solve_modes
-from jaxmodal.mesh import box_mesh, voxel_mesh
+from jaxmodal.mesh import box_mesh, solid_shell, voxel_mesh
 from jaxmodal.precond import SingularShiftError
 
 api = importlib.import_module("jaxmodal.eigen.api")
@@ -421,10 +421,11 @@ def test_c_max_need_floor(fake_builds):
 
 
 def test_ladder_real(fake_builds):
-    """Test 3: an interior band on "short" at a budget between chunk 20's and chunk 40's needs:
-    the chunk is the reach rule's on the searched C_max table, below the top chunk (measured:
-    C_max 960 / 1320 / 1360 at chunks 20 / 10 / 5, so chunk 10)."""
-    B = (chunk_need("short", 20) + chunk_need("short", 40)) / 2
+    """Test 3: an interior band on "short" at a budget a tenth of the way from chunk 20's need to
+    chunk 40's: the chunk is the reach rule's on the searched C_max table, below the top chunk
+    (measured: C_max 704 / 1980 / 2000 at chunks 20 / 10 / 5, so chunk 10)."""
+    a, b = chunk_need("short", 20), chunk_need("short", 40)
+    B = a + 0.1 * (b - a)
     reach = {c: c_max("short", c, B) for c in (40, 20, 10, 5)}
     assert reach[40] is None and reach[20] is not None
     f1, f2 = fband("short", 15, 25)
@@ -1022,15 +1023,51 @@ def test_count_si_terms():
     assert a["host_total"] == a["host"] + max(op(6)["build"], 0)  # GMG builds on the device
 
 
-def test_amg_scan_cached(monkeypatch):
-    """Test 11: amg_memory scans the mesh once per mesh."""
-    mem._amg_scan.cache_clear()
-    mesh = prob("short")[0]
+def test_amg_scan_cached():
+    """Test 11: amg_memory scans a mesh once (a fresh mesh: shared ones carry other keys)."""
+    mesh = box_mesh((3, 3, 3), type="hex20")
     for m in (6, 10, 15):
         mem.amg_memory(mesh, m)
-    info = mem._amg_scan.cache_info()
-    mem._amg_scan.cache_clear()
-    assert info.misses == 1 and info.hits == 2
+    first = mem._amg_scan(mesh)
+    assert mem._amg_scan(mesh) is first
+    assert [k for k in mem._CACHE[mesh] if k[0] == "_amg_scan"] == [("_amg_scan",)]
+
+
+def test_cache_lifetime():
+    """The per-mesh cache entries die with the mesh (no lru_cache keeping the last one alive)."""
+    mesh, other = box_mesh((3, 3, 3), type="hex20"), box_mesh((2, 2, 2))
+    shell = solid_shell(box_mesh((3, 3, 1), spacing=(1.0, 1.0, 0.1)), direction=(0, 0, 1))[0]
+    mem._amg_scan(mesh)
+    mem._amg_scan(other)
+    mem._shell_scan(shell)
+    for path in ("scatter", "gather"):
+        mem.unstructured_memory(mesh, 4, path=path)
+    assert mesh in mem._CACHE and shell in mem._CACHE
+    r, rs = weakref.ref(mesh), weakref.ref(shell)
+    del mesh, shell
+    gc.collect()
+    assert r() is None and rs() is None and other in mem._CACHE
+
+
+@pytest.mark.parametrize("path", ["scatter", "gather"])
+def test_layout_sizes(path):
+    """_layout_sizes keeps layout's scalars; the default path resolves before the cache."""
+    from jaxmodal.operators.matfree import DEFAULT_PATH, layout
+
+    mesh = box_mesh((4, 3, 2), type="hex20")
+    lay, got = layout(mesh, path, 7, None), mem._layout_sizes(mesh, path, 7, None)
+    assert got["path"] == lay["path"] and got["n_nodes"] == lay["n_nodes"]
+    for a, b in zip(got["blocks"], lay["blocks"], strict=True):
+        assert a == {k: b[k] for k in a} and set(a) == {"type", "k", "chunk", "n_pad", "W"} & set(b)
+    if path == "gather":
+        assert [got[k] for k in ("R", "n_ranges", "valence")] == [
+            lay[k] for k in ("R", "n_ranges", "valence")
+        ]
+        assert got["inv"] == lay["inv"].size
+    fresh = box_mesh((4, 3, 2), type="hex20")
+    a = mem.unstructured_memory(fresh, 4)
+    assert a == mem.unstructured_memory(fresh, 4, path=DEFAULT_PATH["cpu"])
+    assert len([k for k in mem._CACHE[fresh] if k[0] == "_layout_sizes"]) == 1
 
 
 @pytest.mark.peak
@@ -1721,15 +1758,19 @@ def test_given_chunk_no_fit(fake_builds, monkeypatch):
     assert info["reason"] == "memory" and info["c_max"] == {20: None}
 
 
-def fake_gpu(monkeypatch):
-    """memory.jax.devices()[0]: a GPU with 7e9 free bytes (10e9 limit, 3e9 in use)."""
-    stats = dict(bytes_limit=10e9, bytes_in_use=3e9)
-    gpu = types.SimpleNamespace(platform="gpu", memory_stats=lambda: stats)
+def fake_gpu(monkeypatch, stats=None, platform="gpu"):
+    """memory.jax.devices()[0]: a GPU with 7e9 free bytes (10e9 limit, 3e9 in use), or the given
+    memory_stats function and platform."""
+    if stats is None:
+        stats = lambda: dict(bytes_limit=10e9, bytes_in_use=3e9)  # noqa: E731
+    gpu = types.SimpleNamespace(platform=platform, memory_stats=stats)
     monkeypatch.setattr(mem, "jax", types.SimpleNamespace(devices=lambda: [gpu]))
 
 
 def test_default_budget(monkeypatch):
-    """Test 16: the default budgets: 0.8 x RAM on the CPU; a GPU's free pool and 0.8 x RAM."""
+    """Test 16: the default budgets: 0.8 x RAM on the CPU; a GPU's free pool and 0.8 x RAM; a
+    Metal device whose memory_stats() raises, returns None or lacks bytes_limit gets the CPU
+    rule; a GPU or TPU without bytes_limit takes the given budget, or raises without one."""
     pages = {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 2**20}  # 4 GiB
     monkeypatch.setattr(mem.os, "sysconf", lambda k: pages[k])
     ram = 0.8 * 2**32
@@ -1737,10 +1778,24 @@ def test_default_budget(monkeypatch):
     fake_gpu(monkeypatch)
     assert mem._default_budget() == (7e9, ram)
 
+    def raises():
+        raise NotImplementedError
+
+    for stats in (raises, lambda: None, lambda: dict(bytes_in_use=3e9)):  # no pool limit: CPU rule
+        fake_gpu(monkeypatch, stats, "METAL")
+        assert mem._default_budget() == (ram, None)
+        for platform in ("gpu", "tpu"):
+            fake_gpu(monkeypatch, stats, platform)
+            with pytest.raises(ValueError, match="memory_budget"):
+                mem._default_budget()
+            assert mem._default_budget(5e9) == (5e9, ram)
+    fake_gpu(monkeypatch, lambda: dict(bytes_limit=10e9))
+    assert mem._default_budget() == (10e9, ram)
+
 
 def test_budget_recorded(fake_builds, monkeypatch):
     """Test 16: info["budget"]: (budget, None) on the CPU, (memory_budget, 0.8 x RAM) under a
-    fake GPU (the host budget then binds per space)."""
+    fake GPU (the host budget then binds per space), also on one without bytes_limit."""
     monkeypatch.setattr(api, "si_band", stub_band({}))
     band = fband("short", 15, 25)
     _, _, info = run("short", band, n_modes=12, verify=False)
@@ -1749,6 +1804,13 @@ def test_budget_recorded(fake_builds, monkeypatch):
     ram = 0.8 * mem.os.sysconf("SC_PAGE_SIZE") * mem.os.sysconf("SC_PHYS_PAGES")
     _, _, info = run("short", band, n_modes=12, verify=False, memory_budget=5e9)
     assert info["budget"] == (5e9, ram)
+    fake_gpu(monkeypatch, lambda: None)  # no bytes_limit: memory_budget passes the raise
+    _, _, info = run("short", band, n_modes=12, verify=False, memory_budget=5e9)
+    assert info["budget"] == (5e9, ram)
+    fake_builds["builds"].clear()
+    with pytest.raises(ValueError, match="memory_budget"):
+        run("short", band, n_modes=12, verify=False)
+    assert not fake_builds["builds"]
 
 
 def test_options_reach(fake_builds, monkeypatch):
@@ -1780,7 +1842,7 @@ def test_budget_before_build(fake_builds, monkeypatch):
     order = []
     monkeypatch.setattr(api, "si_band", stub_band({}))
     real_b = mem._default_budget
-    monkeypatch.setattr(mem, "_default_budget", lambda: order.append("budget") or real_b())
+    monkeypatch.setattr(mem, "_default_budget", lambda *a: order.append("budget") or real_b(*a))
     for name in ("stencil", "unstructured"):
         real = getattr(api, name)
         monkeypatch.setattr(api, name, lambda *a, f=real, **kw: order.append("op") or f(*a, **kw))

@@ -417,7 +417,7 @@ def solve_modes(
     from .. import memory as mem  # memory imports this module
 
     # before the build: a GPU pool's bytes_in_use would count the operator a second time
-    budget, host_budget = mem._default_budget() if band is not None else (None, None)
+    budget, host_budget = mem._default_budget(memory_budget) if band is not None else (None, None)
     op = build(mesh, materials, orientations, mass=mass, nodal_mass=nodal_mass, **op_opts)
     t0 = time.perf_counter()
     aggs, R = None, jnp.asarray(rigid_modes(mesh, free))
@@ -496,7 +496,7 @@ def solve_modes(
 
     def levers(c):  # the memory levers not set, with their C_max at chunk c
         out = [f"low_memory=True (C_max {c_max(c, low=True)})"] if not low_memory else []
-        # a polish term (shell AMG, fp32 hex AMG) sets the step, so low_memory alone saves
+        # a polish term (every AMG family) can set the step, so low_memory alone saves
         # little there; its presence does not depend on m
         if pc is not None and "polish" in pc(1):
             off = models(precond_dtype, po={"on": False})[1]

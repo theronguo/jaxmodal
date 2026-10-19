@@ -535,16 +535,26 @@ def test_shell_steps_degree3():
 
 @pytest.mark.slow
 @pytest.mark.parametrize("t, n", [("hex20", 14), ("hex8", 24), ("hex8", 40)])
-def test_hex_polish_below_step(t, n):
-    """fp64 hex AMG has no polish term: its modelled step covers the measured polish."""
+def test_hex_polish_bounded(t, n):
+    """PR 18d: the measured fp64 hex polish <= max(low, fl ws + amg_memory's polish term), and
+    lobpcg_memory takes that term (with and without low_memory). The low model alone bounds
+    these cases, so this checks the step; on hex20 the polish term alone bounds the measured
+    polish (fails without the polish term). The value 1.05 is pinned by test_polish64_pinned;
+    test_amg_polish_tight64 bounds the term from both sides (1 to 1.3x)."""
     S = study()
     mesh = box_mesh((n,) * 3, (1 / n,) * 3, type=t)
     op, free = unstructured(mesh, STEEL), dof_mask(mesh, {"xmin": "xyz"})
     P = API.amg(op, free, 1.0, mesh.points)
+    pc = functools.partial(amg_memory, mesh)
     for m in (8, 25):
-        pc = amg_memory(mesh, m)
-        assert "polish" not in pc
-        assert modelled(mesh, m, pc)["9-block"] >= S.polish(op, jnp.asarray(free), P, m)
+        terms, got = modelled(mesh, m, pc(m)), S.polish(op, jnp.asarray(free), P, m)
+        assert max(terms["low"], terms["polish"]) >= got
+        assert t != "hex20" or terms["polish"] >= got
+    om, nd = functools.partial(unstructured_memory, mesh), op.n_dof
+    terms = modelled(mesh, 15, pc(15))
+    assert lobpcg_memory(om, nd, 10, precond_memory=pc)["step"] == max(terms.values())
+    low = lobpcg_memory(om, nd, 10, precond_memory=pc, low_memory=True)["step"]
+    assert low == max(terms["low"], terms["polish"])
 
 
 @pytest.mark.slow
@@ -581,17 +591,16 @@ def test_polish_lever(off):
 
 @pytest.mark.parametrize("dtype", ["float64", "float32"])
 def test_polish_lever_hex(dtype):
-    """PR 18c test 4: hex AMG names polish_options={'on': False} as a lever only in fp32 (its
-    polish term; the fp64 hex polish stays below the step), and both name precond_dtype unless
-    it is already fp32. The budget is fp64-based for both: on this tiny mesh the fp32 step
-    intercepts make the fp32 estimate the larger one."""
+    """PR 18c test 4, PR 18d: hex AMG names polish_options={'on': False} as a lever in both
+    dtypes (every AMG family has a polish term), and names precond_dtype unless it is already
+    fp32. The budget is below each dtype's own 2-mode estimate, so no slice fits."""
     mesh, bcs = box_mesh((6,) * 3, (1 / 6,) * 3, type="hex20"), {"xmin": "xyz"}
-    budget = 0.8 * solve_modes_memory(mesh, bcs, 20)["total"]
+    budget = 0.8 * solve_modes_memory(mesh, bcs, 2, precond_dtype=dtype)["total"]
     with pytest.warns(UserWarning, match="levers") as w, pytest.raises(ValueError, match="slice"):
         solve_modes(mesh, STEEL, bcs, band=(0, 1e4), memory_budget=budget, verify=False,
                     precond_dtype=dtype)  # fmt: skip
     msg = [str(x.message) for x in w if "levers" in str(x.message)][0]
-    assert ("polish_options={'on': False}" in msg) == (dtype == "float32")
+    assert "polish_options={'on': False}" in msg
     assert ("precond_dtype='float32'" in msg) == (dtype == "float64")
 
 
@@ -607,8 +616,8 @@ def test_band_probe_polish(monkeypatch):
 
 def test_lobpcg_memory_max():
     """step = max(9-block, low, polish) (low_memory: max(low, polish)); no polish term with
-    {"on": False}, Jacobi, GMG, fp64 hex AMG; on flat 64^2 at m = 15 the polish term wins; on hex8
-    AMG at 100k and m = 60 the low term wins."""
+    {"on": False}, Jacobi, GMG; on flat 64^2 at m = 15 the polish term wins; on fp64 hex8 AMG at
+    100k and m = 60 too (POLISH64, PR 18d: 1.600 against 1.519 GB low)."""
     mesh = T.plate(64, 100)[0]
     n = 3 * len(mesh.points)
     om = functools.partial(unstructured_memory, mesh)
@@ -626,12 +635,13 @@ def test_lobpcg_memory_max():
     box = box_mesh((32, 32, 32), (1 / 32,) * 3)  # hex8, 107k DOF
     nb = 3 * len(box.points)
     hp = amg_memory(box, 60)
-    assert "polish" not in hp and "polish" not in gmg_memory(voxel_mesh((8, 8, 8)), 15)
+    assert "polish" not in gmg_memory(voxel_mesh((8, 8, 8)), 15)
     hterms = modelled(box, 60, hp)
-    assert hterms["low"] > hterms["9-block"]
-    hstep = lobpcg_memory(functools.partial(unstructured_memory, box), nb, 50,
-                          precond_memory=functools.partial(amg_memory, box))["step"]  # fmt: skip
-    assert hstep == hterms["low"]
+    assert hterms["polish"] > hterms["low"] > hterms["9-block"]
+    bo, bp = functools.partial(unstructured_memory, box), functools.partial(amg_memory, box)
+    assert lobpcg_memory(bo, nb, 50, precond_memory=bp)["step"] == hterms["polish"]
+    hlow = lobpcg_memory(bo, nb, 50, precond_memory=bp, low_memory=True)["step"]
+    assert hlow == max(hterms["low"], hterms["polish"])
 
 
 def test_pc_builds_shell():

@@ -33,7 +33,7 @@ K, M = assemble(
 ```
 
 1. **Host checks:** `chunk >= 1`; x64 must be on (`jaxmodal.config.enable_x64()`), else `ValueError`, so the oracle is never silently fp32. Then `phases(mesh)`, `check_materials` and `check_elements(mesh, mass)`, the `nodal_mass` checks below, and `s_K`, `s_M`: `None` or finite, non-negative `(n_el,)` arrays in global element order (zeros allowed).
-2. **Element matrices:** per block, in chunks of $c = \min(\text{chunk}, n_\text{el})$ elements, the jitted PR 3 kernels `stiffness` and `mass` (or `lumped_mass`) with the rotated per-phase $C$ and $\rho$ from `phase_table`. The last chunk is padded with its first element and sliced off, so a block compiles once per (type, $c$). Each element's $K_e$ is multiplied by $s_{K,e}$ and its consistent $M_e$ (or lumped diagonal) by $s_{M,e}$ before summation; `None` is bit-identical to ones. `chunk` bounds the $K_e$ temporaries and the XLA workspace, not total memory; 1024 is as fast as 4096 and peaks about 0.5 GB lower for hex20/hex27.
+2. **Element matrices:** per block, in chunks of $c = \min(\text{chunk}, n_\text{el})$ elements, the jitted PR 3 kernels `stiffness` and `mass` (or `lumped_mass`) with the rotated per-phase $C$ and $\rho$ from `phase_table`. The last chunk is padded with its first element and sliced off, so a block compiles once per (type, $c$). Each element's $K_e$ is multiplied by $s_{K,e}$ and its consistent $M_e$ (or lumped diagonal) by $s_{M,e}$ before summation; `None` is bit-identical to ones. `chunk` bounds the $K_e$ temporaries and the XLA workspace, not total memory; 1024 is as fast as 4096 and peaks about 0.5 GB lower for hex20/hex27. The chunk loop (`_chunked`) is pipelined (PR 18d): it launches chunk $i+1$ before copying chunk $i$'s results to the host, so up to two chunks' inputs and results are alive at once.
    **Solid shells:** with an `ssh8` block, `ply_table` gives the per-phase plies, and the `ssh8` branch calls the jitted, `vmap`ped one-element kernels `shell_stiffness` (condensed $K_e$) and `shell_mass` ($m_e\otimes I_3$) on each element's ply slice, chunked and padded the same way (`_chunked` slices the ply pytree). A `Laminate` on a hex block raises after `check_materials` ("material $m$ is a Laminate on $t$ elements; laminates need ssh8"); `mass="lumped"` raises on `ssh8` (`docs/elements.md`). The matrix-free operator takes `ssh8` blocks in stored mode only ([below](#solid-shell-blocks)).
 3. **Global matrices:** COO triplets with int32 rows/cols from `element_dofs` → `csr_array` (duplicates summed) → $\tfrac12(A + A^\top)$. Each $K_e$ is exactly symmetric, but the summed CSR is symmetric only to ~1e-16 (summation order of duplicates), so the result is symmetrized and then satisfies `(K != K.T).nnz == 0`. K is built before M, so only one matrix's triplets are alive at a time.
 4. **Lumped mass** (`mass="lumped"`): a diagonal M from the PR 3 lumped diagonals (row-sum for hex8/hex27, HRZ for hex20), scaled by $s_M$.
@@ -86,7 +86,7 @@ dK, dM = op.diag_K(), op.diag_M()  # (n_dof,)
 - **Inputs.** Host checks as in `assemble` (x64 on, `phases`, `check_materials`, `check_elements(mesh, mass)`, `nodal_mass`), `chunk >= 1`, `range_nodes >= 1`. `v` must be 2-D with `n_dof` rows (a trace-time check); `m = 1` is `(n_dof, 1)`. No masking: callers form $m \odot K(m \odot v)$ (PR 7, PR 9).
 - **`scaled(s_K=None, s_M=None)`**: `None` keeps the current value; otherwise the shape must be `(n_el,)`. Only shapes are checked, so it is traceable (use it under `jit` and `grad`). Values should be finite and $\ge 0$; $s = 0$ voids an element.
 - **Stored mode bakes $C$ into $K_e$:** changing materials means building a new operator. In otf mode, `dataclasses.replace(op, C=...)` changes the stiffness without recompiling. A stored-mode operator with `C` set raises (it would be ignored).
-- **After `rcm`** (or any `renumber`), user arrays follow the new numbering: `s_K[q]`, `s_M[q]`, `nodal_mass[p]`, and $v$ maps as `v.reshape(-1, 3, m)[p]` (new DOF $3n' + i$ is old DOF $3p[n'] + i$).
+- **After `rcm`** (or `morton`, or any `renumber`), user arrays follow the new numbering: `s_K[q]`, `s_M[q]`, `nodal_mass[p]`, and $v$ maps as `v.reshape(-1, 3, m)[p]` (new DOF $3n' + i$ is old DOF $3p[n'] + i$).
 
 ### Pytree (Principle 3)
 
@@ -185,7 +185,7 @@ est = unstructured_memory(
 # {storage, vectors, workspace, build, overhead, total} in bytes
 ```
 
-Call it on the mesh that will be used (after `rcm`, if any), with the same keyword arguments as `unstructured`.
+Call it on the mesh that will be used (after `rcm` or `morton`, if any), with the same keyword arguments as `unstructured`.
 
 - `storage`: every leaf, from `layout` (padded counts, $W_b$, valence).
 - `vectors`: $3 \cdot 8\,n_\text{dof} m$: $v$ and two outputs (XLA frees an apply's output asynchronously, so it can overlap the next apply's).
@@ -203,7 +203,7 @@ Call it on the mesh that will be used (after `rcm`, if any), with the same keywo
 - `overhead`: 10 MB, the only constant fitted to measured peaks ($t$, $a$, $b$ come from `memory_analysis`; measured on hex20 $30^3$ and hex8 $60^3$; the formulas match `memory_analysis` without factors).
 - `total = overhead + storage + max(build, vectors + workspace)`.
 - Not counted: `layout`'s host transient (≈ 4× the int64 inverse map while it is built, e.g. 0.55 GB at hex20 $55^3$ gather). It is freed before any device leaf exists, so it does not set the peak of `unstructured`, but an estimator that composes this one with live device memory should add it.
-- The estimate costs as much as `layout` (0.3 s at 1M DOF gather, 3.2 s per call at 10.2M: about 35 s of estimates per band call there; caching `layout` is PR 18d).
+- The estimate reads only the scalars of `layout` (per block type, $k$, chunk, padded count, window; the path, node count and, for gather, $R$, range count, valence and the inverse-map size), cached per mesh (PR 18d; a weak per-mesh cache, so the entry lives as long as the mesh and meshes are treated as immutable): the first call costs one `layout` (0.22 s at 812k DOF gather, 3.2 s at 10.2M), later calls on the same mesh nothing (before 18d, about 35 s of estimates per band call at 10.2M). The path is resolved before the cache, so `path=None` and the explicit default share one entry.
 - **Composition:** later estimators (PR 9/11/13/14/15) add PR 5's `storage + workspace` and count `overhead` once; they count their own vectors.
 
 ## Voxel stencil (`stencil`)
@@ -219,7 +219,7 @@ y = op.apply_K(v)  # (n_dof, m) -> (n_dof, m); also apply_M, diag_K, diag_M
 Ke, me = reference_element(op)  # (P, 24, 24) per phase; (8, 8) scalar mass per unit density
 ```
 
-For `voxel_mesh` meshes (`mesh.voxel` set; it also works after `renumber`/`rcm`). Same interface and conventions as `unstructured` (DOF $3n + i$ in mesh node order, 2-D `v`, traceable `scaled`, nodal masses, consistent or lumped mass; on a box element row-sum and HRZ coincide at $\rho V/8$ per node), so results compare directly with `unstructured` and `assemble` on the same mesh.
+For `voxel_mesh` meshes (`mesh.voxel` set; it also works after `renumber`/`rcm`/`morton`). Same interface and conventions as `unstructured` (DOF $3n + i$ in mesh node order, 2-D `v`, traceable `scaled`, nodal masses, consistent or lumped mass; on a box element row-sum and HRZ coincide at $\rho V/8$ per node), so results compare directly with `unstructured` and `assemble` on the same mesh.
 
 - **Restriction:** one reference hex8 $K_e$ per phase (a (material, orientation) pair); elements differ only by phase, $s_K$ and $s_M$. The points must be the grid points. A distorted voxel mesh, hex20/hex27 grids or many phases (cost ∝ P: one GEMM per phase; e.g. one orientation per element) belong to `unstructured`.
 - **Geometry check** (NumPy, before building): every used grid node's mesh point equals `origin + spacing * (i, j, k)` to $10^{-12}\max_d(|o_d| + h_d n_d)$, and every active cell's connectivity equals the `node_map` of its grid corners in VTK order (exact). Otherwise `ValueError("mesh does not match its voxel grid: ...")`. With `Mesh`'s bijection checks this makes the grid description equivalent to the mesh. A mesh without `voxel` raises too.
@@ -250,7 +250,7 @@ Every per-cell gather passes `fill_value=0`, so inactive and padded cells contri
 
 The rule is within 10% of the best for both $m$ (`slab_rule_ok`, checked by a fast test). Per DOF this is ≈ 4.5× faster than PR 5's stored-Ke `unstructured` at m = 1 and ≈ 1.4× at m = 16.
 
-**Cost per apply** (m = 1, P = 1, for PR 18d's roofline): per cell, $2 \cdot 24^2 = 1152$ flops; data moved per slab: the int32 `node`/`cell` slices (≈ 8 B per cell), the gathered $u$ and the scattered output (each ≈ 24 B per node read and written), $s$ (8 B per cell); the rest stays in slab-sized buffers.
+**Cost per apply** (m = 1, P = 1): per cell, $2 \cdot 24^2 = 1152$ flops. The roofline (lower-bound bytes against the implementation's traffic through the corner stack and shifted adds) and the measured fraction are in [performance](performance.md#roofline).
 
 ### Memory estimator (`stencil_memory`)
 
@@ -280,6 +280,7 @@ est = stencil_memory(mesh, m, mass="consistent", slab=None)  # same keys as unst
 `tests/test_operators.py`:
 
 - **Assembly** equals a dense Python loop (explicit DOF lists, per-element `rotate(material, orientation)`, no `phases`/`element_dofs`) to 1e-14 on a distorted two-block mesh: hex20 and hex8 glued at a shared face, with two materials (one orthotropic, different $\rho$) and two orientations mixed in each block, for `chunk=7` (several chunks, padded last one) and `chunk=4096` (one chunk), consistent and lumped.
+- **Pipelined chunk loop** (PR 18d): `_chunked` equals one chunk to $10^{-14}$ for $n = 3c$, $3c + 1$ and $n <$ chunk, array and pytree results (`test_chunked`).
 - **Patch test:** on a $3^3$ box per type, rotated orthotropic $C$, interior corner nodes moved per component by $\le 15\%$ of the edge, all boundary nodes prescribed $u = Ax + b$, the interior solved with `spsolve`. The stress is constant at every quadrature point to 1e-10 relative to $\|\sigma\|_\infty$; measured 1.2e-15 (hex8), 1.0e-14 (hex20), 1.3e-14 (hex27) for straight edges (non-corner nodes on the trilinear map of the corners), and 6.4e-15 (hex20), 1.6e-14 (hex27) for curved elements (non-corner interior nodes additionally offset per component by $\le 5\%$ of the edge).
 - **Rigid translation mass:** $t_x^\top M t_x = \rho V + \sum m_n$ with the analytic volume, consistent and lumped, straight and curved; $t_x^\top M t_y = 0$.
 - **Nodal masses** add exactly; `element_dofs` calls `check_int32` with every block's size.
@@ -287,6 +288,7 @@ est = stencil_memory(mesh, m, mass="consistent", slab=None)  # same keys as unst
 - **Matrix-free** (`tests/test_matfree.py`), on four meshes: A, the mixed hex8 + hex20 mesh (two materials, two orientations), RCM-ordered; B, a curved hex27 $3^3$ box, RCM-ordered; C, mesh A shuffled without RCM (elements not sorted by min node); D, an asymmetric masked voxel mesh with mixed labels; E (gather only), an RCM-ordered hex20 $12 \times 2 \times 2$ box with `chunk=4`, `range_nodes=203`: narrow windows and two ranges with a large overlap, so the last range's window extension is visible. Random $s_K, s_M \in [0.1, 2]$ with one $s = 0$, nodal masses with zeros, `chunk=5` (pads every block) and `range_nodes=23` (several ranges, overlapping last one):
   - `apply_K`, `apply_M` ($m = 1, 5$), `diag_K`, `diag_M` equal the scaled `assemble` to 1e-12 for every mode, path and mass (C, E: gather); measured errors are about 1e-15. One case has one chunk and one range. The lumped HRZ formula is shared with the oracle (`kernels.lumped_nodal`), so it is validated by PR 3's element tests, not here.
   - **Permuted:** the RCM-ordered operator with `s[q]`, `nodal_mass[p]` and $v$ permuted by $p$ reproduces the original mesh's SciPy products.
+  - **Morton** (`tests/test_reorder.py`, PR 18d): after `morton`, apply_K and apply_M of `unstructured` (box hex8 on both paths, hex20, the mixed hex8 + hex20 mesh, an `ssh8` + hex8 plate) and of `stencil` (a masked non-cubic voxel mesh) equal the permuted original to $10^{-12}$ relative, m = 3.
   - **No recompile:** an executable compiled once gives the new SciPy products after replacing `s_K`, `s_M`, `rho`, `nodal` (and `C` in otf mode), consistent and lumped.
   - **Gradient:** `jax.grad` of $w^\top K(s_K) v$ equals the per-element $w_e^\top K_e v_e$ to 1e-12.
   - **Gather layout:** the inverse map, decoded independently, files every (element, local DOF) pair under the right DOF once per covering range (twice in the overlap), references no padded element, and keeps windows inside the padded block; the $R$ rule matches a brute-force recomputation on a host-only hex20 $44^3$ layout.

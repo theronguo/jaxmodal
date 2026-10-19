@@ -73,16 +73,25 @@ def maxrss_bytes(value, sys_platform):
     return value if sys_platform == "darwin" else value * 1024
 
 
-def measure(code, setup=""):
+def child_env(large_cache=False):
+    """The measured child's environment. large_cache=True (timed runs) leaves macOS's large-block
+    cache on; peaks keep MallocLargeCache=0 (freed large blocks unmapped, not reused uncharged)."""
+    # the parallel test workers' BLAS caps (tests/conftest.py) must not reach measured children
+    drop = ("JAX_ENABLE_X64", "JAX_COMPILATION_CACHE_DIR", "MallocLargeCache")
+    drop += ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")
+    env = {k: v for k, v in os.environ.items() if k not in drop}
+    if not large_cache:
+        env["MallocLargeCache"] = "0"
+    return env
+
+
+def measure(code, setup="", large_cache=False):
     """Run `setup`, then `code`, in a fresh subprocess; return its peak/RSS deltas and wall time.
 
     On macOS, peak_bytes = max(interval footprint delta, ru_maxrss delta); None elsewhere.
+    large_cache: see child_env (True for timed runs; the peak then undercounts reused blocks).
     """
-    # the parallel test workers' BLAS caps (tests/conftest.py) must not reach measured children
-    drop = ("JAX_ENABLE_X64", "JAX_COMPILATION_CACHE_DIR")
-    drop += ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")
-    env = {k: v for k, v in os.environ.items() if k not in drop}
-    env["MallocLargeCache"] = "0"  # freed large blocks are unmapped, not reused uncharged
+    env = child_env(large_cache)
     with tempfile.TemporaryDirectory() as d:
         out = os.path.join(d, "r.json")
         proc = subprocess.run(
@@ -99,11 +108,11 @@ def measure(code, setup=""):
     return {"peak_bytes": peak, "rss_bytes": rss, "time_s": r["time_s"]}
 
 
-def measure_json(code, setup=""):
+def measure_json(code, setup="", large_cache=False):
     """measure() for `code` that writes a JSON dict to "{out}"; that dict plus peak_bytes."""
     with tempfile.TemporaryDirectory() as d:
         out = os.path.join(d, "r.json")
-        r = measure(code.format(out=out), setup)
+        r = measure(code.format(out=out), setup, large_cache)
         return json.loads(Path(out).read_text()) | {"peak_bytes": r["peak_bytes"]}
 
 

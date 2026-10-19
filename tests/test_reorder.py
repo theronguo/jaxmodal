@@ -1,13 +1,17 @@
-"""renumber and rcm: renumbering rules checked geometrically, RCM against SciPy."""
+"""renumber, rcm, morton: renumbering rules checked geometrically, RCM against SciPy, Morton
+against a per-bit reference, and the operators after morton against the permuted original."""
 
+import jax.numpy as jnp
 import numpy as np
 import pytest
 import scipy.sparse as sp
-from helpers import mixed_mesh
+from helpers import MATERIALS, R, mixed_mesh, rel
 from scipy.sparse.csgraph import reverse_cuthill_mckee
 
 from jaxmodal.elements import check_elements
-from jaxmodal.mesh import Mesh, rcm, renumber, voxel_mesh
+from jaxmodal.mesh import Mesh, box_mesh, morton, rcm, renumber, solid_shell, voxel_mesh
+from jaxmodal.mesh.reorder import _morton_keys
+from jaxmodal.operators import stencil, unstructured
 
 
 def with_sets(m):
@@ -130,3 +134,102 @@ def test_renumber():
         renumber(old, p[:-1], q)
     with pytest.raises(ValueError, match="permutations"):
         renumber(old, p, np.zeros(old.n_el, int))
+
+
+def ref_keys(x, lo, hi):
+    """Morton keys by the formula, one bit at a time in Python integers."""
+    q = np.floor((x - lo) / np.maximum(hi - lo, 1e-300) * (2**21 - 1)).astype(np.int64)
+    out = []
+    for row in q:
+        k = 0
+        for b in range(21):
+            for d in range(3):
+                k |= ((int(row[d]) >> b) & 1) << (3 * b + d)
+        out.append(k)
+    return np.array(out, np.uint64)
+
+
+def test_morton_keys():
+    rng = np.random.default_rng(8)
+    x = rng.uniform(-1, 3, (50, 3))
+    lo, hi = x.min(0), x.max(0)
+    np.testing.assert_array_equal(_morton_keys(x, lo, hi), ref_keys(x, lo, hi))
+    x[:, 2] = 0.5  # coplanar: zero extent on z
+    lo, hi = x.min(0), x.max(0)
+    np.testing.assert_array_equal(_morton_keys(x, lo, hi), ref_keys(x, lo, hi))
+
+
+@pytest.mark.parametrize("case", ["box", "mixed"])
+def test_morton_order(case):
+    """Node and per-block element order equal the reference: keys on the cube of the bounding
+    box's largest side, elements by their 8-corner centroid."""
+    rng = np.random.default_rng(9)
+    if case == "box":
+        old = box_mesh((4, 3, 2), spacing=(1.0, 2.0, 0.5))
+    else:
+        old = shuffled(with_sets(mixed_mesh(rng)), rng)
+    new, p, q = morton(old)
+    x = old.points
+    lo = x.min(0)
+    hi = lo + (x.max(0) - lo).max()
+    np.testing.assert_array_equal(p, np.argsort(ref_keys(x, lo, hi), kind="stable"))
+    for t, s in old.offsets.items():
+        c = old.blocks[t]
+        e = s + np.argsort(ref_keys(x[c[:, :8]].mean(1), lo, hi), kind="stable")
+        np.testing.assert_array_equal(q[s : s + len(c)], e)
+    check_renumbered(old, new, p, q)
+
+
+def test_morton_thin():
+    """A thin plate keeps the in-plane locality (one scale for all axes): the median element
+    span stays far below grid order's."""
+    old = box_mesh((32, 32, 1), spacing=(1.0, 1.0, 0.01))
+    new = morton(old)[0]
+    span = [np.median(np.ptp(m.blocks["hex8"], axis=1)) for m in (new, old)]
+    assert span[0] < 0.1 * span[1]
+
+
+def test_morton_voxel():
+    old = islands()
+    new, p, q = morton(old)
+    check_renumbered(old, new, p, q)
+
+
+def plate():
+    """ssh8 + hex8 plate."""
+    box = box_mesh((4, 3, 1), spacing=(1.0, 1.0, 0.1))
+    sel = np.flatnonzero(box.points[box.blocks["hex8"]].mean(1)[:, 0] > 2)
+    return solid_shell(box, sel, direction=(0, 0, 1))[0]
+
+
+def voxel_case():
+    mask = np.ones((4, 3, 3), bool)
+    mask[2:, 1:, 2] = mask[0, 2, :2] = mask[3, 0, 0] = False
+    return voxel_mesh((4, 3, 3), spacing=(0.5, 1.0, 0.75), mask=mask)
+
+
+EQUIV = [("hex8", "scatter"), ("hex8", "gather"), ("hex20", "scatter"), ("mixed", "scatter"),
+         ("plate", "scatter"), ("voxel", "stencil")]  # fmt: skip
+
+
+@pytest.mark.parametrize("case, path", EQUIV)
+def test_morton_equivalence(case, path):
+    """apply_K and apply_M after morton equal the permuted original (roadmap)."""
+    rng = np.random.default_rng(10)
+    old = {
+        "hex8": lambda: box_mesh((3, 2, 2)),
+        "hex20": lambda: box_mesh((2, 2, 2), type="hex20"),
+        "mixed": lambda: mixed_mesh(rng),
+        "plate": plate,
+        "voxel": voxel_case,
+    }[case]()
+    new, p, q = morton(old)
+    v = rng.standard_normal((3 * len(old.points), 3))
+    vn = v.reshape(-1, 3, 3)[p].reshape(v.shape)
+    if path == "stencil":
+        a, b = stencil(old, MATERIALS, {1: R}), stencil(new, MATERIALS, {1: R})
+    else:
+        a, b = (unstructured(m, MATERIALS, {1: R}, path=path) for m in (old, new))
+    for f in ("apply_K", "apply_M"):
+        ya = np.asarray(getattr(a, f)(jnp.asarray(v))).reshape(-1, 3, 3)[p].reshape(v.shape)
+        assert rel(np.asarray(getattr(b, f)(jnp.asarray(vn))), ya) < 1e-12

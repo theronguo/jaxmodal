@@ -1,4 +1,4 @@
-"""Node and element renumbering (NumPy/SciPy): renumber, rcm. See docs/mesh.md."""
+"""Node and element renumbering (NumPy/SciPy): renumber, rcm, morton. See docs/mesh.md."""
 
 import dataclasses
 
@@ -82,6 +82,34 @@ def rcm(mesh):
         [
             s + np.argsort(pi[c].min(1), kind="stable")
             for c, s in zip(conn, mesh.offsets.values(), strict=True)
+        ]
+    )
+    return renumber(mesh, p, q), p, q
+
+
+def _morton_keys(x, lo, hi, bits=21):
+    """Morton (Z-order) keys of points x (n, 3) quantized on the box [lo, hi]; x bit lowest."""
+    q = ((x - lo) / np.maximum(hi - lo, 1e-300) * (2**bits - 1)).astype(np.uint64)
+    k = np.zeros(len(x), np.uint64)
+    for b in range(bits):
+        for d in range(3):
+            k |= ((q[:, d] >> np.uint64(b)) & np.uint64(1)) << np.uint64(3 * b + d)
+    return k
+
+
+def morton(mesh):
+    """Morton (Z-order) node order, then elements by the Morton key of their corner centroid
+    within each block, quantized on the cube of the bounding box's largest side (so a thin axis
+    keeps few bits). Returns (new mesh, p, q) like rcm. A benchmark helper; prefer rcm
+    (docs/performance.md)."""
+    x = mesh.points
+    lo = x.min(0)
+    hi = lo + (x.max(0) - lo).max()
+    p = np.argsort(_morton_keys(x, lo, hi), kind="stable")
+    q = np.concatenate(
+        [
+            s + np.argsort(_morton_keys(x[c[:, :8]].mean(1), lo, hi), kind="stable")
+            for c, s in zip(mesh.blocks.values(), mesh.offsets.values(), strict=True)
         ]
     )
     return renumber(mesh, p, q), p, q

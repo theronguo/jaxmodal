@@ -15,7 +15,9 @@ from jaxmodal.eigen import count, lobpcg, reference_modes, solve_modes
 from jaxmodal.materials import Material, isotropic
 from jaxmodal.memory import (
     AMG_LOOP_K,
+    AMG_STEP32,
     GMG_LOOP,
+    POLISH64,
     amg_memory,
     gmg_memory,
     lobpcg_memory,
@@ -400,6 +402,9 @@ def test_memory_precond_options():
     a = {d: amg_memory(mesh, 15, degree=d) for d in (1, 2, 3)}
     assert a[1] == a[2] and a[3]["step"] - a[2]["step"] == 8 * 15 * AMG_LOOP_K
     assert a[3]["step_low"] - a[2]["step_low"] == 8 * 15 * AMG_LOOP_K
+    assert abs(a[3]["polish"] - a[2]["polish"] - 8 * 15 * AMG_LOOP_K) <= 1  # unscaled loop term
+    pa, pc, pK = AMG_STEP32[("p", "polish")]  # hex20
+    assert abs(a[2]["polish"] - POLISH64 * (8 * n * (pa * 15 + pc) + 8 * 15 * pK)) <= 1
     g = {d: gmg_memory(v, 15, degree=d) for d in (2, 3)}
     b = 8 * 3 * len(v.points) * 15
     for key in ("workspace", "step", "step_low"):

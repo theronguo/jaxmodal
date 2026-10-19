@@ -30,17 +30,28 @@ _SHELL = {
 def _chunked(kernel, X, conn, p, chunk, *args):
     """kernel(X[conn], p, *args) in chunks of min(chunk, n_el); the last chunk is padded. p is
     an array or a pytree of per-element arrays, args are passed whole; the result (an array or
-    a pytree) is written into host arrays allocated after the first chunk."""
-    n, out = len(conn), None
+    a pytree) is written into host arrays shaped by the first chunk. Pipelined: chunk i+1
+    is gathered and dispatched before chunk i is copied, so up to two chunks (inputs and
+    results) are alive at once."""
+    n = len(conn)
     c = min(chunk, n)
-    for s in range(0, n, c):
+
+    def launch(s):
         e = np.arange(s, s + c)
         e = np.where(e < n, e, s)  # pad by repeating the chunk's first element
-        r = kernel(X[conn[e]], jax.tree.map(lambda a, e=e: a[e], p), *args)
-        if out is None:
-            out = jax.tree.map(lambda a: np.empty((n, *a.shape[1:]), a.dtype), r)
+        return s, kernel(X[conn[e]], jax.tree.map(lambda a, e=e: a[e], p), *args)
+
+    def copy(s, r):
         for o, a in zip(jax.tree.leaves(out), jax.tree.leaves(r), strict=True):
             o[s : s + c] = np.asarray(a)[: n - s]
+
+    prev = launch(0)
+    out = jax.tree.map(lambda a: np.empty((n, *a.shape[1:]), a.dtype), prev[1])
+    for s in range(c, n, c):
+        cur = launch(s)  # dispatched asynchronously; runs while the previous result is copied
+        copy(*prev)
+        prev = cur
+    copy(*prev)
     return out
 
 

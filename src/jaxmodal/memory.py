@@ -3,6 +3,7 @@
 import functools
 import math
 import os
+import weakref
 
 import jax
 import numpy as np
@@ -22,7 +23,7 @@ from .elements import ELEMENTS
 from .materials import phases
 from .operators import dof_mask, rigid_modes
 from .operators.common import check_shell, is_count
-from .operators.matfree import layout
+from .operators.matfree import layout, resolve_path
 from .operators.voxel import grid_layout
 from .precond import schwarz
 from .precond.amg import SHELL_BLOCKS, unsupported_shell
@@ -44,6 +45,37 @@ OVERHEAD = 10e6  # fixed JAX runtime overhead beyond the formulas, measured (hex
 # otf apply_K temporaries per element: a + b (m - 1) bytes, an upper envelope of memory_analysis
 # at m = 1, 4, 16 (XLA's fusion of the strain/stress fields varies with m).
 OTF_BYTES = {"hex8": (6.1e3, 1.28e3), "hex20": (41.0e3, 3.17e3), "hex27": (54.6e3, 2.55e3)}
+
+
+_CACHE = weakref.WeakKeyDictionary()  # mesh -> {key: value}; entries die with the mesh
+
+
+def _per_mesh(f):
+    """Cache f(mesh, *args) per mesh (meshes are treated as immutable; Mesh hashes by
+    identity). Cached values must not reference the mesh."""
+
+    @functools.wraps(f)
+    def g(mesh, *args):
+        d = _CACHE.setdefault(mesh, {})
+        key = (f.__name__, *args)
+        if key not in d:
+            d[key] = f(mesh, *args)
+        return d[key]
+
+    return g
+
+
+@_per_mesh
+def _layout_sizes(mesh, path, chunk, range_nodes):
+    """The scalars of layout(...) that unstructured_memory reads."""
+    lay = layout(mesh, path, chunk, range_nodes)
+    keys = ("type", "k", "chunk", "n_pad", "W")
+    out = dict(path=lay["path"], n_nodes=lay["n_nodes"],
+               blocks=[{k: b[k] for k in keys if k in b} for b in lay["blocks"]])  # fmt: skip
+    if lay["path"] == "gather":
+        out.update(R=lay["R"], n_ranges=lay["n_ranges"], valence=lay["valence"],
+                   inv=lay["inv"].size)  # fmt: skip
+    return out
 
 
 def _chunk_temps(mode, t, c, m):
@@ -68,7 +100,7 @@ def unstructured_memory(
     check_shell(mesh, mode)
     if "ssh8" in mesh.blocks and mass == "lumped":
         raise ValueError("solid-shell elements are consistent-mass only")
-    lay = layout(mesh, path, chunk, range_nodes)
+    lay = _layout_sizes(mesh, resolve_path(path), chunk, range_nodes)
     n_dof, n_el = 3 * lay["n_nodes"], mesh.n_el
     gather = lay["path"] == "gather"
     storage = 8 * (n_dof + 2 * n_el)  # nodal, s_K, s_M
@@ -87,7 +119,7 @@ def unstructured_memory(
             storage += 4 * lay["n_ranges"]
             window += 8 * b["W"] * k * m
     if gather:
-        inv = lay["inv"].size
+        inv = lay["inv"]
         storage += 4 * inv
         host += 8 * inv  # int64 inverse map, alive until the int32 copy
         workspace = window + max(8 * 3 * lay["R"] * lay["valence"] * m, temps)
@@ -151,8 +183,8 @@ def lobpcg_memory(
     estimate (e.g. lambda m: gmg_memory(mesh, m)), None for the default Jacobi. capacity: the
     basis columns (default _capacity's for n_modes).
 
-    step = max(9-block, low, polish) (low_memory: max(low, polish); polish for the shell AMG
-    family and fp32 hex AMG). Returns step, basis, rigid, host, precond (its storage),
+    step = max(9-block, low, polish) (low_memory: max(low, polish); polish for every AMG
+    family). Returns step, basis, rigid, host, precond (its storage),
     total = overhead + storage + precond + basis + rigid + host + max(build, precond build, step)
     and per memory space (a GPU; the CPU uses total): device_total (the device terms and the
     device builds), host_total (the host peak: max(operator build, V + AMG build, V + 2 chunks
@@ -170,7 +202,7 @@ def lobpcg_memory(
     step = Al * b + fl * ws + pc["step_low"]  # the low step, also after a 9-block switch
     if not low_memory:
         step = max(step, A * b + f * ws + pc["step"])
-    if "polish" in pc:  # the polish's PCG (shell AMG, fp32 hex AMG)
+    if "polish" in pc:  # the polish's PCG (AMG)
         step = max(step, fl * ws + pc["polish"])
     out = dict(
         step=step,
@@ -359,6 +391,10 @@ AMG_STEP32 = {
     ("p", "low"): (8.70, 14.5, 576_100),
     ("p", "polish"): (20.70, 4.0, 830_500),
 }
+# fp64 hex AMG polish: the fp32 polish entry 8n(am + c) + 8mK scaled by POLISH64, chosen from
+# the 11 measured fp64 polish rows of amg_fp32_study.json (max(low, polish) 1.04-1.15 of
+# measured); f_l ws (lobpcg_memory) and the degree > 2 loop term are added unscaled.
+POLISH64 = 1.05
 SHELL_STEP32 = {
     "9-block": (5.2, 16.0, 37e6),
     "low": (11.1, 18.9, 65e6),
@@ -366,7 +402,7 @@ SHELL_STEP32 = {
 }
 
 
-@functools.lru_cache(maxsize=1)  # Mesh hashes by identity; keeps the last mesh alive
+@_per_mesh
 def _shell_scan(mesh):
     """(level-0 patch sizes in DOFs, shell DOFs, hex-only DOFs, shell fiber groups) of the
     solid-shell AMG: the fibers and patches of amg's own scan, on the mesh's connectivity."""
@@ -404,7 +440,7 @@ def _shell_amg_memory(mesh, m, max_coarse, degree, dtype):
     return {k: int(v) for k, v in out.items()}
 
 
-@functools.lru_cache(maxsize=1)  # Mesh hashes by identity; keeps the last mesh alive
+@_per_mesh
 def _amg_scan(mesh):
     """(family, corner DOFs n_c, p-level table bytes) of amg_memory: the mesh scan alone."""
     n_nodes = len(mesh.points)
@@ -428,8 +464,8 @@ def amg_memory(mesh, m, max_coarse=1000, degree=2, dtype="float64"):
     max_coarse=max_coarse, dtype=dtype) applied to (n_dof, m) blocks: storage (the p-level
     exact from the mesh, the AMG levels per corner DOF, the coarsest factor), build and
     host_build (the setup host peak, fp64 for both dtypes), step and step_low (extra LOBPCG
-    step bytes over Jacobi), count (extra count-recurrence bytes, an fp64 build); meshes with
-    ssh8 blocks, and fp32 on hex, also polish (the polish's PCG). Calibrated on box meshes at
+    step bytes over Jacobi), count (extra count-recurrence bytes, an fp64 build) and polish
+    (the polish's PCG; fp64 hex: POLISH64 x the fp32 term). Calibrated on box meshes at
     max_coarse 1000 (the shell family on flat, stacked, web and block meshes); the coarse term
     uses max(max_coarse, 1000) (an upper bound, loose above 1000)."""
     if dtype not in ("float64", "float32"):
@@ -448,9 +484,9 @@ def amg_memory(mesh, m, max_coarse=1000, degree=2, dtype="float64"):
     loop = AMG_LOOP_K if degree > 2 else 0
     hb = beta + max(alpha[t] for t in mesh.blocks) * n_c
 
-    def term(key):
-        a, c, K = (AMG_STEP32 if fp32 else AMG_STEP)[(fam, key)]
-        return 8 * n_dof * (a * m + c) + 8 * m * (K + loop)
+    def term(key, table=AMG_STEP32 if fp32 else AMG_STEP, scale=1):
+        a, c, K = table[(fam, key)]
+        return scale * (8 * n_dof * (a * m + c) + 8 * m * K) + 8 * m * loop
 
     out = dict(
         storage=storage,
@@ -459,9 +495,8 @@ def amg_memory(mesh, m, max_coarse=1000, degree=2, dtype="float64"):
         step=term("9-block"),
         step_low=term("low"),
         count=8 * n_dof * (AMG_COUNT[0] * m + AMG_COUNT[1]) + 8 * m * loop,
+        polish=term("polish", AMG_STEP32, 1 if fp32 else POLISH64),
     )
-    if fp32:
-        out["polish"] = term("polish")
     return {k: int(v) for k, v in out.items()}
 
 
@@ -745,12 +780,24 @@ def _count_block(op_memory, pc64, n_dof, *, voxel, n_rigid, n_store, window, n_p
     return _largest(fits, 1, 1, n_probes)
 
 
-def _default_budget():
+def _default_budget(given=None):
     """(budget, host_budget): on a GPU its free pool (bytes_limit - bytes_in_use) and 0.8 x
-    physical RAM; on the CPU (unified) 0.8 x RAM and None."""
+    physical RAM; on the CPU, or Metal without bytes_limit in memory_stats() (or memory_stats()
+    raising or returning None; unified memory), 0.8 x RAM and None. Another device without
+    bytes_limit takes the given budget (the caller's memory_budget) and 0.8 x RAM, or raises
+    without one: RAM is no bound for its memory."""
     ram = 0.8 * os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
     dev = jax.devices()[0]
     if dev.platform == "cpu":
         return ram, None
-    st = dev.memory_stats()
-    return st["bytes_limit"] - st["bytes_in_use"], ram
+    try:
+        st = dev.memory_stats()
+    except Exception:  # some plugins do not implement it
+        st = None
+    if not st or "bytes_limit" not in st:  # Metal: no pool limit, a unified pool as on the CPU
+        if dev.platform.lower() == "metal":
+            return ram, None
+        if given is None:
+            raise ValueError(f"{dev.platform} reports no bytes_limit; pass memory_budget")
+        return given, ram
+    return st["bytes_limit"] - st.get("bytes_in_use", 0), ram
