@@ -35,7 +35,7 @@ class Mesh:
 
 ### Renumbering
 
-Grid order is not an invariant, so node and element permutations (PR 5 RCM, PR 18c Morton) are legal if they update every dependent field:
+Grid order is not an invariant, so node and element permutations (PR 5 RCM, PR 18d Morton) are legal if they update every dependent field:
 
 - **Node permutation** $p$ (new → old): `points[p]`; connectivity through $p^{-1}$; `node_sets` mapped through $p^{-1}$ and re-sorted; non-negative `voxel.node_map` entries mapped through $p^{-1}$.
 - **Element permutation** $q$ (new → old) within one block (the global index is fixed by `TYPES` order): block rows, `material` and `orientation` indexed by $q$; `element_sets` mapped through $q^{-1}$ and re-sorted; non-negative `voxel.element_map` entries mapped through $q^{-1}$.

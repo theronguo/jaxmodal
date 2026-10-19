@@ -111,6 +111,8 @@ Static: per block `type`, `offset`, `n_el`, `chunk`, window width `W`; global `n
 
 **Build on the device.** Per block, one module-level `jax.jit` (static type and mode) runs `lax.map` over chunks of the padded connectivity; the stacked output is the padded leaf itself, with no slice and no host copy (a host fill or a sliced output doubles the build peak). The build blocks until done, so its temporaries are freed before the next block or the first apply. Stored $K_e$ comes from PR 3's `kernels.stiffness`, the same kernel as the oracle; otf is the independent check of the stiffness.
 
+**Vector dtype.** The `Unstructured` applies compute in fp64 whatever the vector's dtype; `ap_operator` casts its result to `x.dtype` (PR 18c), so $A_P$ on fp32 blocks returns fp32 (within $10^{-6}$ of fp64; the fine level of the fp32 AMG V-cycle, [`preconditioners.md`](preconditioners.md#fp32-v-cycle-pr-18c)). The p-level `NodalTransfer` likewise returns the input's dtype.
+
 ### Solid-shell blocks
 
 An `ssh8` block (`docs/elements.md`) is stored only: `mode="otf"` raises "solid-shell elements support stored mode only (mode='otf')", in `unstructured` and `unstructured_memory`. The build calls the one-element kernels on `ply_table`'s per-phase plies (a one-phase table is doubled first: XLA turns a size-1 gather into broadcasts that take 1.35× the temporaries at 1 ply). The leaves are the packed condensed $K_e$ (300) and the packed nodal mass $m_e$ (36), 336 floats per element, with no `wdet`.
@@ -201,7 +203,7 @@ Call it on the mesh that will be used (after `rcm`, if any), with the same keywo
 - `overhead`: 10 MB, the only constant fitted to measured peaks ($t$, $a$, $b$ come from `memory_analysis`; measured on hex20 $30^3$ and hex8 $60^3$; the formulas match `memory_analysis` without factors).
 - `total = overhead + storage + max(build, vectors + workspace)`.
 - Not counted: `layout`'s host transient (≈ 4× the int64 inverse map while it is built, e.g. 0.55 GB at hex20 $55^3$ gather). It is freed before any device leaf exists, so it does not set the peak of `unstructured`, but an estimator that composes this one with live device memory should add it.
-- The estimate costs as much as `layout` (0.3 s at 1M DOF gather, 3.2 s per call at 10.2M: about 35 s of estimates per band call there; caching `layout` is PR 18c).
+- The estimate costs as much as `layout` (0.3 s at 1M DOF gather, 3.2 s per call at 10.2M: about 35 s of estimates per band call there; caching `layout` is PR 18d).
 - **Composition:** later estimators (PR 9/11/13/14/15) add PR 5's `storage + workspace` and count `overhead` once; they count their own vectors.
 
 ## Voxel stencil (`stencil`)
@@ -248,7 +250,7 @@ Every per-cell gather passes `fill_value=0`, so inactive and padded cells contri
 
 The rule is within 10% of the best for both $m$ (`slab_rule_ok`, checked by a fast test). Per DOF this is ≈ 4.5× faster than PR 5's stored-Ke `unstructured` at m = 1 and ≈ 1.4× at m = 16.
 
-**Cost per apply** (m = 1, P = 1, for PR 18c's roofline): per cell, $2 \cdot 24^2 = 1152$ flops; data moved per slab: the int32 `node`/`cell` slices (≈ 8 B per cell), the gathered $u$ and the scattered output (each ≈ 24 B per node read and written), $s$ (8 B per cell); the rest stays in slab-sized buffers.
+**Cost per apply** (m = 1, P = 1, for PR 18d's roofline): per cell, $2 \cdot 24^2 = 1152$ flops; data moved per slab: the int32 `node`/`cell` slices (≈ 8 B per cell), the gathered $u$ and the scattered output (each ≈ 24 B per node read and written), $s$ (8 B per cell); the rest stays in slab-sized buffers.
 
 ### Memory estimator (`stencil_memory`)
 
@@ -298,5 +300,6 @@ est = stencil_memory(mesh, m, mass="consistent", slab=None)  # same keys as unst
   - **No recompile:** one executable gives the new SciPy products after replacing $s_K$, $s_M$, `C`, `rho`, `spacing`, `nodal`, consistent and lumped.
   - **Geometry check:** a point moved by 1e-6, a cell with cyclically rotated corners (same nodes, positive $\det J$, wrong VTK order) and a non-voxel mesh raise.
   - `reference_element` equals PR 3's `stiffness` and `mass` on a mesh cell for every phase; `axes` and the layer count per mesh; int32 checks and casts; input errors; estimator storage equals the leaf bytes exactly.
+  - **fp32 through `ap_operator` on `Unstructured`** (PR 18c): fp32 in, fp32 out within $10^{-6}$ relative of fp64 (measured 3.5e-8), fp64 unchanged bit for bit; on a `Stencil` the fp32 result equals the uncast apply bitwise; `NodalTransfer` likewise (`tests/test_operators.py::test_apply_dtype`).
   - **fp32 vectors** (PR 11b; Tmix, both masses): `apply_K`, `apply_M` and `ap_operator` return fp32 within $10^{-6}$ of fp64; the compiled fp32 `apply_K` and consistent `apply_M` have ≤ 0.6× the fp64 temporaries ($16^3$, $m = 8$), so they really compute in fp32; integer vectors are applied in fp64 (exactly as their fp64 copy).
   - **Slow:** `memory_analysis` temporaries of `apply_K`/`apply_M` within 10% of `workspace` at $87^3$ (m = 1, 4, 16, 24; P = 1, 2); the Mac acceptance (estimate within 20% of the measured peak of build + six `(n_dof, 24)` random arrays + `apply_K` + `apply_M` at 2.04M DOF, estimate ≥ 2 GB); the slab benchmark smoke run.
