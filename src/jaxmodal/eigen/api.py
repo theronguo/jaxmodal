@@ -6,6 +6,7 @@ import gc
 import math
 import numbers
 import time
+import traceback
 import warnings
 
 import jax.numpy as jnp
@@ -531,7 +532,7 @@ def solve_modes(
                chunk=ch, c_max=reach, stagnation_risk=False, budget=(budget, host_budget),
                mu1_ub=None, n_store=None, from_zero=False)  # fmt: skip
     # the sigma pre-estimate, the in-band locked count (sizes n_store), LOBPCG's time, its stop
-    pre, L, t_lob, stopped = None, 0, None, None
+    pre, L, t_lob, stopped, err = None, 0, None, None, None
     if ch is not None:
         if sigma is None and precond != "jacobi":
             sigma, its = _precond_sigma(op, free, Rd, reuse, seed=seed, **sg_opts)
@@ -657,11 +658,18 @@ def solve_modes(
                 v_si = False
             else:
                 cn = {**cn_opts, "block": bp}
-        lam, V, info = si_band(
-            op, free, 0.0 if out["from_zero"] else lam_lo, lam_hi, make, capacity=C, R=Rd,
-            verify=v_si, count_options=cn, tol=tol, seed=seed, n_store=n_store,
-            **{key: x for key, x in sl_opts.items() if key != "capacity"},
-        )  # fmt: skip
+        try:
+            lam, V, info = si_band(
+                op, free, 0.0 if out["from_zero"] else lam_lo, lam_hi, make, capacity=C, R=Rd,
+                verify=v_si, count_options=cn, tol=tol, seed=seed, n_store=n_store,
+                **{key: x for key, x in sl_opts.items() if key != "capacity"},
+            )  # fmt: skip
+        except (RuntimeError, ValueError) as e:
+            if getattr(e, "result", None) is None:
+                raise
+            (lam, V, info), e.result, err = e.result, None, e
+            traceback.clear_frames(e.__traceback__)  # si_band's frame: no other V reference
+        info["complete_to_hz"] = math.sqrt(max(info["complete_to"], 0)) / (2 * np.pi)
         if no_count and verify is not False:
             info["count"]["reason"] = no_count
         info["slice_reason"] = info.pop("reason")  # si_band's; reason is the strategy's
@@ -688,4 +696,7 @@ def solve_modes(
         V = np.array(V[:, : i1 - i0], order="F")
     lam = lam[i0:i1]
     info["frequencies"] = np.sqrt(np.maximum(lam, 0)) / (2 * np.pi)
+    if err is not None:  # a capacity error of the slices: raised with the band's pairs so far
+        err.result = (lam, V, info)
+        raise err
     return lam, V, info

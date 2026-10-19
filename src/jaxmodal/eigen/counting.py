@@ -224,9 +224,9 @@ def _solve_y(op, m, g, tau, maxit):
 
 
 @functools.partial(jax.jit, donate_argnums=0)
-def _chunk_step(Y, Wc, MY):
-    Wc = Wc.astype(Y.dtype)
-    return Y - Wc @ (Wc.T @ MY)
+def _chunk_step(Y, Wt, MY):  # Y - W W^T M Y for a transposed chunk Wt; this form 3.5x on CPU
+    Wt = Wt.astype(Y.dtype)
+    return Y - ((Wt @ MY).T @ Wt).T
 
 
 @jax.jit
@@ -234,14 +234,24 @@ def _rigid_step(Y, R, MR, m):
     return m * (Y - R @ (MR.T @ Y))
 
 
+@jax.jit
+def _pad_t(Wc):  # (n, w) -> (CHUNK, n): transposed, zero rows below w
+    return jnp.pad(Wc.T, ((0, CHUNK - Wc.shape[1]), (0, 0)))
+
+
 def _chunks(Ws):
-    """(chunk, width): column chunks of the arrays Ws (width CHUNK, each array's last chunk
-    zero-padded on the device): one compiled width; a device array is sliced in place."""
+    """(chunk, width): transposed column chunks (CHUNK, n) of the arrays Ws (each array's last
+    chunk zero-padded on the device): one compiled width. A host chunk is sent as its transpose
+    (a view of F-order W: no host copy); a device array is sliced and transposed on the device."""
     for W in Ws:
         for i in range(0, W.shape[1], CHUNK):
-            Wc = jnp.asarray(W[:, i : i + CHUNK])
+            Wc = W[:, i : i + CHUNK]
             w = Wc.shape[1]
-            yield (jnp.pad(Wc, ((0, 0), (0, CHUNK - w))) if w < CHUNK else Wc), w
+            if isinstance(Wc, np.ndarray):
+                Wt = jax.device_put(Wc.T)
+                yield (jnp.pad(Wt, ((0, CHUNK - w), (0, 0))) if w < CHUNK else Wt), w
+            else:
+                yield _pad_t(Wc), w
 
 
 def _project(op, m, Ws, R, MR, Y):
@@ -301,15 +311,14 @@ def _check_ortho(op, m, W, seed):
     side): two passes over W, e = W^T M (W z) - z."""
     Ws = W if isinstance(W, tuple) else (W,)
     k = sum(A.shape[1] for A in Ws)
-    key = jax.random.fold_in(jax.random.key(seed), 2**32 - 1)
-    z = np.asarray(jax.random.normal(key, (k, SKETCH)))
+    z = np.random.default_rng(int(seed) % 2**64).standard_normal((k, SKETCH))
     v, j = jnp.zeros((Ws[0].shape[0], SKETCH)), 0
-    for Wc, w in _chunks(Ws):
+    for Wt, w in _chunks(Ws):
         zc = np.zeros((CHUNK, SKETCH))
         zc[:w] = z[j : j + w]
-        v, j = v + Wc.astype(v.dtype) @ jnp.asarray(zc), j + w
+        v, j = v + (jnp.asarray(zc).T @ Wt.astype(v.dtype)).T, j + w
     Mv = _mm(op, m, v)
-    e = np.concatenate([np.asarray(Wc.astype(Mv.dtype).T @ Mv)[:w] for Wc, w in _chunks(Ws)])
+    e = np.concatenate([np.asarray(Wt.astype(Mv.dtype) @ Mv)[:w] for Wt, w in _chunks(Ws)])
     e = e - z
     tol = max(ORTHO_TOL.get(str(A.dtype), ORTHO_TOL["float32"]) for A in Ws)
     if not np.linalg.norm(e) <= tol * np.linalg.norm(z):

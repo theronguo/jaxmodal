@@ -2467,3 +2467,227 @@ def test_band_requeue_lineage(monkeypatch):
     with pytest.raises(ValueError, match=r"\(no progress\)"):
         fband("short", lo2, hi2)
     assert len(calls) == 3 and calls[2]["interval"] == calls[1]["interval"]
+
+
+# ---------------------------------------------------------------- PR 18e: si_band follow-ups
+
+
+def raised(exc, f, *a, **kw):
+    """The exception f(*a, **kw) raises (of type exc)."""
+    with pytest.raises(exc) as e:
+        f(*a, **kw)
+    return e.value
+
+
+def check_result(e, lam_ref, complete_to, M, n_leaves):
+    """err.result of si_band: the stored pairs (lam_ref), not converged, the reason the
+    message, complete_to, only the leaves run counted, V M-orthonormal."""
+    lam, V, info = e.result
+    assert np.array_equal(lam, lam_ref) and not info["converged"] and info["reason"] == str(e)
+    assert info["complete_to"] == complete_to and len(info["count"]["estimates"]) == n_leaves
+    assert np.abs(V.T @ (M @ V) - np.eye(len(lam))).max() <= 1e-8
+
+
+def test_band_error_result(monkeypatch):
+    """PR 18e test 6: each si_band capacity error carries err.result = (lam, V, info) of the
+    pairs stored so far; complete_to on errors, a non-converged slice, a failed merge and a
+    converged band."""
+    M, lr = prob("short")[4], prob("short")[6]
+    lo, hi = edges(lr, 3, 16)
+    c1 = (lr[7] + lr[8]) / 2
+    # nothing converged in slice 2 after slice 1 stored
+    fake_band(monkeypatch, lambda j, a, e, kw: found(j, a, e, kw) if j == 1 else (
+        [], "capacity full", rz([], range(8, 16)), None))  # fmt: skip
+    e = raised(ValueError, fband, "short", lo, hi, edges=[c1])
+    assert "nothing converged" in str(e)
+    check_result(e, lr[3:8], c1, M, 1)
+    # no progress (slice 2 converges only stored modes below its edge)
+    fake_band(monkeypatch, lambda j, a, e, kw: found(j, a, e, kw) if j == 1 else (
+        [], "capacity full", rz([5, 6, 7], range(8, 16)), None))  # fmt: skip
+    e = raised(ValueError, fband, "short", lo, hi, edges=[c1])
+    assert "no progress" in str(e)
+    check_result(e, lr[3:8], c1, M, 1)
+    # too many deflated modes for slice 2 (capacity 24: the known neighbour takes the chunk)
+    s = [(lr[7] + lr[8]) / 2, (lr[10] + lr[11]) / 2]
+    fake_band(monkeypatch, found)
+    e = raised(ValueError, fband, "short", lo, hi, capacity=24, edges=s)
+    assert "deflated modes leave 0 columns" in str(e)
+    lam = e.result[0]
+    check_result(e, lam, e.result[2]["complete_to"], M, len(e.result[2]["count"]["estimates"]))
+    assert len(lam) and e.result[2]["complete_to"] in s  # the failing slice's lower edge
+    # max_slices: the full slice's modes 7-11 stored, its remainders left from lo
+    fake_band(monkeypatch, full_slice)
+    e = raised(RuntimeError, fband, "short", lo, hi, max_slices=1)
+    check_result(e, lr[7:12], lo, M, 1)  # the full slice's span
+    # a slice not converged after a stored one: returned, complete_to its lower edge
+    fake_band(monkeypatch, found, post=lambda j, info: dict(info, converged=j != 2))
+    lam, V, info = fband("short", lo, hi, edges=s)
+    assert not info["converged"] and info["complete_to"] == s[0]
+    fake_band(monkeypatch, found)
+    assert fband("short", lo, hi, edges=s)[2]["complete_to"] == hi
+
+
+def test_band_error_merged(monkeypatch):
+    """PR 18e test 6: max_slices after two runs sharing a cluster (merged, duplicate dropped):
+    err.result holds the merged pairs; a failed re-check gives complete_to = lo."""
+    _, free, op, K, M, R, lr, Vr = prob("cube")
+    lo, hi = edges(lr, 2, 10)
+    s = [(lr[2] + lr[3]) / 2, (lr[8] + lr[9]) / 2]
+    two_runs(monkeypatch, (lr[[2, 3]], [Vr[:, 2], Vr[:, 3]]),
+             (lr[3:10], [Vr[:, q] for q in range(3, 10)]), (lr[[9]], [Vr[:, 9]]))  # fmt: skip
+    e = raised(RuntimeError, fband, "cube", lo, hi, edges=s, R=R, max_slices=2)
+    lam, V, info = e.result
+    assert info["duplicates"] == 1 and np.allclose(lam, lr[2:10], rtol=1e-10)
+    assert info["complete_to"] == s[1] and not info["converged"]
+    assert np.abs(V.T @ (M @ V) - np.eye(len(lam))).max() <= 1e-8
+    rng = np.random.default_rng(0)
+    w = Vr[:, 4] + 1e-3 * np.where(free, rng.standard_normal(len(free)), 0)
+    w /= np.sqrt(w @ (M @ w))
+    two_runs(monkeypatch, (lr[[2, 3]], [Vr[:, 2], Vr[:, 3]]),
+             (lr[3:10], [Vr[:, 3], w] + [Vr[:, q] for q in range(5, 10)]),
+             (lr[[9]], [Vr[:, 9]]))  # fmt: skip
+    info = fband("cube", lo, hi, edges=s, R=R)[2]
+    assert info["edge_rr_failed"] and info["complete_to"] == lo
+
+
+def band_tol(name, lo, hi, tol, **kw):
+    _, free, op = prob(name)[:3]
+    return si.si_band(op, free, lo, hi, lambda s: ("P", s), capacity=96, tol=tol, **kw)
+
+
+def test_slice_tau(monkeypatch):
+    """PR 18e test 8 (fakes): slice [a, e] runs at max(TAU_MIN, min(TAU0, tol a / (10 e))) and
+    moves sigma as at TAU0 (stag_tau); a given tau is used as is; reruns of the same or a span
+    interval get their own interval's value; info["slices"][i]["tau"] the value passed."""
+    lr = prob("short")[6]
+
+    def tau(a, e, tol):
+        return max(si.TAU_MIN, min(si.TAU0, tol * a / (10 * e)))
+
+    for lo, hi, tol in ((lr[20], lr[25], 1e-6), (lr[1], lr[40], 1e-6), (lr[20], lr[25], 1e-10),
+                        (0.0, lr[10], 1e-6)):  # fmt: skip
+        calls, _ = fake_band(monkeypatch, found)
+        info = band_tol("short", *edges(lr, *np.searchsorted(lr, [lo, hi])), tol)[2]
+        a, e = calls[0]["interval"]
+        assert calls[0]["tau"] == tau(a, e, tol) == info["slices"][0]["tau"]
+        assert calls[0]["stag_tau"] == si.TAU0
+    assert tau(lr[20], lr[25], 1e-6) == si.TAU0  # e / a <= 10 keeps TAU0
+    assert si.TAU_MIN < tau(lr[1], lr[40], 1e-6) < si.TAU0
+    assert tau(lr[20], lr[25], 1e-10) == tau(0.0, 1.0, 1e-6) == si.TAU_MIN
+    calls, _ = fake_band(monkeypatch, found)
+    band_tol("short", *edges(lr, 3, 16), 1e-6, tau=1e-7)
+    assert calls[0]["tau"] == calls[0]["stag_tau"] == 1e-7
+    # a span rerun and the remainders: each its own interval's tau
+    calls, _ = fake_band(monkeypatch, split_once, count=lambda j: (0.9, True, False) if j == 1
+                         else (0.1, True, False))  # fmt: skip
+    info = band_tol("short", *edges(lr, 3, 16), 1e-6)
+    assert len(calls) >= 3
+    for c in calls:
+        assert c["tau"] == tau(*c["interval"], 1e-6) and c["stag_tau"] == si.TAU0
+
+
+def test_stag_tau(monkeypatch):
+    """PR 18e test 8: si_slice moves sigma when the first solve stagnates above STAGNATION
+    max(stag_tau, TAU_MIN): a residual 1e-6 with tau 1e-10 moves it (threshold 1e-7), with
+    stag_tau 1e-8 not (1e-5)."""
+    lr = prob("short")[6]
+    lo, hi = edges(lr, 8, 12)
+
+    def stuck(A, b, P, tol, maxit, x, info):
+        if not first:
+            return x, info
+        first.pop()
+        return x, info | dict(stagnated=jnp.ones_like(info["stagnated"]),
+                              residuals=jnp.full_like(info["residuals"], 1e-6))  # fmt: skip
+
+    for stag, moved in ((None, True), (1e-8, False)):
+        first = [1]
+        monkeypatch.setattr(si, "minres", Spy(stuck))
+        info = solve("short", lo, hi, tau=1e-10, stag_tau=stag)[2]
+        assert info["sigma_moved"] is moved
+
+
+def test_band_p_reuse(monkeypatch):
+    """PR 18e test 12: a slice requeued whole (same sigma) keeps its preconditioner; a new
+    sigma builds a new one after the previous is released (one alive at a time)."""
+    import weakref
+
+    lr = prob("short")[6]
+    lo2, hi2 = edges(lr, 3, 10)
+    rit = {
+        1: ([5, 6, 7, 8, 9], rz([5, 6, 7, 8, 9, 10], [2, 3, 4])),
+        2: ([3], rz([3, 5, 6], [2, 4])),
+    }
+    calls, counts = fake_band(monkeypatch, lambda j, a, e, kw: (rit[j][0], "capacity full",
+                              rit[j][1], None) if j in rit else found(j, a, e, kw))  # fmt: skip
+    inner, inner_cs = si.si_checked, si._count_slice
+
+    def no_p(*a, **kw):  # fake_band's records would keep P alive
+        out = inner(*a, **kw)
+        calls[-1]["P"] = id(calls[-1]["P"])
+        return out
+
+    def cs(*a, **kw):
+        out = inner_cs(*a, **kw)
+        for c in counts:
+            c[1]["precond"] = None
+        return out
+
+    monkeypatch.setattr(si, "si_checked", no_p)
+    monkeypatch.setattr(si, "_count_slice", cs)
+    refs, sigmas = [], []
+
+    class Pc:
+        pass
+
+    def make(s):
+        assert all(r() is None for r in refs)  # the previous one released first
+        p = Pc()
+        refs.append(weakref.ref(p))
+        sigmas.append(s)
+        return p
+
+    _, free, op = prob("short")[:3]
+    lam = si.si_band(op, free, lo2, hi2, make, capacity=96, tol=TOL)[0]
+    assert np.array_equal(lam, lr[3:12]) and calls[2]["interval"] == calls[1]["interval"]
+    assert calls[2]["P"] == calls[1]["P"] and len(sigmas) == len(calls) - 1
+    assert sigmas == sorted(set(sigmas), key=sigmas.index)  # distinct consecutive sigmas
+
+
+def test_span_gather(monkeypatch):
+    """PR 18e test 10: a span count gathers its pairs (a host copy) only when a calibration or
+    the count runs: verify=False and a skip gather nothing (the prediction gets a zero-stride
+    placeholder), verify=True gathers once and counts the real columns."""
+    lr = prob("short")[6]
+    lo, hi = edges(lr, 3, 16)
+    real = si._span_count
+
+    def wide(j, a, e, kw):  # a full slice whose span holds more than the 2 neighbours
+        if j > 1:
+            return found(j, a, e, kw)
+        return list(range(5, 14)), "capacity full", rz(range(5, 14), [2, 3, 4, 14, 15, 16]), None
+
+    for verify, n_gather in ((False, 0), (True, 1)):
+        calls, counts = fake_band(monkeypatch, wide)
+        gathers = []
+
+        def span(op, free, P, lam_s, cols, *a, g=gathers, **kw):
+            return real(op, free, P, lam_s, lambda idx: g.append(len(idx)) or cols(idx), *a, **kw)
+
+        preds = []
+
+        def cs(*a, _predict=False, inner=si._count_slice, p=preds, **kw):
+            if _predict:
+                p.append(a[2][0].strides)
+            return inner(*a, _predict=_predict, **kw)
+
+        monkeypatch.setattr(si, "_span_count", span)
+        monkeypatch.setattr(si, "_count_slice", cs)
+        info = fband("short", lo, hi, verify=verify)[2]
+        spans = [s for s in info["slices"] if s["kind"] == "span"]
+        big = [g for g in gathers if g > 2]  # cols(near) gathers at most 2
+        assert len(spans) == 1 and len(big) == n_gather
+        assert (0, 0) in preds  # the span's prediction: the placeholder
+        if verify:
+            assert counts[-1][0][2][0].shape == (prob("short")[2].n_dof, big[0])
+            assert counts[-1][0][2][0].strides != (0, 0)

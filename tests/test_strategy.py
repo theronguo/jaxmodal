@@ -258,6 +258,7 @@ def stub_band(seen):
             residuals=np.zeros(0),
             thresholds=np.zeros(0),
             count=dict(ran=False, reason=None),
+            complete_to=b,
             time={},
         )
         return np.zeros(0), np.zeros((op.n_dof, 0), order="F"), info
@@ -867,6 +868,85 @@ def test_edge_above_spectrum(fake_builds):
         run("tiny", band, strategy="lobpcg")
     with pytest.raises(ValueError, match="no progress.*hi above the spectrum"):
         run("tiny", band, strategy="shift_invert")
+
+
+def check_partial(name, f1, lam, V, info):
+    """err.result's checks: each mode a reference mode at or above f1 (to 1e-8), V M-orthonormal,
+    owning and F-contiguous with exactly the result's columns, complete_to_hz."""
+    M, lr = prob(name)[4], prob(name)[6]
+    lo = (2 * np.pi * f1) ** 2
+    assert len(lam) and (lam >= lo).all() and len(info["residuals"]) == len(lam)
+    assert all(np.abs(lr - x).min() <= 1e-8 * x for x in lam)
+    assert V.shape[1] == len(lam) and V.flags.f_contiguous and V.flags.owndata
+    assert np.abs(V.T @ (M @ V) - np.eye(len(lam))).max() <= 1e-8
+    assert info["complete_to_hz"] == math.sqrt(info["complete_to"]) / (2 * math.pi)
+
+
+def test_error_result(fake_builds):
+    """PR 18e test 7: a slice capacity error raises with err.result = (lam, V, info) of the band
+    so far: filtered to the band (lambda_1 below f1 dropped: the band runs from 0), compacted in
+    place, the info keys of a normal exit; forced "lobpcg" errors carry none."""
+    fake_builds["name"] = "tiny"
+    lr = prob("tiny")[6]
+    f1, f2 = freq(1.005 * lr[0]), freq(2 * lr[-1])  # within MU1_MARGIN: from 0
+    cuts = list(edges(lr, 10, 30))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)  # no "returned modes copied"
+        with pytest.raises(ValueError, match="no progress") as e:
+            run("tiny", (f1, f2), strategy="shift_invert", slice_options={"edges": cuts})
+    lam, V, info = e.value.result
+    assert info["from_zero"] and lr[0] < lam[0] and not info["converged"]
+    ok = run("tiny", (f1, freq(cuts[0])), strategy="shift_invert")[2]
+    assert set(ok) <= set(info) and {"complete_to", "complete_to_hz"} <= set(info)
+    ct = info["complete_to"]  # every reference mode in [f1, complete_to] returned
+    assert ct in cuts and np.allclose(lam[lam <= ct], lr[(lr > 1.005 * lr[0]) & (lr <= ct)],
+                                      rtol=1e-8)  # fmt: skip
+    check_partial("tiny", f1, lam, V, info)
+    with pytest.raises(ValueError, match="more modes than the mesh provides") as e:
+        run("tiny", (f1, f2), strategy="lobpcg")
+    assert getattr(e.value, "result", None) is None
+
+
+@pytest.mark.slow
+def test_error_result_capacity(fake_builds):
+    """PR 18e test 7: max_slices after test_capacity's capacity stop: err.result carries the
+    stop's info (stopped, time["lobpcg"])."""
+    budget = need(lob_est("short", 5, 80)) - 1
+    f1, f2 = fband("short", 25, 46)
+    kw = dict(n_modes=22, chunk=5, memory_budget=budget,
+              slice_options={"capacity": 96, "max_slices": 1})  # fmt: skip
+    with pytest.warns(UserWarning, match="35 modes locked"):
+        with pytest.raises(RuntimeError, match="max_slices = 1") as e:
+            run("short", (f1, f2), **kw)
+    lam, V, info = e.value.result
+    assert info["stopped"] == "capacity" and "lobpcg" in info["time"]
+    assert info["reason"] == "capacity" and info["strategy"] == "shift_invert"
+    check_partial("short", f1, lam, V, info)
+
+
+@pytest.mark.slow
+def test_slice_tau_real(monkeypatch):
+    """PR 18e test 8: a real slice from 0 at tol 1e-6 runs at TAU_MIN and reaches r_acc <= tol
+    (tau = 1e-8: above), the same steps and basis; si_checked forwards stag_tau = TAU0."""
+    _, free, op, *_, lr, Vr = prob("short")
+    hi = edges(lr, 0, 20)[1]
+    seen, real = [], tsi.si.si_slice
+
+    def spy(*a, **kw):
+        seen.append(kw.get("stag_tau"))
+        return real(*a, **kw)
+
+    out = []
+    for kw in ({}, {"tau": 1e-8}):
+        monkeypatch.setattr(tsi.si, "si_slice", spy)
+        lam, V, info = tsi.si.si_band(op, free, 0.0, hi, lambda s: tsi.precond("short", s),
+                                      capacity=600, tol=1e-6, **kw)  # fmt: skip
+        assert len(info["slices"]) == 1 and np.allclose(lam, lr[:20], rtol=1e-6)
+        out.append(info)
+    assert out[0]["slices"][0]["tau"] == tsi.si.TAU_MIN and seen[0] == tsi.si.TAU0
+    assert out[0]["r_acc"] <= 1e-6 < out[1]["r_acc"]
+    for key in ("steps", "basis", "capacity_full", "sigma_moved"):
+        assert out[0]["slices"][0][key] == out[1]["slices"][0][key], key
 
 
 # ---------------------------------------------------------------- 12: _solve(max_capacity)

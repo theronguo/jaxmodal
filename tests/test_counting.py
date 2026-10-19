@@ -641,6 +641,38 @@ def test_chunks(monkeypatch):
         count(op, free, bad, lam[:KEEP], lam[5], lam[6])
 
 
+def test_project_transposed():
+    """PR 18e test 9: _project's transposed chunks (host F- and C-order W, device W, a mixed
+    tuple; widths 5 to 128, a padded last chunk) against the dense Y - W W^T M Y (masked)."""
+    _, op, free, K, M, lam, W = ref()
+    m = jnp.asarray(free, jnp.float64)[:, None]
+    Y = np.random.default_rng(0).standard_normal((len(free), 3))
+    Z = jnp.zeros((len(free), 0))
+    Mm = M.multiply(free[:, None]).multiply(free[None, :])
+    for w in (5, 37, 64, 100, 128):
+        Wf = np.asfortranarray(W[:, :w])
+        ref_p = free[:, None] * (Y - Wf @ (Wf.T @ (Mm @ Y)))
+        for Ws in ((Wf,), (np.ascontiguousarray(Wf),), (jnp.asarray(Wf),),
+                   (Wf[:, : w // 2], jnp.asarray(Wf[:, w // 2 :]))):  # fmt: skip
+            out = np.asarray(counting._project(op, m, Ws, Z, Z, jnp.asarray(Y)))
+            assert np.abs(out - ref_p).max() <= 1e-14 * np.abs(Y).max() * w, (w, type(Ws[0]))
+
+
+def test_sketch_seeds():
+    """PR 18e test 11: the NumPy sketch accepts M-orthonormal W (host F and C order, device,
+    fp64 and fp32) and rejects a perturbed column, for seeds 0, -1 and 2**40 (NumPy ints too)."""
+    _, op, free, K, M, lam, W = ref()
+    m = jnp.asarray(free, jnp.float64)[:, None]
+    Wf = np.asfortranarray(W[:, :70])
+    bad = Wf.copy()
+    bad[:, 66] *= 1.01
+    for seed in (0, -1, 2**40, np.int64(-1)):
+        for Ws in (Wf, np.ascontiguousarray(Wf), jnp.asarray(Wf), Wf.astype(np.float32)):
+            counting._check_ortho(op, m, Ws, seed)
+        with pytest.raises(ValueError, match="M-orthonormal"):
+            counting._check_ortho(op, m, bad, seed)
+
+
 # ---------------------------------------------------------------- PR 15b: band-pass count
 
 BAND = (13, 19)  # modes 13-18 (0-based) of ref(): edge gaps 0.09 below and 0.16 above

@@ -1263,3 +1263,16 @@ def test_band_clamp(monkeypatch):
     assert info["n_band"] == 160 and np.allclose(lam[:160], d[:160], rtol=1e-12)
     W = V[:, :160]
     assert np.abs(W.T @ W - np.eye(160)).max() <= 1e-12
+
+
+def test_grow_transposed():
+    """PR 18e test 9: _grow's transposed send gives the host V's first columns exactly (fp64
+    and fp32 bases, a partial last chunk), zeros after."""
+    from jaxmodal.eigen.lobpcg import _grow
+
+    V = np.asfortranarray(np.random.default_rng(0).standard_normal((50, 23)))
+    for dtype in (jnp.float64, jnp.float32):
+        B = np.asarray(_grow(V, 23, 40, 10, dtype))
+        ref = np.zeros((50, 40))
+        ref[:, :23] = V
+        assert B.dtype == dtype and np.array_equal(B, ref.astype(dtype))
