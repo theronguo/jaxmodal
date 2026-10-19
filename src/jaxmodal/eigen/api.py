@@ -469,9 +469,9 @@ def solve_modes(
     if memory_budget is not None:
         budget = float(memory_budget)
 
-    def models(dtype, ops=op_opts):  # the estimators, cached per call (distinct widths cost)
+    def models(dtype, ops=op_opts, po=po_opts):  # the estimators, cached per call
         return [f and functools.cache(f) for f in
-                mem._models(mesh, mass, precond, dtype, ops, pc_opts, po_opts)]  # fmt: skip
+                mem._models(mesh, mass, precond, dtype, ops, pc_opts, po)]  # fmt: skip
 
     op_memory, pc = models(precond_dtype)
     pc64 = models("float64")[1] if precond == "gmg" and precond_dtype == "float32" else pc
@@ -483,6 +483,10 @@ def solve_modes(
 
     def levers(c):  # the memory levers not set, with their C_max at chunk c
         out = [f"low_memory=True (C_max {c_max(c, low=True)})"] if not low_memory else []
+        # the shell AMG's polish term sets its step, so low_memory alone saves little there
+        if precond == "amg" and "ssh8" in mesh.blocks and po_opts.get("on", True):
+            off = models(precond_dtype, po={"on": False})[1]
+            out.append(f"polish_options={{'on': False}} (C_max {c_max(c, pc_m=off)})")
         if basis_dtype != "float32":
             out.append(f"basis_dtype='float32' (C_max {c_max(c, dtype='float32')})")
         if precond == "gmg" and precond_dtype != "float32":

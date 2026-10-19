@@ -327,7 +327,8 @@ AMG_LOOP_K = 120_000
 AMG_COUNT = (11.5, 45.0)
 # Solid-shell family (meshes with ssh8 blocks, docs/preconditioners.md). Storage beyond the
 # level-0 Schwarz (exact from the mesh scan): bytes per shell DOF (T_0 and the rest), per shell
-# fiber group (the coarse levels) and per hex-only DOF (its level-0 and coarse share).
+# fiber group (the coarse levels) and per hex-only DOF (its level-0 and coarse share); for the
+# fit's geometries (a T junction 3/3 at 96^2, out of the fit, is 0.977x its owned bytes).
 SHELL_STORAGE = {"shell": 500, "fiber": 6300, "hex": 1250}
 # Setup host peak: beta + storage + gamma per shell / hex-only DOF (upper envelope, 45k-1.58M,
 # up to 10 layers: a 20-layer stack is 1.3% above it).

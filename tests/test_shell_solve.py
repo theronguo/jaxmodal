@@ -473,6 +473,19 @@ def test_hex_polish_below_step(t, n):
         assert modelled(mesh, m, pc)["9-block"] >= S.polish(op, jnp.asarray(free), P, m)
 
 
+@pytest.mark.parametrize("off", [False, True])
+def test_polish_lever(off):
+    """A band that fits no LOBPCG chunk names polish_options={'on': False} as a memory lever with
+    shell AMG (its polish term sets the step), unless the polish is already off."""
+    mesh = T.plate(32, 50)[0]
+    kw = dict(polish_options={"on": False}) if off else {}
+    budget = 0.8 * solve_modes_memory(mesh, SS, 20, **kw)["total"]
+    with pytest.warns(UserWarning, match="levers") as w, pytest.raises(ValueError, match="slice"):
+        solve_modes(mesh, STEEL, SS, band=(0, 400.0), memory_budget=budget, verify=False, **kw)
+    msg = [str(x.message) for x in w if "levers" in str(x.message)][0]
+    assert ("polish_options={'on': False}" in msg) != off
+
+
 def test_band_probe_polish(monkeypatch):
     """band_probe_block passes polish_options to both of its models."""
     seen, real = [], MEM._models
