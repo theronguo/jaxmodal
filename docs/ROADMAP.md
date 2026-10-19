@@ -162,7 +162,7 @@ All sizes are fp64; GB = 10⁹ bytes.
 | LOBPCG, 9-block step (16 blocks × m, measured) | m = 25: ≈ 3.2 GB | m = 15: ≈ 3.8 GB | m = 30: ≈ 38 GB | m = 10: ≈ 128 GB (multi-GPU only) |
 | LOBPCG, low-memory step (11 blocks × m; 9 with the voxel stencil on CPU) | — | — | m = 30: ≈ 26 GB | m = 8: ≈ 58–70 GB |
 | Rayleigh–Ritz update and deflation-projector temporaries | included in the LOBPCG rows | included | included | included |
-| Preconditioner workspace (GMG ≈ 4–5 blocks × m; AMG ≈ 6 blocks at m = 25, ≈ 11 with the low-memory step, `AMG_STEP`) | ≈ 1.4 GB | ≈ 1 GB | ≈ 14 GB (m = 25; fp32 AMG ≈ 11 GB) | m = 8: ≈ 26 GB (fp32: 13 GB) |
+| Preconditioner workspace (GMG ≈ 4–5 blocks × m; AMG ≈ 6 blocks at m = 25, ≈ 11 with the low-memory step, `AMG_STEP`) | ≈ 1.4 GB | ≈ 1 GB | ≈ 14 GB (m = 25; fp32 AMG ≈ 10 GB) | m = 8: ≈ 26 GB (fp32: 13 GB) |
 | Multigrid | AMG ≈ 0.74 GB (device, `amg_memory`; 0.48 GB measured; fp32 0.42 GB, PR 18c); host build ≈ 1.5 GB | ≈ 0.2 GB | AMG ≈ 7.1 GB (fp32 ≈ 4.0 GB); host build ≈ 15 GB (extrapolated) | ≈ 9.9 GB incl. int32 indices (fp32: ≈ 5.2 GB) |
 | Gather path (if chosen) | ≤ 2 vectors × m (the $R$ cap): ≤ 0.4 GB at m = 25 | — | ≤ 4.8 GB at m = 30 | — |
 | Locked modes / deflation basis | small | small | n × 0.08 GB (fp32: half) | n × 0.8 GB (fp32: half) |
@@ -659,7 +659,7 @@ Split into six parts (2026-10-18, the PR 18a plan `docs/plans/pr-18a-shell-amg.m
   - Morton reordering and reordering tuning.
   - Kernel fusion checks (HLO inspection, report-only, recorded in `docs/performance.md`).
   - Compile-time benchmark: full `solve_modes` compile time with GMG/AMG vs size, recorded in `docs/performance.md`.
-  - Non-band performance follow-ups (`docs/open_items.md`): `assembled._chunked` pipelining, caching `layout` for the gather path, `_amg_scan` keeping the mesh alive, `gmg_memory` recomputed per search step, the Metal `_default_budget`, $P_0^\top$ as a scatter over $P_0$'s ELL, 1.25× ELL width classes, the Schwarz scan remedy if the GPU check needs it, the `scipy.ndimage.label` face-part finder.
+  - Non-band performance follow-ups (`docs/open_items.md`): `assembled._chunked` pipelining, caching `layout` for the gather path, `_amg_scan` keeping the mesh alive, `gmg_memory` recomputed per search step, the Metal `_default_budget`, $P_0^\top$ as a scatter over $P_0$'s ELL, a size-dependent `STORAGE32` and an fp64 hex polish term (PR 18c), 1.25× ELL width classes, the Schwarz scan remedy if the GPU check needs it, the `scipy.ndimage.label` face-part finder.
   - The bimodal LOBPCG process peak (PR 18c, `docs/open_items.md`): identical 791k plate solves peak at 4.75 or 6.9–7.1 GB (fp32 AMG; fp64 6.3 or 7.0–9.4 GB) depending on process timing; find the cause (XLA CPU runtime, allocator) and make the peak tests deterministic.
 - Docs: `docs/performance.md`.
 - Tests:

@@ -369,12 +369,15 @@ def test_memory_block_sentinel(fake_builds, monkeypatch):
 def test_memory_no_lobpcg_build(fake_builds, monkeypatch, f1):
     """Test 3: on "memory" no LOBPCG preconditioner is built ("short", a budget below chunk 5's
     need, the slice capacity given): f1 = 0 builds nothing before si_band and never asks for
-    aggregates; f1 > 0 builds (and asks for aggregates) only inside _precond_sigma."""
+    aggregates; f1 > 0 builds (and asks for aggregates) only inside _precond_sigma, and the
+    aggregates are dead at si_band (the slices build without them)."""
     seen, inside = {}, []
     real_band, real_pre = api.si_band, api._precond_sigma
 
     def band(*a, **kw):
         seen["before"] = len(fake_builds["builds"])
+        gc.collect()
+        seen["dead"] = [r() is None for r in fake_builds["aggs"]]
         return real_band(*a, **kw)
 
     def pre(op, free, R, build, **kw):
@@ -392,6 +395,8 @@ def test_memory_no_lobpcg_build(fake_builds, monkeypatch, f1):
             slice_options={"capacity": 96})  # fmt: skip
     assert seen["before"] == sum(inside) and (f1 == 0) == (not inside)
     assert f1 == 0 or sum(inside) > 0
+    assert f1 == 0 or (any(ra for _, ra, _ in fake_builds["builds"]) and all(seen["dead"]))
+    assert f1 == 0 or seen["dead"]
     assert f1 != 0 or not any(ra for _, ra, _ in fake_builds["builds"])
 
 

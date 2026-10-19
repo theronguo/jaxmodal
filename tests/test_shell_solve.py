@@ -650,11 +650,13 @@ STORAGE_CASES = [("flat", 64), ("stack3", 64), ("stack10", 32), ("T", 24), ("web
 @pytest.mark.parametrize("dtype", ["float64", "float32"])
 @pytest.mark.parametrize("case, n", STORAGE_CASES)
 def test_shell_storage(case, n, dtype):
-    """amg_memory's storage >= the owned device bytes; the mesh scan's patches equal amg's
-    (PR 18c test 5: fp32 too)."""
+    """amg_memory's storage >= the owned device bytes; the mesh scan's patches equal amg's and
+    the fine Schwarz bytes equal schwarz.nbytes (its exact part; PR 18c test 5: fp32 too)."""
     mesh, op, _, P = built(case, n, dtype=dtype)
     assert amg_memory(mesh, 6, dtype=dtype)["storage"] >= owned_bytes(P, op)
     sizes = MEM._shell_scan(mesh)[0]
+    S = P.levels[0][1].precond
+    assert sum(a.nbytes for a in S.idx + S.inv) == T.SW.nbytes(sizes, dtype)
     assert np.array_equal(np.sort(sizes), np.sort(3 * (T.columns(op) >= 0).sum(1)))
 
 
@@ -743,7 +745,7 @@ def test_shell_build_peak32():
 def test_shell_791k_peak32():
     """PR 18c test 9: the 791k plate solve with precond_dtype "float32" (synchronous dispatch).
     Its peak is bimodal on identical runs (4.75 GB, the memory_analysis model's regime, or
-    7.0-7.1 GB with a timing-dependent extra that fp64 shows too; docs/open_items.md), so the
+    6.9-7.1 GB with a timing-dependent extra that fp64 shows too; docs/open_items.md), so the
     check covers both: 0.75 x peak <= solve_modes_memory <= 1.2 x peak (>= 2 GB)."""
     r = study().solve_peak(dtype="float32")
     assert np.all(r["converged"]) and r["precond"] == "amg"

@@ -16,6 +16,7 @@ config.enable_cache(Path(__file__).parents[1] / ".jax_cache")
 
 LONG = (
     "test_mac_acceptance",
+    "test_mac_acceptance_fp32",
     "test_mac_growth_peak",
     "test_count_peak",
     "test_mac_count_peak",
