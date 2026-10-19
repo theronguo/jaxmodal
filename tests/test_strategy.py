@@ -1857,7 +1857,7 @@ import warnings
 warnings.filterwarnings("error", "returned modes copied")
 import jax, numpy as np
 from jaxmodal.materials import Material, isotropic
-from jaxmodal.mesh import box_mesh, voxel_mesh
+from jaxmodal.mesh import voxel_mesh
 from jaxmodal.operators import dof_mask, stencil
 from jaxmodal.precond import gmg
 MAT = {{0: Material(isotropic(3.0, 0.3), 2.0)}}
@@ -2112,4 +2112,7 @@ def test_memory_part(tmp_path, monkeypatch):
     old, new = (json.loads(p.read_text()) for p in (src, tmp_path / "strategy_study.json"))
     assert set(new) == set(old) | {"memory_commit", "memory_versions"}
     assert list(new["memory"]) == ["tiny"] and new["memory"]["tiny"]["target"] == "none"
-    assert all(new[k] == old[k] for k in old if k != "memory")
+    assert new["memory_commit"] == strategy_study.commit()
+    assert isinstance(new["memory_versions"], dict)
+    assert all(new[k] == old[k] for k in old if k not in ("memory", "memory_commit",
+                                                         "memory_versions"))  # fmt: skip

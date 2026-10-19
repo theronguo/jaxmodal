@@ -510,7 +510,9 @@ def test_shell_steps32(case, n, m):
     recorded gate (1.3, or the logged widened gate) x measured."""
     import json
 
-    gates = json.load(open("benchmarks/results/amg_fp32_study.json"))["fit"]["gates"]
+    from benchmarks import harness
+
+    gates = json.load(open(harness.RESULTS / "amg_fp32_study.json"))["fit"]["gates"]
     mesh = built(case, n, dtype="float32")[0]
     pc = amg_memory(mesh, m, dtype="float32")
     model, got = modelled(mesh, m, pc), measured(case, n, m, dtype="float32")

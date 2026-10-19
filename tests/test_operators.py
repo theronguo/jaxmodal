@@ -1,6 +1,9 @@
 """DOF map, assembled oracle, BC masks and A_P against dense references."""
 
+import importlib
+
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 import scipy.sparse as sp
@@ -10,8 +13,19 @@ from scipy.sparse.linalg import spsolve
 from jaxmodal.elements import bmatrix, gradients, jacobian
 from jaxmodal.materials import Material, isotropic, rotate
 from jaxmodal.materials.rotation import VOIGT
-from jaxmodal.mesh import Mesh, box_mesh
-from jaxmodal.operators import a_p, assemble, check_int32, dof_mask, dofmap, element_dofs, masked
+from jaxmodal.mesh import Mesh, box_mesh, voxel_mesh
+from jaxmodal.operators import (
+    a_p,
+    ap_operator,
+    assemble,
+    check_int32,
+    dof_mask,
+    dofmap,
+    element_dofs,
+    masked,
+    stencil,
+    unstructured,
+)
 
 TYPES = ["hex8", "hex20", "hex27"]
 FACES = [f"{a}{s}" for a in "xyz" for s in ("min", "max")]
@@ -220,13 +234,6 @@ def test_apply_dtype():
     """PR 18c test 1: A_P and the p-level NodalTransfer return the input's dtype: fp32 within
     1e-6 of fp64, fp64 bitwise the uncast apply; on a voxel Stencil the fp32 result is bitwise
     the uncast apply (the cast is a no-op there)."""
-    import importlib
-
-    import jax.numpy as jnp
-
-    from jaxmodal.mesh import voxel_mesh
-    from jaxmodal.operators import ap_operator, stencil, unstructured
-
     pm = importlib.import_module("jaxmodal.precond.pmg")
 
     @jax.jit

@@ -43,8 +43,7 @@ HEX = {"hex20": (8, 12, 16, 24, 32, 44), "hex27": (6, 12, 16, 24, 32),
        "hex8": (12, 24, 32, 48, 68)}  # fmt: skip
 HEX_HELD = [("hex20", 52, (10, 25, 40, 120)), ("hex8", 80, (10, 25, 40, 120)),
             ("hex27", 40, (10, 25)), ("hex20", 44, (10,))]  # fmt: skip
-HEX_STORAGE = {"hex20": (8, 12, 16, 24, 32, 44), "hex27": (6, 12, 16, 24),
-               "hex8": (12, 24, 32, 48, 68)}  # fmt: skip
+HEX_STORAGE = HEX | {"hex27": HEX["hex27"][:-1]}  # hex27 32^3 has no storage row
 # shell held-out points (case, size, m); flat 512^2 also gives the m = 10 report
 SHELL_HELD = [("stack3", 256, 120), ("T", 96, 120), ("flat", 512, 10), ("flat", 512, 25)]
 LONG = {"hex8": "hex8", "hex20": "p", "hex27": "p", "flat": "shell", "block": "shell"}
@@ -196,7 +195,7 @@ def steps_hex(grid=HEX, ms=MS, held=HEX_HELD):
                 r["jacobi_" + key] = step_bytes(op, J, low, m)
             rows.append(r)
         if is_held:  # the fp64 polish against the fp64 low model
-            P = None
+            P = None  # free the fp32 build first
             P = amg(op, free, SIGMA, mesh.points)
             for r in rows:
                 r["polish64"] = SSS.polish(op, free, P, r["m"])
@@ -429,25 +428,12 @@ def band_cmax(mesh, bcs, chunks=(40, 20, 10, 5)):
     budget, host = mem._default_budget()
     free = dof_mask(mesh, bcs)
     n = 3 * len(mesh.points)
+    kw = dict(guards=None, low=False, basis_dtype="float64", n_rigid=0, n_avail=int(free.sum()),
+              budget=budget, host_budget=host)  # fmt: skip
     out = {}
     for dtype in ("float64", "float32"):
         op_m, pc_m = mem._models(mesh, "consistent", "auto", dtype, None, None)
-        out[dtype] = {
-            c: mem._c_max(
-                op_m,
-                pc_m,
-                n,
-                chunk=c,
-                guards=None,
-                low=False,
-                basis_dtype="float64",
-                n_rigid=0,
-                n_avail=int(free.sum()),
-                budget=budget,
-                host_budget=host,
-            )  # fmt: skip
-            for c in chunks
-        }
+        out[dtype] = {c: mem._c_max(op_m, pc_m, n, chunk=c, **kw) for c in chunks}
     return dict(budget=budget, host_budget=host, c_max=out)
 
 

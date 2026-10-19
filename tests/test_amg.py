@@ -479,35 +479,46 @@ def test_no_survivors(dtype):
 # ---------------------------------------------------------------- 18c: fp32 V-cycle
 
 
-def fp32_cases():
-    """(name, op, free, sigma, points, tol) of PR 18c test 2."""
-    import test_shell_amg as TS
+def fp32_box(t, n):
+    mesh = box_mesh((n,) * 3, type=t)
+    return unstructured(mesh, MATERIALS), dof_mask(mesh, SLIDE), SIGMA, mesh.points, 1e-5
 
-    out = []
-    for t, n in (("hex8", 8), ("hex20", 6), ("hex27", 4)):
-        mesh = box_mesh((n,) * 3, type=t)
-        out.append((t, unstructured(mesh, MATERIALS), dof_mask(mesh, SLIDE), SIGMA, mesh.points,
-                    1e-5))  # fmt: skip
+
+def fp32_mixed():
     mesh = mixed_mesh(np.random.default_rng(0))
     free = np.ones(3 * len(mesh.points), bool)
     free[:12] = False  # no node sets: 4 nodes pinned
     op = unstructured(mesh, MATERIALS, orientations={1: R})
-    out.append(("mixed", op, free, SIGMA, mesh.points, 1e-5))
-    for name, (mesh, _), tol in (("block", TS.block(8), 1e-5), ("plate", TS.plate(32, 10), 2e-5)):
-        out.append((name, unstructured(mesh, STEEL), dof_mask(mesh, {"xmin": "xyz"}), 1.0,
-                    mesh.points, tol))  # fmt: skip
-    return out
+    return op, free, SIGMA, mesh.points, 1e-5
 
 
-@pytest.mark.parametrize("case", range(6), ids=["hex8", "hex20", "hex27", "mixed", "block",
-                                                 "plate"])  # fmt: skip
-def test_fp32_vcycle(case):
+def fp32_shell(name):
+    import test_shell_amg as TS
+
+    mesh = (TS.block(8) if name == "block" else TS.plate(32, 10))[0]
+    tol = 1e-5 if name == "block" else 2e-5
+    return unstructured(mesh, STEEL), dof_mask(mesh, {"xmin": "xyz"}), 1.0, mesh.points, tol
+
+
+# (op, free, sigma, points, tol) of PR 18c test 2
+FP32_CASES = {
+    "hex8": lambda: fp32_box("hex8", 8),
+    "hex20": lambda: fp32_box("hex20", 6),
+    "hex27": lambda: fp32_box("hex27", 4),
+    "mixed": fp32_mixed,
+    "block": lambda: fp32_shell("block"),
+    "plate": lambda: fp32_shell("plate"),
+}
+
+
+@pytest.mark.parametrize("name", list(FP32_CASES))
+def test_fp32_vcycle(name):
     """PR 18c test 2 (max_coarse 100: 2-3 levels): the fp32 cycle returns fp64 within tol of
     the fp64 cycle (relative Frobenius) and is symmetric to tol / 10 (2e-5 on the thin plate,
     energy-normalized); its float leaves are fp32 except the fine A_P, the p-level transfer,
     free and the coarsest factor; the int leaves equal fp64's; the Schwarz packed inverses
     are the fp64 ones cast."""
-    name, op, free, sigma, points, tol = fp32_cases()[case]
+    op, free, sigma, points, tol = FP32_CASES[name]()
     P64 = amg(op, free, sigma, points, max_coarse=100)
     P32 = amg(op, free, sigma, points, max_coarse=100, dtype="float32")
     assert P32.dtype == "float32" and len(P32.levels) >= 2
@@ -521,7 +532,11 @@ def test_fp32_vcycle(case):
     shell = name in ("block", "plate")
     keep = [P32.levels[0][0], P32.levels[0][1].A, P32.free, P32.coarse.L]
     keep += [] if shell or name == "hex8" else [P32.transfers[0]]
-    keep = {id(a) for a in jax.tree_util.tree_leaves(keep)}
+    keep = jax.tree_util.tree_leaves(keep)
+    assert all(
+        a.dtype == jnp.float64 for a in keep if isinstance(a, jax.Array) and a.dtype.kind == "f"
+    )
+    keep = {id(a) for a in keep}
     f64 = [a for a in jax.tree_util.tree_leaves(P32) if isinstance(a, jax.Array)
            and a.dtype == jnp.float64]  # fmt: skip
     assert all(id(a) in keep for a in f64)
@@ -572,6 +587,7 @@ def test_fp32_not_finite():
         c = 1e-40 / float(jnp.abs(ap_operator(op, free, sigma).op.diag_K()).max())
         op = op.scaled(s_K=c * op.s_K, s_M=c * op.s_M)
         P64 = amg(op, free, sigma, mesh.points)
+        assert match != "AMG level smoother" or len(P64.levels) == 1  # no assembled level
         inv = jax.tree_util.tree_leaves(P64.levels[0][1].precond)
         big = max(float(jnp.abs(x).max()) for x in inv if x.dtype == jnp.float64)
         assert np.isfinite(big) and big > 3.4e38
@@ -681,8 +697,9 @@ def fp32_study():
     import json
 
     from benchmarks import amg_fp32_study as F
+    from benchmarks import harness
 
-    return json.load(open("benchmarks/results/amg_fp32_study.json")), F
+    return json.load(open(harness.RESULTS / "amg_fp32_study.json")), F
 
 
 @pytest.mark.slow

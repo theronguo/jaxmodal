@@ -598,7 +598,7 @@ def solve_modes(
             info["count"] = _verify(
                 verify, cn_opts, op, free, Rd, lam, V[:, : len(lam)], nb, lam_hi, m,
                 info["t_iteration"], solve_s,
-                lambda s: make(s) if aggs is None else make(s, aggregates=aggs), probe_budget,
+                reuse, probe_budget,
             )  # fmt: skip
         aggs = None
         i0, i1 = _keep(lam, info["thresholds"], lam_lo, nb), nb
