@@ -8,14 +8,21 @@ Branch `pr-18d-kernels` from `main` (1c6b651, PR 18c merged). Roadmap: "PR 18d: 
 - Rev 2 (plan review round 1: correctness, tests, docs not satisfied; simplicity, performance satisfied):
   - Morton reference test on the quantized keys, plus `check_renumbered`; `bits` dropped.
   - `lru_cache` callers (`test_amg_scan_cached`, `strategy_study.py:254`) listed; lifetime test by `weakref.ref`.
-  - fp64 polish: the API effects (lever, band `c_max`), the docstrings, the `polish64` plumbing in the fit and the existing tests that change are listed; "no change to solver results" narrowed.
-  - Voxel `parts`: `(nz, ny, nx)` reshape, `label - 1`, no dead guard, a non-cubic test case; host peak measured (93 against 352 B per element).
-  - The roofline test is now a fast formula check against `cost_analysis` (the timed test could not fail); an implementation-bytes column; the GPU peak defined as the measured fp64 matmul.
-  - Smaller benchmarks (fusion on 3 targets, compile study without hex20 $16^3$, gather at one point); structure counts next to compile times.
-  - Bimodal probes: parent-side sampling, the polling thread as the first candidate, time estimate; the roadmap rewording if no cause is found.
-  - `_default_budget` also catches a raising `memory_stats()`.
-  - `_chunked`: the order spelled out (inputs, dispatch, copy); two chunk results alive.
-  - Docs: the compile-time rule in `conventions.md` and the roadmap, every affected location named, an open-items outcome table.
+  - fp64 polish: the API effects (lever, band `c_max`) and the docstrings listed; "no change to solver results" narrowed.
+  - Voxel `parts`: `(nz, ny, nx)` reshape, no dead guard, a non-cubic test case; host peak measured (93 against 352 B per element).
+  - The roofline test is a fast formula check; an implementation-bytes column; the GPU peak defined as the measured fp64 matmul.
+  - Smaller benchmarks; structure counts next to compile times; bimodal probes and the roadmap rewording; `_default_budget` catches a raising `memory_stats()`; `_chunked` order spelled out; docs map.
+- Rev 3 (round 2: tests satisfied; correctness, simplicity, docs, performance not satisfied):
+  - fp64 hex polish = `POLISH64` (1.25) × the fp32 polish term, checked on the 11 recorded `polish64` rows; no study rerun (simplicity). `test_polish_lever_hex` listed.
+  - `cost_analysis` counts a scan body once: the flop check runs on one-trip meshes (asserted), with both bounds; never used in the benchmark.
+  - Fusion report walks every computation reachable from ENTRY (loop bodies), not ENTRY alone.
+  - Stored-Ke implementation bytes $2400 + 2 \cdot 4608$ B per hex8 element (the unpack is materialized: 52% of the triad at m = 1); full-Ke storage recorded as a GPU decision.
+  - Byte counts corrected (stencil `phase`, no double `node`; per-node vector bytes $48m$); the roofline timing excludes first-touch page faults.
+  - Bimodal: a setting is adopted only if it also holds for production runs; a parent-side footprint timeline and interleaved baselines; the harness described as it is.
+  - Voxel `parts` labels ordered by lowest element index: exactly the generic path's labels.
+  - Stencil equivalence after `morton` (exact on a masked $5 \times 4 \times 3$ probe); Morton element order in the reference test; non-cubic spacing.
+  - Cache tests by membership and `len(_CACHE[mesh])`.
+  - Docs: the missed locations (preconditioners 595/597/107, eigensolvers 417/983, open_items 38/42/266/283, ROADMAP 806, operators 44/247/253, postprocessing 212, mesh 38/48).
 
 ## Goal (18d)
 
@@ -26,24 +33,29 @@ Measure the kernels against the machine (roofline, fusion, compile time), add Mo
 ### Ordering (apply_K, scatter path, m = 1 and 16, and the AMG V-cycle)
 
 - **Morton vs RCM vs grid:** on box hex20 $44^3$ (812k DOF) Morton is not faster than RCM or grid order on the scatter path (within ±3%) and makes the gather path about 11× slower (Morton's jumps between octants widen the gather windows). The median element node-index span: grid 8146, RCM 12399, Morton 326 (local in space, not in the index range a window covers).
-- **Shuffled meshes** (random node and per-block element permutations; the worst case for a Gmsh or Abaqus file) cost +30–100% on apply_K and +50% on the AMG V-cycle. RCM recovers both (0.66 s at 358k nodes; about 3 s at 10M DOF, `docs/mesh.md`).
+- **Shuffled meshes** (random node and per-block element permutations; the worst case for a Gmsh or Abaqus file) cost +30–100% on apply_K and +50% on the AMG V-cycle. RCM recovers both (0.66 s at 358k nodes; about 3 s at 10M DOF, `docs/mesh.md:48`).
 - **Grid order on a plate** (`ssh8` $256^2$, 396k DOF): RCM leaves apply_K (23.7 / 23.1 ms at m = 16), the AMG build (5.48 / 5.69 s) and the V-cycle (382 / 381 ms) unchanged, although the median node span is 16771 in grid order against 367 after RCM.
+- The voxel `stencil` on a Morton-renumbered masked voxel mesh equals the permuted original exactly (it works on the grid through the renumbered voxel maps).
 
-### Roofline (first numbers from recorded results)
+### Roofline (first numbers from recorded results and review probes)
 
-- Voxel stencil, $87^3$, m = 1 (`stencil_slab.json`): 18.4 ms per apply_K; 1152 flops per cell, 0.759 GFLOP, so 41 GFLOP/s. Lower-bound bytes ≈ 16 B per cell (`node`/`cell` ids, $s$) + 52 B per node ($u$ read, output written, `node` id) ≈ 46 MB: intensity ≈ 17 flop/B, above 490/185, so the roofline is the fp64 peak: about 8%. The implementation's traffic is the corner stack and shifted adds through U and Y (about $4 \cdot 24 \cdot 8\,m$ B per cell, `docs/operators.md`, "Why this layout").
-- Stored-Ke apply (hex8, packed upper triangle, 300 doubles per element): 1152 flops over 2400 B, 0.48 flop/B, so bandwidth-capped at about 89 GFLOP/s (hex20 0.49 flop/B). It runs at 11–16% of the triad in Ke traffic (PR 5); the unpack `Ke[:, _packed_index(k)]` writes and reads another 4608 B per hex8 element.
+Lower-bound bytes count each stored or streamed array once and the vectors once per apply (read $u$, write the output): per node $4 + 48m$ B (`node` id, vectors), plus per cell or element the stored data.
+
+- **Voxel stencil**, $87^3$, m = 1: 1152 flops per cell, 0.759 GFLOP per apply; per cell 16 B (`cell` 4, `phase` 4, $s$ 8): about 43 MB, intensity about 17.6 flop/B, above $490/185 = 2.65$, so the roofline is the fp64 peak. In a plain process an apply takes 15.3 ms (`docs/operators.md:247`; the 18.4 ms of `stencil_slab.json` includes about 3 ms of first-touch page faults): 50 GFLOP/s, about 10%. The implementation's traffic is the corner stack and shifted adds through U and Y (about $4 \cdot 24 \cdot 8\,m$ B per cell, `docs/operators.md`, "Why this layout").
+- **Stored-Ke apply** (hex8, packed upper triangle, 300 doubles): 1152 flops per element and m, 2400 B of Ke per element: 0.48 flop/B at m = 1, bandwidth-capped at about 89 GFLOP/s (hex20 0.49 flop/B); the intensity grows with m (ridge near m = 6 for hex8). The unpack `Ke[:, _packed_index(k)]` is materialized (20.8 MB temporaries per 4096-element chunk at m = 1 = $576 \cdot 4096 \cdot 8$ B), so the implementation moves $2400 + 2 \cdot 4608 = 11616$ B per element plus the gathered $u$ and the scattered output ($2 \cdot 192m$ B each): at $48^3$, m = 1, 13.2 ms, 9.7 GFLOP/s, 20 GB/s of Ke traffic but about 97 GB/s (52% of the triad) of implementation traffic. Storing the full Ke (4608 B, 1.9× the storage) or a packed symmetric matvec would roughly halve the m = 1 traffic: recorded as a GPU-side decision (deferred check), not changed on CPU (storage is the 10M reach's limit).
+- `cost_analysis()["flops"]` counts a `lax.scan` / while body once, not per trip (a 64-step scan of 24×24 matvecs reports 1178 flops against 73728): usable only on one-trip programs.
 
 ### Follow-ups
 
 - **`unstructured_memory` (gather):** `layout` costs 0.22 s at 812k DOF (half windows, half inverse map) and 3.2 s at 10.2M per call, about 35 s per band call there. The estimator reads only scalars (per block `type`, `n_pad`, `chunk`, `k`, `W`; `path`, `n_nodes`, `R`, `n_ranges`, `valence`, the inverse-map size).
 - **`gmg_memory`:** 0.11 s per call at 10.3M DOF (voxel $150^3$), with or without `s_K`. Closed with the number.
 - **`_amg_scan` / `_shell_scan`:** `lru_cache(maxsize=1)` keeps the last mesh and its scan alive after the caller drops it.
-- **Voxel part finder:** `ndimage.label` on the cell mask (face connectivity), mapped through `element_map`, plus the existing node-label contact check: 0.025 s and 93 B per element of transient host memory, against 0.72 s and 352 B for the generic search, on $100^3$ with a gap layer (2 parts, the same partition): 29× faster, 3.8× leaner (`docs/boundary_conditions.md:53`'s estimate said 20× and 8×).
+- **Voxel part finder:** `ndimage.label` on the cell mask (face connectivity), mapped through `element_map`, plus the existing node-label contact check: 0.025 s and 93 B per element of transient host memory, against 0.72 s and 352 B for the generic search, on $100^3$ with a gap layer (2 parts, the same partition): 29× faster, 3.8× leaner (`docs/boundary_conditions.md:53` estimated 20× and 8×).
 - **$P_0^\top$ as a scatter over $P_0$'s ELL:** 3–9× slower than the stored transpose on CPU (18c probe). Closed, not adopted.
 - **1.25× ELL width classes:** the current classes pad only 6–10% of the ELL bytes. Closed, not adopted.
 - **Size-dependent `STORAGE32`:** the per-family ratio (hex8 0.636, p 0.548, shell 0.574) falls with size (0.44 at hex20 $44^3$, 0.59–0.61 hex8, 0.50 flat $362^2$ / block $64^3$): at 1M DOF the fp32 storage is 58–86 MB high, about 7–12 basis columns, under 2% of the reach, and conservative. Closed, not refitted.
-- **fp64 hex polish:** exceeds the fp64 low model by up to 0.33 blocks (hex20 $52^3$, m = 120; `amg_fp32_study.json` `polish64_slack`). The model must bound it: add the term.
+- **fp64 hex polish:** exceeds the fp64 low model by up to 0.33 blocks (hex20 $52^3$, m = 120; `amg_fp32_study.json` `polish64_slack`). On the 11 recorded `polish64` rows the fp32 polish model (`AMG_STEP32[(fam, "polish")]` with its $f_l\,ws$) over the measured fp64 polish is 0.836–1.662 (hex8 $80^3$ m = 10 lowest; hex20 $52^3$ 0.985–1.001): the fp64 polish is the fp32 one plus 0–20%.
+- **fp64 hex step at m = 120:** 3.2% above the model's extra at hex8 $40^3$ (about 1% of the step; `docs/open_items.md:283`). Kept and logged (within the ±20% band; no fit data beyond the 18c grid).
 - **`assembled._chunked`:** the loop gathers, dispatches and copies one chunk at a time. Pipelined, 8% in `element_stress` on CPU (PR 17); a reviewer probe (host gather + jitted kernel + copy, 400k elements in 50k chunks) gave 17%.
 
 ## Design (18d)
@@ -56,7 +68,7 @@ def morton(mesh):
     each block. Returns (new mesh, p, q) like rcm."""
 ```
 
-- Keys: per axis $q = \lfloor (x - x_\min) / \max(x_\max - x_\min, 10^{-300}) \cdot (2^{21} - 1) \rfloor$ on the mesh's bounding box, bits interleaved (x lowest) into a uint64 (63 bits); `np.argsort(kind="stable")`. Elements: per block, `s + argsort(keys(centroids))` (the same box as the nodes).
+- Keys: per axis $q = \lfloor (x - x_\min) / \max(x_\max - x_\min, 10^{-300}) \cdot (2^{21} - 1) \rfloor$ on the nodes' bounding box, bits interleaved (x lowest) into a uint64 (63 bits); `np.argsort(kind="stable")`. Elements: per block, `s + argsort(keys(centroids))` on the same box.
 - Exported from `jaxmodal.mesh` next to `rcm`. Not a default anywhere (Findings).
 - **No automatic reordering and no warning** in `solve_modes` (decision, logged): reordering would permute the mode vectors back and forth, and a span threshold would need calibration across element types. `docs/mesh.md` gets the measured cost of a shuffled mesh and the advice to call `rcm` on meshes read from files.
 
@@ -79,7 +91,7 @@ def _per_mesh(f):
 - Replaces `lru_cache(maxsize=1)` on `_shell_scan` and `_amg_scan` (`Mesh` is `frozen=True, eq=False` without slots: identity hash, weak references work).
 - New `_layout_sizes(mesh, path, chunk, range_nodes)` under `_per_mesh`: calls `layout` once and keeps the scalars `unstructured_memory` reads (Findings). `path` is resolved before the call (`DEFAULT_PATH` by backend), so the key is stable. `unstructured_memory` reads it instead of `layout`; its values are unchanged.
 - Cached values are NumPy arrays and ints; none references the mesh.
-- `lru_cache` callers updated: `tests/test_strategy.py::test_amg_scan_cached` (`cache_clear`, `cache_info`) becomes an identity and call-count check; `benchmarks/strategy_study.py:254`'s `mem._amg_scan.cache_clear()` is removed (a fresh mesh starts a fresh entry).
+- `lru_cache` callers updated: `tests/test_strategy.py::test_amg_scan_cached` (`cache_clear`, `cache_info`); `benchmarks/strategy_study.py:254`'s `mem._amg_scan.cache_clear()` is removed (a fresh mesh starts a fresh entry).
 
 ### `_default_budget` without `bytes_limit` (`memory.py`)
 
@@ -87,93 +99,98 @@ def _per_mesh(f):
 
 ### `assembled._chunked` pipelined (`operators/assembled.py`)
 
-Per chunk: build chunk $i+1$'s host inputs (`X[conn[e]]`, the parameter slices), dispatch its kernel, then copy chunk $i$'s result into the host arrays (asynchronous dispatch runs kernel $i+1$ during the gather and the copy). Two chunk results are alive at once; the chunk defaults (`element_stress`, `assemble`) are a few tens of MB per chunk, and `docs/postprocessing.md`'s memory line is checked and updated. The output arrays and the padding rule are unchanged.
+Per chunk: build chunk $i+1$'s host inputs (`X[conn[e]]`, the parameter slices), dispatch its kernel, then copy chunk $i$'s result into the host arrays (asynchronous dispatch runs kernel $i+1$ during the gather and the copy; the copy blocks only on kernel $i$). Two chunks (inputs and results) are alive at once; `docs/postprocessing.md:212` ("+ one chunk") and `assemble`'s memory text (`docs/operators.md:36–44`) say two. The output arrays and the padding rule are unchanged.
 
 ### Voxel `parts` (`mesh/parts.py`)
 
-If `mesh.voxel is not None` (voxel meshes are hex8 only, `Mesh._check_voxel`): `lab, _ = ndimage.label(element_map.reshape(nz, ny, nx) >= 0)` (the default cross structure is face connectivity), element labels `lab - 1` scattered through `element_map` (label 0, inactive cells, dropped). The node scatter and the contact check (edge and vertex contacts raise) are shared with the generic path. Labels are `0..n-1` (the only consumer, `rigid_modes`, uses `max()` and `bincount`); their order can differ from the generic path's, so tests compare partitions. Valid after `renumber` (the voxel maps are renumbered with the mesh). No collapsed-element check (voxel cells cannot collapse).
+If `mesh.voxel is not None` (voxel meshes are hex8 only, `Mesh._check_voxel`): `lab, n = ndimage.label(element_map.reshape(nz, ny, nx) >= 0)` (the default cross structure is face connectivity); element labels `lab - 1` scattered through `element_map` (label 0, inactive cells, dropped), then renumbered by each component's lowest element index (`np.minimum.at` and a rank over $n$), which is `connected_components`' order: the labels equal the generic path's, so `rigid_modes`' column order (`constraints.py:127–139`) does not depend on the path, also after `rcm` / `renumber`. The node scatter and the contact check (edge and vertex contacts raise) are shared with the generic path. Valid after `renumber` (the voxel maps are renumbered with the mesh). No collapsed-element check (voxel cells cannot collapse).
 
-### fp64 hex polish term (`memory.py`, `eigen/api.py`, `benchmarks/amg_fp32_study.py`)
+### fp64 hex polish term (`memory.py`, `eigen/api.py`)
 
-- `steps_hex` records `polish64` on the whole `HEX` grid (one fp64 AMG build per case next to the fp32 one, the polish compiled at each width). `targets`, `asymptotes` and the TIGHT gate take a key for the polish series, so `fit` fits `AMG_STEP[(fam, "polish")]` for `hex8` and `p` from `polish64` with the same LP (upper envelope, rounded up, gate 1.3); the fp32 constants are refitted from the same data and asserted unchanged. Before the full run, two cases are timed; if the projection exceeds 1 h the run is split by family (one invocation each).
-- `amg_memory` (fp64, hex) returns `polish` like the fp32 and shell families; `lobpcg_memory`'s step is $\max(\text{9-block}, \text{low}, f_l\,ws + \text{polish})$ as for them. `polish_options={"on": False}` drops it.
-- API effects: the lever list (`eigen/api.py:499–503`) now also offers `polish_options={"on": False}` for fp64 hex AMG; a band `c_max` from `solve_modes_memory` (`api.py:523`) can fall for fp64 hex AMG, so a band strategy or chunk can change. Docstrings and comments that say "shell AMG, fp32 hex AMG" (`memory.py:154`, `:173`, `:432`, `api.py:499`) are updated; recorded strategy, `c_max` and lever expectations in `tests/test_strategy.py` and the band tests are re-checked.
+- `POLISH64 = 1.25`: for fp64 hex AMG (`hex8` and `p`), `amg_memory` returns `polish` $= 1.25 \times$ the fp32 polish term (`AMG_STEP32[(fam, "polish")]`), and `lobpcg_memory`'s step is $\max(\text{9-block}, \text{low}, f_l\,ws + \text{polish})$ as for the other families; `polish_options={"on": False}` drops it. 1.25 bounds the 11 recorded rows (lowest model over measured 0.836, so $1.25 \times 0.836 > 1$, rounded up to 0.05 with margin); the fp32 study is not rerun. If the tests below fail, the fallback is the full `polish64` grid refit (logged).
+- API effects: the lever list (`eigen/api.py:499–503`) offers `polish_options={"on": False}` for fp64 hex AMG too; a band `c_max` from `solve_modes_memory` (`api.py:523`) can fall for fp64 hex AMG, so a band strategy or chunk can change. Docstrings and comments that say "shell AMG, fp32 hex AMG" (`memory.py:154`, `:173`, `:432`, `api.py:499`) are updated; recorded strategy, `c_max` and lever expectations in `tests/test_strategy.py` and the band tests are re-checked.
 
 ### Benchmarks
 
 - **`benchmarks/kernels.py` → `benchmarks/results/kernels.json`**, parts `roofline`, `fusion`, `orders`, each in fresh subprocesses (`harness.measure`):
-  - `roofline` (about 5 min): the triad and fp64 peak from `harness.system_info` (rerun in the same invocation); the voxel stencil ($87^3$) and stored-Ke `unstructured` (hex8 $48^3$, hex20 $32^3$) apply_K at m = 1, 4, 16, min of 5 after a warm call. Per kernel: flops, lower-bound bytes and intensity, implementation bytes and intensity (formula), the roofline $\min(B \cdot I, F)$, achieved GFLOP/s and its percentage.
-  - `fusion` (about 2 min): for the stencil apply_K, the stored-Ke apply_K (scatter) and the hex20 AMG V-cycle: the compiled HLO's fusion count, the non-fused ops of the entry computation by opcode, and `memory_analysis` temp bytes against the vector bytes. Report only; more targets only if one of these shows unfused large ops.
+  - `roofline` (about 5 min): the triad and fp64 peak from `harness.system_info` (rerun in the same invocation); the voxel stencil ($87^3$) and stored-Ke `unstructured` (hex8 $48^3$, hex20 $32^3$) apply_K at m = 1, 4, 16, min of 5 after two warm calls (first touch excluded). Per kernel: analytic flops, lower-bound bytes and intensity, implementation bytes and intensity (formulas above), the roofline $\min(B \cdot I, F)$, achieved GFLOP/s and its percentage of the roofline. No `cost_analysis` (loops).
+  - `fusion` (about 2 min): for the stencil apply_K, the stored-Ke apply_K (scatter) and the hex20 AMG V-cycle: the compiled HLO text, walked over every computation reachable from ENTRY (fusions, while / scan / conditional bodies): per computation the fusion count, the non-fused ops by opcode and the largest materialized buffers; `memory_analysis` temp bytes against the vector bytes. Report only; more targets only if one of these shows large unfused ops.
   - `orders` (about 15 min): apply_K (scatter) at m = 1, 16 and the AMG V-cycle at m = 16 on box hex20 $44^3$ and the `ssh8` $256^2$ plate in grid, RCM, Morton and shuffled order; gather on the box at m = 1 only (the 11×), after `unstructured_memory` confirms it fits.
-- **`benchmarks/compile_study.py` → `benchmarks/results/compile_study.json`** (about 20 min): full `solve_modes` (20 modes) with GMG (voxel $20^3$, $40^3$, $80^3$) and AMG (box hex20 $8^3$, $24^3$; the `ssh8` plate $64^2$, $256^2$), each in a fresh subprocess with the persistent cache disabled. A `solve_modes` call compiles many jits, so the compile time is the sum of `/jax/core/compile/backend_compile_duration` events (`jax.monitoring.register_event_duration_secs_listener`), with the summed `jaxpr_trace_duration` and the wall time; next to each, the structure counts that drive it (GMG / AMG levels, ELL classes, slab count, number of compiles).
+- **`benchmarks/compile_study.py` → `benchmarks/results/compile_study.json`** (about 20 min): full `solve_modes` (20 modes) with GMG (voxel $20^3$, $40^3$, $80^3$) and AMG (box hex20 $8^3$, $24^3$; the `ssh8` plate $64^2$, $256^2$), each in a fresh subprocess with the persistent cache disabled. A `solve_modes` call compiles many jits, so the compile time is the sum of the `/jax/core/compile/backend_compile_duration` events (`jax.monitoring.register_event_duration_secs_listener`), with the summed `jaxpr_to_mlir_module_duration` (lowering) and `jaxpr_trace_duration`, the number of compiles and the wall time; the run asserts that compile events arrived (no silent cache hit). Next to each, the structure counts that drive it (GMG / AMG levels, ELL classes, slab count).
 
 ### Bimodal LOBPCG peak (time-boxed, about 45 min of runs, each invocation ≤ 1 h)
 
-The 791k plate cold `solve_modes` (5 fresh runs per setting, `docs/open_items.md`), the peak read by the parent (`proc_pid_rusage(child_pid)` interval footprint and `ru_maxrss`, `harness.py`), so no sampler runs in the measured process:
-1. An in-process polling thread (`proc_pid_rusage` every 5 ms; 18c found it gives the low regime every time): the cheapest deterministic setting if it holds over 5 runs on fp64 and fp32.
-2. XLA CPU intra-op thread count (`--xla_cpu_multi_thread_eigen=false`; both flags are accepted by jaxlib 0.11.2).
-3. `--xla_cpu_enable_concurrency_optimized_scheduler`.
+The 791k plate cold `solve_modes` (`docs/open_items.md:293`), fresh subprocesses. The peak as today: the child resets the footprint interval after setup and reads the interval maximum and `ru_maxrss` at the end (`harness.py:41–97`). New, in the probe script only: the parent samples the child's `phys_footprint` every 100 ms (`proc_pid_rusage(child_pid)`, no thread in the child), giving a timeline to tell live buffers from allocator retention (the extra 2–3 GB appears inside LOBPCG's iterations). Each setting gets 5 runs, interleaved with 5 unmodified baseline runs in the same session (so a one-regime result is not session drift):
+1. XLA CPU intra-op threads (`--xla_cpu_multi_thread_eigen=false`).
+2. `--xla_cpu_enable_concurrency_optimized_scheduler`.
+3. For the record only, an in-process polling thread (`proc_pid_rusage` every 5 ms; 18c: low regime every time). It perturbs the process and does not apply to production runs, so it is never adopted.
 
-Outcome: either a setting that puts every run in one regime (and the estimators' regime), adopted in the peak tests' subprocess environment, or the findings logged and 18c's gates kept, with the roadmap's 18d bullet reworded (cause not found; deferred to the GPU check, where the allocator differs). The estimators do not change.
+Outcome: a setting is adopted only if it puts every run in the estimators' regime and applies to production runs (set by `solve_modes` or documented as the user default), then in the peak tests too. Otherwise the findings (timeline, which settings move the regime) are logged, 18c's gates stay, and the roadmap's 18d bullet is reworded (cause not found; deferred to the GPU check, where the allocator differs). The estimators do not change.
 
 ## Tests (18d)
 
 - `tests/test_reorder.py`:
-  - `morton` on a $4^3$ hex8 box: the node order equals an independent reference that quantizes with the formula above and interleaves the integers with a per-bit Python loop; `check_renumbered(old, new, p, q)` on `morton`'s output for `with_sets(mixed_mesh)` and a voxel mesh (sets, material, orientation, voxel maps), as for `rcm`.
-  - Equivalence (roadmap): after `morton`, apply_K and apply_M of `unstructured` (box hex8, hex20, the mixed hex8 + hex20 mesh, an `ssh8` + hex8 plate) equal the permuted original to $10^{-12}$ relative, m = 3; the same for `rcm` on the `ssh8` + hex8 plate.
-- `tests/test_rigid.py` (parts): the voxel path equals the generic path as partitions on the existing cases and a non-cubic $6 \times 3 \times 2$ mask with a gap and an L-shaped part; edge and vertex contacts raise on the voxel path; after `rcm` and a random `renumber`; a spy on `parts.ndimage.label` confirms the voxel cases take the path and the non-voxel ones do not.
-- `tests/test_operators.py` / `test_post.py`: `_chunked` against one chunk with exact equality for $n$ divisible by the chunk, not divisible (padded last chunk), $n$ < chunk, and a pytree output (`element_stress`); existing cases checked first and only missing ones added.
+  - `morton` on a $4 \times 3 \times 2$ hex8 box with spacing (1, 2, 0.5): the node order and each block's element order equal an independent reference that quantizes with the formula above and interleaves the integers with a per-bit Python loop; `check_renumbered(old, new, p, q)` on `morton`'s output for `with_sets(mixed_mesh)` and a voxel mesh (sets, material, orientation, voxel maps), as for `rcm`.
+  - Equivalence (roadmap): after `morton`, apply_K and apply_M of `unstructured` (box hex8, hex20, the mixed hex8 + hex20 mesh, an `ssh8` + hex8 plate) and of `stencil` (a masked non-cubic voxel mesh) equal the permuted original to $10^{-12}$ relative, m = 3.
+- `tests/test_rigid.py` (parts): the voxel path's labels equal the generic path's exactly on the existing cases and a non-cubic $6 \times 3 \times 2$ mask with a gap and an L-shaped part, also after `rcm` and a random `renumber`; edge and vertex contacts raise on the voxel path; a spy on `parts.ndimage.label` confirms the voxel cases take the path and the non-voxel ones do not.
+- `tests/test_operators.py` / `test_post.py`: `_chunked` for $n$ divisible by the chunk, not divisible (padded last chunk), $n$ < chunk, and a pytree output (`element_stress`), against one chunk with the existing tolerances (different chunk shapes compile different kernels); existing cases checked first and only missing ones added.
 - Memory (`tests/test_strategy.py`):
-  - `test_amg_scan_cached` rewritten: the same object on a second call, and a spy on the scan's inner work counts one call.
-  - Lifetime: a fresh mesh (no cached helper), `_amg_scan`, `_shell_scan` (shell mesh) and `_layout_sizes` (scatter and gather) called, `r = weakref.ref(mesh)`, `del mesh; gc.collect()`: `r() is None` and its `_CACHE` entry is gone; two meshes keep two entries.
+  - `test_amg_scan_cached` rewritten: the same object on a second call and `len(mem._CACHE[mesh]) == 1`.
+  - Lifetime: a fresh mesh (no cached helper); `_amg_scan`, `_shell_scan` (shell mesh) and `_layout_sizes` (scatter and gather) called; `mesh in _CACHE`; `r = weakref.ref(mesh)`; `del mesh; gc.collect()`: `r() is None` and `len(_CACHE)` dropped by one; two meshes are both members.
   - `_layout_sizes` against a fresh `layout` on gather and scatter.
-  - `_default_budget` under `fake_gpu` with `memory_stats` raising, `None`, `{}`, `{"bytes_in_use": x}` (all `(ram, None)`) and a full dict.
+  - `_default_budget` under `fake_gpu` with `memory_stats` raising, returning `None`, a dict without `bytes_limit` (all `(ram, None)`), and a full dict.
 - `tests/test_amg.py`:
-  - `test_amg_step` includes the polish for fp64 (its docstring updated); the fp64 term bounds $f_l\,ws + \text{polish}$ against the measured `memory_analysis` at hex20 $12^3$, hex27 $12^3$ and hex8 $24^3$, m = 25.
-  - The TIGHT point (hex20 $24^3$, m = 25, `slow`) within the 1.3 gate for fp64 as `test_amg_step_tight32` does for fp32.
-  - `test_fp32_constants_pinned` pins the new `AMG_STEP[(fam, "polish")]` against the recorded fit (its constant count updated).
+  - `test_amg_step` includes the polish for fp64 on its existing parametrisation (its docstring updated): `lobpcg_memory`'s fp64 polish ($f_l\,ws + \text{polish}$) bounds the measured `memory_analysis`.
+  - The TIGHT point (hex20 $24^3$, m = 25, `slow`) within the 1.3 gate for fp64, as `test_amg_step_tight32` does for fp32.
+  - `POLISH64` bounds the 11 recorded `polish64` rows of `amg_fp32_study.json` (model ≥ measured).
   - `polish_options={"on": False}` drops the fp64 term.
+- `tests/test_shell_solve.py::test_polish_lever_hex`: the lever is named for both dtypes; the docstring ("the fp64 hex polish stays below the step") rewritten.
 - `tests/test_performance.py` (new, fast, no wall-time assertion):
-  - `test_roofline_model`: the flop and byte formulas on $87^3$ (0.759 GFLOP) and hex8 (1152 flops, 2400 B per element) by hand, and the analytic flops of the stencil and stored-Ke apply ≤ 1.01× `jit(...).lower(x).compile().cost_analysis()["flops"]` on small meshes (the analytic count is the minimum).
-  - `test_fusion_report`: the HLO parser on a tiny stencil apply returns ≥ 1 fusion and counts every entry op.
-  - `test_compile_listener`: the compile-time collector returns > 0 s for a tiny jitted function in a subprocess with the cache disabled.
-  - `test_results_pinned`: `kernels.json` and `compile_study.json` have the keys and cases the docs tables read.
-- If the bimodal outcome adopts a setting: the peak tests' subprocess environment carries it, and `test_harness.py` checks it is set.
+  - `test_roofline_model`: the flop and byte formulas by hand ($87^3$: 0.759 GFLOP; hex8: 1152 flops and 2400 B per element); and analytic ≤ `cost_analysis()["flops"]` ≤ 1.5 × analytic (probe ratios 1.17–1.39) on one-trip programs: a stencil with `slab` = the full length and one material, `unstructured` with `chunk` ≥ $n_{el}$ and $n_{el}$ a multiple of the chunk (no padding), the trip count asserted to be 1.
+  - `test_fusion_report`: on a tiny two-chunk stored-Ke apply the walker finds the loop body and its fusions (not only ENTRY's).
+  - `test_compile_listener`: in a subprocess with the cache disabled, a tiny jit yields ≥ 1 backend-compile event and > 0 s.
+  - `test_results_pinned`: `kernels.json` and `compile_study.json` have the keys and cases the docs tables read, and the recorded roofline and percentages recompute from their recorded fields.
+- If the bimodal outcome adopts a setting: `test_harness.py` checks the peak tests' subprocess environment carries it.
 
 ## Docs (18d)
 
-- `docs/performance.md` (new): the roofline (definition, the table from `kernels.json`, the byte counts, the implementation bytes), the fusion report, the compile times with their structure counts, the ordering costs, the bimodal outcome, the deferred GPU checks (pointing to `docs/ROADMAP.md`).
+- `docs/performance.md` (new): the roofline (definition, the byte counts, the implementation bytes, the table from `kernels.json`, the full-Ke GPU decision, the `cost_analysis` loop caveat), the fusion report, the compile times with their structure counts, the ordering costs, the bimodal outcome, the deferred GPU checks (pointing to `docs/ROADMAP.md`).
 - `docs/conventions.md:89` and `docs/ROADMAP.md:207`: compile timing of one jit by `jit(f).lower(...).compile()`, and of a multi-jit call by the summed backend-compile events; both in a fresh subprocess with the cache disabled.
-- `docs/mesh.md`: `morton` in the helper list (line 3) and a section; the ordering advice with the measured costs.
-- `docs/operators.md:206`: the layout cache replaces "caching `layout` is PR 18d" (0.22 s at 812k, 3.2 s at 10.2M once per mesh); `_chunked` pipelining in the assembled section; Morton in the equivalence test list (`:287ff`).
-- `docs/boundary_conditions.md:53`: the voxel path and its measured cost (29×, 93 B per element); `:90`, the parts tests.
-- `docs/eigensolvers.md`: `:167`, a device without `bytes_limit` uses the CPU rule; `:414–417`, the polish term exists for every AMG family; `:487`, the bimodal outcome; `:901–908`, the test summary.
-- `docs/preconditioners.md`: `:597–611`, the fp64 hex polish constants; `:627`, the bimodal outcome; `:672`, the test summary; the $P_0^\top$ and 1.25× closures next to the shell storage text.
-- `docs/postprocessing.md`: the `_chunked` memory line (two chunk results).
+- `docs/mesh.md`: `morton` in the helper list (`:3`) and a section (`:38` names "PR 18d Morton"); the ordering advice and the shuffled-mesh costs next to the RCM cost (`:48`).
+- `docs/operators.md`: `:206`, the layout cache replaces "caching `layout` is PR 18d" (0.22 s at 812k, 3.2 s at 10.2M, once per mesh); `:36–44`, `assemble`'s two chunks; `:247–253`, the cost per apply points to `docs/performance.md` (lower bound vs implementation bytes); Morton in the equivalence test list (`:287ff`).
+- `docs/boundary_conditions.md`: `:53`, the voxel path and its cost (29×, 93 B per element); `:90`, the parts tests.
+- `docs/eigensolvers.md`: `:167`, a device without `bytes_limit` uses the CPU rule; `:414–417`, the polish term exists for every AMG family and `POLISH64`; `:487`, the bimodal outcome; `:901–908` and `:983`, the test summaries (polish, cache and lifetime tests).
+- `docs/preconditioners.md`: `:595`, the fp64 hex polish row; `:597`, the weak per-mesh cache (replaces "`lru_cache(maxsize=1)`" and "the gather path still runs `layout` per call"); `:612`, the test list; `:627`, the bimodal outcome; `:672`, the test summary; `:107`, the 1.25× width classes closed; `:615`, the $P_0^\top$ scatter closed.
+- `docs/postprocessing.md:212`: two chunks (inputs and results).
 - `docs/open_items.md`, line to outcome:
 
   | Line | Item | Outcome |
   |---|---|---|
+  | 38, 42 | GMG intermittent peak (11b), 300k pencil peak | covered by the bimodal outcome if the cause is shared, else unchanged |
   | 165, 182 | layout cache, scan cache, `gmg_memory` | per-mesh weak cache; `gmg_memory` closed (0.11 s at 10M) |
   | 183 | Metal / budget | CPU rule without `bytes_limit` |
   | 234 | `_chunked` | pipelined |
   | 241 | $P_0^\top$ scatter, 1.25× classes | closed with numbers (3–9× slower; 6–10% padding) |
   | 245 | Schwarz `chunk_bytes` "public option in 18d if needed" | deferred to the GPU check (PR 18a's) |
+  | 266 | "polish term for shell and fp32 hex" | every AMG family (`POLISH64`) |
   | 268, 293 | 791k solve peak, bimodal | the investigation's outcome |
   | 280 | size-dependent `STORAGE32` | closed with numbers |
+  | 283 | fp64 hex step at m = 120 (3.2%) | kept, logged |
   | 283, 284 | fp64 hex polish; fp32 above fp64 on hex | the term added; 284's ranking statement re-measured or removed |
 
   plus a PR 18d section with the decisions below.
-- `docs/ROADMAP.md`: the 18d status; deferred GPU checks: the roofline ≥ 50% at m = 1 for both kernels (against the measured fp64 matmul peak, as on the Mac), Morton against RCM on the GPU scatter path, compile times on GPU, the Schwarz scan steps (PR 18a, unchanged); the bimodal bullet reworded if no cause is found.
-- `README.md`: the status line (PR 18d); a link to `docs/performance.md` next to the operators / eigensolvers links; `morton` where `rcm` is mentioned.
+- `docs/ROADMAP.md`: the 18d status; `:806` (PR 18a's Schwarz scan check) reworded: the remedy is deferred with the check (not needed on CPU); deferred GPU checks added: the roofline ≥ 50% at m = 1 for both kernels (against the measured fp64 matmul peak, as on the Mac), the full-Ke / packed matvec decision for stored Ke, Morton against RCM on the GPU scatter path, compile times on GPU; the bimodal bullet reworded if no cause is found.
+- `README.md`: the status line (PR 18d); a link to `docs/performance.md` next to the operators / eigensolvers links; `morton` next to the `docs/mesh.md` link (`:37`).
 
 ## Risks and decisions without user input (logged in `docs/open_items.md`)
 
 - **18d stays one PR:** the items are small and independent.
 - **No automatic reordering and no warning;** `morton` is a helper only.
-- **Closed without code:** `gmg_memory` caching, the $P_0^\top$ scatter, the 1.25× classes, the size-dependent `STORAGE32` (numbers above).
+- **Closed without code:** `gmg_memory` caching, the $P_0^\top$ scatter, the 1.25× classes, the size-dependent `STORAGE32`, the fp64 hex step at m = 120 (numbers above).
+- **Stored Ke stays packed on CPU;** full-Ke storage or a packed matvec is a GPU decision (the unpack doubles the m = 1 traffic; full Ke costs 1.9× the storage).
 - **Deferred to GPU:** the Schwarz scan remedy, the XLA temporaries on GPU, the roofline ≥ 50%.
 - **The roofline test checks the model, not the speed:** the timed percentages are a benchmark (a timed bound at 8–16% could never fail).
-- **The bimodal investigation is time-boxed;** without a cause, 18c's gates stay.
+- **fp64 hex polish as a factor on the fp32 term** (1.25, from 11 recorded rows) instead of a refit; the refit is the fallback.
+- **The bimodal investigation is time-boxed;** a setting is adopted only if it holds for production runs; otherwise 18c's gates stay.
 - **The fp64 hex polish term can shrink a band chunk** chosen from the estimate; eigenpairs are unchanged.
 - **Cache lifetime:** results live as long as the mesh (scan arrays of a few bytes per DOF; the layout entry is scalars).
