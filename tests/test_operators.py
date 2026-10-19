@@ -211,3 +211,49 @@ def test_assemble_host_checks():
             assemble(bad, MATERIALS)
     finally:
         jax.config.update("jax_enable_x64", True)
+
+
+# ---------------------------------------------------------------- PR 18c: dtype of the applies
+
+
+def test_apply_dtype():
+    """PR 18c test 1: A_P and the p-level NodalTransfer return the input's dtype: fp32 within
+    1e-6 of fp64, fp64 bitwise the uncast apply; on a voxel Stencil the fp32 result is bitwise
+    the uncast apply (the cast is a no-op there)."""
+    import importlib
+
+    import jax.numpy as jnp
+
+    from jaxmodal.mesh import voxel_mesh
+    from jaxmodal.operators import ap_operator, stencil, unstructured
+
+    pm = importlib.import_module("jaxmodal.precond.pmg")
+
+    @jax.jit
+    def uncast(A, x):  # _ap_apply without the final cast
+        m = A.free[:, None].astype(x.dtype)
+        mx = m * x
+        y = A.op.apply_K(mx) + A.sigma.astype(x.dtype) * A.op.apply_M(mx)
+        return m * y + A.s.astype(x.dtype) * (1 - m) * x
+
+    rng = np.random.default_rng(0)
+    for mesh, build in ((box_mesh((3, 3, 3), type="hex20"), unstructured),
+                        (voxel_mesh((3, 3, 3)), stencil)):  # fmt: skip
+        op = build(mesh, MATERIALS)
+        A = ap_operator(op, dof_mask(mesh, {"xmin": "xyz"}), 0.37)
+        x = jnp.asarray(rng.standard_normal((op.n_dof, 2)))
+        y64, y32 = A(x), A(x.astype(jnp.float32))
+        assert y64.dtype == jnp.float64 and y32.dtype == jnp.float32
+        assert np.array_equal(y64, uncast(A, x)) and rel(y32, y64) <= 1e-6
+        if build is stencil:
+            assert np.array_equal(y32, uncast(A, x.astype(jnp.float32)))
+    mesh = box_mesh((3, 3, 3), type="hex20")
+    A = ap_operator(unstructured(mesh, MATERIALS), dof_mask(mesh, {"xmin": "xyz"}), 0.37)
+    T = pm._hex8_galerkin(A)[1].T
+    xc = jnp.asarray(rng.standard_normal((3 * T.child.shape[0], 2)))
+    r = jnp.asarray(rng.standard_normal((A.n_dof, 2)))
+    for f, v in ((T, xc), (T.restrict, r)):
+        y64, y32 = f(v), f(v.astype(jnp.float32))
+        assert y64.dtype == jnp.float64 and y32.dtype == jnp.float32 and rel(y32, y64) <= 1e-6
+    assert np.array_equal(T(xc), pm._gather(T.parent, T.weight, xc))
+    assert np.array_equal(T.restrict(r), pm._gather(T.child, T.cweight, r))

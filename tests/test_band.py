@@ -182,6 +182,28 @@ def test_clear_gap(spy, name, k):
     assert info["count"]["ran"] and info["count"]["passed"]
 
 
+def test_fp32_count_build(monkeypatch):
+    """PR 18c test 4: with fp32 AMG the LOBPCG-path band count (verify=True, no slices) builds
+    its lam_c preconditioner in fp64, and LOBPCG's build is fp32."""
+    mesh, bcs, _, _ = ref("clamped")
+    built, real = [], api.amg
+    monkeypatch.setattr(
+        api, "amg", lambda *a, **kw: built.append(kw.get("dtype")) or real(*a, **kw)
+    )
+    dtypes = []
+
+    def build(s):
+        P = orig(s)
+        dtypes.append(P.dtype)
+        return P
+
+    orig = wrap_build(monkeypatch, build)
+    _, _, info = solve_modes(mesh, MAT, bcs, band=(0, mid("clamped", 3)), tol=TOL, verify=True,
+                             precond_dtype="float32")  # fmt: skip
+    assert info["count"]["ran"] and info["strategy"] == "lobpcg"
+    assert dtypes == ["float64"] and "float32" in built
+
+
 def test_window():
     """Test 2: f_max 10 x inside / outside the 100 t window below mode 4 (thresholds from a
     first solve; mode 3 far below)."""
@@ -493,16 +515,24 @@ def test_errors(kw, err, match):
         solve_modes(mesh, MAT, bcs, **kw)
 
 
-def test_fp64_count_model():
-    """Test 10: after an fp32 V-cycle solve the probe block is sized with the fp64 multigrid
-    the count builds at lam_c: a budget that holds one probe under the fp32 model raises."""
-    mesh, bcs = voxel_mesh((16,) * 3, (1 / 16,) * 3), {"zmin": "xyz"}
-    n, band, kw = 3 * len(mesh.points), (0, 1.0), dict(precond="gmg", precond_dtype="float32")
+@pytest.mark.parametrize("precond", ["gmg", "amg"])
+def test_fp64_count_model(precond):
+    """Test 10: after an fp32 V-cycle solve (voxel GMG; since PR 18c hex20 AMG) the probe block
+    is sized with the fp64 multigrid the count builds at lam_c: a budget that holds one probe
+    under the fp32 model raises."""
+    if precond == "gmg":
+        mesh, bcs = voxel_mesh((16,) * 3, (1 / 16,) * 3), {"zmin": "xyz"}
+        op_m, pc_m = memory.stencil_memory, memory.gmg_memory
+    else:
+        mesh, bcs = box_mesh((8,) * 3, (1 / 8,) * 3, type="hex20"), {"xmin": "xyz"}
+        op_m, pc_m = memory.unstructured_memory, memory.amg_memory
+    n, band = 3 * len(mesh.points), (0, 1.0)
+    kw = dict(precond=precond, precond_dtype="float32")
     total = solve_modes_memory(mesh, bcs, 10, band=band, n_rigid=0, **kw)["total"]
 
     def one(dtype):
-        pc = lambda m: memory.gmg_memory(mesh, m, dtype=dtype)  # noqa: E731
-        return count_memory(lambda m: memory.stencil_memory(mesh, m), n, 1, voxel=True,
+        pc = lambda m: pc_m(mesh, m, dtype=dtype)  # noqa: E731
+        return count_memory(lambda m: op_m(mesh, m), n, 1, voxel=precond == "gmg",
                             precond_memory=pc)["total"]  # fmt: skip
 
     assert one("float32") < one("float64")

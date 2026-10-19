@@ -340,6 +340,9 @@ def test_key_check_before_build(monkeypatch):
     monkeypatch.setattr(api, "unstructured", fail)
     with pytest.raises(ValueError, match="unknown"):
         solve_modes(box(), MAT, CLAMP, 1, precond_options={"degre": 3})
+    # PR 18c: AMG's dtype is reserved (set through precond_dtype)
+    with pytest.raises(ValueError, match=r"unknown .*'dtype'.*\(dtype: precond_dtype\)"):
+        solve_modes(box(), MAT, CLAMP, 1, precond_options={"dtype": "float32"})
 
 
 # ------------------------------------------------------------- 5: solve_modes_memory

@@ -1,7 +1,9 @@
 """solve_modes against reference_modes (SciPy) on the assembled matrices."""
 
+import gc
 import importlib
 import sys
+import weakref
 
 import jax.numpy as jnp
 import numpy as np
@@ -51,6 +53,19 @@ def check_lam(lam, lr, lmax, tol):
     f = np.maximum(1e-8, 10 * EPS * lmax / lr[:n])
     assert np.all(err[isolated] <= f[isolated]), err
     assert np.all(err <= np.maximum(f, 10 * tol)), err
+
+
+@pytest.mark.slow
+def test_fp32_amg_accuracy():
+    """PR 18c test 3: hex20 6x5x4, 20 modes, precond_dtype "float32" (pre-estimate fp64, LOBPCG
+    and the polish fp32) against reference_modes at tol 1e-10 (PR 9 tolerances)."""
+    mesh, bcs = box(), {"xmin": "xyz"}
+    lam, V, info = solve_modes(mesh, MAT, bcs, 20, tol=1e-10, precond_dtype="float32")
+    assert info["converged"] and info["precond"] == "amg"
+    lr, nr, lmax = reference(mesh, MAT, bcs, 20)
+    assert nr == 0
+    check_lam(lam, lr, lmax, 1e-10)
+    assert np.abs(m_dot(mesh, MAT, V, V) - np.eye(20)).max() <= 1e-10
 
 
 @pytest.fixture
@@ -369,7 +384,7 @@ def test_dispatch(preconds):
         (box((2, 2, 2)), dict(precond="gmg"), "voxel mesh"),
         (vox, dict(precond="amg"), "unstructured mesh"),
         (vox, dict(precond="ilu"), "precond must be"),
-        (vox, dict(precond="jacobi", precond_dtype="float32"), "needs precond 'gmg'"),
+        (vox, dict(precond="jacobi", precond_dtype="float32"), "needs precond 'gmg' or 'amg'"),
         (vox, dict(precond_dtype="float16"), "precond_dtype must be"),
         (vox, dict(sigma=-1.0), "sigma must be"),
         (vox, dict(sigma=float("nan")), "sigma must be"),
@@ -525,3 +540,69 @@ def test_acceptance_smoke():
         assert len(r[dtype]["peaks_bytes"]) == 2 and r[dtype]["sigma_iterations"] > 0
         est = solve_modes_memory(mesh, {"xmin": "xyz"}, 10, precond_dtype=dtype)["total"]
         assert r[dtype]["estimate_bytes"] == est
+
+
+# ---------------------------------------------------------------- PR 18c: sigma-round reuse
+
+
+def reuse_spy(monkeypatch, reuse=True):
+    """api.amg recording per call (return_aggregates, aggregates is the first returned
+    aggregates) and a weakref to those; reuse=False drops aggregates= (still returning a
+    tuple when asked), the run with reuse disabled."""
+    rec = dict(calls=[], ref=None)
+
+    def spy(op, free, s, *a, aggregates=None, return_aggregates=False, **kw):
+        first = rec["ref"] and rec["ref"]()
+        rec["calls"].append((return_aggregates, aggregates is not None and aggregates is first))
+        out = amg(op, free, s, *a, aggregates=aggregates if reuse else None,
+                  return_aggregates=return_aggregates, **kw)  # fmt: skip
+        if return_aggregates and rec["ref"] is None:
+            rec["ref"], rec["first"] = weakref.ref(out[1]), len(rec["calls"]) - 1
+        return out
+
+    monkeypatch.setattr(api, "amg", spy)
+    return rec
+
+
+@pytest.mark.parametrize("dtype", ["float64", "float32"])
+@pytest.mark.parametrize("case", ["hex", "plate"])
+def test_sigma_reuse(monkeypatch, case, dtype):
+    """PR 18c test 10: one aggregation per solve_modes call (clamped hex20 6x5x4; a free ssh8
+    16^2 plate, L/t = 50, whose sigma = 0 build raises before aggregating): every build after
+    the first successful one passes its aggregates; lam, sigma and the iterations equal a run
+    with reuse disabled bitwise; the aggregates are dead at the main lobpcg's entry; in band
+    mode (hex, verify=True) the count build receives them too."""
+    import test_shell_amg as TS
+
+    mesh, bcs, mats = (box(), {"xmin": "xyz"}, MAT) if case == "hex" else (
+        TS.plate(16, 50)[0], {}, TS.STEEL)  # fmt: skip
+    real_lob = api.lobpcg
+
+    def run(reuse, **kw):
+        rec, dead = reuse_spy(monkeypatch, reuse), []
+
+        def lob(op, free, n_modes, *a, **kw):
+            if n_modes > 1:  # the sigma rounds pass 1
+                gc.collect()
+                dead.append(rec["ref"]() is None)
+            return real_lob(op, free, n_modes, *a, **kw)
+
+        monkeypatch.setattr(api, "lobpcg", lob)
+        return solve_modes(mesh, mats, bcs, 4, precond_dtype=dtype, **kw), rec, dead
+
+    (lam, _, info), rec, dead = run(True)
+    calls, k = rec["calls"], rec["first"]
+    assert all(ra for ra, _ in calls[: k + 1]) and len(calls) > k + 1
+    assert all(same for _, same in calls[k + 1 :]) and dead == [True]
+    assert (k == 1) == (case == "plate")  # the free plate's sigma = 0 build raised
+    (lam0, _, info0), *_ = run(False)
+    assert np.array_equal(lam, lam0) and info["sigma"] == info0["sigma"]
+    assert info["iterations"] == info0["iterations"]
+    assert info["sigma_iterations"] == info0["sigma_iterations"]
+    if case == "hex":
+        rec = reuse_spy(monkeypatch)
+        f = np.sqrt(lam[2] * lam[3]) / (2 * np.pi)
+        _, _, info = solve_modes(mesh, mats, bcs, band=(0, f), verify=True, precond_dtype=dtype)
+        assert info["strategy"] == "lobpcg" and info["count"]["ran"]
+        calls, k = rec["calls"], rec["first"]
+        assert len(calls) > k + 2 and all(same for _, same in calls[k + 1 :])
