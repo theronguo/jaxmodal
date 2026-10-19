@@ -359,6 +359,8 @@ Asked whether `solve_modes` should support `jax.grad` end to end (a custom VJP w
 
 User: topology optimization "as large scale as possible", multi-GPU and multi-node; first hardware is 2× A100, possibly on different nodes. HPC runs have time limits, so checkpoint/restart is wanted "eventually". Recorded in the roadmap: PR 19 adds multi-node (`jax.distributed`, distributed setup, coarse-level agglomeration), sharded checkpoints and an optional wall-clock budget; PR 23 now depends on PR 19 (sharded filter, sensitivities and MMA, optimizer checkpoints). The earlier ≤ 10M voxel-element working assumption is dropped. Sizes beyond ~100M DOF (about 1.7 TB at 1B voxel elements) need multi-node and are verified only on hardware.
 
+Reordered (user, 2026-10-19, "everything hardcore GPU comes last"): 18e, 18f, 20, 21, 22 and 23a (topology optimization on one device, the Du & Olhoff benchmark) come first, then PR 19 and 23b (sharding, optimizer checkpoint, large runs). The scale target stays; PRs 20–23a follow the shard-ready rules in the roadmap's M6 so 23b is a retrofit. Single-GPU runs need no PR 19 (plain JAX); the GPU-only checks stay in PR 24.
+
 ### GMG restriction on the GPU (PR 11 deferred GPU checks)
 
 Restriction is the transpose of gathers, i.e. scatter-adds (6× the prolongation time on CPU at $87^3$). Default: keep; listed in the deferred GPU checks with "rewrite as gathers if it dominates".
