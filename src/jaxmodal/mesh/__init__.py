@@ -4,7 +4,7 @@ from .box import box_mesh
 from .io import read, write
 from .model import TYPES, Mesh, Voxel, corner_jacobians
 from .parts import parts
-from .reorder import rcm, renumber
+from .reorder import morton, rcm, renumber
 from .shell import solid_shell
 from .voxel import voxel_mesh
 
@@ -14,6 +14,7 @@ __all__ = [
     "Voxel",
     "box_mesh",
     "corner_jacobians",
+    "morton",
     "parts",
     "rcm",
     "read",
