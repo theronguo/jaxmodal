@@ -239,7 +239,7 @@ mu, V, info = lobpcg(hop, hfree, 4, tol=1e-8, precond=P)
 assert info["converged"] and info["iterations"] <= 40
 ```
 
-`solve_modes` uses this AMG automatically on unstructured meshes (PR 13b) and solid shells (PR 18b), with the same σ pre-estimate as GMG (started at σ = 0 when the BCs leave no rigid modes); `solve_modes_memory` models it too. `precond_dtype="float32"` runs LOBPCG's AMG V-cycle in fp32 (PR 18c: the same PCG counts, 0.55–0.64× the preconditioner storage; the pre-estimate, counts and slices stay fp64), and one call aggregates once, reusing the aggregates in its later AMG builds (the σ rounds, LOBPCG's build and the band counts; the slices build fresh). `amg(..., return_aggregates=True)` and `amg(..., aggregates=...)` reuse the setup's aggregates for new materials or densities on the same mesh:
+`solve_modes` uses this AMG automatically on unstructured meshes (PR 13b) and solid shells (PR 18b), with the same σ pre-estimate as GMG (started at σ = 0 when the BCs leave no rigid modes); `solve_modes_memory` models it too. `precond_dtype="float32"` runs LOBPCG's (and the polish's) AMG V-cycle in fp32 (PR 18c: the same PCG counts, about 0.55–0.64× the modelled preconditioner storage; the pre-estimate, counts and slices stay fp64), and one call aggregates once, reusing the aggregates in its later AMG builds (the σ rounds, LOBPCG's build and the band counts; the slices build fresh). `amg(..., return_aggregates=True)` and `amg(..., aggregates=...)` reuse the setup's aggregates for new materials or densities on the same mesh:
 
 ```python
 mu, V, info = solve_modes(hbox, materials, {"xmin": "xyz"}, 4)

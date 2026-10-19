@@ -654,12 +654,15 @@ def step_case(t, n, dtype="float64"):
     return mesh, op, free, amg(op, free, 1e6, mesh.points, dtype=dtype)
 
 
-def step_model(mesh, op, low, n_modes=10, dtype="float64"):
-    """(lobpcg_memory's step with amg_memory, its block size)."""
+def step_model(mesh, op, low, n_modes=10, dtype="float64", polish=True):
+    """(lobpcg_memory's step with amg_memory, its block size); polish False drops the polish
+    term (the step's max would hide the 9-block and low terms)."""
     k = LOB._block_size(n_modes, None, None)[2]
+    pc = lambda w: {key: v for key, v in amg_memory(mesh, w, dtype=dtype).items()  # noqa: E731
+                    if polish or key != "polish"}  # fmt: skip
     est = lobpcg_memory(
         lambda w: unstructured_memory(mesh, w), op.n_dof, n_modes, low_memory=low,
-        precond_memory=lambda w: amg_memory(mesh, w, dtype=dtype),
+        precond_memory=pc,
     )["step"]  # fmt: skip
     return est, k
 
@@ -669,9 +672,10 @@ def step_model(mesh, op, low, n_modes=10, dtype="float64"):
 @pytest.mark.parametrize("low", [False, True], ids=["9-block", "low"])
 def test_amg_step(t, n, low, dtype):
     """13b test 8: the LOBPCG step with AMG <= lobpcg_memory's step (amg_memory), measured at
-    the block size lobpcg_memory derives from n_modes (PR 18c test 6: fp32 too)."""
+    the block size lobpcg_memory derives from n_modes (PR 18c test 6: fp32 too, without the
+    polish term, which is checked by test_hex_polish_fp32)."""
     mesh, op, _, P = step_case(t, n, dtype)
-    est, k = step_model(mesh, op, low, dtype=dtype)
+    est, k = step_model(mesh, op, low, dtype=dtype, polish=False)
     assert k == 15
     got = step_bytes(op, P, low, k)
     assert got <= est, (got, est)

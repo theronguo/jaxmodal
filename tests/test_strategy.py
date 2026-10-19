@@ -395,9 +395,8 @@ def test_memory_no_lobpcg_build(fake_builds, monkeypatch, f1):
             slice_options={"capacity": 96})  # fmt: skip
     assert seen["before"] == sum(inside) and (f1 == 0) == (not inside)
     assert f1 == 0 or sum(inside) > 0
-    assert f1 == 0 or (any(ra for _, ra, _ in fake_builds["builds"]) and all(seen["dead"]))
-    assert f1 == 0 or seen["dead"]
-    assert f1 != 0 or not any(ra for _, ra, _ in fake_builds["builds"])
+    assert any(ra for _, ra, _ in fake_builds["builds"]) == (f1 != 0)
+    assert f1 == 0 or (seen["dead"] and all(seen["dead"]))
 
 
 def chunk_need(name, c):
