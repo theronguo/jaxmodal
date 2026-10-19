@@ -161,7 +161,8 @@ def test_morton_keys():
 
 @pytest.mark.parametrize("case", ["box", "mixed"])
 def test_morton_order(case):
-    """Node and per-block element order equal the reference, on the nodes' bounding box."""
+    """Node and per-block element order equal the reference: keys on the cube of the bounding
+    box's largest side, elements by their 8-corner centroid."""
     rng = np.random.default_rng(9)
     if case == "box":
         old = box_mesh((4, 3, 2), spacing=(1.0, 2.0, 0.5))
@@ -169,13 +170,23 @@ def test_morton_order(case):
         old = shuffled(with_sets(mixed_mesh(rng)), rng)
     new, p, q = morton(old)
     x = old.points
-    lo, hi = x.min(0), x.max(0)
+    lo = x.min(0)
+    hi = lo + (x.max(0) - lo).max()
     np.testing.assert_array_equal(p, np.argsort(ref_keys(x, lo, hi), kind="stable"))
     for t, s in old.offsets.items():
         c = old.blocks[t]
-        e = s + np.argsort(ref_keys(x[c].mean(1), lo, hi), kind="stable")
+        e = s + np.argsort(ref_keys(x[c[:, :8]].mean(1), lo, hi), kind="stable")
         np.testing.assert_array_equal(q[s : s + len(c)], e)
     check_renumbered(old, new, p, q)
+
+
+def test_morton_thin():
+    """A thin plate keeps the in-plane locality (one scale for all axes): the median element
+    span stays far below grid order's."""
+    old = box_mesh((32, 32, 1), spacing=(1.0, 1.0, 0.01))
+    new = morton(old)[0]
+    span = [np.median(np.ptp(m.blocks["hex8"], axis=1)) for m in (new, old)]
+    assert span[0] < 0.1 * span[1]
 
 
 def test_morton_voxel():

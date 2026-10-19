@@ -1026,9 +1026,9 @@ def test_count_si_terms():
 def test_amg_scan_cached():
     """Test 11: amg_memory scans a mesh once (a fresh mesh: shared ones carry other keys)."""
     mesh = box_mesh((3, 3, 3), type="hex20")
-    first = mem._amg_scan(mesh)
     for m in (6, 10, 15):
         mem.amg_memory(mesh, m)
+    first = mem._amg_scan(mesh)
     assert mem._amg_scan(mesh) is first
     assert [k for k in mem._CACHE[mesh] if k[0] == "_amg_scan"] == [("_amg_scan",)]
 
@@ -1758,18 +1758,19 @@ def test_given_chunk_no_fit(fake_builds, monkeypatch):
     assert info["reason"] == "memory" and info["c_max"] == {20: None}
 
 
-def fake_gpu(monkeypatch, stats=None):
+def fake_gpu(monkeypatch, stats=None, platform="gpu"):
     """memory.jax.devices()[0]: a GPU with 7e9 free bytes (10e9 limit, 3e9 in use), or the given
-    memory_stats function."""
+    memory_stats function and platform."""
     if stats is None:
         stats = lambda: dict(bytes_limit=10e9, bytes_in_use=3e9)  # noqa: E731
-    gpu = types.SimpleNamespace(platform="gpu", memory_stats=stats)
+    gpu = types.SimpleNamespace(platform=platform, memory_stats=stats)
     monkeypatch.setattr(mem, "jax", types.SimpleNamespace(devices=lambda: [gpu]))
 
 
 def test_default_budget(monkeypatch):
     """Test 16: the default budgets: 0.8 x RAM on the CPU; a GPU's free pool and 0.8 x RAM; a
-    device whose memory_stats() raises, returns None or lacks bytes_limit gets the CPU rule."""
+    non-GPU device (Metal) whose memory_stats() raises, returns None or lacks bytes_limit gets
+    the CPU rule; a GPU without bytes_limit raises."""
     pages = {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 2**20}  # 4 GiB
     monkeypatch.setattr(mem.os, "sysconf", lambda k: pages[k])
     ram = 0.8 * 2**32
@@ -1781,8 +1782,11 @@ def test_default_budget(monkeypatch):
         raise NotImplementedError
 
     for stats in (raises, lambda: None, lambda: dict(bytes_in_use=3e9)):  # no pool limit: CPU rule
-        fake_gpu(monkeypatch, stats)
+        fake_gpu(monkeypatch, stats, "METAL")
         assert mem._default_budget() == (ram, None)
+        fake_gpu(monkeypatch, stats)
+        with pytest.raises(ValueError, match="memory_budget"):
+            mem._default_budget()
     fake_gpu(monkeypatch, lambda: dict(bytes_limit=10e9))
     assert mem._default_budget() == (10e9, ram)
 

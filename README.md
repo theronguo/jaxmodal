@@ -284,7 +284,7 @@ mub, Vb, binfo = solve_modes(
 assert len(mub) == 2 and binfo["count"]["passed"]  # the two bending modes, none missing
 ```
 
-`band=(f1, f2)` returns the modes in an interior band (PR 15d). The default `strategy="auto"` runs LOBPCG from 0 with its basis capped by `memory_budget` (default: 0.8 × RAM on the CPU and on a device without `bytes_limit`, the free device pool on a GPU) and keeps the modes in the band; when no LOBPCG chunk fits, or the basis cap stops it below $f_2$, the band is solved by shift-invert slices (`strategy="shift_invert"` forces them). LOBPCG to the band was faster than a slice at every measured depth (33× at depth 6 to 1260× at depth 1005), so the choice is by memory alone. `info["strategy"]` and `info["reason"]` record the choice:
+`band=(f1, f2)` returns the modes in an interior band (PR 15d). The default `strategy="auto"` runs LOBPCG from 0 with its basis capped by `memory_budget` (default: 0.8 × RAM on the CPU and on a non-GPU device without `bytes_limit`, the free device pool on a GPU) and keeps the modes in the band; when no LOBPCG chunk fits, or the basis cap stops it below $f_2$, the band is solved by shift-invert slices (`strategy="shift_invert"` forces them). LOBPCG to the band was faster than a slice at every measured depth (33× at depth 6 to 1260× at depth 1005), so the choice is by memory alone. `info["strategy"]` and `info["reason"]` record the choice:
 
 ```python
 f14 = solve_modes(hbox, materials, {"xmin": "xyz"}, 14)[2]["frequencies"]

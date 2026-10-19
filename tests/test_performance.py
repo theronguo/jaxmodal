@@ -44,6 +44,7 @@ def test_roofline_model():
     assert K.ke_flops(24, 1, 1) == 1152 and K.ke_bytes(24, 1, 0, 1) == 2504
     assert K.ke_flops(60, 1, 1) == 7200 and K.ke_bytes(60, 1, 0, 1) == 14888
     assert K.ke_impl_bytes(24, 1, 0, 1) - K.ke_bytes(24, 1, 0, 1) == 2 * 4608 + 4 * 192
+    assert K.stencil_impl_bytes(ne, nn, 4) - K.stencil_bytes(ne, nn, 4) == 768 * 4 * ne
     assert K.roofline(1, 1, 185, 490) == 185 and K.roofline(10, 1, 185, 490) == 490
     v = voxel_mesh((12,) * 3)
     c = compiled(stencil(v, STEEL, slab=12))
@@ -65,6 +66,17 @@ def test_fusion_report():
     assert comps[w["entry"]]["unfused"].get("while") == 1
     assert any(c["fusions"] for name, c in comps.items() if name != w["entry"])
     assert all(len(c["largest"]) <= 5 for c in comps.values())
+    hlo = """ENTRY %main (p: f64[4]) -> f64[4] {
+  %p = f64[4]{0} parameter(0)
+  ROOT %call = f64[4]{0} call(%p), to_apply=%inner
+}
+
+%inner (q: f64[4]) -> f64[4] {
+  %q = f64[4]{0} parameter(0)
+  ROOT %s = f64[4]{0} sine(%q)
+}
+"""  # XLA:CPU outlines small loops into call ops
+    assert K.walk(hlo)["computations"]["inner"]["unfused"] == {"sine": 1}
 
 
 LISTEN = """
@@ -79,7 +91,7 @@ print(len(ev), sum(ev))
 
 
 def test_compile_listener():
-    """compile_study's listener: a tiny jit yields >= 1 backend-compile event and > 0 s."""
+    """A listener like compile_study's: a tiny jit yields >= 1 backend-compile event and > 0 s."""
     p = subprocess.run([sys.executable, "-c", LISTEN], env=harness.child_env(),
                        capture_output=True, text=True)  # fmt: skip
     assert p.returncode == 0, p.stderr
@@ -119,13 +131,12 @@ def test_results_pinned():
     want = {(t, n, m) for t, ns in K.ROOF.items() for n in ns for m in K.MS}
     assert {(r["kernel"], r["size"], r["m"]) for r in ro["rows"]} == want
     for r in ro["rows"] + [ro["chunk512"]["small"]]:
-        t, ne, nn, m = r["kernel"], r["n_el"], r["n_nodes"], r["m"]
-        if t == "stencil":
-            fl, lb = K.stencil_flops(ne, m), K.stencil_bytes(ne, nn, m)
-        else:
-            kk = 24 if t == "hex8" else 60
-            fl, lb = K.ke_flops(kk, ne, m), K.ke_bytes(kk, ne, nn, m)
-        assert (r["flops"], r["bytes"]) == (fl, lb)
+        fl, lb, ib = K.model(r["kernel"], r["n_el"], r["n_nodes"], r["m"])
+        assert (r["flops"], r["bytes"], r["impl_bytes"]) == (fl, lb, ib)
+        g = 100 * r["gflops"]
+        assert r["pct_impl_roofline"] == pytest.approx(g / K.roofline(fl, ib, B, F))
+        if r["kernel"] == "stencil":
+            assert r["pct_gemm"] == pytest.approx(g / r["gemm_gflops"])
         assert r["roofline_gflops"] == pytest.approx(K.roofline(fl, lb, B, F))
         assert r["gflops"] == pytest.approx(fl / r["apply_s"] / 1e9)
         assert r["pct_roofline"] == pytest.approx(100 * r["gflops"] / r["roofline_gflops"])

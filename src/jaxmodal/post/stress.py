@@ -90,7 +90,7 @@ def element_stress(mesh, materials, U, orientations=None, chunk=1024, batch=64):
     (1-D U: (n_el, 6)), of the fields U (n_dof, k). Columns go to the kernel in batches of
     min(batch, k) (the last one zero-padded, each cast to fp64), elements in chunks. Host memory:
     the outputs plus one block's (n_e, kb, 6) pair and one batch; device: the column batch
-    (n_dof, kb) and one chunk."""
+    (n_dof, kb) and up to two chunks (the chunk loop is pipelined)."""
     if batch < 1:
         raise ValueError(f"batch must be >= 1, got {batch}")
     blocks = _setup("element_stress", mesh, materials, orientations, chunk)

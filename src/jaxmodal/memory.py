@@ -484,9 +484,9 @@ def amg_memory(mesh, m, max_coarse=1000, degree=2, dtype="float64"):
     loop = AMG_LOOP_K if degree > 2 else 0
     hb = beta + max(alpha[t] for t in mesh.blocks) * n_c
 
-    def term(key):
-        a, c, K = (AMG_STEP32 if fp32 else AMG_STEP)[(fam, key)]
-        return 8 * n_dof * (a * m + c) + 8 * m * (K + loop)
+    def term(key, table=AMG_STEP32 if fp32 else AMG_STEP, scale=1):
+        a, c, K = table[(fam, key)]
+        return scale * (8 * n_dof * (a * m + c) + 8 * m * K) + 8 * m * loop
 
     out = dict(
         storage=storage,
@@ -495,12 +495,8 @@ def amg_memory(mesh, m, max_coarse=1000, degree=2, dtype="float64"):
         step=term("9-block"),
         step_low=term("low"),
         count=8 * n_dof * (AMG_COUNT[0] * m + AMG_COUNT[1]) + 8 * m * loop,
+        polish=term("polish", AMG_STEP32, 1 if fp32 else POLISH64),
     )
-    if fp32:
-        out["polish"] = term("polish")
-    else:
-        a, c, K = AMG_STEP32[(fam, "polish")]
-        out["polish"] = POLISH64 * (8 * n_dof * (a * m + c) + 8 * m * K) + 8 * m * loop
     return {k: int(v) for k, v in out.items()}
 
 
@@ -786,8 +782,9 @@ def _count_block(op_memory, pc64, n_dof, *, voxel, n_rigid, n_store, window, n_p
 
 def _default_budget():
     """(budget, host_budget): on a GPU its free pool (bytes_limit - bytes_in_use) and 0.8 x
-    physical RAM; on the CPU (unified), or a device without bytes_limit in memory_stats() (Metal,
-    or memory_stats() raising or returning None), 0.8 x RAM and None."""
+    physical RAM; on the CPU (unified), or another device without bytes_limit in memory_stats()
+    (Metal, or memory_stats() raising or returning None), 0.8 x RAM and None. A "gpu" device
+    without bytes_limit raises: RAM is no bound for its memory."""
     ram = 0.8 * os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
     dev = jax.devices()[0]
     if dev.platform == "cpu":
@@ -797,5 +794,7 @@ def _default_budget():
     except Exception:  # some plugins do not implement it
         st = None
     if not st or "bytes_limit" not in st:  # Metal: no pool limit, a unified pool as on the CPU
+        if dev.platform == "gpu":
+            raise ValueError("the GPU reports no bytes_limit; pass memory_budget")
         return ram, None
     return st["bytes_limit"] - st.get("bytes_in_use", 0), ram

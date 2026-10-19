@@ -49,7 +49,7 @@ Grid order is not an invariant, so node and element permutations (PR 5 RCM, PR 1
 - **Shuffled meshes** (random node and per-block element order, the worst case for a file) cost +19–123% on apply_K and about +90% on the AMG V-cycle (box hex20 $44^3$, `ssh8` $256^2$; [performance](performance.md#node-and-element-order)); RCM recovers both. Call `rcm` on meshes read from files; `solve_modes` does not reorder or warn.
 - User arrays follow the new numbering: per-element arrays as `a[q]`, per-node arrays as `a[p]`.
 
-`morton(mesh)` (PR 18d) returns `(mesh, p, q)` like `rcm`: nodes sorted by their Morton (Z-order) key, elements within each block by the key of their centroid. The key quantizes each coordinate on the nodes' bounding box to $2^{21} - 1$ levels (a zero extent maps to 0) and interleaves the bits into a `uint64`, $x$ lowest. It is a benchmark helper: on the scatter path it is not faster than grid order or RCM (within 7%), and it makes the gather path 13× slower than grid order (its jumps between octants widen the gather windows), so prefer `rcm`.
+`morton(mesh)` (PR 18d) returns `(mesh, p, q)` like `rcm`: nodes sorted by their Morton (Z-order) key, elements within each block by the key of their corner centroid. The key quantizes every coordinate on one cube, the nodes' bounding box's largest side, to $2^{21} - 1$ levels (so a thin plate's thickness keeps few bits and the order stays in-plane) and interleaves the bits into a `uint64`, $x$ lowest. It is a benchmark helper: on the scatter path it is not faster than grid order or RCM (within 7%), and it makes the gather path 13× slower than grid order (its jumps between octants widen the gather windows), so prefer `rcm`.
 
 ## Node ordering
 

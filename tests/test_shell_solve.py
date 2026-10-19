@@ -536,17 +536,20 @@ def test_shell_steps_degree3():
 @pytest.mark.slow
 @pytest.mark.parametrize("t, n", [("hex20", 14), ("hex8", 24), ("hex8", 40)])
 def test_hex_polish_bounded(t, n):
-    """PR 18d: the measured fp64 hex polish <= max(low, fl ws + amg_memory's polish term) (the
-    POLISH64 term; the low model bounds hex8 at small m), and lobpcg_memory takes that term
-    (with and without low_memory). An independent check of POLISH64, with the TIGHT point."""
+    """PR 18d: the measured fp64 hex polish <= max(low, fl ws + amg_memory's polish term), and
+    lobpcg_memory takes that term (with and without low_memory). The low model alone bounds
+    these cases, so this checks the step; on hex20 the polish term alone bounds the measured
+    polish (fails without POLISH64's term). The value of POLISH64 is pinned by
+    test_polish64_pinned and test_amg_polish_tight64."""
     S = study()
     mesh = box_mesh((n,) * 3, (1 / n,) * 3, type=t)
     op, free = unstructured(mesh, STEEL), dof_mask(mesh, {"xmin": "xyz"})
     P = API.amg(op, free, 1.0, mesh.points)
     pc = functools.partial(amg_memory, mesh)
     for m in (8, 25):
-        terms = modelled(mesh, m, pc(m))
-        assert max(terms["low"], terms["polish"]) >= S.polish(op, jnp.asarray(free), P, m)
+        terms, got = modelled(mesh, m, pc(m)), S.polish(op, jnp.asarray(free), P, m)
+        assert max(terms["low"], terms["polish"]) >= got
+        assert t != "hex20" or terms["polish"] >= got
     om, nd = functools.partial(unstructured_memory, mesh), op.n_dof
     terms = modelled(mesh, 15, pc(15))
     assert lobpcg_memory(om, nd, 10, precond_memory=pc)["step"] == max(terms.values())

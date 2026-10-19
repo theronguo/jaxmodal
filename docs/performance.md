@@ -26,8 +26,8 @@ The attainable rate is $\min(B\,I, F)$ with intensity $I$ = flops / bytes. The *
 
 Reading:
 
-- Both kernels reach 9–18% of the lower-bound roofline. The stored-Ke apply at $m \le 4$ moves about half of the implementation roofline's bytes per second through the hierarchy (49–57%): it is bound by the unpack traffic, not by the stored bytes. The stencil reaches 16–22% of its own bare GEMM.
-- **Chunk-512 probe** (hex8 $48^3$, $m$ = 1, 2.4 MB of $K_e$ per chunk, L2-sized, 216 loop trips): 15.9 ms against 13.4 ms at the default 4096 (27 trips). Not faster, so it is **not determined** whether the 4096 chunk is limited by bandwidth beyond L2: the 8× trip count biases it toward not faster.
+- Both kernels reach 9–18% of the lower-bound roofline. The stored-Ke apply at $m \le 4$ moves about half of the implementation roofline's bytes per second through the hierarchy (49–57%), consistent with the unpack (the largest $m$-independent traffic) being the limit; the stored bytes alone move at about 21 GB/s. The stencil reaches 16–22% of its own bare GEMM.
+- **Chunk-512 probe** (hex8 $48^3$, $m$ = 1, 2.4 MB of unpacked $K_e$ per chunk, L2-sized, 216 loop trips): 15.9 ms against 13.4 ms at the default 4096 (27 trips). Not faster, so it is **not determined** whether the 4096 chunk is limited by bandwidth beyond L2: the 8× trip count biases it toward not faster.
 - **Full-Ke storage on GPU:** storing the full $K_e$ (4608 B per hex8 element, 1.9× the storage) or a packed symmetric matvec would roughly halve the $m$ = 1 traffic. On CPU the packed storage stays, since storage limits the 10M reach. On GPU this is a decision (deferred check).
 
 ## Fusion
@@ -35,8 +35,8 @@ Reading:
 `kernels.py`, part `fusion`, walks the compiled HLO of each program over every computation reachable from ENTRY (while, conditional and call bodies; fused computations count as fusions). It records per computation the fusion count, the non-fused ops by opcode, the largest materialized outputs and `memory_analysis` temp bytes. Sizes: voxel $24^3$, box hex8 $24^3$ (13824 elements, 4 chunks), hex20 $12^3$ AMG, all at $m$ = 4.
 
 - **Stencil:** one computation, 17 fusions, no unfused op; temporaries 21.2 MB against 1.5 MB of vectors (the two 10.6 MB slab buffers).
-- **Stored Ke:** ENTRY holds the chunk `while` and 2 fusions; the loop body has 7 fusions and one copy, the largest the 18.9 MB unpack; temporaries 25.7 MB.
-- **AMG V-cycle (hex20):** 16 while loops (the block-ELL scans and p-level chunk loops), 11 unfused `dot`s (the dense coarse solve and small projections), 27 copies; each loop body is 4–8 fusions. Temporaries 51.4 MB against 0.79 MB of vectors (the p-level unpacks, 29.5 MB each).
+- **Stored Ke:** ENTRY holds the chunk `while`, 2 fusions and one copy; the loop body has 7 fusions and one copy, the largest the 18.9 MB unpack; temporaries 25.7 MB.
+- **AMG V-cycle (hex20):** ENTRY holds 16 while loops (the block-ELL scans and p-level chunk loops), 11 unfused `dot`s (small projections), 2 custom-calls (the dense coarse solve) and 27 copies; the loop bodies add 4 `dot`s and 16 copies, each body 4–8 fusions. Temporaries 51.4 MB against 0.79 MB of vectors (the p-level unpacks, 29.5 MB each).
 
 No large unfused elementwise op appears, so no further target was added.
 
@@ -54,7 +54,7 @@ No large unfused elementwise op appears, so no further target was added.
 | plate `ssh8` $64^2$ (shell AMG) | 25.4k | 5.1 s | 2.54 s | 0.36 s | 0.31 s | 144 | 3 levels, 1 bucket |
 | plate `ssh8` $256^2$ | 396k | 30.8 s | 3.16 s | 0.37 s | 0.37 s | 159 | 4 levels, 1 / 1 buckets |
 
-- Compile time grows with the number of levels (each level compiles its own smoother and transfer applies), not with the size: 4.8 → 6.4 s for GMG from 28k to 1.6M DOF, 2.5–3.2 s for AMG. It is 9–10% of the wall time at 0.4–1.6M DOF, 23% at 182k and 50–75% below 30k.
+- Compile time tracks the number of levels (each level compiles its own smoother and transfer applies) more than the size: 4.8 → 6.4 s for GMG from 28k to 1.6M DOF, 2.5–3.2 s for AMG. It is 9–10% of the wall time at 0.4–1.6M DOF, 23–40% at 182–207k and 50–75% below 30k.
 - The AMG level matrices on these boxes and plates are plain ELL (one bucket: padding ≤ 1.5), so width classes add no compiles here.
 - Lowering and tracing together are under 1.1 s in every case.
 
@@ -70,16 +70,16 @@ No large unfused elementwise op appears, so no further target was added.
 | | shuffled | 328865 | 80.3 ms | 235 ms | 2.19 s | 1.46 s |
 | plate `ssh8` $256^2$ | grid | 66307 | 9.1 ms | 23.9 ms | 386 ms | |
 | | RCM | 729 | 9.0 ms | 22.8 ms | 386 ms | |
-| | Morton | 66056 | 9.1 ms | 23.9 ms | 388 ms | |
+| | Morton | 25 | 9.0 ms | 23.8 ms | 397 ms | |
 | | shuffled | 105630 | 10.8 ms | 53.2 ms | 728 ms | |
 
-- A shuffled mesh costs +19–123% on apply_K and +89–92% on the V-cycle; RCM recovers both (0.66 s at 358k nodes, about 3 s at 10M DOF, [mesh](mesh.md#renumbering)). Call `rcm` on meshes read from files.
-- Morton is not faster than grid or RCM order on the scatter path (within 7%) and makes the gather path 13× slower than grid order: its jumps between octants widen the gather windows, although the span is the smallest.
+- A shuffled mesh costs +19–123% on apply_K and +89–92% on the V-cycle; RCM recovers both (0.66 s at 358k nodes, about 3 s at 10M DOF, [mesh](mesh.md#renumbering)); on the gather path it is 38% slower than grid order (116 against 84 ms). Call `rcm` on meshes read from files.
+- Morton is not faster than grid or RCM order on the scatter path (within 7%; on the plate its span is the smallest, 25, at the same times) and makes the gather path 13× slower than grid order (9.4× RCM): its jumps between octants widen the gather windows, although the span is small.
 - `morton` stays a helper; `solve_modes` does not reorder (it would permute the mode vectors back and forth) and does not warn.
 
 ## Bimodal LOBPCG peak
 
-`benchmarks/bimodal_probe.py` (`benchmarks/results/bimodal_probe.json`), the cold fp32 `solve_modes` on the flat $362^2$ plate (791k DOF, 20 modes, σ given, synchronous CPU dispatch; `shell_solve_study.solve_peak`'s child) in fresh processes on an otherwise idle machine (load average 3–7, from the runs themselves), each classified by its interval peak above 5.8 GB (midway between 4.75 and 6.9–7.1 GB; [open items](open_items.md#bimodal-lobpcg-peak-on-the-791k-plate-pr-18c--pr-18d-user-decision-2026-10-19)). About 55 minutes of runs, the time box.
+`benchmarks/bimodal_probe.py` (`benchmarks/results/bimodal_probe.json`), the cold fp32 `solve_modes` on the flat $362^2$ plate (791k DOF, 20 modes, σ given, synchronous CPU dispatch; `shell_solve_study.solve_peak`'s child) in fresh processes on an otherwise idle machine (load average 3–8, from the runs themselves), each classified by its interval peak above 5.8 GB (midway between 4.75 and 6.9–7.1 GB; [open items](open_items.md#bimodal-lobpcg-peak-on-the-791k-plate-pr-18c--pr-18d-user-decision-2026-10-19)). About 35 minutes of recorded runs, inside the time box.
 
 | runs | peak | regime |
 |---|---|---|
@@ -94,6 +94,6 @@ No large unfused elementwise op appears, so no further target was added.
 | a parent sampling the child's footprint every 100 ms, no wrapper, 2 | 5.52–5.56 GB | between |
 
 - The extra is resident memory, not footprint accounting: in two more baseline runs (part `checks`) `ru_maxrss` reads 7.01–7.09 GB, the footprint interval maximum 7.03–7.10 GB.
-- The switch is the process's own `proc_pid_rusage` call between LOBPCG steps (8 of 8 runs low; 22 of 22 runs without it high in this session, against a mix in PR 18c's sessions). PR 18c's polling thread made the same call every 5 ms. A query from another process moves it only partly. The wall time does not change (58.6–59.0 s in every row).
+- The switch is the process's own `proc_pid_rusage` call between LOBPCG steps (8 of 8 runs low; 22 of the 24 runs without it high in this session, the 2 parent-sampler runs between, against a mix in PR 18c's sessions). PR 18c's polling thread made the same call every 5 ms. A query from another process moves it only partly. The wall time does not change (58.6–59.0 s in every row).
 - In the low regime the live `jax.Array` bytes stay at 2.5 GB and the process footprint at 5.3 GB (operator included) over the 25 steps, with no step above the others.
 - **Cause not found** within the time box. The mechanism by which a footprint query keeps 2.3 GB from becoming resident (allocator retention or reuse timing inside XLA:CPU's runtime) is open; no XLA flag tried changes it, and a syscall per step in `solve_modes` would be a macOS-specific workaround for an unexplained effect, so nothing is adopted. The estimators stay the `memory_analysis` envelope, PR 18c's gates stay (`test_shell_791k_peak32`: $0.75\,\text{peak} \le$ estimate $\le 1.2\,\text{peak}$), and the question moves to the GPU check, where the allocator differs.

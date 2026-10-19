@@ -13,8 +13,10 @@ Timed children keep macOS's large-block cache (large_cache=True; docs/performanc
 
 import argparse
 import json
+import os
 import re
 from collections import Counter
+from pathlib import Path
 
 from benchmarks import harness
 
@@ -57,6 +59,16 @@ def ke_impl_bytes(k, n_el, n_nodes, m):
     return ke_bytes(k, n_el, n_nodes, m) + (16 * k * k + 32 * k * m) * n_el
 
 
+def model(t, n_el, n_nodes, m):
+    """(flops, lower-bound bytes, implementation bytes) of kernel t (stencil, hex8, hex20)."""
+    if t == "stencil":
+        args = (n_el, n_nodes, m)
+        return stencil_flops(n_el, m), stencil_bytes(*args), stencil_impl_bytes(*args)
+    k = 24 if t == "hex8" else 60
+    args = (k, n_el, n_nodes, m)
+    return ke_flops(k, n_el, m), ke_bytes(*args), ke_impl_bytes(*args)
+
+
 def roofline(flops, nbytes, B, F):
     """Attainable GFLOP/s min(B I, F), B in GB/s, F in GFLOP/s."""
     return min(B * flops / nbytes, F)
@@ -81,7 +93,7 @@ def _bytes(shape):
 def walk(text, top=5):
     """Per computation reachable from ENTRY (while, conditional and call bodies; fused
     computations are counted as fusions): fusion count, non-fused ops by opcode, and the
-    largest materialized outputs [(bytes, opcode)]."""
+    largest outputs [(bytes, opcode)] (a while's output is its carried state)."""
     comps, entry, cur = {}, None, None
     for line in text.splitlines():
         if not line.startswith((" ", "}", "HloModule")) and line.rstrip().endswith("{"):
@@ -109,7 +121,7 @@ def walk(text, top=5):
             todo += CALLS.findall(rhs)
             br = re.search(r"branch_computations=\{([^}]*)\}", rhs)
             todo += [s.strip().lstrip("%") for s in br.group(1).split(",")] if br else []
-            todo += re.findall(r"calls=%?([\w.\-]+)", rhs) if o == "call" else []
+            todo += re.findall(r"to_apply=%?([\w.\-]+)", rhs) if o == "call" else []
     return dict(entry=entry, computations=seen)
 
 
@@ -135,8 +147,8 @@ def best(f, x):
 STENCIL = "mesh = voxel_mesh(({n},) * 3); op = stencil(mesh, MAT)"
 KE = """mesh = box_mesh(({n},) * 3, (1 / {n},) * 3, type="{t}")
 op = unstructured(mesh, MAT, path="scatter", chunk={chunk})
-from jaxmodal.memory import _layout_sizes
-b = _layout_sizes(mesh, "scatter", {chunk}, None)["blocks"][0]"""
+from jaxmodal.operators.matfree import layout
+b = layout(mesh, "scatter", {chunk})["blocks"][0]"""
 APPLY = """v = jnp.ones((op.n_dof, {m}))
 info = dict(n_el=mesh.n_el, n_nodes=len(mesh.points), apply_s=best(op.apply_K, v))
 if "{t}" != "stencil":
@@ -158,11 +170,7 @@ def apply_row(t, n, m, B, F, chunk=None):
     build = STENCIL.format(n=n) if t == "stencil" else KE.format(n=n, t=t, chunk=chunk)
     r = child(build, APPLY.format(m=m, t=t))
     ne, nn = r["n_el"], r["n_nodes"]
-    if t == "stencil":
-        fl, lb, ib = stencil_flops(ne, m), stencil_bytes(ne, nn, m), stencil_impl_bytes(ne, nn, m)
-    else:
-        k = 24 if t == "hex8" else 60
-        fl, lb, ib = ke_flops(k, ne, m), ke_bytes(k, ne, nn, m), ke_impl_bytes(k, ne, nn, m)
+    fl, lb, ib = model(t, ne, nn, m)
     g = fl / r["apply_s"] / 1e9
     roof, iroof = roofline(fl, lb, B, F), roofline(fl, ib, B, F)
     return dict(kernel=t, size=n, m=m, **{k: r[k] for k in r if k != "peak_bytes"}, flops=fl,
@@ -237,7 +245,7 @@ elif "{order}" == "shuffled":
     rng = np.random.default_rng(0)
     q = np.concatenate([s + rng.permutation(len(mesh.blocks[t])) for t, s in mesh.offsets.items()])
     mesh = renumber(mesh, rng.permutation(len(mesh.points)), q)
-conn = np.concatenate([b for b in mesh.blocks.values()])
+conn = np.concatenate(list(mesh.blocks.values()))
 info = dict(n_dof=3 * len(mesh.points), span=float(np.median(np.ptp(conn, axis=1))))
 op = unstructured(mesh, MAT, path="scatter")
 for m in (1, 16):
@@ -255,8 +263,6 @@ if "{case}" == "box":
 
 
 def run_orders(meshes=ORDER_MESHES, orders=ORDERS):
-    import os
-
     ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
     rows = []
     for case, n in meshes.items():
@@ -275,7 +281,7 @@ def main(argv=None):
     p.add_argument("--out", default=harness.RESULTS)
     p.add_argument("--parts", nargs="+", choices=list(PARTS), default=list(PARTS))
     a = p.parse_args(argv)
-    path = harness.RESULTS / "kernels.json"
+    path = Path(a.out) / "kernels.json"
     old = json.loads(path.read_text()) if path.exists() else {}
     data = {k: v for k, v in old.items() if k in PARTS}
     for part in a.parts:

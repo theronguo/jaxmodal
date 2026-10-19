@@ -30,11 +30,12 @@ def parts(mesh):
 
 def _voxel_labels(mesh):
     """Element labels of a voxel mesh: ndimage.label on the cell mask (face connectivity),
-    renumbered by each part's lowest element index (connected_components' order)."""
+    renumbered by each part's lowest element index (connected_components' order). Assumes the
+    connectivity matches the grid, as voxel_mesh builds it."""
     nx, ny, nz = mesh.voxel.shape
     em = mesh.voxel.element_map.reshape(nz, ny, nx)
-    lab, k = ndimage.label(em >= 0)
     sel = em >= 0
+    lab, k = ndimage.label(sel)
     label = np.empty(mesh.n_el, np.int64)
     label[em[sel]] = lab[sel] - 1
     first = np.full(k, mesh.n_el)
