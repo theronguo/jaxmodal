@@ -1,5 +1,6 @@
 """solve_modes: the public modal-analysis entry point. See docs/eigensolvers.md."""
 
+import copy
 import dataclasses
 import functools
 import gc
@@ -87,7 +88,7 @@ SLICE_MIN = 96  # PR 15c's measured slice minimum at block 6: a smaller capacity
 # the memory levers a band solve may set (option, value, cost per iteration, Mac CPU), and the
 # cost of the ladder's chunks by position (top, first, second, third halving: eigensolvers.md)
 LEVERS = (("precond_dtype", "float32", 1.0), ("basis_dtype", "float32", 1.0),
-          ("low_memory", True, 1.6), ("mode", "otf", 3.0))  # fmt: skip
+          ("low_memory", True, 1.6), ("operator_options", {"mode": "otf"}, 3.0))  # fmt: skip
 CHUNK_COST = (1.0, 1.7, 2.2, 2.7)
 # Builder parameters solve_modes sets itself or through its own keywords (dtype: precond_dtype).
 RESERVED = {
@@ -318,22 +319,20 @@ def _choose(reach, needs, chunks):
     pos = {c: CHUNK_COST[min(i, len(CHUNK_COST) - 1)] for i, c in enumerate(chunks)}
 
     def key(S, c, r):
-        return pos[c] * math.prod(LEVERS[i][2] for i in S), len(S), -r, S
+        return pos[c] * math.prod(LEVERS[i][2] for i in S), len(S), -r, S, c
 
     for nd in needs:
-        ok = [(key(S, c, r), c) for S, rc in reach.items() for c, r in rc.items()
+        ok = [key(S, c, r) for S, rc in reach.items() for c, r in rc.items()
               if r is not None and r >= nd[S][c]]  # fmt: skip
         if ok:
-            k, c = min(ok)
-            return k[3], c
+            return min(ok)[3:]
     if needs:
         return None
     used = {S: (c, rc[c]) for S, rc in reach.items() if (c := _ladder(rc, None)) is not None}
     if not used:
         return None
     best = max(r for _, r in used.values())
-    k, c = min((key(S, c, r), c) for S, (c, r) in used.items() if r >= 0.95 * best)
-    return k[3], c
+    return min(key(S, c, r) for S, (c, r) in used.items() if r >= 0.95 * best)[3:]
 
 
 def _keep(lam, t, lam_lo, n_band):
@@ -402,12 +401,14 @@ def solve_modes(
     cost no more than the solve; count_options (COUNT_OPTIONS) go to count. levers: when no
     LOBPCG chunk fits or the top chunk misses a known depth, set the memory levers at their
     defaults (LEVERS: fp32 V-cycle, fp32 basis at tol >= 1e-6, low_memory, the on-the-fly
-    operator) by _choose; False keeps the options as given. A slice capacity error raises with
-    err.result = (lam, V, info) of the band so far. V is the solver's own array compacted in
-    place. info adds band, strategy, reason, levers (the options set), chunk, c_max, budget,
-    mu1_ub, n_store, from_zero, stagnation_risk, count, and LOBPCG's n_beyond, capacity,
-    t_iteration or si_band's slices and complete_to, complete_to_hz
+    operator) by _choose; False keeps the options as given. A slice-path capacity error or
+    max_slices raises with err.result = (lam, V, info) of the band so far. V is the solver's
+    own array compacted in place. info adds band, strategy, reason, levers (the options set),
+    chunk, c_max, budget, mu1_ub, n_store, from_zero, stagnation_risk, count, and LOBPCG's
+    n_beyond, capacity, t_iteration or si_band's slices and complete_to, complete_to_hz
     (docs/eigensolvers.md#interior-bands-and-strategy)."""
+    if not isinstance(levers, bool):
+        raise ValueError(f"levers must be True or False, got {levers!r}")
     if band is None:
         if n_modes is None:
             raise ValueError("pass n_modes or band")
@@ -429,8 +430,6 @@ def solve_modes(
         raise ValueError(
             f"memory_budget must be a finite number of bytes > 0, got {memory_budget!r}"
         )
-    if not isinstance(levers, bool):
-        raise ValueError(f"levers must be True or False, got {levers!r}")
     if verify not in (None, True, False):
         raise ValueError(f"verify must be None, True or False, got {verify!r}")
     cn_opts = _check_options("count", count_options, COUNT_OPTIONS)
@@ -477,10 +476,12 @@ def solve_modes(
                 est_cache[key] = [f and functools.cache(f) for f in fs]
             return est_cache[key]
 
+        otf_ok = not voxel and "ssh8" not in mesh.blocks
+
         def rows(hint=False):  # the LEVERS rows still at their defaults (applicable unless hint)
             ok = (precond != "jacobi" and precond_dtype == "float64",
                   basis_dtype == "float64" and (hint or tol >= 1e-6), not low_memory,
-                  not voxel and "ssh8" not in mesh.blocks and "mode" not in op_opts)  # fmt: skip
+                  otf_ok and "mode" not in op_opts)  # fmt: skip
             return [i for i, x in enumerate(ok) if x]
 
         def state(S):  # the current options with the LEVERS rows S applied
@@ -488,13 +489,15 @@ def solve_modes(
                      op_opts=op_opts)  # fmt: skip
             for i in S:
                 key, val, _ = LEVERS[i]
-                o.update({"op_opts": {**op_opts, key: val}} if key == "mode" else {key: val})
+                o.update({"op_opts": {**op_opts, **val}} if key == "operator_options"
+                         else {key: val})  # fmt: skip
             return o
 
         def c_max(c, o=None, pc_m=None, start=None):  # at chunk c, state o (default the current)
             o = o or state(())
             op_m, pc_o = models(o["precond_dtype"], o["op_opts"])
-            start = need and need.get(c) if start is None else start
+            if start is None:
+                start = need and need.get(c)
             return mem._c_max(op_m, pc_m or pc_o, n, chunk=c, guards=guards, low=o["low_memory"],
                               basis_dtype=o["basis_dtype"], n_rigid=k, n_avail=n_avail,
                               budget=budget, host_budget=host_budget, need=start)  # fmt: skip
@@ -503,8 +506,7 @@ def solve_modes(
             out = []
             for i in rows(hint=True):
                 key, val, _ = LEVERS[i]
-                txt = "operator_options={'mode': 'otf'}" if key == "mode" else f"{key}={val!r}"
-                out.append(f"{txt} (C_max {c_max(c, state((i,)))})")
+                out.append(f"{key}={val!r} (C_max {c_max(c, state((i,)))})")
             # a polish term (every AMG family) can set the step, so low_memory alone saves
             # little there; its presence does not depend on m
             pc_c = models(precond_dtype)[1]
@@ -532,9 +534,9 @@ def solve_modes(
             reach = {c: c_max(c) for c in chunks}
             ch = _ladder(reach, need)
             trigger = ch is None or (known and (reach[chunks[0]] or 0) < need[chunks[0]])
-            if levers and trigger and rows():
-                subsets = [S for j in range(len(rows()) + 1)
-                           for S in itertools.combinations(rows(), j)]  # fmt: skip
+            rs = rows()
+            if levers and trigger and rs:
+                subsets = [S for j in range(len(rs) + 1) for S in itertools.combinations(rs, j)]
                 needs = [{S: need_of(state(S)["low_memory"], mg) for S in subsets}
                          for mg in (True, False)] if known else []  # fmt: skip
                 reach_s = {S: {c: c_max(c, state(S), start=needs[1][S][c] if known else None)
@@ -546,11 +548,7 @@ def solve_modes(
                     precond_dtype, basis_dtype = o["precond_dtype"], o["basis_dtype"]
                     low_memory, op_opts = o["low_memory"], o["op_opts"]
                     reach, need = reach_s[S], need_of(low_memory) if known else None
-                    for i in S:
-                        key, val, _ = LEVERS[i]
-                        choice["operator_options" if key == "mode" else key] = (
-                            {"mode": val} if key == "mode" else val
-                        )
+                    choice = {LEVERS[i][0]: copy.copy(LEVERS[i][1]) for i in S}
             if ch is None and strategy == "lobpcg":
                 raise ValueError(
                     f"no LOBPCG chunk fits memory_budget = {budget:.4g} bytes (C_max {reach}):"
@@ -724,8 +722,8 @@ def solve_modes(
                 raise ValueError(
                     f"the smallest shift-invert slice does not fit memory_budget = {budget:.4g}"
                     " bytes: raise memory_budget"
-                    + ("" if voxel or "ssh8" in mesh.blocks or op_opts.get("mode") == "otf"
-                       else ", or pass operator_options={'mode': 'otf'}")
+                    + (", or pass operator_options={'mode': 'otf'}"
+                       if otf_ok and op_opts.get("mode") != "otf" else "")
                 )  # fmt: skip
             if C < SLICE_MIN:
                 warnings.warn(
@@ -758,7 +756,8 @@ def solve_modes(
         except (RuntimeError, ValueError) as e:
             if getattr(e, "result", None) is None:
                 raise
-            (lam, V, info), e.result, err = e.result, None, e
+            lam, V, info = e.result
+            e.result, err = None, e
             traceback.clear_frames(e.__traceback__)  # si_band's frame: no other V reference
         info["complete_to_hz"] = math.sqrt(max(info["complete_to"], 0)) / (2 * np.pi)
         if no_count and verify is not False:

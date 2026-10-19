@@ -901,7 +901,7 @@ def test_error_result(fake_builds):
     lam, V, info = e.value.result
     assert info["from_zero"] and lr[0] < lam[0] and not info["converged"]
     ok = run("tiny", (f1, freq(cuts[0])), strategy="shift_invert")[2]
-    assert set(ok) <= set(info) and {"complete_to", "complete_to_hz"} <= set(info)
+    assert set(ok) == set(info)  # ok carries complete_to and complete_to_hz too
     ct = info["complete_to"]  # every reference mode in [f1, complete_to] returned
     assert ct in cuts and np.allclose(lam[lam <= ct], lr[(lr > 1.005 * lr[0]) & (lr <= ct)],
                                       rtol=1e-8)  # fmt: skip
@@ -932,7 +932,7 @@ def test_error_result_capacity(fake_builds):
 def test_slice_tau_real(monkeypatch):
     """PR 18e test 8: a real slice from 0 at tol 1e-6 runs at TAU_MIN and reaches r_acc <= tol
     (tau = 1e-8: above), the same steps and basis; si_checked forwards stag_tau = TAU0."""
-    _, free, op, *_, lr, Vr = prob("short")
+    _, free, op, _, M, _, lr, Vr = prob("short")
     hi = edges(lr, 0, 20)[1]
     seen, real = [], tsi.si.si_slice
 
@@ -946,6 +946,8 @@ def test_slice_tau_real(monkeypatch):
         lam, V, info = tsi.si.si_band(op, free, 0.0, hi, lambda s: tsi.precond("short", s),
                                       capacity=600, tol=1e-6, **kw)  # fmt: skip
         assert len(info["slices"]) == 1 and np.allclose(lam, lr[:20], rtol=1e-6)
+        assert np.abs(V.T @ (M @ V) - np.eye(20)).max() <= 1e-8  # and the reference's span
+        assert np.linalg.svd(Vr[:, :20].T @ (M @ V), compute_uv=False).min() >= 1 - 1e-6
         out.append(info)
     assert out[0]["slices"][0]["tau"] == tsi.si.TAU_MIN and seen[0] == tsi.si.TAU0
     assert out[0]["r_acc"] <= 1e-6 < out[1]["r_acc"]
@@ -1294,7 +1296,7 @@ def state_reach(name, S, c, B, start=None):
     """C_max at chunk c in the LEVERS state S ("short": AMG, fp64 basis, no otf by default)."""
     o = {api.LEVERS[i][0]: api.LEVERS[i][1] for i in S}
     op, pc = mem._models(prob(name)[0], "consistent", "auto", o.get("precond_dtype", "float64"),
-                         {"mode": "otf"} if "mode" in o else {}, None)  # fmt: skip
+                         o.get("operator_options", {}), None)  # fmt: skip
     return mem._c_max(op, pc, prob(name)[2].n_dof, chunk=c, guards=None,
                       low=o.get("low_memory", False), basis_dtype=o.get("basis_dtype", "float64"),
                       n_rigid=0, n_avail=n_avail(name), budget=B, host_budget=None,
@@ -1323,6 +1325,7 @@ def test_levers_known(fake_builds, monkeypatch, case):
     the same levers; levers=False keeps chunk 5 and no levers."""
     B = B_PC if case == "pc" else B_PCLOW
     r = {S: state_reach("short", S, 5, B, 40) for S in [(), (0,), (2,), (0, 2)]}
+    S = (0,) if case == "pc" else (0, 2)
     assert all(state_reach("short", S, c, B, 50) is None for S in r for c in (40, 20, 10))
     if case == "pc":
         assert r[()] == 40 and r[(0,)] >= 48
@@ -1336,8 +1339,7 @@ def test_levers_known(fake_builds, monkeypatch, case):
         lam, V, info = run("short", (0.0, f2), strategy=strategy, **kw)
         assert info["levers"] == want and info["chunk"] == 5
         assert info["reason"] == ("fits" if strategy == "auto" else "forced")
-        assert info["c_max"][5] == r[tuple(sorted(api.LEVERS.index(x) for x in api.LEVERS
-                                                  if x[0] in want))]  # fmt: skip
+        assert info["c_max"][5] == r[S]
         check("short", 0.0, f2, lam, V, info)
     if case == "pc":
         monkeypatch.setattr(api, "si_band", stub_band({}))
@@ -1403,7 +1405,9 @@ def test_levers_applied(fake_builds, monkeypatch):
 def test_levers_unmargined(fake_builds, monkeypatch):
     """Test 2: n_modes 150 from 0 (needs 198 margined, 160 unmargined at chunk 5): at 1.2135e8
     no state reaches 198 and {precond} reaches 160, searched from 160 (rule 1, unmargined); at
-    1.2e8 none reaches 160 (rule 2: no levers, "memory")."""
+    1.2e8 none reaches 160 (rule 2: no levers, "memory"). Chunk 40, n_modes 120 (needs 198 / 168)
+    at 4.57e8: {precond} reaches 192 only when searched from the unmargined need (rule 1's
+    unmargined pass)."""
     monkeypatch.setattr(api, "si_band", stub_band({}))
     monkeypatch.setattr(api, "_solve", capacity_stop("short", list(range(30))))
     f2 = fband("short", 0, 30)[1]
@@ -1419,9 +1423,15 @@ def test_levers_unmargined(fake_builds, monkeypatch):
     with pytest.warns(UserWarning, match="no LOBPCG chunk fits"):
         _, _, info = run("short", (0.0, f2), memory_budget=1.2e8, **kw)
     assert info["levers"] == {} and info["reason"] == "memory"
+    B = 4.57e8
+    assert (state_reach("short", (), 40, B, 168) or 0) < 168
+    assert state_reach("short", (0,), 40, B, 198) is None
+    assert state_reach("short", (0,), 40, B, 168) == 192
+    _, _, info = run("short", (0.0, f2), memory_budget=B, **{**kw, "n_modes": 120, "chunk": 40})
+    assert info["levers"] == {"precond_dtype": "float32"} and info["chunk"] == 40
 
 
-def test_levers_real():
+def test_levers_real(monkeypatch):
     """Test 3: the {precond, low} budget with real builds ("short", AMG): one fp32 V-cycle (the
     LOBPCG one, after the fp64 pre-estimate's); the band against eigsh."""
     real, dtypes = api.amg, []
@@ -1430,13 +1440,10 @@ def test_levers_real():
         dtypes.append(kw.get("dtype"))
         return real(*a, **kw)
 
-    api.amg = amg
-    try:
-        f2 = fband("short", 0, 30)[1]
-        lam, V, info = run("short", (0.0, f2), n_modes=30, tol=1e-7, memory_budget=B_PCLOW,
-                           verify=False)  # fmt: skip
-    finally:
-        api.amg = real
+    monkeypatch.setattr(api, "amg", amg)
+    f2 = fband("short", 0, 30)[1]
+    lam, V, info = run("short", (0.0, f2), n_modes=30, tol=1e-7, memory_budget=B_PCLOW,
+                       verify=False)  # fmt: skip
     assert info["levers"] == {"precond_dtype": "float32", "low_memory": True}
     assert info["reason"] == "fits" and dtypes[-1] == "float32"  # after the pre-estimate's
     assert dtypes.count("float32") == 1
@@ -1473,7 +1480,7 @@ def test_levers_rows(fake_builds, monkeypatch):
             out = run(name, band, **(kw | k))
         return {i for S in seen[0] for i in S}, out[2]
 
-    assert rows("short", (f1, f2), memory_budget=1.1e8)[0] == {0, 2, 3}
+    assert rows("short", (f1, f2), memory_budget=1.1e8, tol=1e-7)[0] == {0, 2, 3}
     assert rows("short", (f1, f2), memory_budget=1.1e8, tol=1e-6)[0] == {0, 1, 2, 3}
     assert rows("short", (f1, f2), memory_budget=1.1e8, low_memory=True)[0] == {0, 3}
     got = rows("short", (f1, f2), memory_budget=1.1e8, operator_options={"mode": "stored"})
@@ -1508,8 +1515,10 @@ def test_levers_basis(fake_builds):
     lam, V, info = run("short", (0.0, f2), n_modes=30, tol=1e-6, memory_budget=B_PCLOW,
                        verify=False)  # fmt: skip
     assert "basis_dtype" in info["levers"]
-    M = prob("short")[4]
+    _, _, _, K, M, _, lr, _ = prob("short")
     assert np.abs(V.T @ (M @ V) - np.eye(len(lam))).max() <= 1e-5
+    assert len(lam) == (lr <= (2 * np.pi * f2) ** 2).sum()
+    assert np.allclose(lam, lr[: len(lam)], rtol=1e-6)
 
 
 def est(e, m, de=0, dm=0, he=0, hm=0):

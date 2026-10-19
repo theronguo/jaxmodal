@@ -224,7 +224,7 @@ def _solve_y(op, m, g, tau, maxit):
 
 
 @functools.partial(jax.jit, donate_argnums=0)
-def _chunk_step(Y, Wt, MY):  # Y - W W^T M Y for a transposed chunk Wt; this form 3.5x on CPU
+def _chunk_step(Y, Wt, MY):  # Y - W W^T M Y, Wt a transposed chunk (3.5x Wt.T @ (Wt @ MY) on CPU)
     Wt = Wt.astype(Y.dtype)
     return Y - ((Wt @ MY).T @ Wt).T
 
@@ -232,11 +232,6 @@ def _chunk_step(Y, Wt, MY):  # Y - W W^T M Y for a transposed chunk Wt; this for
 @jax.jit
 def _rigid_step(Y, R, MR, m):
     return m * (Y - R @ (MR.T @ Y))
-
-
-@jax.jit
-def _pad_t(Wc):  # (n, w) -> (CHUNK, n): transposed, zero rows below w
-    return jnp.pad(Wc.T, ((0, CHUNK - Wc.shape[1]), (0, 0)))
 
 
 def _chunks(Ws):
@@ -247,19 +242,17 @@ def _chunks(Ws):
         for i in range(0, W.shape[1], CHUNK):
             Wc = W[:, i : i + CHUNK]
             w = Wc.shape[1]
-            if isinstance(Wc, np.ndarray):
-                Wt = jax.device_put(Wc.T)
-                yield (jnp.pad(Wt, ((0, CHUNK - w), (0, 0))) if w < CHUNK else Wt), w
-            else:
-                yield _pad_t(Wc), w
+            Wt = jax.device_put(Wc.T) if isinstance(Wc, np.ndarray) else Wc.T
+            del Wc  # a device slice: not alive while the consumer runs
+            yield (jnp.pad(Wt, ((0, CHUNK - w), (0, 0))) if w < CHUNK else Wt), w
 
 
 def _project(op, m, Ws, R, MR, Y):
     """Pi Y = Y - W W^T M Y - R R^T M Y, masked, W the columns of the arrays Ws streamed in
     chunks (never all on the device). Y is donated."""
     MY = _mm(op, m, Y)
-    for Wc, _ in _chunks(Ws):
-        Y = _chunk_step(Y, Wc, MY)
+    for Wt, _ in _chunks(Ws):
+        Y = _chunk_step(Y, Wt, MY)
     return _rigid_step(Y, R, MR, m)
 
 

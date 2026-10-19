@@ -2512,9 +2512,7 @@ def test_band_error_result(monkeypatch):
     fake_band(monkeypatch, found)
     e = raised(ValueError, fband, "short", lo, hi, capacity=24, edges=s)
     assert "deflated modes leave 0 columns" in str(e)
-    lam = e.result[0]
-    check_result(e, lam, e.result[2]["complete_to"], M, len(e.result[2]["count"]["estimates"]))
-    assert len(lam) and e.result[2]["complete_to"] in s  # the failing slice's lower edge
+    check_result(e, lr[3:8], s[0], M, 1)  # slice 1 stored; the failing slice's lower edge
     # max_slices: the full slice's modes 7-11 stored, its remainders left from lo
     fake_band(monkeypatch, full_slice)
     e = raised(RuntimeError, fband, "short", lo, hi, max_slices=1)
@@ -2539,6 +2537,7 @@ def test_band_error_merged(monkeypatch):
     lam, V, info = e.result
     assert info["duplicates"] == 1 and np.allclose(lam, lr[2:10], rtol=1e-10)
     assert info["complete_to"] == s[1] and not info["converged"]
+    assert len(info["count"]["estimates"]) == 2  # the two runs' leaves
     assert np.abs(V.T @ (M @ V) - np.eye(len(lam))).max() <= 1e-8
     rng = np.random.default_rng(0)
     w = Vr[:, 4] + 1e-3 * np.where(free, rng.standard_normal(len(free)), 0)
@@ -2657,7 +2656,9 @@ def test_band_p_reuse(monkeypatch):
 def test_span_gather(monkeypatch):
     """PR 18e test 10: a span count gathers its pairs (a host copy) only when a calibration or
     the count runs: verify=False and a skip gather nothing (the prediction gets a zero-stride
-    placeholder), verify=True gathers once and counts the real columns."""
+    placeholder), verify=True gathers once and counts the real columns; verify=None
+    (counting._decide faked) gathers nothing on a skip and once for a calibration plus the
+    count, both on the real columns, and the span's count records the decision."""
     lr = prob("short")[6]
     lo, hi = edges(lr, 3, 16)
     real = si._span_count
@@ -2667,9 +2668,20 @@ def test_span_gather(monkeypatch):
             return found(j, a, e, kw)
         return list(range(5, 14)), "capacity full", rz(range(5, 14), [2, 3, 4, 14, 15, 16]), None
 
-    for verify, n_gather in ((False, 0), (True, 1)):
+    def decide(go):
+        def f(verify, d, n_probes, block, m, t_ref, t_it, tau, n_free, run, prepare=None):
+            if go:
+                run(1)  # the calibration
+            return go, dict(reason=None if go else "faked skip", degree_seen=d)
+
+        return f
+
+    for verify, go, n_gather in ((False, None, 0), (True, None, 1), (None, False, 0),
+                                 (None, True, 1)):  # fmt: skip
         calls, counts = fake_band(monkeypatch, wide)
         gathers = []
+        if go is not None:
+            monkeypatch.setattr(si.counting, "_decide", decide(go))
 
         def span(op, free, P, lam_s, cols, *a, g=gathers, **kw):
             return real(op, free, P, lam_s, lambda idx: g.append(len(idx)) or cols(idx), *a, **kw)
@@ -2688,6 +2700,14 @@ def test_span_gather(monkeypatch):
         big = [g for g in gathers if g > 2]  # cols(near) gathers at most 2
         assert len(spans) == 1 and len(big) == n_gather
         assert (0, 0) in preds  # the span's prediction: the placeholder
-        if verify:
+        rec = spans[0]["count"]
+        if verify or go:
             assert counts[-1][0][2][0].shape == (prob("short")[2].n_dof, big[0])
             assert counts[-1][0][2][0].strides != (0, 0)
+        if go is not None:
+            assert rec["degree_seen"] == rec["degree"] == 7 and rec["ran"] == go
+            if go:  # the calibration and the count on the one gathered copy
+                cal = [c for c in counts if "_steps" in c[1]]
+                assert len(cal) >= 1 and cal[-1][0][2][0] is counts[-1][0][2][0]
+            else:
+                assert rec["reason"] == "faked skip"

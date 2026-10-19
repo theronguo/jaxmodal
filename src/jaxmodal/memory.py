@@ -575,10 +575,11 @@ def solve_modes_memory(
 # temporaries of _recurrence): workspace + 8 n (a b + c), and on the stencil at least
 # 2 workspace + 8 n a_dup b (the slab workspace appears twice while a slab covers most of the
 # grid); upper envelope of hex20 12^3-44^3, ssh8 120^2-515^2 (to 1.6M DOF; PR 18e: the slope
-# rises with n, 10.0 at 0.24M to 10.9 at 1.6M, so a = 11 leaves room above the fit range; a
-# 10M check is a deferred GPU check) and voxel 16^3-64^3, b = 4-32 (meshes below about 20k
-# DOF, where one chunk holds the whole mesh, are outside it). Plus w0 and u (2 blocks).
-COUNT_STEP = {"unstructured": (11.0, 0.5, 0.0), "stencil": (10.2, 1.0, 2.2)}
+# rises with n, 10.0 at 0.24M to 10.97 at 6M with c up to 1.3, so a = 11 and c = 2 cover the
+# points measured to 6M DOF; a 10M check is a deferred GPU check) and voxel 16^3-64^3,
+# b = 4-32 (meshes below about 20k DOF, where one chunk holds the whole mesh, are outside
+# it). Plus w0 and u (2 blocks).
+COUNT_STEP = {"unstructured": (11.0, 2.0, 0.0), "stencil": (10.2, 1.0, 2.2)}
 # Sampling: the y PCG on M_P, workspace + 6 vectors per probe (memory_analysis, hex20 20^3,
 # voxel 64^3), plus g and y.
 COUNT_SAMPLE = 8.0
