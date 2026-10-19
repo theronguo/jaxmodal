@@ -212,7 +212,7 @@ def si_slice(
 ):  # fmt: skip
     """Eigenpairs of the masked pencil (K_m, M_m) in the slice [lo, hi] (eigenvalues, 0 <= lo <
     hi) by block shift-invert Lanczos at sigma (default the midpoint). precond: SPD
-    preconditioner of K + sigma M (fp64; a GMG with fp32 levels raises); R: M-orthonormal rigid
+    preconditioner of K + sigma M (fp64; fp32 GMG or AMG levels raise); R: M-orthonormal rigid
     modes; W: known M-orthonormal modes to deflate (host array, never returned), lam_W their
     eigenvalues (optional: they then count as converged candidates of the stop rule, so a known
     mode beyond an edge closes that side; an unknown mode between still appears as a nearer
@@ -243,7 +243,7 @@ def si_slice(
     if not isinstance(capacity, int) or capacity < 2 * block:
         raise ValueError(f"capacity must be an int >= 2 block = {2 * block}, got {capacity!r}")
     if getattr(precond, "dtype", "float64") != "float64":
-        raise ValueError("precond must run in fp64 inside MINRES (a GMG with fp32 levels)")
+        raise ValueError("precond must run in fp64 inside MINRES (a GMG or AMG with fp32 levels)")
     sigma = float((lo + hi) / 2 if sigma is None else sigma)
     b, c = block, _chunk(block)
     capacity = _up(capacity, c)

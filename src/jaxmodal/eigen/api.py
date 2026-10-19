@@ -54,8 +54,8 @@ def resolve_precond(mesh, precond, precond_dtype):
         raise ValueError("precond 'amg' needs an unstructured mesh (voxel meshes: 'gmg')")
     if precond_dtype not in ("float64", "float32"):
         raise ValueError(f"precond_dtype must be 'float64' or 'float32', got {precond_dtype!r}")
-    if precond != "gmg" and precond_dtype != "float64":
-        raise ValueError("precond_dtype 'float32' needs precond 'gmg'")
+    if precond == "jacobi" and precond_dtype != "float64":
+        raise ValueError("precond_dtype 'float32' needs precond 'gmg' or 'amg'")
     return precond
 
 
@@ -87,7 +87,16 @@ RESERVED = {
     "unstructured": {"mesh", "materials", "orientations", "mass", "nodal_mass"},
     "stencil": {"mesh", "materials", "orientations", "mass", "nodal_mass"},
     "gmg": {"op", "free", "sigma", "dtype"},
-    "amg": {"op", "free", "sigma", "points", "nonsingular", "aggregates", "return_aggregates"},
+    "amg": {
+        "op",
+        "free",
+        "sigma",
+        "points",
+        "nonsingular",
+        "aggregates",
+        "return_aggregates",
+        "dtype",
+    },
     "jacobi": {"op", "free", "sigma"},
     "count": {"op", "free", "W", "lam", "lam_last", "lam_next", "R", "precond"},
 }
@@ -334,8 +343,9 @@ def solve_modes(
     material and element checks first). The rigid modes left by bcs are deflated and returned
     in info["rigid"] (M-orthonormal). precond: "auto" (GMG on voxel meshes, Jacobi with ssh8
     and hex20 / hex27 blocks, else AMG), "gmg", "amg" or "jacobi". The multigrid is built at
-    sigma (a hint >= 0) or at the refined lam_1 pre-estimate; precond_dtype "float32" runs the
-    GMG V-cycle in fp32. X0 (n_dof, j <= block size) seeds lobpcg's first chunk.
+    sigma (a hint >= 0) or at the refined lam_1 pre-estimate; precond_dtype "float32" runs
+    LOBPCG's (and the polish's) GMG or AMG V-cycle in fp32. X0 (n_dof, j <= block size) seeds
+    lobpcg's first chunk.
     operator_options, precond_options and sigma_options are dicts forwarded to the operator
     builder, the preconditioner builder and the pre-estimate (allowed keys: OPERATOR_OPTIONS,
     PRECOND_OPTIONS, SIGMA_OPTIONS; docs/eigensolvers.md#options). polish_options
@@ -439,18 +449,21 @@ def solve_modes(
 
         return run
 
-    def lobpcg_precond(s):  # LOBPCG's preconditioner (and AMG's aggregates in band mode)
-        if precond == "gmg":
-            return make(s, dtype=precond_dtype), None
-        if precond == "amg" and band is not None:  # the aggregates are reused at lam_c (exact)
-            return make(s, return_aggregates=True)
-        return make(s), None
+    def reuse(s, **kw):  # sigma rounds, LOBPCG's build: one aggregation (exact, only values change)
+        nonlocal aggs
+        if precond != "amg":
+            return make(s, **kw)
+        if aggs is None:
+            P, aggs = make(s, return_aggregates=True, **kw)
+            return P
+        return make(s, aggregates=aggs, **kw)
 
     if band is None:
         if sigma is None and precond != "jacobi":
-            sigma, its = _precond_sigma(op, free, Rd, make, seed=seed, **sg_opts)
+            sigma, its = _precond_sigma(op, free, Rd, reuse, seed=seed, **sg_opts)
         sigma = sigma or 0.0
-        P = lobpcg_precond(sigma)[0]
+        P = reuse(sigma, dtype=precond_dtype)
+        aggs = None  # no aggregates held during the iterations
         t_p = time.perf_counter() - t0
         lam, V, info = lobpcg(
             op, free, n_modes, tol, Rd, P, X0, maxit=maxit, seed=seed, chunk=chunk,
@@ -474,7 +487,7 @@ def solve_modes(
                 mem._models(mesh, mass, precond, dtype, ops, pc_opts, po)]  # fmt: skip
 
     op_memory, pc = models(precond_dtype)
-    pc64 = models("float64")[1] if precond == "gmg" and precond_dtype == "float32" else pc
+    pc64 = models("float64")[1] if precond_dtype == "float32" else pc
 
     def c_max(c, low=low_memory, dtype=basis_dtype, op_m=None, pc_m=None):
         return mem._c_max(op_m or op_memory, pc_m or pc, n, chunk=c, guards=guards, low=low,
@@ -483,13 +496,14 @@ def solve_modes(
 
     def levers(c):  # the memory levers not set, with their C_max at chunk c
         out = [f"low_memory=True (C_max {c_max(c, low=True)})"] if not low_memory else []
-        # the shell AMG's polish term sets its step, so low_memory alone saves little there
-        if precond == "amg" and "ssh8" in mesh.blocks and po_opts.get("on", True):
+        # a polish term (shell AMG, fp32 hex AMG) sets the step, so low_memory alone saves
+        # little there; its presence does not depend on m
+        if pc is not None and "polish" in pc(1):
             off = models(precond_dtype, po={"on": False})[1]
             out.append(f"polish_options={{'on': False}} (C_max {c_max(c, pc_m=off)})")
         if basis_dtype != "float32":
             out.append(f"basis_dtype='float32' (C_max {c_max(c, dtype='float32')})")
-        if precond == "gmg" and precond_dtype != "float32":
+        if precond != "jacobi" and precond_dtype != "float32":
             out.append(f"precond_dtype='float32' (C_max {c_max(c, pc_m=models('float32')[1])})")
         if not voxel and "ssh8" not in mesh.blocks and op_opts.get("mode") != "otf":
             otf = models(precond_dtype, op_opts | {"mode": "otf"})[0]
@@ -520,10 +534,10 @@ def solve_modes(
     pre, L, t_lob, stopped = None, 0, None, None
     if ch is not None:
         if sigma is None and precond != "jacobi":
-            sigma, its = _precond_sigma(op, free, Rd, make, seed=seed, **sg_opts)
+            sigma, its = _precond_sigma(op, free, Rd, reuse, seed=seed, **sg_opts)
             pre = sigma
         sigma = sigma or 0.0
-        P, aggs = lobpcg_precond(sigma)
+        P = reuse(sigma, dtype=precond_dtype)  # band mode keeps aggs for the counts
         t_p = time.perf_counter() - t0
         n_m = band_defaults(n_modes if f1 == 0 else None, ch, guards, n_avail)[0]
         lam, V, info = _solve(
@@ -606,7 +620,8 @@ def solve_modes(
             if precond == "jacobi":
                 pre, its = sigma_estimate(op, free, Rd, seed=seed)
             else:
-                pre, its = _precond_sigma(op, free, Rd, make, seed=seed, **sg_opts)
+                pre, its = _precond_sigma(op, free, Rd, reuse, seed=seed, **sg_opts)
+                aggs = None  # the slices build without aggregates
             sigma, out["mu1_ub"], t_p = pre, pre, time.perf_counter() - t
         out["from_zero"] = f1 == 0 or lam_lo < out["mu1_ub"] * (1 + max(MU1_MARGIN, 300 * tol))
         n_store = max(n_modes or 200, math.ceil(1.25 * L))

@@ -67,26 +67,33 @@ def spy(monkeypatch):
     """Records every count call in solve_modes (args, kwargs) and every lam_c build; drop:
     elastic mode indices to remove from W before the real count runs."""
     rec = dict(count=[], build=[], drop=())
-    real_count, real_amg, real_gmg = api.count, api.amg, api.gmg
+    real_count = api.count
 
     def count(op, free, W, lam, *a, **kw):
         keep = np.setdiff1d(np.arange(W.shape[1]), rec["drop"])
         rec["count"].append((np.array(W), lam, a, kw))  # a copy: no reference to the result
         return real_count(op, free, W[:, keep], lam[keep], *a, **kw)
 
-    def amg(op, free, s, *a, **kw):
-        if "aggregates" in kw:
-            rec["build"].append(s)
-        return real_amg(op, free, s, *a, **kw)
-
-    def gmg(op, free, s, *a, **kw):
+    def build(s):
         rec["build"].append(s)
-        return real_gmg(op, free, s, *a, **kw)
+        return orig(s)
 
     monkeypatch.setattr(api, "count", count)
-    monkeypatch.setattr(api, "amg", amg)
-    monkeypatch.setattr(api, "gmg", gmg)
+    orig = wrap_build(monkeypatch, build)
     return rec
+
+
+def wrap_build(monkeypatch, new):
+    """Replaces the lam_c build solve_modes passes to api._verify (its 13th positional
+    argument) by new; returns a callable forwarding to the original build of the current call."""
+    real, cur = api._verify, {}
+
+    def verify(*a):
+        cur["build"] = a[12]
+        return real(*a[:12], new, *a[13:])
+
+    monkeypatch.setattr(api, "_verify", verify)
+    return lambda s: cur["build"](s)
 
 
 @pytest.fixture
@@ -111,14 +118,10 @@ def budgets(monkeypatch):
 def no_build(monkeypatch):
     """Any lam_c build fails the test."""
 
-    def fail(*a, **kw):
+    def fail(s):
         raise AssertionError("lam_c preconditioner built")
 
-    real = api.amg
-    monkeypatch.setattr(
-        api, "amg", lambda *a, **kw: fail() if "aggregates" in kw else real(*a, **kw)
-    )
-    monkeypatch.setattr(api, "jacobi", fail)
+    wrap_build(monkeypatch, fail)
 
 
 # ---------------------------------------------------------------- 1: the band rule
@@ -167,10 +170,8 @@ def check_band(name, f_max, spy, expect, **kw):
     assert (ckw["R"] is None) == bool(MESHES[name][1])
     if ckw["R"] is not None:
         assert ckw["R"].shape[1] == 6
-    if info["precond"] != "jacobi":  # built at lam_c (AMG: from the solve's aggregates)
-        assert spy["build"]
-    if spy["build"]:
-        assert spy["build"][-1] == pytest.approx(c["lam_c"], rel=1e-14)
+    # the count ran, so its preconditioner was built at lam_c (AMG: from the solve's aggregates)
+    assert spy["build"][-1] == pytest.approx(c["lam_c"], rel=1e-14)
     return lam, info
 
 

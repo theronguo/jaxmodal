@@ -369,7 +369,6 @@ def test_dispatch(preconds):
         (box((2, 2, 2)), dict(precond="gmg"), "voxel mesh"),
         (vox, dict(precond="amg"), "unstructured mesh"),
         (vox, dict(precond="ilu"), "precond must be"),
-        (box((2, 2, 2)), dict(precond="amg", precond_dtype="float32"), "needs precond 'gmg'"),
         (vox, dict(precond="jacobi", precond_dtype="float32"), "needs precond 'gmg'"),
         (vox, dict(precond_dtype="float16"), "precond_dtype must be"),
         (vox, dict(sigma=-1.0), "sigma must be"),

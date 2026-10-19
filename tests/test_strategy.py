@@ -369,7 +369,7 @@ def test_memory_block_sentinel(fake_builds, monkeypatch):
 def test_memory_no_lobpcg_build(fake_builds, monkeypatch, f1):
     """Test 3: on "memory" no LOBPCG preconditioner is built ("short", a budget below chunk 5's
     need, the slice capacity given): f1 = 0 builds nothing before si_band and never asks for
-    aggregates; f1 > 0 builds only inside _precond_sigma."""
+    aggregates; f1 > 0 builds (and asks for aggregates) only inside _precond_sigma."""
     seen, inside = {}, []
     real_band, real_pre = api.si_band, api._precond_sigma
 
@@ -392,7 +392,7 @@ def test_memory_no_lobpcg_build(fake_builds, monkeypatch, f1):
             slice_options={"capacity": 96})  # fmt: skip
     assert seen["before"] == sum(inside) and (f1 == 0) == (not inside)
     assert f1 == 0 or sum(inside) > 0
-    assert not any(ra for _, ra, _ in fake_builds["builds"])
+    assert f1 != 0 or not any(ra for _, ra, _ in fake_builds["builds"])
 
 
 def chunk_need(name, c):
@@ -1100,15 +1100,19 @@ def test_levers(fake_builds, monkeypatch):
     monkeypatch.setattr(api, "si_band", stub_band({}))
     B = chunk_need("short", 20) - 1
     otf = mem._models(prob("short")[0], "consistent", "auto", "float64", {"mode": "otf"}, None)
-    _, pc = models("short")
+    op, pc = models("short")
     cm = mem._c_max(otf[0], pc, prob("short")[2].n_dof, chunk=20, guards=None, low=False,
                     basis_dtype="float64", n_rigid=0, n_avail=n_avail("short"), budget=B,
                     host_budget=None)  # fmt: skip
     with pytest.warns(UserWarning) as w:
         run("short", fband("short", 15, 25), chunk=20, memory_budget=B,
             slice_options={"capacity": 96})  # fmt: skip
+    vc = mem._c_max(op, models("short", dtype="float32")[1], prob("short")[2].n_dof, chunk=20,
+                    guards=None, low=False, basis_dtype="float64", n_rigid=0,
+                    n_avail=n_avail("short"), budget=B, host_budget=None)  # fmt: skip
     (msg,) = [str(x.message) for x in w if "levers" in str(x.message)]
-    assert f"operator_options={{'mode': 'otf'}} (C_max {cm})" in msg and "precond_dtype" not in msg
+    assert f"operator_options={{'mode': 'otf'}} (C_max {cm})" in msg
+    assert f"precond_dtype='float32' (C_max {vc})" in msg  # AMG too since PR 18c
 
 
 def est(e, m, de=0, dm=0, he=0, hm=0):
