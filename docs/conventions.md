@@ -45,7 +45,7 @@ with the max over all points for pointwise fields such as stress. Absolute toler
 
 `benchmarks/harness.py`:
 
-- `measure(code, setup)` runs `setup`, then `code`, in a fresh subprocess and returns `peak_bytes`, `rss_bytes` and `time_s` for `code`.
+- `measure(code, setup, large_cache=False)` runs `setup`, then `code`, in a fresh subprocess and returns `peak_bytes`, `rss_bytes` and `time_s` for `code`; `measure_json` takes the same `large_cache` keyword. `child_env(large_cache)` builds the child's environment: it drops an inherited `MallocLargeCache` and sets it to 0 unless `large_cache=True` (PR 18d).
 - `python benchmarks/harness.py` writes the machine peaks to `benchmarks/results/system.json`. These are fp64 matmul GFLOP/s, jitted and pthread C STREAM triad GB/s, and versions. The C triad runs at $P$ and $P+E$ threads (P/E cores; `os.cpu_count()` when unknown) and records the best run with its thread count. Later results reference this file instead of re-measuring.
 - `write_result(name, data, out_dir)` writes `<out_dir>/<name>.json` (default `benchmarks/results/`) with `data` plus `versions()`.
 
@@ -68,7 +68,7 @@ Each mechanism exists because of a measured failure, and each has a test that fa
 
 | Mechanism | Failure without it (measured) |
 |---|---|
-| `MallocLargeCache=0` in the child env (undocumented) | a 1.6 GB block freed in `setup` stays resident and is reused uncharged; a 0.8 GB allocation in `code` reads 0 |
+| `MallocLargeCache=0` in the child env (undocumented; the default, `large_cache=False`) | a 1.6 GB block freed in `setup` stays resident and is reused uncharged; a 0.8 GB allocation in `code` reads 0 |
 | `gc.collect()` after `setup` | cyclic garbage left by `setup` is freed during `code`; the allocation reads 0 |
 | footprint poll after `setup` (10 ms steps until it changes by < 1 MiB; at least 50 ms, at most 2 s) | XLA:CPU frees executable temporaries on another thread after `block_until_ready`; 3.2e9 reads ≈ 2.1–2.4e9 |
 | interval reset before the baseline | a 2 GB transient in `setup` inflates the peak to 2.0e9 |
@@ -84,6 +84,6 @@ Each mechanism exists because of a measured failure, and each has a test that fa
   - After a compile-only warm-up, `time_s` includes about 2 ms of first-run overhead.
 - `ru_maxrss` also counts library code pages first touched in `code`, so warm up the backend in `setup`.
 - Footprint counts compressed pages at their compressed size, so estimator checks use non-constant data.
-- On macOS `time_s` includes the page faults of fresh mmaps, since freed large blocks are unmapped.
+- On macOS `time_s` includes the page faults of fresh mmaps, since freed large blocks are unmapped (the default). `large_cache=True` leaves macOS's large-block cache on, so freed blocks are reused and first touch is excluded: for timing only (PR 18d's `kernels.py`), never for peaks, which it undercounts.
 - The STREAM triad counts 24 B per element ($a = b + s c$; write-allocate traffic is not counted).
-- `measure` records no compile time. Compile-time tests (PRs 5 and 18d) time `jit(f).lower(...).compile()` in a fresh subprocess with the cache disabled.
+- `measure` records no compile time. Compile time of one jit is timed as `jit(f).lower(...).compile()`; of a call that compiles many jits (a `solve_modes`) as the sum of the `/jax/core/compile/backend_compile_duration` events (`jax.monitoring.register_event_duration_secs_listener`, `benchmarks/compile_study.py`). Both run in a fresh subprocess with the persistent cache disabled.

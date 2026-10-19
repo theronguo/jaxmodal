@@ -209,7 +209,7 @@ Stacking the small `(n, 6)` outputs avoids `np.hstack([info["rigid"], V])`, whic
 | `normalize(V, M)` | n | the output (a copy of V) | $\approx (3 + \text{ws})\,w\,n_\text{dof}\cdot 8$ B |
 | `mac(A, B, M)` | $n_A + n_B$ ($n_B$ when `B is A`) | $8\,n_A n_B$ B | same |
 | `participation(V, M, r)` | $n + 6$ | $O(6\,n_\text{dof})$ | same |
-| `element_stress` | none | $96\,n_\text{el}(k + kb) + 8\,n_\text{dof}\,kb$ B | $8\,n_\text{dof}\,kb$ B + one chunk |
+| `element_stress` | none | $96\,n_\text{el}(k + kb) + 8\,n_\text{dof}\,kb$ B | $8\,n_\text{dof}\,kb$ B + up to two chunks |
 
 - $w = \min(\text{batch}, n)$, ws the operator's own workspace per column; the device holds
   the batch, its product and the product dispatched ahead. Host memory is the inputs plus
@@ -218,7 +218,9 @@ Stacking the small `(n, 6)` outputs avoids `np.hstack([info["rigid"], V])`, whic
   $\lceil n/w\rceil w$. On CPU a host batch passed to the device stays referenced until Python's
   garbage collector runs, so up to two extra batches can be live.
 - $kb = \min(\text{batch}, k)$; `element_stress` holds the outputs plus one block's
-  `(n_e, kb, 6)` pair on the host, and the column batch `(n_dof, kb)` on the device.
+  `(n_e, kb, 6)` pair on the host, and the column batch `(n_dof, kb)` on the device, plus up to
+  two chunks (inputs and results): the loop launches chunk $i+1$ before copying chunk $i$ to the
+  host (PR 18d's pipelined `_chunked`); this follows from the loop structure, not measured.
 - The host GEMM of `_gram` ($A^\top MB$) is $2 n_A w\,n_\text{dof}$ flops per batch.
 - `element_stress` runs `ceil(k / batch)` × (blocks × chunks) kernel calls; geometry and the
   `ssh8` EAS factorization are computed once per chunk and column batch (not per column).
@@ -237,6 +239,6 @@ columns; host peaks above the inputs): `_gram` $V^\top MV$ 1.6 s (0.41 s per 64-
 which the host GEMM is 0.06 s, overlapped with the next `apply_M`; the GEMM grows with $n_A$),
 `participation` 1.7 s (fp32 V: `_gram` 1.7 s, host peak 1.5 GB), `normalize` 2.3 s with a host peak
 of 1.25× V, `element_stress` of 64 columns 0.32 s (about 55 ms setup plus 2.2–2.9 ms of kernel per
-1024-element chunk; `ssh8` one ply: 16 ms) with a host peak of 0.97 GB. Process peak RSS 6.8 GB, of
+1024-element chunk; `ssh8` one ply: 16 ms; measured before PR 18d pipelined the chunk loop) with a host peak of 0.97 GB. Process peak RSS 6.8 GB, of
 which V is 1.9 GB and the operator and mesh 1.7 GB; outputs kept afterwards (the `normalize` copy)
 come on top.

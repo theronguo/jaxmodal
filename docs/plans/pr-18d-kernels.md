@@ -130,6 +130,7 @@ def morton(mesh):
 ```python
 _CACHE = weakref.WeakKeyDictionary()  # mesh -> {key: value}; entries die with the mesh
 
+
 def _per_mesh(f):
     @functools.wraps(f)
     def g(mesh, *args):
@@ -138,6 +139,7 @@ def _per_mesh(f):
         if key not in d:
             d[key] = f(mesh, *args)
         return d[key]
+
     return g
 ```
 
