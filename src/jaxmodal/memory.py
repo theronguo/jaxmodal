@@ -350,16 +350,20 @@ SHELL_STEP = {
 # terms refitted as above (hex: 8 n (a m + c) + 8 m K; shell: 8 n (a m + c) + K0) with
 # asymptote rows on the long series. The polish's PCG keeps fp64 vectors around the fp32
 # cycle, so hex gains a polish term. Counts and builds stay fp64.
-STORAGE32 = {"hex8": 1.0, "p": 1.0, "shell": 1.0}
+STORAGE32 = {"hex8": 0.636, "p": 0.548, "shell": 0.574}
 AMG_STEP32 = {
-    ("hex8", "9-block"): AMG_STEP[("hex8", "9-block")],
-    ("hex8", "low"): AMG_STEP[("hex8", "low")],
-    ("hex8", "polish"): AMG_STEP[("hex8", "low")],
-    ("p", "9-block"): AMG_STEP[("p", "9-block")],
-    ("p", "low"): AMG_STEP[("p", "low")],
-    ("p", "polish"): AMG_STEP[("p", "low")],
+    ("hex8", "9-block"): (3.26, 55.4, 351_800),
+    ("hex8", "low"): (8.74, 53.1, 433_600),
+    ("hex8", "polish"): (20.44, 40.1, 505_500),
+    ("p", "9-block"): (3.64, 21.9, 525_400),
+    ("p", "low"): (8.70, 14.5, 576_100),
+    ("p", "polish"): (20.70, 4.0, 830_500),
 }
-SHELL_STEP32 = {key: SHELL_STEP[key] for key in ("9-block", "low", "polish")}
+SHELL_STEP32 = {
+    "9-block": (5.2, 16.0, 37e6),
+    "low": (11.1, 18.9, 65e6),
+    "polish": (23.5, 10.0, 89e6),
+}
 
 
 @functools.lru_cache(maxsize=1)  # Mesh hashes by identity; keeps the last mesh alive

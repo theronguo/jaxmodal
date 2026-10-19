@@ -73,13 +73,14 @@ PEAKS = [("flat", 128), ("flat", 256), ("flat", 362), ("flat", 512), ("stack3", 
          ("stack10", 64), ("T", 48), ("block", 32), ("block", 48), ("block", 64)]  # fmt: skip
 
 
-def build(case, n, degree=2):
+def build(case, n, degree=2, dtype="float64"):
     """(mesh, op, free, P): AMG at sigma 1 with 4 nodes pinned (A_P(1) SPD, no rigid modes)."""
     mesh = MESHES[case](n)
     op = unstructured(mesh, STEEL)
     free = np.ones(op.n_dof, bool)
     free[:12] = False
-    return mesh, op, jnp.asarray(free), amg(op, free, 1.0, mesh.points, degree=degree)
+    P = amg(op, free, 1.0, mesh.points, degree=degree, dtype=dtype)
+    return mesh, op, jnp.asarray(free), P
 
 
 def step(op, P, low, k, cap=0):
@@ -202,7 +203,7 @@ import json, time
 from exact import SIMPLY_SUPPORTED
 from jaxmodal.eigen import solve_modes
 t = time.perf_counter()
-lam, V, info = solve_modes(mesh, STEEL, SIMPLY_SUPPORTED, N_MODES, tol=1e-6)
+lam, V, info = solve_modes(mesh, STEEL, SIMPLY_SUPPORTED, N_MODES, tol=1e-6, precond_dtype=DTYPE)
 keys = ("iterations", "converged", "precond")
 json.dump({{k: info[k] for k in keys}} | dict(time_s=time.perf_counter() - t), open("{out}", "w"))
 """
@@ -220,18 +221,20 @@ def peaks(cases=PEAKS):
     return out
 
 
-def solve_peak(case="flat", n=362, n_modes=20):
-    """One cold solve_modes (tol 1e-6, synchronous CPU dispatch) in a fresh subprocess: its info,
-    time and process peak above the built operator, next to solve_modes_memory's total."""
+def solve_peak(case="flat", n=362, n_modes=20, dtype="float64"):
+    """One cold solve_modes (tol 1e-6, precond_dtype dtype, synchronous CPU dispatch) in a fresh
+    subprocess: its info, time and process peak above the built operator, next to
+    solve_modes_memory's total."""
     root = str(harness.RESULTS.parents[1])
     # replace, not format: measure_json formats the code once more (its {out})
-    code, setup = SOLVE.replace("N_MODES", str(n_modes)), SETUP.format(root=root, case=case, n=n)
+    code = SOLVE.replace("N_MODES", str(n_modes)).replace("DTYPE", repr(dtype))
+    setup = SETUP.format(root=root, case=case, n=n)
     # synchronous CPU dispatch, set before the backend starts: with async dispatch the 791k peak
     # varies with machine load (6.6 GB loaded, intermittently 7.9-9.4 GB idle; preconditioners.md)
     setup = 'import jax\njax.config.update("jax_cpu_enable_async_dispatch", False)\n' + setup
     r = harness.measure_json(code, setup)
-    est = solve_modes_memory(MESHES[case](n), SS, n_modes)["total"]
-    r |= dict(case=case, size=n, n_modes=n_modes, estimate_bytes=est)
+    est = solve_modes_memory(MESHES[case](n), SS, n_modes, precond_dtype=dtype)["total"]
+    r |= dict(case=case, size=n, n_modes=n_modes, estimate_bytes=est, dtype=dtype)
     print(json.dumps(r), flush=True)
     return r
 

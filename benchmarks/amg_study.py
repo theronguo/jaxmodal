@@ -221,23 +221,24 @@ from jaxmodal.mesh import box_mesh
 mesh = box_mesh(({n},) * 3, (1 / {n},) * 3, type="hex20")
 mats, bcs = {{0: Material(isotropic(210e9, 0.3), 7850.0)}}, {{"xmin": "xyz"}}
 def run():
-    return solve_modes(mesh, mats, bcs, {k}, tol=1e-6)
+    return solve_modes(mesh, mats, bcs, {k}, tol=1e-6, precond_dtype={dtype!r})
 """
 
 
-def acceptance(n=44, n_modes=20):
-    """solve_modes (AMG) on the hex20 n^3 steel box (xmin clamped, tol 1e-6, defaults): the cold
-    run (time_s with compilation, its info) and the peaks of two warm runs (after a full run),
-    next to solve_modes_memory's estimate."""
+def acceptance(n=44, n_modes=20, dtype="float64"):
+    """solve_modes (AMG, precond_dtype dtype) on the hex20 n^3 steel box (xmin clamped, tol 1e-6,
+    defaults): the cold run (time_s with compilation, its info) and the peaks of two warm runs
+    (after a full run), next to solve_modes_memory's estimate."""
     mesh = box_mesh((n,) * 3, (1 / n,) * 3, type="hex20")
-    setup = SOLVE.format(n=n, k=n_modes)
+    setup = SOLVE.format(n=n, k=n_modes, dtype=dtype)
     r = harness.measure_json(gmg_study.RUN, setup)
     r["cold_peak_bytes"] = r.pop("peak_bytes")
     r["peaks_bytes"] = [
         harness.measure_json(gmg_study.RUN, setup + "run()\n")["peak_bytes"] for _ in range(2)
     ]
-    est = solve_modes_memory(mesh, {"xmin": "xyz"}, n_modes, n_rigid=0)["total"]
-    out = r | dict(n=n, n_modes=n_modes, n_dof=3 * len(mesh.points), estimate_bytes=est)
+    est = solve_modes_memory(mesh, {"xmin": "xyz"}, n_modes, n_rigid=0, precond_dtype=dtype)
+    out = r | dict(n=n, n_modes=n_modes, n_dof=3 * len(mesh.points), estimate_bytes=est["total"],
+                   dtype=dtype)  # fmt: skip
     print(json.dumps(out), flush=True)
     return out
 
@@ -251,7 +252,7 @@ def large(n=95, n_modes=10, limit=52e9):
     print(json.dumps(out), flush=True)
     if est > limit:
         return out | dict(skipped=f"estimate above {limit / 1e9:.0f} GB")
-    r = harness.measure_json(gmg_study.RUN, SOLVE.format(n=n, k=n_modes))
+    r = harness.measure_json(gmg_study.RUN, SOLVE.format(n=n, k=n_modes, dtype="float64"))
     return out | r
 
 

@@ -701,7 +701,7 @@
       "n_dof": 10533888,
       "budget": 76000000000.0,
       "host_budget": null,
-      "target": "700-1000 with fp32 AMG (PR 18): recorded with the fp64 AMG model plus levers",
+      "target": "220 stored / 300 otf with fp32 AMG (PR 18c): unified 76 GB pool (Mac accounting)",
       "ladder": [
         {
           "operator": "stored",
@@ -757,6 +757,59 @@
           "slice_capacity": null
         },
         {
+          "operator": "stored",
+          "precond_dtype": "float32",
+          "low": false,
+          "basis_dtype": "float64",
+          "c_max": {
+            "40": null,
+            "20": null,
+            "10": 60,
+            "5": 160
+          }
+        },
+        {
+          "operator": "stored",
+          "precond_dtype": "float32",
+          "low": false,
+          "basis_dtype": "float32",
+          "c_max": {
+            "40": null,
+            "20": null,
+            "10": 120,
+            "5": 200
+          }
+        },
+        {
+          "operator": "stored",
+          "precond_dtype": "float32",
+          "low": true,
+          "basis_dtype": "float64",
+          "c_max": {
+            "40": null,
+            "20": null,
+            "10": 90,
+            "5": 160
+          }
+        },
+        {
+          "operator": "stored",
+          "precond_dtype": "float32",
+          "low": true,
+          "basis_dtype": "float32",
+          "c_max": {
+            "40": null,
+            "20": null,
+            "10": 120,
+            "5": 220
+          }
+        },
+        {
+          "operator": "stored",
+          "precond_dtype": "float32",
+          "slice_capacity": null
+        },
+        {
           "operator": "otf",
           "precond_dtype": "float64",
           "low": false,
@@ -808,12 +861,297 @@
           "operator": "otf",
           "precond_dtype": "float64",
           "slice_capacity": 96
+        },
+        {
+          "operator": "otf",
+          "precond_dtype": "float32",
+          "low": false,
+          "basis_dtype": "float64",
+          "c_max": {
+            "40": null,
+            "20": null,
+            "10": 120,
+            "5": 200
+          }
+        },
+        {
+          "operator": "otf",
+          "precond_dtype": "float32",
+          "low": false,
+          "basis_dtype": "float32",
+          "c_max": {
+            "40": null,
+            "20": null,
+            "10": 180,
+            "5": 280
+          }
+        },
+        {
+          "operator": "otf",
+          "precond_dtype": "float32",
+          "low": true,
+          "basis_dtype": "float64",
+          "c_max": {
+            "40": null,
+            "20": null,
+            "10": 150,
+            "5": 230
+          }
+        },
+        {
+          "operator": "otf",
+          "precond_dtype": "float32",
+          "low": true,
+          "basis_dtype": "float32",
+          "c_max": {
+            "40": null,
+            "20": null,
+            "10": 195,
+            "5": 300
+          }
+        },
+        {
+          "operator": "otf",
+          "precond_dtype": "float32",
+          "slice_capacity": 96
         }
       ],
       "reach_lost": {
         "fit": 120,
         "unit": 160,
         "lost": 0.25
+      },
+      "si_over_lobpcg": {
+        "48": 1.0929583410761632,
+        "72": 1.0519770471413625,
+        "96": 1.0162944540144865,
+        "120": 0.9849453399699729,
+        "144": 0.9571854986595203
+      }
+    },
+    "hex20_10M_gpu": {
+      "n_dof": 10533888,
+      "budget": 76000000000.0,
+      "host_budget": 409600000000.0,
+      "target": "690 stored / 940 otf with fp32 AMG (PR 18c): 76 GB device, separate host",
+      "ladder": [
+        {
+          "operator": "stored",
+          "precond_dtype": "float64",
+          "low": false,
+          "basis_dtype": "float64",
+          "c_max": {
+            "40": null,
+            "20": null,
+            "10": 60,
+            "5": 240
+          }
+        },
+        {
+          "operator": "stored",
+          "precond_dtype": "float64",
+          "low": false,
+          "basis_dtype": "float32",
+          "c_max": {
+            "40": null,
+            "20": null,
+            "10": 180,
+            "5": 520
+          }
+        },
+        {
+          "operator": "stored",
+          "precond_dtype": "float64",
+          "low": true,
+          "basis_dtype": "float64",
+          "c_max": {
+            "40": null,
+            "20": null,
+            "10": 135,
+            "5": 280
+          }
+        },
+        {
+          "operator": "stored",
+          "precond_dtype": "float64",
+          "low": true,
+          "basis_dtype": "float32",
+          "c_max": {
+            "40": null,
+            "20": null,
+            "10": 270,
+            "5": 560
+          }
+        },
+        {
+          "operator": "stored",
+          "precond_dtype": "float64",
+          "slice_capacity": 336
+        },
+        {
+          "operator": "stored",
+          "precond_dtype": "float32",
+          "low": false,
+          "basis_dtype": "float64",
+          "c_max": {
+            "40": null,
+            "20": null,
+            "10": 180,
+            "5": 320
+          }
+        },
+        {
+          "operator": "stored",
+          "precond_dtype": "float32",
+          "low": false,
+          "basis_dtype": "float32",
+          "c_max": {
+            "40": null,
+            "20": null,
+            "10": 360,
+            "5": 680
+          }
+        },
+        {
+          "operator": "stored",
+          "precond_dtype": "float32",
+          "low": true,
+          "basis_dtype": "float64",
+          "c_max": {
+            "40": null,
+            "20": null,
+            "10": 195,
+            "5": 340
+          }
+        },
+        {
+          "operator": "stored",
+          "precond_dtype": "float32",
+          "low": true,
+          "basis_dtype": "float32",
+          "c_max": {
+            "40": null,
+            "20": null,
+            "10": 390,
+            "5": 690
+          }
+        },
+        {
+          "operator": "stored",
+          "precond_dtype": "float32",
+          "slice_capacity": 336
+        },
+        {
+          "operator": "otf",
+          "precond_dtype": "float64",
+          "low": false,
+          "basis_dtype": "float64",
+          "c_max": {
+            "40": null,
+            "20": null,
+            "10": 180,
+            "5": 360
+          }
+        },
+        {
+          "operator": "otf",
+          "precond_dtype": "float64",
+          "low": false,
+          "basis_dtype": "float32",
+          "c_max": {
+            "40": null,
+            "20": null,
+            "10": 420,
+            "5": 760
+          }
+        },
+        {
+          "operator": "otf",
+          "precond_dtype": "float64",
+          "low": true,
+          "basis_dtype": "float64",
+          "c_max": {
+            "40": null,
+            "20": null,
+            "10": 255,
+            "5": 400
+          }
+        },
+        {
+          "operator": "otf",
+          "precond_dtype": "float64",
+          "low": true,
+          "basis_dtype": "float32",
+          "c_max": {
+            "40": null,
+            "20": null,
+            "10": 510,
+            "5": 810
+          }
+        },
+        {
+          "operator": "otf",
+          "precond_dtype": "float64",
+          "slice_capacity": 480
+        },
+        {
+          "operator": "otf",
+          "precond_dtype": "float32",
+          "low": false,
+          "basis_dtype": "float64",
+          "c_max": {
+            "40": null,
+            "20": null,
+            "10": 300,
+            "5": 440
+          }
+        },
+        {
+          "operator": "otf",
+          "precond_dtype": "float32",
+          "low": false,
+          "basis_dtype": "float32",
+          "c_max": {
+            "40": null,
+            "20": null,
+            "10": 600,
+            "5": 920
+          }
+        },
+        {
+          "operator": "otf",
+          "precond_dtype": "float32",
+          "low": true,
+          "basis_dtype": "float64",
+          "c_max": {
+            "40": null,
+            "20": null,
+            "10": 315,
+            "5": 470
+          }
+        },
+        {
+          "operator": "otf",
+          "precond_dtype": "float32",
+          "low": true,
+          "basis_dtype": "float32",
+          "c_max": {
+            "40": null,
+            "20": null,
+            "10": 645,
+            "5": 940
+          }
+        },
+        {
+          "operator": "otf",
+          "precond_dtype": "float32",
+          "slice_capacity": 480
+        }
+      ],
+      "reach_lost": {
+        "fit": 240,
+        "unit": 360,
+        "lost": 0.33333333333333337
       },
       "si_over_lobpcg": {
         "48": 1.0929583410761632,
@@ -883,6 +1221,59 @@
           "slice_capacity": 624
         },
         {
+          "operator": "stored",
+          "precond_dtype": "float32",
+          "low": false,
+          "basis_dtype": "float64",
+          "c_max": {
+            "40": 2176,
+            "20": 2496,
+            "10": 2640,
+            "5": 2760
+          }
+        },
+        {
+          "operator": "stored",
+          "precond_dtype": "float32",
+          "low": false,
+          "basis_dtype": "float32",
+          "c_max": {
+            "40": 2880,
+            "20": 3328,
+            "10": 3540,
+            "5": 3680
+          }
+        },
+        {
+          "operator": "stored",
+          "precond_dtype": "float32",
+          "low": true,
+          "basis_dtype": "float64",
+          "c_max": {
+            "40": 2160,
+            "20": 2525,
+            "10": 2685,
+            "5": 2770
+          }
+        },
+        {
+          "operator": "stored",
+          "precond_dtype": "float32",
+          "low": true,
+          "basis_dtype": "float32",
+          "c_max": {
+            "40": 2880,
+            "20": 3375,
+            "10": 3585,
+            "5": 3700
+          }
+        },
+        {
+          "operator": "stored",
+          "precond_dtype": "float32",
+          "slice_capacity": 624
+        },
+        {
           "operator": "otf",
           "precond_dtype": "float64",
           "low": false,
@@ -933,6 +1324,59 @@
         {
           "operator": "otf",
           "precond_dtype": "float64",
+          "slice_capacity": 624
+        },
+        {
+          "operator": "otf",
+          "precond_dtype": "float32",
+          "low": false,
+          "basis_dtype": "float64",
+          "c_max": {
+            "40": 2176,
+            "20": 2560,
+            "10": 2700,
+            "5": 2800
+          }
+        },
+        {
+          "operator": "otf",
+          "precond_dtype": "float32",
+          "low": false,
+          "basis_dtype": "float32",
+          "c_max": {
+            "40": 2944,
+            "20": 3392,
+            "10": 3600,
+            "5": 3720
+          }
+        },
+        {
+          "operator": "otf",
+          "precond_dtype": "float32",
+          "low": true,
+          "basis_dtype": "float64",
+          "c_max": {
+            "40": 2208,
+            "20": 2575,
+            "10": 2730,
+            "5": 2810
+          }
+        },
+        {
+          "operator": "otf",
+          "precond_dtype": "float32",
+          "low": true,
+          "basis_dtype": "float32",
+          "c_max": {
+            "40": 2928,
+            "20": 3425,
+            "10": 3645,
+            "5": 3750
+          }
+        },
+        {
+          "operator": "otf",
+          "precond_dtype": "float32",
           "slice_capacity": 624
         }
       ],
@@ -1078,6 +1522,18 @@
   },
   "wall_s": 860.4093697080098,
   "versions": {
+    "jax": "0.11.2",
+    "jaxlib": "0.11.2",
+    "numpy": "2.5.3",
+    "platform": "macOS-27.2-arm64-arm-64bit",
+    "cpu_count": 16,
+    "p_cores": 12,
+    "e_cores": 4,
+    "xla_flags": null,
+    "jax_num_cpu_devices": true
+  },
+  "memory_commit": "3f4ca19fe85480a34947a9833a0b7dc44e8f1611",
+  "memory_versions": {
     "jax": "0.11.2",
     "jaxlib": "0.11.2",
     "numpy": "2.5.3",
