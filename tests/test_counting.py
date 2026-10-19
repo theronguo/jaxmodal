@@ -445,6 +445,35 @@ def test_step_memory(kind, pc):
             assert lo <= inc / pcm(b)["count"] <= 1.0, inc / pcm(b)["count"]
 
 
+@pytest.mark.slow
+@pytest.mark.peak
+@pytest.mark.parametrize("pc", ["jacobi", "mg"])
+@pytest.mark.parametrize("kind", ["ssh8", "hex20"])
+def test_step_memory_large(kind, pc):
+    """PR 18e test 13: COUNT_STEP's refit at >= 1M DOF (ssh8 515^2, 1.6M; hex20 44^3, 1.08M):
+    the step (without its 2 b blocks) >= the recurrence, within 1.2x with Jacobi (the fitted
+    part) and 1.3x with multigrid (measured 1.03-1.05 ssh8, 1.18-1.23 hex20: the kept count
+    terms over-count by the refit's increase), b = 16 and 32."""
+    if kind == "ssh8":
+        import test_shell_amg as T
+
+        mesh = T.plate(515, 100)[0]
+    else:
+        mesh = box_mesh((44,) * 3, (1 / 44,) * 3, type="hex20")
+    op, est = unstructured(mesh, STEEL), functools.partial(unstructured_memory, mesh)
+    free = np.ones(op.n_dof, bool)
+    free[:12] = False  # A_P(1) SPD, no rigid modes
+    free = jnp.asarray(free)
+    P = amg(op, free, 1.0, mesh.points) if pc == "mg" else jacobi(op, free, 1.0)
+    pcm = functools.partial(amg_memory, mesh) if pc == "mg" else None
+    assert op.n_dof >= 1_000_000
+    for b in (16, 32):
+        got = _recurrence_temps(op, free, P, b)
+        model = count_memory(est, op.n_dof, b, precond_memory=pcm)["step"] - 2 * 8 * op.n_dof * b
+        print(f"{kind} {pc} b={b}: {got / 1e6:.1f} MB, model {model / 1e6:.1f} MB")
+        assert got <= model <= (1.3 if pc == "mg" else 1.2) * got, model / got
+
+
 def test_sampling_memory():
     """Test 9b: the sampling kernels <= the sampling phase <= the step phase."""
     from jaxmodal.linalg.krylov import _pcg

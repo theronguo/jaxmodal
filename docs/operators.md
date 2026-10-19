@@ -58,7 +58,7 @@ BCs, masks, `masked`, `a_p`, rigid body modes and the deflation projector are de
 
 ## Matrix-free operator (`unstructured`)
 
-`solve_modes` forwards `mode`, `path`, `chunk` and `range_nodes` through `operator_options` ([`eigensolvers.md`](eigensolvers.md#options)).
+`solve_modes` forwards `mode`, `path`, `chunk` and `range_nodes` through `operator_options` ([`eigensolvers.md`](eigensolvers.md#options)). On band paths it may select `mode="otf"` itself through `levers` when the stored operator keeps LOBPCG from fitting (PR 18e, [`eigensolvers.md`](eigensolvers.md#interior-bands-and-strategy)).
 
 ```python
 from jaxmodal.mesh import rcm

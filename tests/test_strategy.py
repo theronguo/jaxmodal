@@ -315,10 +315,12 @@ def test_memory_bracket(fake_builds):
     slice floor of 72 searched."""
     fake_builds["name"] = "voxel"
     f1, f2 = fband("voxel", 3, 12)
-    _, _, info = run("voxel", (f1, f2), n_modes=10, memory_budget=voxel_budget(1.25))
+    _, _, info = run("voxel", (f1, f2), n_modes=10, levers=False, memory_budget=voxel_budget(1.25))
     assert info["reason"] == "fits" and info["chunk"] == 5 and info["c_max"][5] == 40
-    with pytest.warns(UserWarning, match=r"no LOBPCG chunk fits.*levers: low_memory=True"):
-        _, _, info = run("voxel", (f1, f2), n_modes=10, memory_budget=voxel_budget(1.15))
+    with pytest.warns(UserWarning, match=r"no LOBPCG chunk fits.*levers: .*low_memory=True"):
+        _, _, info = run(
+            "voxel", (f1, f2), n_modes=10, levers=False, memory_budget=voxel_budget(1.15)
+        )
     assert info["reason"] == "memory" and info["strategy"] == "shift_invert"
     assert info["capacity"] >= 72 and set(info["c_max"].values()) == {None}
 
@@ -342,7 +344,9 @@ def test_memory(fake_builds, monkeypatch, case):
     monkeypatch.setattr(mem, "_slice_capacity", lambda *a, **kw: caps.append(real_cap(*a, **kw))
                         or caps[-1])  # fmt: skip
     with pytest.warns(UserWarning, match="no LOBPCG chunk fits"):
-        lam, V, info = run("voxel", (f1, f2), n_modes=10, memory_budget=B, verify=case == "above")
+        lam, V, info = run(
+            "voxel", (f1, f2), n_modes=10, levers=False, memory_budget=B, verify=case == "above"
+        )
     assert info["reason"] == "memory" and info["from_zero"] == (case != "above")
     lo, hi = (2 * np.pi * f1) ** 2, (2 * np.pi * f2) ** 2
     assert seen["interval"] == ((lo, hi) if case == "above" else (0.0, hi))
@@ -362,7 +366,7 @@ def test_memory_block_sentinel(fake_builds, monkeypatch):
     monkeypatch.setattr(mem, "_count_block", lambda *a, **kw: 3)
     f1, f2 = fband("voxel", 3, 12)
     with pytest.warns(UserWarning, match="no LOBPCG chunk fits"):
-        run("voxel", (f1, f2), n_modes=10, memory_budget=voxel_budget(1.15))
+        run("voxel", (f1, f2), n_modes=10, levers=False, memory_budget=voxel_budget(1.15))
     assert seen["count_options"]["block"] == 3
 
 
@@ -392,7 +396,7 @@ def test_memory_no_lobpcg_build(fake_builds, monkeypatch, f1):
     f1, f2 = (0.0, fband("short", 0, 6)[1]) if f1 == 0 else fband("short", 3, 9)
     B = need(lob_est("short", 5, 40)) - 1e6
     with pytest.warns(UserWarning, match="no LOBPCG chunk fits"):
-        run("short", (f1, f2), n_modes=6, memory_budget=B, verify=False,
+        run("short", (f1, f2), n_modes=6, levers=False, memory_budget=B, verify=False,
             slice_options={"capacity": 96})  # fmt: skip
     assert seen["before"] == sum(inside) and (f1 == 0) == (not inside)
     assert f1 == 0 or sum(inside) > 0
@@ -913,7 +917,7 @@ def test_error_result_capacity(fake_builds):
     stop's info (stopped, time["lobpcg"])."""
     budget = need(lob_est("short", 5, 80)) - 1
     f1, f2 = fband("short", 25, 46)
-    kw = dict(n_modes=22, chunk=5, memory_budget=budget,
+    kw = dict(n_modes=22, chunk=5, levers=False, memory_budget=budget,
               slice_options={"capacity": 96, "max_slices": 1})  # fmt: skip
     with pytest.warns(UserWarning, match="35 modes locked"):
         with pytest.raises(RuntimeError, match="max_slices = 1") as e:
@@ -1175,7 +1179,8 @@ def test_amg_reuse_peak(t, n):
 
 def test_models_cached(fake_builds, monkeypatch):
     """Test 11: within one band call no estimator sees the same arguments twice (a "fits" run
-    with the count block given, and a slice path); a second call computes again."""
+    with the count block given, a slice path, and a no-fit run trying the lever states: one
+    model per state); a second call computes again."""
     seen, real = [], mem._models
 
     def models_(*a, **kw):
@@ -1188,11 +1193,15 @@ def test_models_cached(fake_builds, monkeypatch):
 
             return g
 
-        return [f and wrap(f, (len(seen), i)) for i, f in enumerate(out)]
+        return [f and wrap(f, (len(seen), (repr(a[3:]), i))) for i, f in enumerate(out)]
 
     monkeypatch.setattr(mem, "_models", models_)
     f1, f2 = fband("short", 15, 25)
-    for kw in (dict(count_options={"block": 4}), dict(strategy="shift_invert", verify=False)):
+    nofit = dict(memory_budget=1.1e8, verify=False, slice_options={"capacity": 96})
+    for kw in (dict(count_options={"block": 4}), dict(strategy="shift_invert", verify=False),
+               nofit):  # fmt: skip
+        if kw is nofit:  # the lever states' models, each built once
+            monkeypatch.setattr(api, "si_band", stub_band({}))
         for _ in range(2):
             seen.clear()
             run("short", (f1, f2), n_modes=12, **kw)  # the band holds 12
@@ -1213,7 +1222,7 @@ def test_levers(fake_builds, monkeypatch):
     f32 = mem._c_max(op, pc, n, low=False, **(kw | {"basis_dtype": "float32"}))
     vc = mem._c_max(op, models("voxel", dtype="float32")[1], n, low=False, **kw)
     with pytest.warns(UserWarning) as w:
-        run("voxel", fband("voxel", 3, 12), n_modes=10, memory_budget=B, verify=False)
+        run("voxel", fband("voxel", 3, 12), n_modes=10, levers=False, memory_budget=B, verify=False)
     (msg,) = [str(x.message) for x in w if "levers" in str(x.message)]
     assert f"low_memory=True (C_max {low})" in msg and f"basis_dtype='float32' (C_max {f32})" in msg
     assert f"precond_dtype='float32' (C_max {vc})" in msg and "otf" not in msg and (low or f32)
@@ -1226,7 +1235,7 @@ def test_levers(fake_builds, monkeypatch):
                     basis_dtype="float64", n_rigid=0, n_avail=n_avail("short"), budget=B,
                     host_budget=None)  # fmt: skip
     with pytest.warns(UserWarning) as w:
-        run("short", fband("short", 15, 25), chunk=20, memory_budget=B,
+        run("short", fband("short", 15, 25), chunk=20, levers=False, memory_budget=B,
             slice_options={"capacity": 96})  # fmt: skip
     vc = mem._c_max(op, models("short", dtype="float32")[1], prob("short")[2].n_dof, chunk=20,
                     guards=None, low=False, basis_dtype="float64", n_rigid=0,
@@ -1234,6 +1243,273 @@ def test_levers(fake_builds, monkeypatch):
     (msg,) = [str(x.message) for x in w if "levers" in str(x.message)]
     assert f"operator_options={{'mode': 'otf'}} (C_max {cm})" in msg
     assert f"precond_dtype='float32' (C_max {vc})" in msg  # AMG too since PR 18c
+
+
+# ---------------------------------------------------------------- PR 18e: the memory levers
+
+
+def test_choose():
+    """Test 1: _choose on crafted reaches (rows 0 precond, 1 basis, 2 low_memory, 3 otf)."""
+    ch, top = [40, 20, 10, 5], [40]
+
+    def known(reach, m, u=None, chunks=ch):  # one need for every state and chunk
+        nd = [{S: dict.fromkeys(chunks, x) for S in reach} for x in (m, u or m)]
+        return api._choose(reach, nd, chunks)
+
+    # rule 1: the cheapest state reaching the need, not the largest reach
+    assert known({(): {40: 40}, (0,): {40: 50}, (2,): {40: 60}}, 48, chunks=top) == ((0,), 40)
+    # two levers reach where neither alone does
+    r = {(): {40: 40}, (0,): {40: 45}, (1,): {40: 45}, (0, 1): {40: 50}}
+    assert known(r, 48, chunks=top) == ((0, 1), 40)
+    # a lever adding nothing (cost 1.0) loses to the state without it
+    assert known({(): {40: 50}, (0,): {40: 50}}, 48, chunks=top) == ((), 40)
+    # top chunk with low (1.6) beats the first halving (1.7); the first halving beats low + otf
+    r = {(): {40: 40, 20: 60}, (2,): {40: 60, 20: 60}}
+    assert known(r, 48, chunks=[40, 20]) == ((2,), 40)
+    r = {(): {40: None, 20: 60}, (2,): {40: 40, 20: 60}, (2, 3): {40: 60, 20: 60}}
+    assert known(r, 48, chunks=[40, 20]) == ((), 20)
+    # a 15 / 7 ladder: only the low rounding of the need (52 against 50) decides
+    r = {(): {15: None, 7: 50}, (2,): {15: 51, 7: 51}}
+    nd = {(): {15: 50, 7: 50}, (2,): {15: 52, 7: 52}}
+    assert api._choose(r, [nd, nd], [15, 7]) == ((), 7)
+    assert api._choose(r, [{**nd, (2,): nd[()]}] * 2, [15, 7]) == ((2,), 15)
+    # ties: |S|, then the reach, then the row order
+    assert known({(0,): {40: 50}, (1,): {40: 50}}, 48, chunks=top) == ((0,), 40)
+    assert known({(0,): {40: 50}, (1,): {40: 55}}, 48, chunks=top) == ((1,), 40)
+    # the margined need unreached, the unmargined reached
+    assert known({(): {40: 44}, (2,): {40: 46}}, 48, 40, chunks=top) == ((), 40)
+    # rule 2: neither need reached -> None, with and without a lever-free fit
+    assert known({(): {40: 30}, (0,): {40: 35}}, 48, 40, chunks=top) is None
+    assert known({(): {40: None}, (0,): {40: 35}}, 48, 40, chunks=top) is None
+    # rule 3: the ladder chunk's reach ranks (92 at 40 for (0,), not its max 100)
+    r = {(): {40: None, 20: None}, (0,): {40: 92, 20: 100}, (1,): {40: 97, 20: None}}
+    assert api._choose(r, [], [40, 20]) == ((1,), 40)
+    # +2% reach at 3x cost loses, +6% wins
+    assert api._choose({(0,): {40: 100}, (0, 3): {40: 102}}, [], top) == ((0,), 40)
+    assert api._choose({(0,): {40: 100}, (0, 3): {40: 106}}, [], top) == ((0, 3), 40)
+    assert api._choose({(): {40: None}, (0,): {40: None}}, [], top) is None
+
+
+def state_reach(name, S, c, B, start=None):
+    """C_max at chunk c in the LEVERS state S ("short": AMG, fp64 basis, no otf by default)."""
+    o = {api.LEVERS[i][0]: api.LEVERS[i][1] for i in S}
+    op, pc = mem._models(prob(name)[0], "consistent", "auto", o.get("precond_dtype", "float64"),
+                         {"mode": "otf"} if "mode" in o else {}, None)  # fmt: skip
+    return mem._c_max(op, pc, prob(name)[2].n_dof, chunk=c, guards=None,
+                      low=o.get("low_memory", False), basis_dtype=o.get("basis_dtype", "float64"),
+                      n_rigid=0, n_avail=n_avail(name), budget=B, host_budget=None,
+                      need=start)  # fmt: skip
+
+
+def spy_choose(monkeypatch, seen, pick=None):
+    """api._choose wrapped: its reach table recorded; pick (S, chunk) replaces its answer."""
+    real = api._choose
+
+    def choose(reach, needs, chunks):
+        seen.append(reach)
+        return real(reach, needs, chunks) if pick is None else pick
+
+    monkeypatch.setattr(api, "_choose", choose)
+
+
+B_PC, B_PCLOW = 1.214e8, 1.17e8  # "short", n_modes 30 from 0: {precond} and {precond, low}
+
+
+@pytest.mark.parametrize("case", ["pc", "pc_low"])
+def test_levers_known(fake_builds, monkeypatch, case):
+    """Test 2: rule 1 at chunk 5 ("short", f1 = 0, n_modes 30, tol 1e-7, need 48 from 40 at
+    chunk 5): {precond} where it reaches 160 and no levers 40; {precond, low} where {precond}
+    reaches 40 and only {precond, low} reaches 48. The band against eigsh; forced "lobpcg" takes
+    the same levers; levers=False keeps chunk 5 and no levers."""
+    B = B_PC if case == "pc" else B_PCLOW
+    r = {S: state_reach("short", S, 5, B, 40) for S in [(), (0,), (2,), (0, 2)]}
+    assert all(state_reach("short", S, c, B, 50) is None for S in r for c in (40, 20, 10))
+    if case == "pc":
+        assert r[()] == 40 and r[(0,)] >= 48
+        want = {"precond_dtype": "float32"}
+    else:
+        assert r[()] is None and (r[(0,)] or 0) < 48 and (r[(2,)] or 0) < 48 and r[(0, 2)] >= 48
+        want = {"precond_dtype": "float32", "low_memory": True}
+    f2 = fband("short", 0, 30)[1]
+    kw = dict(n_modes=30, tol=1e-7, memory_budget=B, verify=False)
+    for strategy in ("auto", "lobpcg"):
+        lam, V, info = run("short", (0.0, f2), strategy=strategy, **kw)
+        assert info["levers"] == want and info["chunk"] == 5
+        assert info["reason"] == ("fits" if strategy == "auto" else "forced")
+        assert info["c_max"][5] == r[tuple(sorted(api.LEVERS.index(x) for x in api.LEVERS
+                                                  if x[0] in want))]  # fmt: skip
+        check("short", 0.0, f2, lam, V, info)
+    if case == "pc":
+        monkeypatch.setattr(api, "si_band", stub_band({}))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            _, _, info = run("short", (0.0, f2), levers=False, **kw)
+        assert info["chunk"] == 5 and info["levers"] == {}
+
+
+def test_levers_unknown(fake_builds):
+    """Test 2: rule 3 (f1 > 0, no lever-free fit, tol 1e-8: no basis row): {precond} reaches 40,
+    {precond, low} 60, so 40 < 0.95 x 60 picks {precond, low}; the band against eigsh."""
+    f1, f2 = fband("short", 15, 25)
+    r = {S: state_reach("short", S, 5, B_PCLOW) for S in [(), (0,), (2,), (0, 2)]}
+    assert r == {(): None, (0,): 40, (2,): None, (0, 2): 60}
+    assert all(state_reach("short", (0, 2), c, B_PCLOW) is None for c in (40, 20, 10))
+    lam, V, info = run("short", (f1, f2), n_modes=10, memory_budget=B_PCLOW, verify=False)
+    assert info["levers"] == {"precond_dtype": "float32", "low_memory": True}
+    assert info["chunk"] == 5 and info["reason"] == "fits"
+    check("short", f1, f2, lam, V, info)
+
+
+def test_levers_applied(fake_builds, monkeypatch):
+    """Test 2: _choose forced to {precond, otf} at chunk 5, at a budget where that state reaches
+    40 (a capacity stop at depth 46): one operator build, in otf mode; the slice capacity sees the
+    otf model's op_memory and the fp64 model's pc64; the capacity-stop warning lists low_memory
+    and neither precond_dtype nor otf."""
+    lo, hi = 1e8, 1e9
+    while hi - lo > 1e4:  # the budget at which {precond, otf} just reaches 40 at chunk 5
+        mid = (lo + hi) / 2
+        lo, hi = (lo, mid) if (state_reach("short", (0, 3), 5, mid, 40) or 0) >= 40 else (mid, hi)
+    B = hi
+    assert state_reach("short", (0, 3), 5, B, 40) == 40
+    assert (state_reach("short", (), 40, B, 50) or 0) < 50  # the top chunk misses: a trigger
+    builds, caps, seen = [], [], []
+    real_build, real_cap = api.unstructured, mem._slice_capacity
+
+    def build(*a, **kw):
+        builds.append(kw.get("mode"))
+        return real_build(*a, **kw)
+
+    def cap(op_memory, pc64, *a, **kw):
+        caps.append((op_memory(6), pc64(6)))
+        return real_cap(op_memory, pc64, *a, **kw)
+
+    monkeypatch.setattr(api, "unstructured", build)
+    monkeypatch.setattr(mem, "_slice_capacity", cap)
+    monkeypatch.setattr(api, "si_band", stub_band({}))
+    spy_choose(monkeypatch, seen, pick=((0, 3), 5))
+    with pytest.warns(UserWarning, match="modes locked") as w:
+        _, _, info = run("short", (0.0, fband("short", 0, 46)[1]), n_modes=30, memory_budget=B,
+                         verify=False)  # fmt: skip
+    assert builds == ["otf"] and info["reason"] == "capacity"
+    assert info["levers"] == {"precond_dtype": "float32", "operator_options": {"mode": "otf"}}
+    mesh = prob("short")[0]
+    otf = mem._models(mesh, "consistent", "auto", "float64", {"mode": "otf"}, None)
+    assert caps == [(otf[0](6), otf[1](6))]
+    (msg,) = [str(x.message) for x in w if "modes locked" in str(x.message)]
+    hint = msg.split("levers:")[1]
+    assert "low_memory=True" in hint and "precond_dtype" not in hint and "otf" not in hint
+
+
+def test_levers_unmargined(fake_builds, monkeypatch):
+    """Test 2: n_modes 150 from 0 (needs 198 margined, 160 unmargined at chunk 5): at 1.2135e8
+    no state reaches 198 and {precond} reaches 160, searched from 160 (rule 1, unmargined); at
+    1.2e8 none reaches 160 (rule 2: no levers, "memory")."""
+    monkeypatch.setattr(api, "si_band", stub_band({}))
+    monkeypatch.setattr(api, "_solve", capacity_stop("short", list(range(30))))
+    f2 = fband("short", 0, 30)[1]
+    kw = dict(n_modes=150, tol=1e-7, verify=False, slice_options={"capacity": 96})
+    S4 = [(), (0,), (2,), (0, 2)]
+    assert all((state_reach("short", S, 5, 1.2135e8, 198) or 0) < 198 for S in S4)
+    assert state_reach("short", (0,), 5, 1.2135e8, 160) == 160
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        _, _, info = run("short", (0.0, f2), memory_budget=1.2135e8, **kw)
+    assert info["levers"] == {"precond_dtype": "float32"} and info["chunk"] == 5
+    assert all((state_reach("short", S, 5, 1.2e8, 160) or 0) < 160 for S in S4)
+    with pytest.warns(UserWarning, match="no LOBPCG chunk fits"):
+        _, _, info = run("short", (0.0, f2), memory_budget=1.2e8, **kw)
+    assert info["levers"] == {} and info["reason"] == "memory"
+
+
+def test_levers_real():
+    """Test 3: the {precond, low} budget with real builds ("short", AMG): one fp32 V-cycle (the
+    LOBPCG one, after the fp64 pre-estimate's); the band against eigsh."""
+    real, dtypes = api.amg, []
+
+    def amg(*a, **kw):
+        dtypes.append(kw.get("dtype"))
+        return real(*a, **kw)
+
+    api.amg = amg
+    try:
+        f2 = fband("short", 0, 30)[1]
+        lam, V, info = run("short", (0.0, f2), n_modes=30, tol=1e-7, memory_budget=B_PCLOW,
+                           verify=False)  # fmt: skip
+    finally:
+        api.amg = real
+    assert info["levers"] == {"precond_dtype": "float32", "low_memory": True}
+    assert info["reason"] == "fits" and dtypes[-1] == "float32"  # after the pre-estimate's
+    assert dtypes.count("float32") == 1
+    check("short", 0.0, f2, lam, V, info)
+
+
+def test_levers_no_fit(fake_builds, monkeypatch):
+    """Test 4: a budget below every state: "memory", no levers, the hints named; without a given
+    capacity below the slice floor the error names otf."""
+    monkeypatch.setattr(api, "si_band", stub_band({}))
+    f1, f2 = fband("short", 15, 25)
+    with pytest.warns(UserWarning, match="no LOBPCG chunk fits") as w:
+        _, _, info = run("short", (f1, f2), memory_budget=1.1e8, slice_options={"capacity": 96})
+    assert info["reason"] == "memory" and info["levers"] == {}
+    (msg,) = [str(x.message) for x in w if "levers:" in str(x.message)]
+    for h in ("precond_dtype='float32'", "low_memory=True", "operator_options={'mode': 'otf'}"):
+        assert h in msg
+    with pytest.raises(ValueError, match="smallest shift-invert slice.*'mode': 'otf'"):
+        run("short", (f1, f2), memory_budget=1e6)
+
+
+def test_levers_rows(fake_builds, monkeypatch):
+    """Test 5: the rows offered: low_memory given, tol 1e-7 (no basis row) against 1e-6, Jacobi
+    (no precond row), ssh8 and a given mode (no otf row); info["levers"] on every band path."""
+    monkeypatch.setattr(api, "si_band", stub_band({}))
+    f1, f2 = fband("short", 15, 25)
+    kw = dict(slice_options={"capacity": 96}, verify=False)
+
+    def rows(name, band, **k):
+        seen = []
+        spy_choose(monkeypatch, seen)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            out = run(name, band, **(kw | k))
+        return {i for S in seen[0] for i in S}, out[2]
+
+    assert rows("short", (f1, f2), memory_budget=1.1e8)[0] == {0, 2, 3}
+    assert rows("short", (f1, f2), memory_budget=1.1e8, tol=1e-6)[0] == {0, 1, 2, 3}
+    assert rows("short", (f1, f2), memory_budget=1.1e8, low_memory=True)[0] == {0, 3}
+    got = rows("short", (f1, f2), memory_budget=1.1e8, operator_options={"mode": "stored"})
+    assert got[0] == {0, 2}
+    fake_builds["name"] = "tiny"
+    assert rows("tiny", (0.0, 1e9), memory_budget=1e6, precond="jacobi")[0] == {2, 3}
+    shell = solid_shell(box_mesh((3, 3, 1), spacing=(1.0, 1.0, 0.1)), direction=(0, 0, 1))[0]
+    seen = []
+    spy_choose(monkeypatch, seen)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        solve_modes(shell, MAT, {"xmin": "xyz"}, band=(0.0, 1e9), memory_budget=1e6,
+                    precond="jacobi", tol=TOL, **kw)  # fmt: skip
+    assert {i for S in seen[0] for i in S} == {2}
+    fake_builds["name"] = "short"
+    # info["levers"] on every band path: fits, capacity, shift_invert
+    assert "levers" in run("short", (f1, f2), n_modes=10, verify=False)[2]
+    assert "levers" in run("short", (f1, f2), strategy="shift_invert", **kw)[2]
+    monkeypatch.setattr(api, "_solve", capacity_stop("short", list(range(30))))
+    with pytest.warns(UserWarning, match="modes locked"):
+        assert run("short", (f1, f2), **kw)[2]["levers"] == {}
+    with pytest.raises(ValueError, match="levers must be True or False"):
+        run("short", (f1, f2), levers=1)
+    with pytest.raises(ValueError, match="levers need band"):
+        solve_modes(prob("short")[0], MAT, MESHES["short"][1], n_modes=4, levers=False)
+
+
+def test_levers_basis(fake_builds):
+    """Test 5: at tol 1e-6 the fp32 basis row is offered and, when picked, V stays M-orthonormal
+    to 1e-5 ("short", f1 = 0, n_modes 30, the {precond, low} budget)."""
+    f2 = fband("short", 0, 30)[1]
+    lam, V, info = run("short", (0.0, f2), n_modes=30, tol=1e-6, memory_budget=B_PCLOW,
+                       verify=False)  # fmt: skip
+    assert "basis_dtype" in info["levers"]
+    M = prob("short")[4]
+    assert np.abs(V.T @ (M @ V) - np.eye(len(lam))).max() <= 1e-5
 
 
 def est(e, m, de=0, dm=0, he=0, hm=0):
@@ -1378,7 +1654,8 @@ def test_count_block_none(fake_builds, monkeypatch, verify):
 
 
 def test_solve_modes_memory_band():
-    with pytest.raises(ValueError, match="needs band=\\(0, f_max\\)"):
+    """PR 18e: f1 > 0 stays an error, naming the band=(0, f2) estimate."""
+    with pytest.raises(ValueError, match="needs band=\\(0, f2\\).*expected depth"):
         mem.solve_modes_memory(prob("short")[0], MESHES["short"][1], band=(1.0, 2.0))
 
 
@@ -1818,12 +2095,17 @@ def test_numpy_slice_ints(fake_builds, monkeypatch):
     assert type(seen["capacity"]) is int and type(seen["block"]) is int
 
 
-def test_forced_lobpcg_no_fit(fake_builds):
-    """Test 16: forced "lobpcg" with no chunk fitting raises before any build."""
+def test_forced_lobpcg_no_fit(fake_builds, monkeypatch):
+    """Test 16: forced "lobpcg" with no chunk fitting raises before any build (the operator's
+    too), with and without levers (none fits: all hints named)."""
+    builds = []
+    monkeypatch.setattr(api, "unstructured", lambda *a, **kw: builds.append(1))
     levers = "no LOBPCG chunk fits memory_budget.*low_memory=True.*strategy='shift_invert'"
-    with pytest.raises(ValueError, match=levers):
-        run("short", fband("short", 15, 25), strategy="lobpcg", memory_budget=1e6)
-    assert not fake_builds["builds"]
+    for lv in (False, True):
+        with pytest.raises(ValueError, match=levers) as e:
+            run("short", fband("short", 15, 25), strategy="lobpcg", levers=lv, memory_budget=1e6)
+        assert "precond_dtype='float32'" in str(e.value) and "'mode': 'otf'" in str(e.value)
+    assert not fake_builds["builds"] and not builds
 
 
 def test_given_chunk_no_fit(fake_builds, monkeypatch):
@@ -1833,7 +2115,7 @@ def test_given_chunk_no_fit(fake_builds, monkeypatch):
     B = chunk_need("short", 20) - 1
     assert c_max("short", 10, B) is not None  # a smaller chunk would fit: no ladder
     with pytest.warns(UserWarning, match="no LOBPCG chunk fits"):
-        _, _, info = run("short", fband("short", 15, 25), chunk=20, memory_budget=B,
+        _, _, info = run("short", fband("short", 15, 25), chunk=20, levers=False, memory_budget=B,
                          slice_options={"capacity": 96})  # fmt: skip
     assert info["reason"] == "memory" and info["c_max"] == {20: None}
 

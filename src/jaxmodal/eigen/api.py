@@ -3,6 +3,7 @@
 import dataclasses
 import functools
 import gc
+import itertools
 import math
 import numbers
 import time
@@ -83,6 +84,11 @@ STRATEGIES = ("auto", "lobpcg", "shift_invert")
 MU1_MARGIN = 1e-2  # the lam_lo < mu_1 rule's margin: max(MU1_MARGIN, 300 tol)
 STAGNATION_DEPTH = 1000  # locked modes at a capacity stop above which MINRES may stagnate
 SLICE_MIN = 96  # PR 15c's measured slice minimum at block 6: a smaller capacity warns
+# the memory levers a band solve may set (option, value, cost per iteration, Mac CPU), and the
+# cost of the ladder's chunks by position (top, first, second, third halving: eigensolvers.md)
+LEVERS = (("precond_dtype", "float32", 1.0), ("basis_dtype", "float32", 1.0),
+          ("low_memory", True, 1.6), ("mode", "otf", 3.0))  # fmt: skip
+CHUNK_COST = (1.0, 1.7, 2.2, 2.7)
 # Builder parameters solve_modes sets itself or through its own keywords (dtype: precond_dtype).
 RESERVED = {
     "unstructured": {"mesh", "materials", "orientations", "mass", "nodal_mass"},
@@ -302,6 +308,34 @@ def _ladder(reach, need):
     return max(c for c, r in fit.items() if r >= 0.9 * best)
 
 
+def _choose(reach, needs, chunks):
+    """(S, chunk) of the memory levers, or None (no levers): reach = {S: {chunk: C_max or None}}
+    over the subsets S (sorted LEVERS row indices); needs = [margined, unmargined] {S: {chunk:
+    columns}} of a known depth, [] if unknown. Known depth: the cheapest (S, chunk) reaching the
+    margined, else the unmargined need; unknown: per S the ladder's chunk and its reach r(S),
+    the cheapest S with r(S) >= 0.95 max r. Cost: CHUNK_COST of the chunk's ladder position
+    times the rows' costs; ties to fewer levers, a larger reach, then the row indices."""
+    pos = {c: CHUNK_COST[min(i, len(CHUNK_COST) - 1)] for i, c in enumerate(chunks)}
+
+    def key(S, c, r):
+        return pos[c] * math.prod(LEVERS[i][2] for i in S), len(S), -r, S
+
+    for nd in needs:
+        ok = [(key(S, c, r), c) for S, rc in reach.items() for c, r in rc.items()
+              if r is not None and r >= nd[S][c]]  # fmt: skip
+        if ok:
+            k, c = min(ok)
+            return k[3], c
+    if needs:
+        return None
+    used = {S: (c, rc[c]) for S, rc in reach.items() if (c := _ladder(rc, None)) is not None}
+    if not used:
+        return None
+    best = max(r for _, r in used.values())
+    k, c = min((key(S, c, r), c) for S, (c, r) in used.items() if r >= 0.95 * best)
+    return k[3], c
+
+
 def _keep(lam, t, lam_lo, n_band):
     """i0: the band filter's range [i0, n_band) of the ascending lam (thresholds t, per mode or one
     value): from the first mode >= lam_lo (1 - 100 t) (len(lam) if none), extended down over
@@ -336,7 +370,7 @@ def solve_modes(
     basis_dtype="float64", low_memory=False, precond="auto", sigma=None,
     precond_dtype="float64", X0=None, operator_options=None, precond_options=None,
     sigma_options=None, band=None, verify=None, count_options=None, strategy="auto",
-    memory_budget=None, slice_options=None, polish_options=None,
+    memory_budget=None, slice_options=None, polish_options=None, levers=True,
 ):  # fmt: skip
     """Lowest n_modes elastic modes of mesh under the Dirichlet sets bcs (see dof_mask).
 
@@ -365,17 +399,22 @@ def solve_modes(
     the expected count (f1 = 0: the basis and the ladder's top chunk, chunk default min(40,
     ceil(1.25 n_modes) + 2); f1 > 0: the slice store, chunk default 40). verify: True runs the
     completeness count(s), False only predicts the cost, None (default) counts when predicted to
-    cost no more than the solve; count_options (COUNT_OPTIONS) go to count. V is the solver's
-    own array compacted in place. info adds band, strategy, reason, chunk, c_max, budget, mu1_ub,
-    n_store, from_zero, stagnation_risk, count, and LOBPCG's n_beyond, capacity, t_iteration
-    or si_band's slices (docs/eigensolvers.md#interior-bands-and-strategy)."""
+    cost no more than the solve; count_options (COUNT_OPTIONS) go to count. levers: when no
+    LOBPCG chunk fits or the top chunk misses a known depth, set the memory levers at their
+    defaults (LEVERS: fp32 V-cycle, fp32 basis at tol >= 1e-6, low_memory, the on-the-fly
+    operator) by _choose; False keeps the options as given. A slice capacity error raises with
+    err.result = (lam, V, info) of the band so far. V is the solver's own array compacted in
+    place. info adds band, strategy, reason, levers (the options set), chunk, c_max, budget,
+    mu1_ub, n_store, from_zero, stagnation_risk, count, and LOBPCG's n_beyond, capacity,
+    t_iteration or si_band's slices and complete_to, complete_to_hz
+    (docs/eigensolvers.md#interior-bands-and-strategy)."""
     if band is None:
         if n_modes is None:
             raise ValueError("pass n_modes or band")
         if verify is not None or count_options:
             raise ValueError("verify and count_options need band")
-        if strategy != "auto" or memory_budget is not None or slice_options:
-            raise ValueError("strategy, memory_budget and slice_options need band")
+        if strategy != "auto" or memory_budget is not None or slice_options or not levers:
+            raise ValueError("strategy, memory_budget, slice_options and levers need band")
     else:
         f1, f2 = check_band(band)
         for name, x in (("n_modes", n_modes), ("chunk", chunk)):
@@ -390,6 +429,8 @@ def solve_modes(
         raise ValueError(
             f"memory_budget must be a finite number of bytes > 0, got {memory_budget!r}"
         )
+    if not isinstance(levers, bool):
+        raise ValueError(f"levers must be True or False, got {levers!r}")
     if verify not in (None, True, False):
         raise ValueError(f"verify must be None, True or False, got {verify!r}")
     cn_opts = _check_options("count", count_options, COUNT_OPTIONS)
@@ -419,10 +460,108 @@ def solve_modes(
 
     # before the build: a GPU pool's bytes_in_use would count the operator a second time
     budget, host_budget = mem._default_budget(memory_budget) if band is not None else (None, None)
+    R = rigid_modes(mesh, free)
+    k, choice = R.shape[1], {}
+    if band is not None:  # the ladder and the levers: before the build, which uses their options
+        lam_lo, lam_hi = (2 * np.pi * f1) ** 2, (2 * np.pi * f2) ** 2
+        n, n_avail = len(free), int(free.sum()) - k
+        if memory_budget is not None:
+            budget = float(memory_budget)
+        est_cache = {}
+
+        def models(dtype, ops=None, po=None):  # the estimators, cached per options
+            ops, po = op_opts if ops is None else ops, po_opts if po is None else po
+            key = (dtype, repr(sorted(ops.items())), repr(sorted(po.items())))
+            if key not in est_cache:
+                fs = mem._models(mesh, mass, precond, dtype, ops, pc_opts, po)
+                est_cache[key] = [f and functools.cache(f) for f in fs]
+            return est_cache[key]
+
+        def rows(hint=False):  # the LEVERS rows still at their defaults (applicable unless hint)
+            ok = (precond != "jacobi" and precond_dtype == "float64",
+                  basis_dtype == "float64" and (hint or tol >= 1e-6), not low_memory,
+                  not voxel and "ssh8" not in mesh.blocks and "mode" not in op_opts)  # fmt: skip
+            return [i for i, x in enumerate(ok) if x]
+
+        def state(S):  # the current options with the LEVERS rows S applied
+            o = dict(precond_dtype=precond_dtype, basis_dtype=basis_dtype, low_memory=low_memory,
+                     op_opts=op_opts)  # fmt: skip
+            for i in S:
+                key, val, _ = LEVERS[i]
+                o.update({"op_opts": {**op_opts, key: val}} if key == "mode" else {key: val})
+            return o
+
+        def c_max(c, o=None, pc_m=None, start=None):  # at chunk c, state o (default the current)
+            o = o or state(())
+            op_m, pc_o = models(o["precond_dtype"], o["op_opts"])
+            start = need and need.get(c) if start is None else start
+            return mem._c_max(op_m, pc_m or pc_o, n, chunk=c, guards=guards, low=o["low_memory"],
+                              basis_dtype=o["basis_dtype"], n_rigid=k, n_avail=n_avail,
+                              budget=budget, host_budget=host_budget, need=start)  # fmt: skip
+
+        def _lever_hint(c):  # the memory levers not set, with their C_max at chunk c
+            out = []
+            for i in rows(hint=True):
+                key, val, _ = LEVERS[i]
+                txt = "operator_options={'mode': 'otf'}" if key == "mode" else f"{key}={val!r}"
+                out.append(f"{txt} (C_max {c_max(c, state((i,)))})")
+            # a polish term (every AMG family) can set the step, so low_memory alone saves
+            # little there; its presence does not depend on m
+            pc_c = models(precond_dtype)[1]
+            if pc_c is not None and "polish" in pc_c(1):
+                off = models(precond_dtype, po={"on": False})[1]
+                out.append(f"polish_options={{'on': False}} (C_max {c_max(c, pc_m=off)})")
+            return ", ".join(out)
+
+        def need_of(low, margin=True):  # a known depth's columns per chunk, capped by free space
+            out = {}
+            for c in chunks:
+                kc = _block_size(c, c, guards)[2]
+                cl = _capacity(0, c, kc, low)[0]
+                want = math.ceil(1.25 * n_modes) + kc if margin else n_modes + kc
+                out[c] = min(want, -(-(n_avail + kc) // cl) * cl)
+            return out
+
+        reach, ch, need = {}, None, None
+        if strategy != "shift_invert":
+            top = band_defaults(n_modes if f1 == 0 else None, chunk, guards, n_avail)[1]
+            chunks = [chunk] if chunk is not None else _halvings(top)
+            known = f1 == 0 and n_modes is not None
+            if known:
+                need = need_of(low_memory)
+            reach = {c: c_max(c) for c in chunks}
+            ch = _ladder(reach, need)
+            trigger = ch is None or (known and (reach[chunks[0]] or 0) < need[chunks[0]])
+            if levers and trigger and rows():
+                subsets = [S for j in range(len(rows()) + 1)
+                           for S in itertools.combinations(rows(), j)]  # fmt: skip
+                needs = [{S: need_of(state(S)["low_memory"], mg) for S in subsets}
+                         for mg in (True, False)] if known else []  # fmt: skip
+                reach_s = {S: {c: c_max(c, state(S), start=needs[1][S][c] if known else None)
+                               for c in chunks} for S in subsets}  # fmt: skip
+                pick = _choose(reach_s, needs, chunks)
+                if pick is not None:
+                    S, ch = pick
+                    o = state(S)
+                    precond_dtype, basis_dtype = o["precond_dtype"], o["basis_dtype"]
+                    low_memory, op_opts = o["low_memory"], o["op_opts"]
+                    reach, need = reach_s[S], need_of(low_memory) if known else None
+                    for i in S:
+                        key, val, _ = LEVERS[i]
+                        choice["operator_options" if key == "mode" else key] = (
+                            {"mode": val} if key == "mode" else val
+                        )
+            if ch is None and strategy == "lobpcg":
+                raise ValueError(
+                    f"no LOBPCG chunk fits memory_budget = {budget:.4g} bytes (C_max {reach}):"
+                    f" raise memory_budget, or pass {_lever_hint(min(reach))}, or"
+                    " strategy='shift_invert'"
+                )  # fmt: skip
+        op_memory, pc = models(precond_dtype)
+        pc64 = models("float64")[1] if precond_dtype == "float32" else pc
     op = build(mesh, materials, orientations, mass=mass, nodal_mass=nodal_mass, **op_opts)
     t0 = time.perf_counter()
-    aggs, R = None, jnp.asarray(rigid_modes(mesh, free))
-    k = R.shape[1]
+    aggs, R = None, jnp.asarray(R)
     if k:
         R = m_orthonormalize(R, op.apply_M(R))  # consumes its first argument
     Rd = R if k else None
@@ -478,59 +617,9 @@ def solve_modes(
         return lam, V, info
 
     # ---------------------------------------------------------------- a band (f1, f2)
-    lam_lo, lam_hi = (2 * np.pi * f1) ** 2, (2 * np.pi * f2) ** 2
-    n, n_avail = op.n_dof, int(free.sum()) - k
-    if memory_budget is not None:
-        budget = float(memory_budget)
-
-    def models(dtype, ops=op_opts, po=po_opts):  # the estimators, cached per call
-        return [f and functools.cache(f) for f in
-                mem._models(mesh, mass, precond, dtype, ops, pc_opts, po)]  # fmt: skip
-
-    op_memory, pc = models(precond_dtype)
-    pc64 = models("float64")[1] if precond_dtype == "float32" else pc
-
-    def c_max(c, low=low_memory, dtype=basis_dtype, op_m=None, pc_m=None):
-        return mem._c_max(op_m or op_memory, pc_m or pc, n, chunk=c, guards=guards, low=low,
-                          basis_dtype=dtype, n_rigid=k, n_avail=n_avail, budget=budget,
-                          host_budget=host_budget, need=need and need.get(c))  # fmt: skip
-
-    def levers(c):  # the memory levers not set, with their C_max at chunk c
-        out = [f"low_memory=True (C_max {c_max(c, low=True)})"] if not low_memory else []
-        # a polish term (every AMG family) can set the step, so low_memory alone saves
-        # little there; its presence does not depend on m
-        if pc is not None and "polish" in pc(1):
-            off = models(precond_dtype, po={"on": False})[1]
-            out.append(f"polish_options={{'on': False}} (C_max {c_max(c, pc_m=off)})")
-        if basis_dtype != "float32":
-            out.append(f"basis_dtype='float32' (C_max {c_max(c, dtype='float32')})")
-        if precond != "jacobi" and precond_dtype != "float32":
-            out.append(f"precond_dtype='float32' (C_max {c_max(c, pc_m=models('float32')[1])})")
-        if not voxel and "ssh8" not in mesh.blocks and op_opts.get("mode") != "otf":
-            otf = models(precond_dtype, op_opts | {"mode": "otf"})[0]
-            out.append(f"operator_options={{'mode': 'otf'}} (C_max {c_max(c, op_m=otf)})")
-        return ", ".join(out)
-
-    reach, ch, need = {}, None, None
-    if strategy != "shift_invert":
-        top = band_defaults(n_modes if f1 == 0 else None, chunk, guards, n_avail)[1]
-        chunks = [chunk] if chunk is not None else _halvings(top)
-        if f1 == 0 and n_modes is not None:  # the known depth: n_modes, at most the free space
-            need = {}
-            for c in chunks:
-                kc = _block_size(c, c, guards)[2]
-                cl = _capacity(0, c, kc, low_memory)[0]
-                need[c] = min(math.ceil(1.25 * n_modes) + kc, -(-(n_avail + kc) // cl) * cl)
-        reach = {c: c_max(c) for c in chunks}
-        ch = _ladder(reach, need)
-        if ch is None and strategy == "lobpcg":
-            raise ValueError(
-                f"no LOBPCG chunk fits memory_budget = {budget:.4g} bytes (C_max {reach}): raise"
-                f" memory_budget, or pass {levers(min(reach))}, or strategy='shift_invert'"
-            )
     out = dict(band=(f1, f2), strategy="lobpcg", reason="forced" if strategy != "auto" else "fits",
                chunk=ch, c_max=reach, stagnation_risk=False, budget=(budget, host_budget),
-               mu1_ub=None, n_store=None, from_zero=False)  # fmt: skip
+               mu1_ub=None, n_store=None, from_zero=False, levers=choice)  # fmt: skip
     # the sigma pre-estimate, the in-band locked count (sizes n_store), LOBPCG's time, its stop
     pre, L, t_lob, stopped, err = None, 0, None, None, None
     if ch is not None:
@@ -562,7 +651,7 @@ def solve_modes(
                 raise ValueError(
                     f"LOBPCG reached its basis cap C_max = {reach[ch]} at {depth} locked modes"
                     f" below f2: raise memory_budget (now {budget:.4g} bytes), or pass"
-                    f" {levers(ch)}, or strategy='shift_invert' or 'auto'"
+                    f" {_lever_hint(ch)}, or strategy='shift_invert' or 'auto'"
                 )  # fmt: skip
             L = depth - _keep(lam, info["thresholds"], lam_lo, depth)
             out["mu1_ub"] = min(float(lam[0]), math.inf if pre is None else pre)
@@ -574,7 +663,7 @@ def solve_modes(
                 f"LOBPCG stopped at its basis cap C_max = {reach[ch]} with {depth} modes locked"
                 f" below f2: the band continues with shift-invert slices"
                 + (" (MINRES may stagnate at this depth)" if risk else "")
-                + f"; levers: {levers(ch)}", stacklevel=2,
+                + f"; levers: {_lever_hint(ch)}", stacklevel=2,
             )  # fmt: skip
     if ch is not None and stopped != "capacity":  # LOBPCG reached the band's end
         nb, n_eff, m = info.pop("n_band"), info.pop("n_modes"), info.pop("block")
@@ -613,7 +702,7 @@ def solve_modes(
                 out["reason"] = "memory"
                 warnings.warn(
                     f"no LOBPCG chunk fits memory_budget = {budget:.4g} bytes: the band is solved"
-                    f" by shift-invert slices; levers: {levers(min(reach))}", stacklevel=2,
+                    f" by shift-invert slices; levers: {_lever_hint(min(reach))}", stacklevel=2,
                 )  # fmt: skip
         out["strategy"] = "shift_invert"
         if f1 > 0 and out["mu1_ub"] is None:  # no LOBPCG bound: the pre-estimate
@@ -635,7 +724,9 @@ def solve_modes(
                 raise ValueError(
                     f"the smallest shift-invert slice does not fit memory_budget = {budget:.4g}"
                     " bytes: raise memory_budget"
-                )
+                    + ("" if voxel or "ssh8" in mesh.blocks or op_opts.get("mode") == "otf"
+                       else ", or pass operator_options={'mode': 'otf'}")
+                )  # fmt: skip
             if C < SLICE_MIN:
                 warnings.warn(
                     f"slice capacity {C} is below {SLICE_MIN} columns (memory_budget"

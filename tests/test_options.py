@@ -550,10 +550,11 @@ def test_option_sets_pinned():
     )
     assert params(count) - api.RESERVED["count"] - {"_steps", "_predict"} == set(api.COUNT_OPTIONS)
     # slice_options: si_band's own minus what solve_modes sets, plus si_slice's inner options
+    # (stag_tau is si_band's own)
     band_set = {"op", "free", "lo", "hi", "make", "R", "verify", "count_options", "tol", "seed",
                 "n_store", "slice_options"}  # fmt: skip
     slice_set = {"op", "free", "lo", "hi", "precond", "capacity", "sigma", "R", "W", "lam_W",
-                 "tol", "block", "seed", "verbose"}  # fmt: skip
+                 "tol", "block", "seed", "verbose", "stag_tau"}  # fmt: skip
     inner = params(SI.si_slice) - slice_set
     assert inner == {"tau", "maxit_inner"}
     assert (params(SI.si_band) - band_set) | inner == set(api.SLICE_OPTIONS)
