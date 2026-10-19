@@ -1868,11 +1868,11 @@ def test_band_max_fields(monkeypatch):
 
 
 def test_band_rejects_sigma(monkeypatch):
-    """sigma and count_precond are set per slice: rejected."""
+    """sigma, count_precond and stag_tau are set per slice: rejected."""
     fake_band(monkeypatch, found)
     lr = prob("short")[6]
     lo, hi = edges(lr, 3, 16)
-    for kw in (dict(sigma=12.0), dict(count_precond="P")):
+    for kw in (dict(sigma=12.0), dict(count_precond="P"), dict(stag_tau=1e-8)):
         with pytest.raises(ValueError, match="sets .* per slice"):
             fband("short", lo, hi, **kw)
 

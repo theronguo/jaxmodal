@@ -1480,6 +1480,9 @@ def test_levers_no_fit(fake_builds, monkeypatch):
         assert h in msg
     with pytest.raises(ValueError, match="smallest shift-invert slice.*'mode': 'otf'"):
         run("short", (f1, f2), memory_budget=1e6)
+    with pytest.raises(ValueError, match="smallest shift-invert slice") as e:  # otf given
+        run("short", (f1, f2), memory_budget=1e6, operator_options={"mode": "otf"})
+    assert "'mode': 'otf'" not in str(e.value)
 
 
 def test_levers_rows(fake_builds, monkeypatch):

@@ -260,7 +260,7 @@ def _grow(V, count, new, c, dtype):
     """A zero (n, new) basis of dtype holding the host V's first up(count, c) columns, copied in
     chunks of c (each synchronised before the next, so transfers do not pile up). A chunk of the
     F-order V goes as its C-order transpose (a view: no host copy; on the CPU the device array
-    may alias V, which _solve never resizes)."""
+    may alias V, which _solve never resizes; solve_modes collects before its resize)."""
     B = jnp.zeros((V.shape[0], new), dtype)
     for i in range(0, -(-count // c) * c, c):
         B = _insert_t(B, jax.device_put(V[:, i : i + c].T), jnp.int32(i))
