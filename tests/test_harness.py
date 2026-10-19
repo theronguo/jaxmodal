@@ -181,3 +181,16 @@ def test_system_info(tmp_path):
     else:
         assert 10 <= ct["gbps"] <= 2000
         assert data["c_triad_ratio"] == pytest.approx(ct["gbps"] / data["triad_gbps"])
+
+
+@pytest.mark.parametrize("large_cache", [False, True])
+def test_large_cache_env(monkeypatch, large_cache):
+    """PR 18d: an inherited MallocLargeCache never reaches the child; large_cache=True leaves it
+    unset (macOS's default cache), False sets "0" (measure and measure_json)."""
+    monkeypatch.setenv("MallocLargeCache", "1")
+    want = None if large_cache else "0"
+    assert harness.child_env(large_cache).get("MallocLargeCache") == want
+    code = "import json, os; v = os.environ.get('MallocLargeCache')"
+    got = harness.measure_json(code + "; json.dump(dict(v=v), open('{out}', 'w'))",
+                               large_cache=large_cache)  # fmt: skip
+    assert got["v"] == want
