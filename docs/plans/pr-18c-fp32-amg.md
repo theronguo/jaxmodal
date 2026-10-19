@@ -37,6 +37,34 @@ estimate is ≥ 2 GB"). The rest of the roadmap's PR 18c moves to new parts (bel
   - **Docs:** a grep rule for every 18c / 18d / 18e retag, and the fp32 statements that
     become false.
   - **Benchmark run times** corrected; `steps` split in two; a `peaks` part added.
+- **Revision 3 (plan review round 2; all 5 not satisfied, none blocking):**
+  - **Step terms:**
+    - Fitted by 18b's linear-programming procedure, not by ratios. A whole-term ratio
+      grows with $n$, because fp32 shrinks the constant more than the slope. Its grid
+      maximum would undershoot the held-out points (hex20 low at 1.7M: 0.886 against 0.879
+      at the grid top) and overshoot the small-$n$ gate.
+    - Storage keeps one ratio per family; that term is proportional to $n_c$.
+    - The "0.04–0.10 spread" claim is withdrawn.
+  - **Reuse:**
+    - A separate `reuse` builder is used only by `_precond_sigma`, LOBPCG's build and the
+      counts. `make` and the slices are untouched, so a slice can never create aggregates.
+    - Lifetime checks at the entry of LOBPCG's main solve and of `si_band`.
+  - **Casts:** `chebyshev()` forces `lmax` and `ratio` to fp64, so `amg` replaces them
+    after construction. The p-level (level 0) gets its smoother cast with `A` kept.
+    `_level`'s finiteness check runs after the cast.
+  - **Hex polish:** measured with `shell_solve_study.polish` in `steps_hex`.
+  - **Tests:**
+    - `test_band`'s λ_c-build marker, now a `_solve` wrapper;
+    - `test_defaults_snapshot` added;
+    - fp32 cases in the reuse and band-count tests;
+    - the `solve_modes_memory` dtype passthrough;
+    - the test 9 upper ratio;
+    - markers.
+  - **Docs:** the retag lists completed (open_items' 18c entries, the ROADMAP headings,
+    `:18`, `:184`, `:627`); citations corrected (`ap_operator` is in
+    `boundary_conditions.md`); the `si_slice` fp32 refusal now names AMG.
+  - **Dependencies:** 18d ← 5, 6, 11, 13, 15d, 18b; 18f ← 18a–18e. The benchmark parts go
+    from 10 to 8.
 
 ## The PR 18c split (decision without user input, logged)
 
@@ -53,14 +81,19 @@ code it touches, as 18a split PR 18:
 | 18f | `pr-18f-calculix` | the old 18e (CalculiX comparison) |
 
 The band-path follow-ups go with the band PR because both rewrite the same functions
-(`si_band`, `si_checked`, the LOBPCG growth). The dependency table becomes:
+(`si_band`, `si_checked`, the LOBPCG growth). The later parts are renumbered rather than
+appended, so the CalculiX comparison stays last and runs on the finished performance pass.
+The dependency table becomes:
 - 18c ← 11, 12, 13, 18b (unchanged);
-- 18d ← 5, 6, 18b (no code dependency on 18c; it can start after 18b);
-- 18e ← 14b, 15d, 18b (the old 18d's row);
-- 18f ← 18e (the old "18e ← 18a–18d");
+- 18d ← 5, 6, 11, 13, 15d, 18b: Morton touches the operators, and the follow-ups touch
+  PR 11 / 13 / 15d / 18a code. There is no code dependency on 18c, but both edit
+  `precond/amg.py` / `schwarz.py`, so whichever merges second rebases;
+- 18e ← 15d, 18b (the old 18d's row);
+- 18f ← 18a–18e (the old "18e ← 18a–18d": CalculiX last);
 - 19 ← 17, 18a–18e (was 18a–18d).
 
-`:627`'s "Split into five parts" becomes six (2026-10-19, this plan).
+`:627`'s "Split into five parts … 18c and 18d after 18b; 18e last" becomes "six parts
+(2026-10-19, the PR 18c plan) … 18c, 18d and 18e after 18b; 18f last".
 
 ## Goal (18c)
 
@@ -124,8 +157,24 @@ AMG is small next to its stored-Ke operator, which stays fp64 because LOBPCG sha
 | hex8 $32^3$ | 15 / 25 / 60 | 13.3 / 10.7 / 8.3 → 8.2 / 6.9 / 5.7 | 17.3 / 14.5 / 12.1 → 12.2 / 10.8 / 9.6 |
 | plate $128^2$ | 15 / 25 / 60 | 16.2 / 14.0 / 12.0 → 9.0 / 8.0 / 7.1 | 20.2 / 18.0 / 16.0 → 13.5 / 12.5 / 11.6 |
 
-fp32 saves 1.3–7 blocks. Within one term the ratio fp32 / fp64 varies by only 0.04–0.10
-across $m$ and $n$, which is what makes one ratio per term enough (below).
+fp32 saves 1.3–7 blocks.
+
+The ratio fp32 / fp64 of a whole term is not constant (review round 2, compile only, against
+the fp64 models). It grows with $n$: fp32 shrinks the $n$-independent part ($K$, $K_0$) much
+more than the slope.
+- **Hex, low step:**
+  - hex8 $m$ = 25: 0.51 / 0.71 / 0.77 at 47k / 207k / 556k DOF;
+  - hex20 $m$ = 120: 0.70 / 0.80 / 0.85; slope ratio 0.90.
+- **Shell, flat $128^2$ → $256^2$ at $m$ = 120:** 9-block 0.15 → 0.43, low 0.51 → 0.69,
+  polish 0.73 → 0.83.
+
+The hex20 9-block $K$ even rises: 71 MB fp32 against 33 MB fp64 at $m$ = 25. So the step
+terms are refitted with their own constant (below), and only storage, which is proportional
+to $n_c$, takes a ratio.
+
+**fp64 hex at $m$ = 120 (found in review):** the fp64 hex8 9-block extra is 3.2% above
+`AMG_STEP` at $40^3$ (1279 against 1240 MB, about 1% of the whole step). The fp64 hex fit
+used $m$ = 15 / 25 only. Logged; the fp64 constants stay (18c does not refit fp64).
 
 The **polish**'s PCG keeps fp64 vectors, so with fp32 AMG it exceeds the fp32 step on hex
 (review round 1, totals in blocks):
@@ -190,10 +239,19 @@ fp64. The voxel `Stencil` already follows the vector's dtype.
     `_invert` casts each chunk and checks finiteness after the cast.
   So no level exists in fp64 on the device.
 - **Computed in fp64, then cast:**
-  - the node-block Jacobi inverses and their mask (small);
-  - the p-level `NodalTransfer` weights;
-  - Chebyshev's `lmax` and `ratio`. `lmax_estimate` runs on the stored, fp32-valued
-    operator with fp64 vectors, so the estimate is of the operator actually applied.
+  - **The node-block Jacobi inverses and their mask** (small). `_level`'s finiteness check
+    runs on the cast inverses.
+  - **The p-level `NodalTransfer` weights.**
+  - **Chebyshev's `lmax` and `ratio`.** `chebyshev()` stores them as fp64 (`chebyshev.py:96–98`),
+    and an fp32 cycle with fp64 scalars fails to trace (scan carry fp32 → fp64; review
+    round 2). So `amg` replaces them with fp32 copies after construction
+    (`dataclasses.replace(S, lmax=..., ratio=...)`, as `gmg._to32`).
+    - On assembled levels `lmax_estimate` runs on the stored, fp32-valued operator with fp64
+      vectors.
+    - On the p-level, `pmg._p_level` (shared with `pmg`) builds its Chebyshev with the fp64
+      node-block Jacobi. `amg` then casts that level's `precond` (inverses and mask), `lmax`
+      and `ratio` and keeps `A`, so its `lmax` is of the fp64 smoother. The difference is
+      about $10^{-7}$ relative, far below the 1.1 safety factor.
 - **Stays fp64:**
   - the fine level's `APOperator` (`levels[0][0]` and `levels[0][1].A`; the operator LOBPCG
     shares, through the cast above);
@@ -227,13 +285,25 @@ fp64. The voxel `Stencil` already follows the vector's dtype.
 
 ### σ-round reuse (`eigen/api.py`)
 
-- **Mechanism:** `make` keeps the aggregates of the first AMG build in a closure variable,
-  that build made with `return_aggregates=True`. While the variable is set, every later AMG
-  build passes `aggregates=`:
-  - the σ rounds of `_precond_sigma`;
-  - LOBPCG's build;
-  - the band counts.
-  `lobpcg_precond`'s `return_aggregates=True` special case goes away.
+- **Mechanism:** `make` is unchanged, and the slices keep calling it, so a slice build never
+  asks for aggregates. A small `reuse` builder beside it holds `aggs` in the enclosing
+  scope:
+  ```python
+  def reuse(s, **kw):  # sigma rounds, LOBPCG's build: one aggregation (exact, only values change)
+      nonlocal aggs
+      if precond != "amg":
+          return make(s, **kw)
+      if aggs is None:
+          P, aggs = make(s, return_aggregates=True, **kw)
+          return P
+      return make(s, aggregates=aggs, **kw)
+  ```
+  Who uses what:
+  - `_precond_sigma` gets `reuse`;
+  - `lobpcg_precond` becomes `reuse(s, dtype=precond_dtype)` (GMG: `dtype` as today) and
+    returns `aggs`;
+  - the counts keep today's `make(s, aggregates=aggs)` lambda (`:587`).
+  So the `return_aggregates=True` special case goes away.
 - **Exact:** reuse keeps the topology (pattern, tentative prolongators and candidates, fibers,
   frames) and recomputes every value-dependent part ($A_b$, the smoothed $P$, the Galerkin
   products, the smoothers). Aggregation does not depend on σ:
@@ -241,16 +311,16 @@ fp64. The voxel `Stencil` already follows the vector's dtype.
   - shell: fibers and frames from the geometry and `Ab.indices`.
   A reused build at a new σ equals a fresh one (PR 13b's and 18a's reuse tests; bitwise in
   review round 1).
-- **Lifetime:** the variable is cleared:
+- **Lifetime:** `aggs = None`, plain lines at:
   - **plain solves:** right after LOBPCG's preconditioner is built, so the host holds no
     aggregates during the iterations;
   - **band mode:** where `aggs` is released today (`:555`, before the slices after a
-    capacity stop, and `:589`, after the counts), so the slices never see them and
-    `si_memory` / `_slice_capacity` need no new term;
-  - **the no-chunk slice path** (`:594–611`): after its σ pre-estimate, before `si_band`, so
-    reuse there covers the σ rounds only;
-  - **counts:** they keep receiving the aggregates as today. The probe budget already
-    subtracts `_nbytes(aggs)`.
+    capacity stop, and `:589`, after the counts);
+  - **the no-chunk slice path** (`:594–611`): right after its `_precond_sigma` returns,
+    before `si_band`, so reuse there covers the σ rounds only.
+  Since the slices use `make`, they never hold aggregates, and `si_memory` /
+  `_slice_capacity` need no new term. The counts keep receiving the aggregates as today, and
+  the probe budget already subtracts `_nbytes(aggs)`.
 - **SingularShiftError:** `build(0.0)` raises before any work (`pmg._check`). The first
   successful build, at the `sigma_estimate` bound, then makes the aggregates.
 - **Memory:** in plain mode the σ rounds hold the aggregates during a reused build. That
@@ -268,28 +338,35 @@ fp64. The voxel `Stencil` already follows the vector's dtype.
     - the `NodalTransfer` tables: 12 → 8 B per entry;
   - shell: `schwarz.nbytes(sizes, dtype)`;
   - the coarsest factor stays $8\,n_c^2$.
-- **Fitted parts, fp32: one ratio per term (`FP32` in `memory.py`).** Each fp32 term is
-  $\rho \times$ its fp64 term. $\rho$ is the maximum, over the fit grid, of measured fp32 /
-  fp64 model. That makes it an upper bound on every fit point by construction.
-  - **Storage:** $\rho$ per family (hex8, p, shell) on the fitted part, i.e. beyond the
-    exact parts and the coarse factor. `AMG_STORAGE[fam]` times $n_c$; for the shell the
-    `SHELL_STORAGE` sum. Grid: the 13b storage cases (hex20 $8^3$–$44^3$, hex27
-    $6^3$–$24^3$, hex8 $12^3$–$68^3$) and 18b's `STORAGE` cases.
-  - **Steps:** $\rho$ per key on the whole fp64 term:
-    - hex: (hex8, p) × (9-block, low), the `AMG_STEP` term $8n(am + c) + 8mK$; the target
-      is the extra over the Jacobi step, as for fp64;
-    - shell: 9-block, low, polish, the `SHELL_STEP` term $8n(am + c) + K_0$; the target is
-      net of `STEP_FIT`, the polish with the low $f$, as 18b.
-  - **Hex polish (new, fp32 only):** `polish` = $\rho_\text{hp} \times$ the fp64 hex 9-block
-    term. $\rho_\text{hp}$ is the maximum of the measured polish net of `STEP_FIT`'s low
-    $f\cdot ws$, divided by that term. So `lobpcg_memory`'s existing `"polish" in pc`
-    branch takes it. fp64 hex keeps no polish term (its polish stays below the step).
+- **Storage, fp32: one ratio per family** (`STORAGE32 = {"hex8": ..., "p": ..., "shell": ...}`).
+  - The fitted part (`AMG_STORAGE[fam]` × $n_c$; for the shell the `SHELL_STORAGE` sum) is
+    multiplied by $\rho$. $\rho$ is the maximum over the grid of the fp32 owned bytes
+    beyond the exact parts and the coarse factor, divided by the fp64 fitted part.
+  - The term is proportional to $n_c$, with no constant, so a ratio is the right form.
+  - Grid: the 13b storage cases (hex20 $8^3$–$44^3$, hex27 $6^3$–$24^3$, hex8
+    $12^3$–$68^3$) and 18b's `STORAGE` cases.
+- **Steps, fp32: refitted by 18b's procedure** (`AMG_STEP[(fam, key, "float32")]`,
+  `SHELL_STEP[(key, "float32")]`; the fp64 entries are unchanged).
+  - The fit is an upper envelope by linear programming, with $c$ and $K$ / $K_0$ ≥ 0 so it
+    cannot undershoot when extrapolating in $n$. The result is rounded up with $c$ + 0.5.
+    The fit code is `shell_solve_study.fit`, generalized to take the target array.
+  - **Hex** ((hex8, p) × (9-block, low)): the term is $8n(am + c) + 8mK$; the target is the
+    extra over the Jacobi step, as for fp64.
+  - **Hex polish (new, fp32 only):** the term is $8n(am + c) + 8mK$, fitted to the measured
+    polish net of `STEP_FIT`'s low $f\cdot ws$, as the shell polish. `lobpcg_memory`'s
+    existing `"polish" in pc` branch takes it. A separate key, rather than folding the
+    polish into the 9-block fit: `low_memory=True` solves take max(low, polish), so a
+    polish folded into the 9-block term would be lost there. fp64 hex keeps no polish term
+    (its polish stays below the step, `test_hex_polish_below_step`).
+  - **Shell** (9-block, low, polish): the term is $8n(am + c) + K_0$; the target is net of
+    `STEP_FIT`, the polish with the low $f$, as 18b.
   - **Grids:**
-    - hex: the 13b step sizes, at $m$ = 6, 15, 25, 60, 120, compile only above 400k DOF;
-    - shell: 18b's `FIT` cases and $m$ grid ($m$ = 6–120, 25k–1.58M DOF) plus `EXTRA`.
-    The shell measurement takes `shell_solve_study.measure`'s max over no basis and a basis
-    of capacity $c\lceil 2m/c\rceil$. The hex one is `tests/helpers.step_bytes` (no basis,
-    as the 13b fit), against `jacobi`'s step.
+    - hex: the 13b step sizes, at $m$ = 6, 15, 25, 60, 120, compile only above 400k DOF.
+      The step is measured with `tests/helpers.step_bytes` (no basis, as the 13b fit),
+      against `jacobi`'s step; the polish with `shell_solve_study.polish`.
+    - shell: 18b's `FIT` cases and $m$ grid ($m$ = 6–120, 25k–1.58M DOF) plus `EXTRA`,
+      with `shell_solve_study.measure` (the max over no basis and a basis of capacity
+      $c\lceil 2m/c\rceil$).
   - **Held out** (compile only, not fitted, each ≤ the fp32 model):
     - hex20 $52^3$ (1.7M DOF) and hex8 $80^3$, at $m$ = 25 and 120;
     - shell stack ×3 $256^2$ and T $96^2$, at $m$ = 120.
@@ -303,11 +380,9 @@ fp64. The voxel `Stencil` already follows the vector's dtype.
   - storage within 1.3× on the tight cases;
   - the step's upper ratio gate, model ≤ 1.3× measured, on flat and stack ×3 $128^2$ at
     $m$ = 25 / 120 and on hex20 $24^3$ at $m$ = 25.
-  If a key fails the upper gate, that key alone gets a full LP refit with 18b's procedure
-  (logged). The ratios are fitted after the implementation, from the benchmark.
-- **Hex fp64 at $m$ = 120:** the review measured the fp64 hex low step 0.5–0.9 units of $8n$
-  above the line through $m$ = 15 / 25, still inside the +1.5 pad. The fp64 constants stay as
-  they are; the fp32 ratio is fitted on the widened grid against them.
+  On the hex polish, the fp32 polish must be ≤ `fl*ws` + its term on every grid and
+  held-out point. The constants are fitted after the implementation, from the benchmark.
+  The plan fixes the procedure, not the numbers.
 
 ### Benchmark: `benchmarks/amg_fp32_study.py` → `benchmarks/results/amg_fp32_study.json`
 
@@ -317,19 +392,18 @@ The file imports the helpers it needs and copies none: `amg_study.acceptance` (g
 
 | part | time | contents |
 |---|---|---|
-| `accuracy` | ~10 min | PCG iterations and true residuals, fp64 against fp32, on the Findings cases plus hex27 $12^3$, hex8 $32^3$, stack ×3 $128^2$ and T $48^2$; V-cycle times, warm, best of 5, at $m$ = 25 (report only) |
-| `storage` | ~15 min | owned bytes fp32 (float / int) on the storage grid |
-| `steps_hex` | ~30 min | compile only, the hex grid and held-out points, fp32 and the Jacobi baseline |
-| `steps_shell` | ~40 min | compile only, the shell grid and held-out points, fp32 |
-| `fit` | seconds | the ratios and gates, into the JSON |
+| `accuracy` | ~10 min | PCG iterations and true residuals, fp64 against fp32, on the Findings cases plus hex27 $12^3$, hex8 $32^3$, stack ×3 $128^2$ and T $48^2$; V-cycle times, warm, best of 5, at $m$ = 25; fresh against reused build times on flat $362^2$ and hex20 $36^3$ (report only) |
+| `storage` | ~10 min | owned bytes fp32 (float / int) on the storage grid |
+| `steps_hex` | ~15 min | compile only, the hex grid and held-out points, fp32 step and polish and the Jacobi baseline |
+| `steps_shell` | ~15 min | compile only, the shell grid and held-out points, fp32 |
+| `fit` | seconds | the storage ratios, the LP fits and the gates, into the JSON |
 | `peaks` | ~5 min | fp32 build peaks in fresh subprocesses: 18b's `PEAKS` cases, the 13b setup cases (hex20 $12^3$ / $24^3$, hex27 $12^3$, hex8 $48^3$), and flat $256^2$ rebuilt with the aggregates held; gated ≤ `build` and on the 18b cases within 1.35× |
-| `reuse` | ~5 min | fresh against reused build times, and `solve_modes` with build counts and `time["precond"]`, reuse on and off |
-| `acceptance` | ~5 min | 1M hex20 with `precond_dtype="float32"`: cold run plus two warm peaks against `solve_modes_memory`; the fp64 numbers from `amg_study.json` beside them |
-| `shell_peak` | ~5 min | 18b's 791k plate solve with `precond_dtype="float32"`, synchronous dispatch |
+| `acceptance` | ~10 min | the 1M hex20 (cold run plus two warm peaks) and 18b's 791k plate (synchronous dispatch) with `precond_dtype="float32"` against `solve_modes_memory`; the fp64 numbers from `amg_study.json` / `shell_solve_study.json` beside them |
 | `reach` | seconds | estimators only: the 10M hex20 and 791k shell $C_{max}$ with and without fp32 AMG (`strategy_study.memory_part` with the lever) |
 
-`acceptance` and `shell_peak` record the JSON for the docs; tests 8 and 9 run the same
-configurations, with nothing extra.
+`acceptance` records the JSON for the docs; tests 8 and 9 run the same configurations, with
+nothing extra. `strategy_study.py:227`'s target string ("700–1000 with fp32 AMG") is
+updated to the `reach` figure.
 
 ## Tests (18c)
 
@@ -357,9 +431,9 @@ Unless marked, the tests go in:
      ≤ 1.2e-7).
 3. **Convergence (roadmap):**
    - **PCG:** the fp32 iteration count is within ±1 of fp64 on hex20 $12^3$ at tol
-     $10^{-8}$, and ≤ 1.05 × fp64 + 1 on the `ssh8` plate $64^2$ at $L/t$ = 100 (tol
-     $10^{-8}$) and at $L/t$ = 1000 (tol $10^{-6}$). In every case the fp32 true residual is
-     ≤ tol (the tolerance is reached).
+     $10^{-8}$, and ≤ 1.05 × fp64 + 1 on the `ssh8` plate $64^2$ (`xmin` clamped, σ = 1) at
+     $L/t$ = 100 (tol $10^{-8}$) and at $L/t$ = 1000 (tol $10^{-6}$). In every case both runs
+     report `info["converged"]` and the fp32 true residual is ≤ tol.
    - **Solve level** (pre-estimate fp64, LOBPCG and the polish fp32):
      - hex20 $6\times5\times4$ (20 modes) matches `reference_modes` at tol $10^{-10}$ (PR 9
        tolerances, as the fp64 accuracy test);
@@ -372,8 +446,14 @@ Unless marked, the tests go in:
    - `precond_options={"dtype": ...}` raises the reserved-key error;
    - the pre-estimate builds are fp64 and LOBPCG's build is fp32 (spy on `api.amg`'s
      `dtype`);
-   - an AMG copy of `test_strategy.py::test_fp32_slices`: every count / slice `make` passes
-     `dtype` float64, and `_slice_capacity` / `_count_block` receive the fp64 `amg_memory`.
+   - `test_strategy.py::test_fp32_slices` parametrized by family (voxel GMG, hex AMG):
+     every count / slice `make` passes `dtype` float64, and `_slice_capacity` /
+     `_count_block` receive the fp64 multigrid model;
+   - the LOBPCG-path band count (`verify=True`, no slices) builds fp64 with fp32 AMG;
+   - `si_slice` refuses an fp32 AMG (`ValueError`, the message naming GMG and AMG);
+   - `tests/test_lobpcg.py`'s `solve_modes_memory` loop (`:897`) gains
+     `("amg", "float32")` on the hex20 box: equal to `lobpcg_memory` with
+     `amg_memory(..., dtype="float32")`.
 5. **`amg_memory` storage fp32:** ≥ owned bytes on `STORAGE_CASES` and 18b's shell storage
    cases, within 1.3× on the tight cases; the exact parts equal the owned bytes of those
    leaves.
@@ -381,12 +461,15 @@ Unless marked, the tests go in:
    - the hex step with fp32 AMG ≤ `lobpcg_memory`'s step on `test_amg_step`'s cases;
    - the shell fp32 step, low and polish ≤ the model at $m$ = 6 / 25 / 120 on 18b's
      `STEP_CASES`;
-   - `test_hex_polish_below_step` with `dtype="float32"`: the fp32 polish ≤ the model's
-     polish term, and that term is what `lobpcg_memory` takes;
+   - a new `test_hex_polish_fp32`: the fp32 hex polish (measured as
+     `shell_solve_study.polish`) ≤ `fl*ws` + the model's polish term, and `lobpcg_memory`
+     takes that term (with and without `low_memory`). `test_hex_polish_below_step` stays
+     fp64;
    - slow tight pins: the hex20 $24^3$ ratio gate; shell ≤ 1.3× at $128^2$, $m$ = 25 / 120.
-7. **`FP32` ratios:** each ratio equals the maximum the benchmark JSON records for its key.
-   That pins the constants, as 18b's fit test.
-8. **Acceptance (roadmap; `peak`, `slow`, darwin):**
+7. **Constants pinned:** each `STORAGE32` ratio equals the maximum the benchmark JSON records
+   for its family, and the fp32 step constants equal the JSON's LP fits (as 18b's fit test).
+8. **Acceptance (roadmap; `peak`, `serial`, `slow`, darwin; wall time and peak, as the fp64
+   test):**
    - `amg_study.acceptance(44, dtype="float32")`;
    - converged, cold run ≤ 15 min (the fp64 test's budget, 10× margin, kept as a comment);
    - `est ≥ 2e9`;
@@ -395,7 +478,8 @@ Unless marked, the tests go in:
    A `test_acceptance_smoke` parametrized by dtype checks the keys at $8^3$, with the
    estimate equal to `solve_modes_memory(precond_dtype=dtype)`.
 9. **Shell peaks fp32 (`peak`, `slow`, darwin):**
-   - the fp32 build peak in a fresh subprocess ≤ `build` on flat $362^2$ and block $32^3$;
+   - the fp32 build peak in a fresh subprocess ≤ `build` and ≥ `build` / 1.35 on flat
+     $362^2$ and block $32^3$;
    - the reused build with the aggregates held ≤ `build` on flat $256^2$;
    - the 791k plate solve with `precond_dtype="float32"` (synchronous dispatch), with
      `est ≥ 2e9` and within 20% of `solve_modes_memory`.
@@ -407,8 +491,14 @@ Unless marked, the tests go in:
     - λ, σ and the iteration counts are `array_equal` to a run with reuse disabled. The
       disabled run wraps `api.amg` so it drops `aggregates=` and still returns a tuple when
       asked.
-    - Lifetime: in plain mode a weakref to the `AMGAggregates` is dead after the solve
-      (`gc.collect()`); band mode's counts receive the same object.
+    - The same on the hex20 box with `precond_dtype="float32"` (the σ rounds fp64, LOBPCG's
+      build fp32, one aggregation).
+    - **Lifetime** (a weakref to the `AMGAggregates`, `gc.collect()` before each check):
+      - plain mode: dead at the entry of the main `lobpcg` (spy) and after the solve;
+      - band mode: the counts receive the same object; dead at the entry of `si_band`;
+      - the no-chunk slice path: dead at the entry of `si_band`;
+      - no `si_band` build (the `make` it receives) passes `aggregates` or
+        `return_aggregates`.
 11. **Benchmark smoke** (`slow`): `amg_fp32_study` parts `accuracy`, `storage`,
     `steps_hex` and `fit` on one tiny case each record their keys.
 12. **Existing tests that change:**
@@ -421,17 +511,25 @@ Unless marked, the tests go in:
       - `test_capacity`'s `aggs_dead` (`:192`): unchanged; it pins the release before the
         slices.
     - `tests/test_band.py`: the `spy` (`:77–80`) and `no_build` (`:111–121`) fixtures stop
-      using `"aggregates" in kw` as "the λ_c count build". They count builds after
-      LOBPCG's, by σ value, so `:172–173`, `:258`, `:299`, `:322` and `:465` keep their
-      meaning.
+      using `"aggregates" in kw` as "the λ_c count build", since the σ rounds and LOBPCG's
+      build now pass it too. A shared helper wraps `api.lobpcg` to set a flag on its first
+      main-solve entry (the call with `polish`), and the fixtures count only `api.amg` /
+      `api.gmg` builds after that flag. So `:172–173`, `:258`, `:299`, `:322` and `:465`
+      keep their meaning.
+    - `tests/test_options.py::test_defaults_snapshot` (`:85`): the AMG builds now carry
+      `return_aggregates=True` (first) and `aggregates=` (second). The snapshot strips
+      both keys and checks that the second build's `aggregates` is the object the first
+      returned.
     - `tests/test_shell_solve.py::test_band`: unchanged (one `return_aggregates` build).
 
 ## Docs (18c)
 
 **Retag rule:** every `PR 18c` / `18d` / `18e` mention in `README.md`, `docs/*.md` (not
 `docs/plans/`), `src/`, `tests/` and `benchmarks/*.py` is retagged per the split table, and a
-grep before merge checks it. The list below is what round 1 found; `benchmarks/strategy_study.py:227`
-stays as history.
+grep before merge checks it. The retags run from the top down (18e → 18f first, then
+18d → 18e, then 18c → 18d), so no mention is retagged twice. The list below is what
+rounds 1–2 found; `benchmarks/strategy_study.py:227`'s target string is updated with the
+`reach` figure (Benchmark).
 
 - **18c → 18d:**
   - `docs/mesh.md:38` (Morton);
@@ -447,8 +545,12 @@ stays as history.
   - ROADMAP `:82`, `:95`, `:97`, `:177`;
   - `docs/eigensolvers.md:128`, `:154`, `:174`, `:180`, `:671`, `:773`, `:814`;
   - every "→ PR 18d" entry in `docs/open_items.md`.
-- **18e → 18f:** the CalculiX mentions (ROADMAP `:666–670`, the memory file is outside the
-  repo).
+- **`docs/open_items.md`'s "→ PR 18c" entries:** each goes to 18c (fp32 AMG, reuse) or 18d
+  (kernels) by the split table.
+- **18e → 18f:** the CalculiX mentions (ROADMAP `:666–670`), and the memory file
+  `project-calculix-benchmark.md` (outside the repo).
+- **ROADMAP headings and rows:** the 18c–18f section headings, the dependency rows, `:18`
+  (status), `:184` and `:627`.
 - **README `:5`:** "split into 18a–18e" → "18a–18f", with 18c's status.
 
 **fp32 statements that become false:**
@@ -456,21 +558,24 @@ stays as history.
   - `:33` (the `"amg"` bullet's "fp64 only");
   - `:76` and the `precond_dtype` row `:82` (GMG and AMG; LOBPCG and the polish only; slices,
     counts and the pre-estimate fp64; on hex a memory lever only);
-  - the levers list.
+  - the levers list (`:154`, "on GMG `precond_dtype`") and `:169` ("LOBPCG's GMG only");
+  - `:709` and `shift_invert.py:41` / `:245`: the MINRES refusal names "a GMG or AMG with
+    fp32 levels".
 - `docs/open_items.md`: `:80` ("`gmg`'s and `amg`'s `dtype`") and `:174` ("LOBPCG's GMG or
   AMG").
 - `docs/preconditioners.md`:
   - `:362–384`: `amg(...)`'s signature and a `dtype` bullet;
   - `:565`: `amg_memory`'s signature, the fp32 exact terms (72 B per node, 8 B per table
-    entry), the `FP32` ratios, the hex fp32 polish term, the build term on fp64 storage,
-    and the fit procedure with the measured gates;
+    entry), the `STORAGE32` ratios, the fp32 step fits and the hex fp32 polish term, the
+    build term on fp64 storage, and the fit procedure with the measured gates;
   - the AMG and Schwarz sections: an "fp32 V-cycle" paragraph (what is fp32, what stays
     fp64, accuracy and times from the benchmark, the band-mode fp64 transfer copy);
   - reuse: σ rounds;
   - its "## Tests" list (`:621ff`).
-- `docs/operators.md:55–58` and `:238`: on `Unstructured` operators `ap_operator` computes in
-  fp64 and casts the result to `x.dtype` (PR 18c); the operator itself does not follow the
-  dtype. The stale "(PR 13)" goes.
+- `docs/boundary_conditions.md` (the `ap_operator` section) and `docs/operators.md:55–58` /
+  `:238`: on `Unstructured` operators `ap_operator` computes in fp64 and casts the result to
+  `x.dtype` (PR 18c); the operator itself does not follow the dtype. The stale "(PR 13)"
+  goes.
 - `docs/eigensolvers.md`: the σ pre-estimate (aggregates built once), the memory-model
   section, the 10M paragraph and table (`:154–162`, from `reach`), and the tests list
   (`:895–980`).
@@ -503,9 +608,8 @@ stays as history.
   - The roadmap table's "≈ 700 (stored Ke) – 1000 (on the fly), with fp32 AMG" was an
     extrapolation.
   - The performance review estimates about 5 GB saved at chunk 5: 3.1–3.3 GB of storage
-    and 2–2.5 low-step blocks. That is about 120–130 more columns (260 → about 390), not
-    600.
-  - The table gets the estimator's number. No test criterion depends on it.
+    and 1–1.5 low-step blocks. That is about 100–130 more columns, not 600.
+  - The table gets the `reach` figure. No test criterion depends on it.
 - **fp32 polish:** PCG with the fp32 cycle reached the same floor as fp64. If a case
   stagnates, the polish's accept-or-revert keeps the unpolished chunk. Test 3 pins the
   thin-shell case.
@@ -514,7 +618,10 @@ stays as history.
   was unchanged; GMG has worked the same way since PR 11b.
 - **The fine level stays fp64:** an fp32 $K_e$ copy would cost half of the operator's
   storage, to save a cast.
-- **Ratios instead of a refit:** they waste at most about 1 block per term, against a
-  1.3–7-block saving, and they stay upper bounds by construction on the grid. The held-out
-  points guard the extrapolation.
-- **GPU:** the fp32 ratios come from CPU `memory_analysis`, so they are a deferred GPU check.
+- **Storage ratio, step refit:** storage is proportional to $n_c$, so a ratio bounds it on
+  the grid by construction. The steps have a constant that fp32 shrinks unevenly, so they
+  get 18b's LP envelope; the held-out points guard the extrapolation.
+- **fp64 hex step at $m$ = 120:** 3.2% above the model's extra at hex8 $40^3$ (about 1% of
+  the step). Logged, not refitted in 18c.
+- **GPU:** the fp32 constants come from CPU `memory_analysis`, so they are a deferred GPU
+  check.
