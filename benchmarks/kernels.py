@@ -162,6 +162,7 @@ json.dump(dict(gemm_s=best(jax.jit(lambda X: K @ X), X)), open("{{out}}", "w"))
 
 def child(build, code, large_cache=LARGE):
     r = harness.measure_json(code, SETUP.format(build=build), large_cache)
+    r.pop("peak_bytes")
     print(json.dumps(r), flush=True)
     return r
 
@@ -173,7 +174,7 @@ def apply_row(t, n, m, B, F, chunk=None):
     fl, lb, ib = model(t, ne, nn, m)
     g = fl / r["apply_s"] / 1e9
     roof, iroof = roofline(fl, lb, B, F), roofline(fl, ib, B, F)
-    return dict(kernel=t, size=n, m=m, **{k: r[k] for k in r if k != "peak_bytes"}, flops=fl,
+    return dict(kernel=t, size=n, m=m, **r, flops=fl,
                 bytes=lb, intensity=fl / lb, impl_bytes=ib, impl_intensity=fl / ib,
                 roofline_gflops=roof, gflops=g, pct_roofline=100 * g / roof,
                 pct_impl_roofline=100 * g / iroof)  # fmt: skip
@@ -189,7 +190,7 @@ def run_roofline(sizes=ROOF, ms=MS, probe=True):
                 r = apply_row(t, n, m, B, F)
                 if t == "stencil":
                     g = child("", GEMM.format(N=r["n_el"] * m))["gemm_s"]
-                    r["gemm_gflops"] = stencil_flops(r["n_el"], m) / g / 1e9
+                    r["gemm_gflops"] = r["flops"] / g / 1e9
                     r["pct_gemm"] = 100 * r["gflops"] / r["gemm_gflops"]
                 rows.append(r)
     out = dict(system=sysinfo, B_gbps=B, F_gflops=F, large_cache=LARGE, rows=rows)
@@ -225,7 +226,6 @@ DUMP = 'json.dump(info, open("{out}", "w"))'
 
 def run_fusion(n=24, n20=12):
     r = child(FUSION.format(n=n, n20=n20), DUMP, large_cache=False)
-    r.pop("peak_bytes")
     return r
 
 
@@ -268,7 +268,6 @@ def run_orders(meshes=ORDER_MESHES, orders=ORDERS):
     for case, n in meshes.items():
         for order in orders:
             r = child(ORDER.format(case=case, n=n, order=order, ram=ram), DUMP)
-            r.pop("peak_bytes")
             rows.append(dict(case=case, size=n, order=order, **r))
     return dict(large_cache=LARGE, rows=rows)
 

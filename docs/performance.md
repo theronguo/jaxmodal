@@ -15,7 +15,7 @@ The attainable rate is $\min(B\,I, F)$ with intensity $I$ = flops / bytes. The *
 | kernel | size | $m$ | time | $I$ (flop/B) | roofline (GFLOP/s) | achieved (GFLOP/s) | % roofline | % impl. roofline | % bare GEMM |
 |---|---|---|---|---|---|---|---|---|---|
 | stencil | $87^3$ (2.04M DOF) | 1 | 15.3 ms | 17.5 | 475 | 49.6 | 10.4 | 19.3 | 16 (307 GFLOP/s) |
-| | | 4 | 44.1 ms | 21.5 | 475 | 68.7 | 14.5 | 26.4 | 20 (338) |
+| | | 4 | 44.1 ms | 21.4 | 475 | 68.7 | 14.5 | 26.4 | 20 (338) |
 | | | 16 | 167 ms | 22.7 | 475 | 72.5 | 15.3 | 27.7 | 22 (334) |
 | hex8 | $48^3$ (353k DOF) | 1 | 13.4 ms | 0.45 | 83.8 | 9.5 | 11.3 | 55.7 | |
 | | | 4 | 18.3 ms | 1.70 | 316 | 27.8 | 8.8 | 48.7 | |
@@ -26,8 +26,8 @@ The attainable rate is $\min(B\,I, F)$ with intensity $I$ = flops / bytes. The *
 
 Reading:
 
-- Both kernels reach 9–18% of the lower-bound roofline. The stored-Ke apply at $m \le 4$ moves about half of the implementation roofline's bytes per second through the hierarchy (49–57%), consistent with the unpack (the largest $m$-independent traffic) being the limit; the stored bytes alone move at about 21 GB/s. The stencil reaches 16–22% of its own bare GEMM.
-- **Chunk-512 probe** (hex8 $48^3$, $m$ = 1, 2.4 MB of unpacked $K_e$ per chunk, L2-sized, 216 loop trips): 15.9 ms against 13.4 ms at the default 4096 (27 trips). Not faster, so it is **not determined** whether the 4096 chunk is limited by bandwidth beyond L2: the 8× trip count biases it toward not faster.
+- Both kernels reach 9–18% of the lower-bound roofline. The stored-Ke apply at $m \le 4$ moves about half of the implementation roofline's bytes per second through the hierarchy (49–57%), consistent with the unpack (the largest $m$-independent traffic) being the limit; the stored bytes alone move at about 21 GB/s at $m$ = 1. The stencil reaches 16–22% of its own bare GEMM.
+- **Chunk-512 probe** (hex8 $48^3$, $m$ = 1, 2.4 MB of unpacked $K_e$ per chunk, L2-sized, 216 loop trips): 15.9 ms against 13.4 ms at the default 4096 (27 trips). Not faster, so it is **not determined** whether the 4096 chunk is limited by bandwidth beyond L2: the 8× trip count biases it toward not faster, and with 16 MB of L2 per P-cluster (the default chunk's unpack is split across both) the probe cannot separate L2 from the SLC.
 - **Full-Ke storage on GPU:** storing the full $K_e$ (4608 B per hex8 element, 1.9× the storage) or a packed symmetric matvec would roughly halve the $m$ = 1 traffic. On CPU the packed storage stays, since storage limits the 10M reach. On GPU this is a decision (deferred check).
 
 ## Fusion
@@ -73,8 +73,8 @@ No large unfused elementwise op appears, so no further target was added.
 | | Morton | 25 | 9.0 ms | 23.8 ms | 397 ms | |
 | | shuffled | 105630 | 10.8 ms | 53.2 ms | 728 ms | |
 
-- A shuffled mesh costs +19–123% on apply_K and +89–92% on the V-cycle; RCM recovers both (0.66 s at 358k nodes, about 3 s at 10M DOF, [mesh](mesh.md#renumbering)); on the gather path it is 38% slower than grid order (116 against 84 ms). Call `rcm` on meshes read from files.
-- Morton is not faster than grid or RCM order on the scatter path (within 7%; on the plate its span is the smallest, 25, at the same times) and makes the gather path 13× slower than grid order (9.4× RCM): its jumps between octants widen the gather windows, although the span is small.
+- A shuffled mesh costs +19–123% on apply_K and +89–92% on the V-cycle; RCM recovers both (`rcm` itself 0.66 s at 358k nodes in the PR 18d plan's prototype, about 3 s at 10M DOF; [mesh](mesh.md#renumbering)); on the gather path it is 38% slower than grid order (116 against 84 ms). Call `rcm` on meshes read from files.
+- Morton is not faster than grid or RCM order on the scatter path (within 7%; on the plate its span is the smallest, 25, with apply_K equal and the V-cycle 3% above grid order; that row was rerun alone after code review round 1 fixed the key scaling) and makes the gather path 13× slower than grid order (9.4× RCM): its jumps between octants widen the gather windows, although the span is small.
 - `morton` stays a helper; `solve_modes` does not reorder (it would permute the mode vectors back and forth) and does not warn.
 
 ## Bimodal LOBPCG peak
@@ -95,5 +95,5 @@ No large unfused elementwise op appears, so no further target was added.
 
 - The extra is resident memory, not footprint accounting: in two more baseline runs (part `checks`) `ru_maxrss` reads 7.01–7.09 GB, the footprint interval maximum 7.03–7.10 GB.
 - The switch is the process's own `proc_pid_rusage` call between LOBPCG steps (8 of 8 runs low; 22 of the 24 runs without it high in this session, the 2 parent-sampler runs between, against a mix in PR 18c's sessions). PR 18c's polling thread made the same call every 5 ms. A query from another process moves it only partly. The wall time does not change (58.6–59.0 s in every row).
-- In the low regime the live `jax.Array` bytes stay at 2.5 GB and the process footprint at 5.3 GB (operator included) over the 25 steps, with no step above the others.
+- In the low regime the live `jax.Array` bytes stay at 2.5 GB over the 25 steps; the interval-maximum footprint (operator included) reaches 5.3 GB in step 9 (3.85 GB before) and no later step exceeds it, while the current footprint stays at 2.8–2.9 GB.
 - **Cause not found** within the time box. The mechanism by which a footprint query keeps 2.3 GB from becoming resident (allocator retention or reuse timing inside XLA:CPU's runtime) is open; no XLA flag tried changes it, and a syscall per step in `solve_modes` would be a macOS-specific workaround for an unexplained effect, so nothing is adopted. The estimators stay the `memory_analysis` envelope, PR 18c's gates stay (`test_shell_791k_peak32`: $0.75\,\text{peak} \le$ estimate $\le 1.2\,\text{peak}$), and the question moves to the GPU check, where the allocator differs.

@@ -391,9 +391,9 @@ AMG_STEP32 = {
     ("p", "low"): (8.70, 14.5, 576_100),
     ("p", "polish"): (20.70, 4.0, 830_500),
 }
-# fp64 hex AMG polish: the fp32 polish term (with its f_l ws) scaled by POLISH64, chosen from
+# fp64 hex AMG polish: the fp32 polish entry 8n(am + c) + 8mK scaled by POLISH64, chosen from
 # the 11 measured fp64 polish rows of amg_fp32_study.json (max(low, polish) 1.04-1.15 of
-# measured); the degree > 2 loop term is added unscaled.
+# measured); f_l ws (lobpcg_memory) and the degree > 2 loop term are added unscaled.
 POLISH64 = 1.05
 SHELL_STEP32 = {
     "9-block": (5.2, 16.0, 37e6),
@@ -780,11 +780,12 @@ def _count_block(op_memory, pc64, n_dof, *, voxel, n_rigid, n_store, window, n_p
     return _largest(fits, 1, 1, n_probes)
 
 
-def _default_budget():
+def _default_budget(given=None):
     """(budget, host_budget): on a GPU its free pool (bytes_limit - bytes_in_use) and 0.8 x
-    physical RAM; on the CPU (unified), or another device without bytes_limit in memory_stats()
-    (Metal, or memory_stats() raising or returning None), 0.8 x RAM and None. A "gpu" device
-    without bytes_limit raises: RAM is no bound for its memory."""
+    physical RAM; on the CPU, or Metal without bytes_limit in memory_stats() (or memory_stats()
+    raising or returning None; unified memory), 0.8 x RAM and None. Another device without
+    bytes_limit takes the given budget (the caller's memory_budget) and 0.8 x RAM, or raises
+    without one: RAM is no bound for its memory."""
     ram = 0.8 * os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
     dev = jax.devices()[0]
     if dev.platform == "cpu":
@@ -794,7 +795,9 @@ def _default_budget():
     except Exception:  # some plugins do not implement it
         st = None
     if not st or "bytes_limit" not in st:  # Metal: no pool limit, a unified pool as on the CPU
-        if dev.platform == "gpu":
-            raise ValueError("the GPU reports no bytes_limit; pass memory_budget")
-        return ram, None
+        if dev.platform.lower() == "metal":
+            return ram, None
+        if given is None:
+            raise ValueError(f"{dev.platform} reports no bytes_limit; pass memory_budget")
+        return given, ram
     return st["bytes_limit"] - st.get("bytes_in_use", 0), ram

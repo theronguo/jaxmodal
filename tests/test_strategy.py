@@ -1769,8 +1769,8 @@ def fake_gpu(monkeypatch, stats=None, platform="gpu"):
 
 def test_default_budget(monkeypatch):
     """Test 16: the default budgets: 0.8 x RAM on the CPU; a GPU's free pool and 0.8 x RAM; a
-    non-GPU device (Metal) whose memory_stats() raises, returns None or lacks bytes_limit gets
-    the CPU rule; a GPU without bytes_limit raises."""
+    Metal device whose memory_stats() raises, returns None or lacks bytes_limit gets the CPU
+    rule; a GPU or TPU without bytes_limit takes the given budget, or raises without one."""
     pages = {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 2**20}  # 4 GiB
     monkeypatch.setattr(mem.os, "sysconf", lambda k: pages[k])
     ram = 0.8 * 2**32
@@ -1784,22 +1784,27 @@ def test_default_budget(monkeypatch):
     for stats in (raises, lambda: None, lambda: dict(bytes_in_use=3e9)):  # no pool limit: CPU rule
         fake_gpu(monkeypatch, stats, "METAL")
         assert mem._default_budget() == (ram, None)
-        fake_gpu(monkeypatch, stats)
-        with pytest.raises(ValueError, match="memory_budget"):
-            mem._default_budget()
+        for platform in ("gpu", "tpu"):
+            fake_gpu(monkeypatch, stats, platform)
+            with pytest.raises(ValueError, match="memory_budget"):
+                mem._default_budget()
+            assert mem._default_budget(5e9) == (5e9, ram)
     fake_gpu(monkeypatch, lambda: dict(bytes_limit=10e9))
     assert mem._default_budget() == (10e9, ram)
 
 
 def test_budget_recorded(fake_builds, monkeypatch):
     """Test 16: info["budget"]: (budget, None) on the CPU, (memory_budget, 0.8 x RAM) under a
-    fake GPU (the host budget then binds per space)."""
+    fake GPU (the host budget then binds per space), also on one without bytes_limit."""
     monkeypatch.setattr(api, "si_band", stub_band({}))
     band = fband("short", 15, 25)
     _, _, info = run("short", band, n_modes=12, verify=False)
     assert info["budget"] == mem._default_budget()
     fake_gpu(monkeypatch)
     ram = 0.8 * mem.os.sysconf("SC_PAGE_SIZE") * mem.os.sysconf("SC_PHYS_PAGES")
+    _, _, info = run("short", band, n_modes=12, verify=False, memory_budget=5e9)
+    assert info["budget"] == (5e9, ram)
+    fake_gpu(monkeypatch, lambda: None)  # no bytes_limit: memory_budget passes the raise
     _, _, info = run("short", band, n_modes=12, verify=False, memory_budget=5e9)
     assert info["budget"] == (5e9, ram)
 
@@ -1833,7 +1838,7 @@ def test_budget_before_build(fake_builds, monkeypatch):
     order = []
     monkeypatch.setattr(api, "si_band", stub_band({}))
     real_b = mem._default_budget
-    monkeypatch.setattr(mem, "_default_budget", lambda: order.append("budget") or real_b())
+    monkeypatch.setattr(mem, "_default_budget", lambda *a: order.append("budget") or real_b(*a))
     for name in ("stencil", "unstructured"):
         real = getattr(api, name)
         monkeypatch.setattr(api, name, lambda *a, f=real, **kw: order.append("op") or f(*a, **kw))

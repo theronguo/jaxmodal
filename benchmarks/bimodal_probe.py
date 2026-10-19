@@ -178,7 +178,6 @@ def main(n=5, wrappers=3):
         rows.append(run_one("B", None))
         for s, flags in SETTINGS.items():
             rows.append(run_one(s, flags))
-    os.environ.pop("XLA_FLAGS", None)
     wrap = [wrapper_run() for _ in range(wrappers)]
     base = [r for r in rows if r["label"] == "B"]
     summary = dict(baseline_high=sum(r["high"] for r in base), n=len(base))

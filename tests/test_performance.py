@@ -142,6 +142,8 @@ def test_results_pinned():
         assert r["pct_roofline"] == pytest.approx(100 * r["gflops"] / r["roofline_gflops"])
     assert ro["chunk512"]["small"]["chunk"] == 512
     assert set(k["fusion"]) == {"stencil", "stored_ke", "vcycle"}
+    for f in k["fusion"].values():
+        assert f["temp_bytes"] > 0 and f["entry"] in f["computations"]
     rows = k["orders"]["rows"]
     assert {(r["case"], r["order"]) for r in rows} == {
         (c, o) for c in K.ORDER_MESHES for o in K.ORDERS
@@ -149,3 +151,6 @@ def test_results_pinned():
     c = results("compile_study")["rows"]
     assert [(r["case"], r["size"]) for r in c] == C.CASES
     assert all(r["compiles"] > 0 and r["compile_s"] > 0 for r in c)
+    for r in c:
+        assert {"n_dof", "wall_s", "lowering_s", "trace_s", "levels"} <= set(r)
+        assert ("slabs" if r["case"] == "voxel" else "ell_classes") in r

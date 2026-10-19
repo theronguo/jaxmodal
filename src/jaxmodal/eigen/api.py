@@ -417,7 +417,7 @@ def solve_modes(
     from .. import memory as mem  # memory imports this module
 
     # before the build: a GPU pool's bytes_in_use would count the operator a second time
-    budget, host_budget = mem._default_budget() if band is not None else (None, None)
+    budget, host_budget = mem._default_budget(memory_budget) if band is not None else (None, None)
     op = build(mesh, materials, orientations, mass=mass, nodal_mass=nodal_mass, **op_opts)
     t0 = time.perf_counter()
     aggs, R = None, jnp.asarray(rigid_modes(mesh, free))

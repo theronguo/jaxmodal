@@ -539,8 +539,8 @@ def test_hex_polish_bounded(t, n):
     """PR 18d: the measured fp64 hex polish <= max(low, fl ws + amg_memory's polish term), and
     lobpcg_memory takes that term (with and without low_memory). The low model alone bounds
     these cases, so this checks the step; on hex20 the polish term alone bounds the measured
-    polish (fails without POLISH64's term). The value of POLISH64 is pinned by
-    test_polish64_pinned and test_amg_polish_tight64."""
+    polish (fails without the polish term). The value 1.05 is pinned by test_polish64_pinned;
+    test_amg_polish_tight64 bounds the term from both sides (1 to 1.3x)."""
     S = study()
     mesh = box_mesh((n,) * 3, (1 / n,) * 3, type=t)
     op, free = unstructured(mesh, STEEL), dof_mask(mesh, {"xmin": "xyz"})
