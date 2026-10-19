@@ -88,11 +88,12 @@ def _apply(S, r):
 def _invert(buf, ok, B, valid, k):
     """buf (n_chunks, c, s (s + 1) / 2) with the packed inverses of the chunk B (c, s, s)
     written as chunk k (valid (c, s): real slots; pads get the identity in the factorization and
-    zero rows and columns), and ok and-ed with their finiteness."""
+    zero rows and columns), cast to buf's dtype, and ok and-ed with their finiteness after the
+    cast."""
     inv, m = _inverse_blocks(B, valid)
     inv = inv * m[:, :, None] * m[:, None, :]
     iu = np.triu_indices(B.shape[1])
-    packed = inv[:, iu[0], iu[1]]
+    packed = inv[:, iu[0], iu[1]].astype(buf.dtype)
     return lax.dynamic_update_slice(buf, packed[None], (k, 0, 0)), ok & jnp.isfinite(packed).all()
 
 
@@ -113,10 +114,11 @@ def _extract(A, keys, blk, J):
     return F[np.arange(c)[:, None, None], J[:, :, None], J[:, None, :]]
 
 
-def build(A, blocks, sel, chunk_bytes=CHUNK_BYTES):
+def build(A, blocks, sel, chunk_bytes=CHUNK_BYTES, *, dtype="float64"):
     """Schwarz of the SciPy BSR matrix A (b x b blocks, sorted indices) over patches given as
     blocks (n_p, m) block indices (valid first, pad -1) and sel (n_p, m b) the kept DOFs of
-    each patch's expanded blocks (False on pads). A patch above sqrt(chunk_bytes / 8) DOFs, or
+    each patch's expanded blocks (False on pads). The inverses are computed in fp64 and stored
+    in dtype. A patch above sqrt(chunk_bytes / 8) DOFs, or
     a non-finite inverse, raises ValueError."""
     b = A.blocksize[0]
     n = A.shape[0]
@@ -132,7 +134,7 @@ def build(A, blocks, sel, chunk_bytes=CHUNK_BYTES):
     for k, (s, nc, ch) in enumerate(cls):
         p = np.flatnonzero(which == k)
         idx = np.full((nc * ch, s), n, np.int32)
-        buf, ok = jnp.zeros((nc, ch, s * (s + 1) // 2)), jnp.asarray(True)
+        buf, ok = jnp.zeros((nc, ch, s * (s + 1) // 2), dtype), jnp.asarray(True)
         for o in range(0, nc * ch, ch):
             q = p[o : o + ch]
             blk = blocks[q]

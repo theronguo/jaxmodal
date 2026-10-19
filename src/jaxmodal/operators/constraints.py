@@ -94,7 +94,8 @@ def _ap_apply(A, x):
     x = as_float(x)
     m, sigma, s = (a.astype(x.dtype) for a in (A.free[:, None], A.sigma, A.s))
     mx = m * x
-    return m * (A.op.apply_K(mx) + sigma * A.op.apply_M(mx)) + s * (1 - m) * x
+    y = m * (A.op.apply_K(mx) + sigma * A.op.apply_M(mx)) + s * (1 - m) * x
+    return y.astype(x.dtype)  # the unstructured applies accumulate in fp64
 
 
 def ap_operator(op, free, sigma=0.0, s=None):
