@@ -80,6 +80,27 @@ def test_assembly_matches_dense_loop(mass):
             assert nnz_diff(A, A.T) == 0 and A.indices.dtype == A.indptr.dtype == np.int32
 
 
+@pytest.mark.parametrize("n", [12, 13, 3])
+def test_chunked(n):
+    """_chunked (pipelined) equals one chunk: n = 3c (two handoffs), 3c + 1 (a padded fourth
+    chunk), n < chunk; an array and a pytree result."""
+    from jaxmodal.operators.assembled import _chunked
+
+    rng = np.random.default_rng(n)
+    X, conn = rng.standard_normal((20, 3)), rng.integers(0, 20, (n, 4))
+    p = {"a": rng.standard_normal(n), "b": rng.standard_normal((n, 2))}
+    k = jax.jit(
+        lambda Xe, pe, w: (Xe.sum(1) * pe["a"][:, None] * w, (pe["b"] * Xe[:, :2, 0]).sum(1))
+    )
+    one = _chunked(k, X, conn, p, n, 2.0)
+    for got in (_chunked(k, X, conn, p, 4, 2.0), _chunked(k, X, conn, p, 5, 2.0)):
+        for a, b in zip(got, one, strict=True):
+            np.testing.assert_allclose(a, b, rtol=1e-14, atol=1e-14)
+    np.testing.assert_allclose(one[0], X[conn].sum(1) * p["a"][:, None] * 2.0, rtol=1e-14)
+    single = jax.jit(lambda Xe, pe: Xe[:, 0])
+    np.testing.assert_array_equal(_chunked(single, X, conn, p["a"], 4), X[conn[:, 0]])
+
+
 # ---------------------------------------------------------------- 4: patch test
 
 
