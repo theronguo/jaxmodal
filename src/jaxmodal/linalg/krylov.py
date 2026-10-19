@@ -64,7 +64,10 @@ def _pcg(A, P, b, tol, maxit):
         rep = s["rep"] + bad
         stag = s["stag"] | (bad & (rep >= STALL_R))
         act = act & ~good & ~stag & jnp.isfinite(rn)
-        z = P(r)
+        # the barrier keeps a preconditioner's preprocessing (e.g. AMG's unpacked inverses) in
+        # the loop: hoisted out, it stays allocated for the whole solve
+        Q, r = lax.optimization_barrier((P, r))
+        z = Q(r)
         rz = jnp.sum(r * z, 0)
         beta = jnp.where(act & ~bad, _div(rz, s["rz"]), 0.0)  # restart: p = z
         return dict(x=x, r=r, p=z + beta * s["p"], rz=rz, it=s["it"] + 1, act=act,
@@ -108,7 +111,8 @@ def _minres(A, P, b, tol, maxit):
         alfa = jnp.sum(v * y, 0)
         y = y - _div(alfa, s["beta"]) * s["r2"]
         r1, r2 = s["r2"], y
-        y = P(r2)
+        Q, r2 = lax.optimization_barrier((P, r2))  # as in _pcg
+        y = Q(r2)
         oldb, beta = s["beta"], jnp.sqrt(jnp.maximum(jnp.sum(r2 * y, 0), 0.0))
         delta = s["cs"] * s["dbar"] + s["sn"] * alfa
         gbar = s["sn"] * s["dbar"] - s["cs"] * alfa

@@ -916,8 +916,8 @@ def test_solve_boundary_one(monkeypatch):
     real = lob._iterate
 
     def one(*a, **kw):
-        state, r, t, j, rec = real(*a, **kw)
-        return state, r, t, min(j, 1), rec
+        X, lam, r, t, j, rec = real(*a, **kw)
+        return X, lam, r, t, min(j, 1), rec
 
     monkeypatch.setattr(lob, "_iterate", one)
     lam, _, info = band_solve(40, prob("short")[6][-1])

@@ -12,10 +12,18 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
-from ..operators import dof_mask, m_orthonormalize, rigid_modes, stencil, unstructured
+from ..linalg import pcg
+from ..operators import (
+    ap_operator,
+    dof_mask,
+    m_orthonormalize,
+    rigid_modes,
+    stencil,
+    unstructured,
+)
 from ..operators.common import is_count
 from ..precond import SingularShiftError, amg, gmg, jacobi
-from ..precond.pmg import no_shell
+from ..precond.amg import SHELL_BLOCKS, unsupported_shell
 from . import counting
 from .counting import count, count_degree
 from .lobpcg import (
@@ -32,13 +40,14 @@ from .shift_invert import si_band
 
 def resolve_precond(mesh, precond, precond_dtype):
     """The preconditioner name solve_modes uses for these options; raises on bad options."""
-    voxel, shell = mesh.voxel is not None, "ssh8" in mesh.blocks
+    voxel = mesh.voxel is not None
+    mixed = unsupported_shell(mesh.blocks)  # ssh8 with hex20 / hex27: no solid-shell AMG
     if precond == "auto":
-        precond = "gmg" if voxel else "jacobi" if shell else "amg"
+        precond = "gmg" if voxel else "jacobi" if mixed else "amg"
     if precond not in ("gmg", "amg", "jacobi"):
         raise ValueError(f"precond must be 'auto', 'gmg', 'amg' or 'jacobi', got {precond!r}")
-    if precond == "amg" and shell:
-        raise no_shell("amg")
+    if precond == "amg" and mixed:
+        raise ValueError(SHELL_BLOCKS)
     if precond == "gmg" and not voxel:
         raise ValueError("precond 'gmg' needs a voxel mesh (voxel_mesh)")
     if precond == "amg" and voxel:
@@ -66,6 +75,7 @@ PRECOND_OPTIONS = {
     "jacobi": (),
 }
 SIGMA_OPTIONS = ("tol", "maxit", "rounds", "drop", "estimate_maxit")
+POLISH_OPTIONS = ("on", "tol", "maxit")
 COUNT_OPTIONS = ("n_probes", "seed", "tau", "degree", "block", "maxit", "verbose")
 SLICE_OPTIONS = ("tau", "maxit_inner", "block", "max_slices", "capacity", "edges", "verbose")
 STRATEGIES = ("auto", "lobpcg", "shift_invert")
@@ -104,6 +114,20 @@ def _check_sigma_options(opts):
         raise ValueError(f"sigma_options tol must be > 0, got {opts['tol']!r}")
     if "drop" in opts and not opts["drop"] > 1:
         raise ValueError(f"sigma_options drop must be > 1, got {opts['drop']!r}")
+
+
+def check_polish_options(opts, precond, label):
+    """polish_options as a dict, or the error (AMG only: the polish is PCG with the V-cycle)."""
+    opts = _check_options("polish", opts, POLISH_OPTIONS)
+    if opts and precond != "amg":
+        raise ValueError(f"polish_options need precond='amg' (precond: {label})")
+    if "on" in opts and not isinstance(opts["on"], bool):
+        raise ValueError(f"polish_options on must be a bool, got {opts['on']!r}")
+    if "tol" in opts and not opts["tol"] > 0:
+        raise ValueError(f"polish_options tol must be > 0, got {opts['tol']!r}")
+    if "maxit" in opts and not is_count(opts["maxit"]):
+        raise ValueError(f"polish_options maxit must be an int >= 1, got {opts['maxit']!r}")
+    return opts
 
 
 def _check_count_options(opts):
@@ -302,19 +326,21 @@ def solve_modes(
     basis_dtype="float64", low_memory=False, precond="auto", sigma=None,
     precond_dtype="float64", X0=None, operator_options=None, precond_options=None,
     sigma_options=None, band=None, verify=None, count_options=None, strategy="auto",
-    memory_budget=None, slice_options=None,
+    memory_budget=None, slice_options=None, polish_options=None,
 ):  # fmt: skip
     """Lowest n_modes elastic modes of mesh under the Dirichlet sets bcs (see dof_mask).
 
     Voxel meshes get the stencil operator, all others the unstructured one (both run the
     material and element checks first). The rigid modes left by bcs are deflated and returned
     in info["rigid"] (M-orthonormal). precond: "auto" (GMG on voxel meshes, Jacobi with ssh8
-    blocks, else AMG), "gmg", "amg" or "jacobi". The multigrid is built at sigma (a hint >= 0)
-    or at the refined lam_1 pre-estimate; precond_dtype "float32" runs the GMG V-cycle in fp32.
-    X0 (n_dof, j <= block size) seeds lobpcg's first chunk. operator_options, precond_options
-    and sigma_options are dicts forwarded to the operator builder, the preconditioner builder
-    and the pre-estimate (allowed keys: OPERATOR_OPTIONS, PRECOND_OPTIONS, SIGMA_OPTIONS;
-    docs/eigensolvers.md#options).
+    and hex20 / hex27 blocks, else AMG), "gmg", "amg" or "jacobi". The multigrid is built at
+    sigma (a hint >= 0) or at the refined lam_1 pre-estimate; precond_dtype "float32" runs the
+    GMG V-cycle in fp32. X0 (n_dof, j <= block size) seeds lobpcg's first chunk.
+    operator_options, precond_options and sigma_options are dicts forwarded to the operator
+    builder, the preconditioner builder and the pre-estimate (allowed keys: OPERATOR_OPTIONS,
+    PRECOND_OPTIONS, SIGMA_OPTIONS; docs/eigensolvers.md#options). polish_options
+    (POLISH_OPTIONS, AMG only): the polish of a stalled chunk, one PCG solve with the V-cycle
+    (on, default True; tol, default min(1e-7, 0.1 tol); maxit, default 500).
     Returns lam (ascending), V (n_dof, n_modes; with band one column per band mode) and
     lobpcg's info plus operator, n_rigid, rigid, frequencies (sqrt(lam) / 2 pi), precond,
     sigma, sigma_iterations and time["precond"].
@@ -372,6 +398,7 @@ def solve_modes(
             f"{label})"
         )
     _check_sigma_options(sg_opts)
+    po_opts = check_polish_options(polish_options, precond, label)
     if sigma is not None:
         if not (math.isfinite(sigma) and sigma >= 0):
             raise ValueError(f"sigma must be a finite float >= 0, got {sigma}")
@@ -400,6 +427,18 @@ def solve_modes(
         # s_K, so A_P(0) is nonsingular
         return amg(op, free, s, mesh.points, nonsingular=k == 0, **pc_opts, **kw)
 
+    def polish(P):  # LOBPCG's polish closure: PCG on A_P(sigma) with its preconditioner P
+        if precond != "amg" or not po_opts.get("on", True):
+            return None
+        ptol, pmax = po_opts.get("tol", min(1e-7, 0.1 * tol)), po_opts.get("maxit", 500)
+
+        def run(X):  # A_P built only when a chunk polishes
+            A, mf = ap_operator(op, free, sigma), jnp.asarray(free, jnp.float64)[:, None]
+            Y, inf = pcg(A, mf * op.apply_M(mf * X), P, ptol, pmax)
+            return Y, int(inf["iterations"].max())
+
+        return run
+
     def lobpcg_precond(s):  # LOBPCG's preconditioner (and AMG's aggregates in band mode)
         if precond == "gmg":
             return make(s, dtype=precond_dtype), None
@@ -416,6 +455,7 @@ def solve_modes(
         lam, V, info = lobpcg(
             op, free, n_modes, tol, Rd, P, X0, maxit=maxit, seed=seed, chunk=chunk,
             guards=guards, basis_dtype=basis_dtype, low_memory=low_memory,
+            polish=polish(P),
         )  # fmt: skip
         P = None
         info["time"]["precond"] = t_p
@@ -429,9 +469,9 @@ def solve_modes(
     if memory_budget is not None:
         budget = float(memory_budget)
 
-    def models(dtype, ops=op_opts):  # the estimators, cached per call (distinct widths cost)
+    def models(dtype, ops=op_opts, po=po_opts):  # the estimators, cached per call
         return [f and functools.cache(f) for f in
-                mem._models(mesh, mass, precond, dtype, ops, pc_opts)]  # fmt: skip
+                mem._models(mesh, mass, precond, dtype, ops, pc_opts, po)]  # fmt: skip
 
     op_memory, pc = models(precond_dtype)
     pc64 = models("float64")[1] if precond == "gmg" and precond_dtype == "float32" else pc
@@ -443,6 +483,10 @@ def solve_modes(
 
     def levers(c):  # the memory levers not set, with their C_max at chunk c
         out = [f"low_memory=True (C_max {c_max(c, low=True)})"] if not low_memory else []
+        # the shell AMG's polish term sets its step, so low_memory alone saves little there
+        if precond == "amg" and "ssh8" in mesh.blocks and po_opts.get("on", True):
+            off = models(precond_dtype, po={"on": False})[1]
+            out.append(f"polish_options={{'on': False}} (C_max {c_max(c, pc_m=off)})")
         if basis_dtype != "float32":
             out.append(f"basis_dtype='float32' (C_max {c_max(c, dtype='float32')})")
         if precond == "gmg" and precond_dtype != "float32":
@@ -485,6 +529,7 @@ def solve_modes(
         lam, V, info = _solve(
             op, free, n_m, tol, Rd, P, X0, maxit, seed, chunk=ch, guards=guards,
             basis_dtype=basis_dtype, low=low_memory, lam_stop=lam_hi, max_capacity=reach[ch],
+            polish=polish(P),
         )  # fmt: skip
         solve_s = time.perf_counter() - t0
         P = None  # one hierarchy alive at a time
@@ -533,7 +578,7 @@ def solve_modes(
                     n_rigid=k, mass=mass, chunk=info["chunk"], guards=guards,
                     basis_dtype=basis_dtype, low_memory=low_memory, precond=precond,
                     precond_dtype=precond_dtype, operator_options=op_opts,
-                    precond_options=pc_opts, band=(0.0, f2),
+                    precond_options=pc_opts, band=(0.0, f2), polish_options=po_opts,
                 )  # fmt: skip
 
             info["count"] = _verify(

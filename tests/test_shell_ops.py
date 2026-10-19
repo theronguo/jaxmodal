@@ -27,9 +27,10 @@ from jaxmodal.operators.matfree import _block_data, element_matrices
 from jaxmodal.operators.sampling import element_factor, xi_shapes
 from jaxmodal.precond import amg, pmg
 
+EPS = np.finfo(float).eps
 STEEL = {0: Material(isotropic(210e9, 0.3), 7850.0)}
 PATHS = ("scatter", "gather")
-AMG = "amg does not support ssh8 blocks; solid-shell AMG arrives in PR 18b"
+AMG = "solid-shell AMG supports ssh8 and hex8 blocks"
 
 
 def shells():
@@ -50,6 +51,14 @@ def mixed_label0():
 def mixed_laminate():
     """hex8 (anisotropic Material) + ssh8 (two laminates): different rho and ply counts."""
     return (*mixed(), None)
+
+
+def hex20_skin():
+    """An ssh8 plate next to a hex20 box (separate parts): no solid-shell AMG (Jacobi)."""
+    h, sh = box_mesh((1, 1, 1), type="hex20"), solid_shell(box_mesh((2, 2, 1)))[0]
+    c, n = sh.blocks["ssh8"] + len(h.points), h.n_el + sh.n_el
+    return Mesh(np.vstack([h.points, sh.points + 2]), {"hex20": h.blocks["hex20"], "ssh8": c},
+                {}, {}, np.zeros(n, np.int64), np.zeros(n, np.int64))  # fmt: skip
 
 
 CASES = {"shells": shells, "mixed": mixed_label0, "mixed-laminate": mixed_laminate}
@@ -157,22 +166,24 @@ def test_m4_bands(plate_ref):
     lo, hi = (lr[0] + lr[1]) / 2, (lr[3] + lr[4]) / 2
     tol = 1e-6
     lam, _, info = solve_modes(mesh, STEEL, SIMPLY_SUPPORTED, band=(0, freq(hi)), tol=tol,
-                               maxit=2000, verify=True)  # fmt: skip
-    assert info["precond"] == "jacobi" and info["strategy"] == "lobpcg"
+                               verify=True)  # fmt: skip
+    assert info["precond"] == "amg" and info["strategy"] == "lobpcg"
     check_m4_band(lam, info, lr, 0, hi, tol)
     lam, _, info = solve_modes(mesh, STEEL, SIMPLY_SUPPORTED, band=(freq(lo), freq(hi)), tol=tol,
                                strategy="shift_invert", verify=True)  # fmt: skip
-    assert info["precond"] == "jacobi" and info["strategy"] == "shift_invert"
+    assert info["precond"] == "amg" and info["strategy"] == "shift_invert"
     check_m4_band(lam, info, lr, lo, hi, tol)
 
 
-def test_m4_reference(plate_ref):
-    """The roadmap's comparison on the example's setup: the PR 9 tolerances (check_lam; principal
-    angles by max_sine against r_M, the double modes compared as subspaces)."""
+@pytest.mark.parametrize("precond", ["auto", "jacobi"])
+def test_m4_reference(plate_ref, precond):
+    """The roadmap's comparison on the example's setup ("auto": AMG): the PR 9 tolerances
+    (check_lam; principal angles by max_sine against r_M, the double modes as subspaces)."""
     mesh, K, M, free, lr_all, Vr = plate_ref
     tol = 1e-10
-    lam, V, info = solve_modes(mesh, STEEL, SIMPLY_SUPPORTED, 6, tol=tol, maxit=3000)
-    assert info["converged"] and info["precond"] == "jacobi"
+    lam, V, info = solve_modes(mesh, STEEL, SIMPLY_SUPPORTED, 6, tol=tol, maxit=3000,
+                               precond=precond)  # fmt: skip
+    assert info["converged"] and info["precond"] == ("amg" if precond == "auto" else "jacobi")
     Kf, Mf, idx = restrict(K, M, free)
     lr = lr_all[:6]
     Ld = sl.cholesky(Mf.toarray(), lower=True)
@@ -182,10 +193,13 @@ def test_m4_reference(plate_ref):
     check_lam(lam, lr_all, lmax, tol)
     Vf, Vrf = np.asarray(V)[idx], Vr[idx, :6]
     rm, rm_ref = r_M(Kf, Mf, Ld, lam, Vf), r_M(Kf, Mf, Ld, lr, Vrf)
+    # both residuals bound the angle (the solver's can be the sharper one); the reference's is
+    # at the rounding floor
+    assert (rm_ref <= 10 * EPS * lmax / lr).all()
     for g in ([0], [1, 2], [3], [4, 5]):
-        assert rm_ref[g].max() <= 0.1 * rm[g].max()  # the reference is the sharper one
         gap = np.abs(np.delete(lr_all, g)[:, None] - lr[g][None]).min()
-        assert max_sine(Mf, Ld, Vf[:, g], Vrf[:, g]) <= 10 * (rm[g] * lam[g]).max() / gap
+        bound = 10 * ((rm[g] + rm_ref[g]) * lam[g]).max() / gap
+        assert max_sine(Mf, Ld, Vf[:, g], Vrf[:, g]) <= bound
 
 
 def test_rho_not_read():
@@ -204,9 +218,12 @@ def test_rho_not_read():
 
 
 def test_auto_jacobi_mixed():
-    mesh, mats, ori = mixed_label0()
-    _, _, info = solve_modes(mesh, mats, {"xmin": "xyz"}, 2, ori, tol=1e-4, maxit=2000)
+    """ssh8 with hex20: "auto" keeps Jacobi; hex8 with ssh8 gets AMG."""
+    _, _, info = solve_modes(hex20_skin(), STEEL, {}, 2, tol=1e-4, maxit=2000)
     assert info["precond"] == "jacobi" and info["converged"]
+    mesh, mats, ori = mixed_label0()
+    _, _, info = solve_modes(mesh, mats, {"xmin": "xyz"}, 2, ori, tol=1e-4)
+    assert info["precond"] == "amg" and info["converged"]
 
 
 # ---------------------------------------------------------------- 4: refusals
@@ -222,21 +239,15 @@ def test_refusals():
         unstructured_memory(mesh, 4, mode="otf")
     with pytest.raises(ValueError, match=otf):
         solve_modes(mesh, mats, bcs, 2, ori, operator_options={"mode": "otf"})
-    for f in (solve_modes, lambda m, mt, b, n, o, **kw: solve_modes_memory(m, b, n, **kw)):
-        with pytest.raises(ValueError, match=AMG):
-            f(mesh, mats, bcs, 2, ori, precond="amg")
+    two = hex20_skin()  # ssh8 with hex20 (solve_modes: test_shell_solve.py)
     with pytest.raises(ValueError, match=AMG):
-        amg_memory(mesh, 4)
+        amg_memory(two, 4)
+    op = unstructured(two, STEEL)
+    with pytest.raises(ValueError, match=AMG):
+        amg(op, np.ones(op.n_dof, bool), 1.0, two.points)
     op, free = unstructured(mesh, mats, ori), dof_mask(mesh, bcs)
     with pytest.raises(ValueError, match="pmg does not support ssh8 blocks; use amg"):
         pmg(op, free, 1.0)
-    h, sh = box_mesh((1, 1, 1), type="hex20"), solid_shell(box_mesh((2, 2, 1)))[0]
-    c, n = sh.blocks["ssh8"] + len(h.points), h.n_el + sh.n_el
-    two = Mesh(np.vstack([h.points, sh.points + 2]), {"hex20": h.blocks["hex20"], "ssh8": c},
-               {}, {}, np.zeros(n, np.int64), np.zeros(n, np.int64))  # fmt: skip
-    op = unstructured(two, STEEL)
-    with pytest.raises(ValueError, match="solid-shell AMG supports ssh8 and hex8 blocks"):
-        amg(op, np.ones(op.n_dof, bool), 1.0, two.points)
     with pytest.raises(ValueError, match="consistent-mass only"):
         solve_modes_memory(mesh, bcs, 2, mass="lumped")
     with pytest.raises(ValueError, match="consistent-mass only"):
@@ -251,13 +262,16 @@ def test_refusals():
 def test_auto_labels():
     mesh, mats, ori = shells()
     bcs = {"xmin": "xyz"}
+    two = hex20_skin()
     label = r"unknown auto \(resolved to jacobi\) precond option"
     with pytest.raises(ValueError, match=label):
-        solve_modes(mesh, mats, bcs, 2, ori, precond_options={"degree": 3})
+        solve_modes(two, STEEL, {}, 2, precond_options={"degree": 3})
     with pytest.raises(ValueError, match=label):
-        solve_modes_memory(mesh, bcs, 2, precond_options={"degree": 3})
+        solve_modes_memory(two, {}, 2, precond_options={"degree": 3})
     with pytest.raises(ValueError, match=r"\(precond: auto \(resolved to jacobi\)\)"):
-        solve_modes(mesh, mats, bcs, 2, ori, sigma_options={"tol": 1e-3})
+        solve_modes(two, STEEL, {}, 2, sigma_options={"tol": 1e-3})
+    with pytest.raises(ValueError, match=r"unknown auto \(resolved to amg\) precond option"):
+        solve_modes(mesh, mats, bcs, 2, ori, precond_options={"foo": 3})
     with pytest.raises(ValueError, match="unknown jacobi precond option"):
         solve_modes(mesh, mats, bcs, 2, ori, precond="jacobi", precond_options={"degree": 3})
     box = box_mesh((2, 2, 2))  # every mesh type: hex8 resolves to amg
@@ -281,6 +295,7 @@ def test_solve_modes_memory():
     mesh = plate()
     est = solve_modes_memory(mesh, SIMPLY_SUPPORTED, 6)
     assert est["total"] > unstructured_memory(mesh, 1)["storage"] > 0
+    assert est["precond"] == amg_memory(mesh, 11)["storage"] > 0  # "auto": shell AMG
 
 
 def test_build_envelope():

@@ -12,6 +12,7 @@ from .eigen.api import (
     PRECOND_OPTIONS,
     _check_options,
     check_band,
+    check_polish_options,
     precond_label,
     resolve_precond,
 )
@@ -23,8 +24,11 @@ from .operators import dof_mask, rigid_modes
 from .operators.common import check_shell, is_count
 from .operators.matfree import layout
 from .operators.voxel import grid_layout
+from .precond import schwarz
+from .precond.amg import SHELL_BLOCKS, unsupported_shell
 from .precond.gmg import _ell_rows, _islands
-from .precond.pmg import _w8, no_shell
+from .precond.pmg import _w8
+from .precond.shell import _columns, _fibers
 
 # XLA temporaries of the build kernel per element (memory_analysis, exactly linear in chunk).
 # ssh8: an envelope, 1.02 x the 32-ply value (44.6 KB at 1 ply, 56.4 KB at 32; above about 35
@@ -147,7 +151,8 @@ def lobpcg_memory(
     estimate (e.g. lambda m: gmg_memory(mesh, m)), None for the default Jacobi. capacity: the
     basis columns (default _capacity's for n_modes).
 
-    Returns step, basis, rigid, host, precond (its storage),
+    step = max(9-block, low, polish) (low_memory: max(low, polish); polish for the shell AMG
+    family only). Returns step, basis, rigid, host, precond (its storage),
     total = overhead + storage + precond + basis + rigid + host + max(build, precond build, step)
     and per memory space (a GPU; the CPU uses total): device_total (the device terms and the
     device builds), host_total (the host peak: max(operator build, V + AMG build, V + 2 chunks
@@ -159,10 +164,16 @@ def lobpcg_memory(
     cap = cap if capacity is None else capacity
     op = op_memory(k)
     pc = precond_memory(k) if precond_memory else dict(storage=0, build=0, step=0, step_low=0)
-    b = 8 * n_dof * k
-    A, f = STEP_FIT["low" if low_memory else "9-block"]
+    b, ws = 8 * n_dof * k, op["workspace"]
+    A, f = STEP_FIT["9-block"]
+    Al, fl = STEP_FIT["low"]
+    step = Al * b + fl * ws + pc["step_low"]  # the low step, also after a 9-block switch
+    if not low_memory:
+        step = max(step, A * b + f * ws + pc["step"])
+    if "polish" in pc:  # the polish's PCG (the shell AMG family)
+        step = max(step, fl * ws + pc["polish"])
     out = dict(
-        step=A * b + f * op["workspace"] + pc["step_low" if low_memory else "step"],
+        step=step,
         basis=n_dof * cap * (4 if basis_dtype == "float32" else 8),
         rigid=2 * 8 * n_dof * n_rigid,  # R and M R, fp64
         # freed step output and the fp64 modes on the host; a chunked solve adds 4 blocks of
@@ -314,6 +325,60 @@ AMG_LOOP_K = 120_000
 # of memory_analysis of _recurrence on hex20 12^3-28^3, b = 4-32 (below 20k DOF the fixed
 # AMG buffers dominate and the fit does not apply).
 AMG_COUNT = (11.5, 45.0)
+# Solid-shell family (meshes with ssh8 blocks, docs/preconditioners.md). Storage beyond the
+# level-0 Schwarz (exact from the mesh scan): bytes per shell DOF (T_0 and the rest), per shell
+# fiber group (the coarse levels) and per hex-only DOF (its level-0 and coarse share); for the
+# fit's geometries (a T junction 3/3 at 96^2, out of the fit, is 0.977x its owned bytes).
+SHELL_STORAGE = {"shell": 500, "fiber": 6300, "hex": 1250}
+# Setup host peak: beta + storage + gamma per shell / hex-only DOF (upper envelope, 45k-1.58M,
+# up to 10 layers: a 20-layer stack is 1.3% above it).
+SHELL_BUILD = (150e6, {"shell": 1400, "hex": 3300})
+# pc terms 8 n (a m + c) + K0 (K0 bytes, independent of m): the upper envelope (linear
+# programming, c, K0 >= 0) of memory_analysis minus lobpcg_memory's STEP_FIT part (A b + f ws;
+# the polish with the low f) on flat 64^2-512^2, web 64^2, block 32^3 and 64^3, stack x10 64^2
+# and x3 128^2 (25k-1.58M DOF), m = 6-120, and T 48^2 at m = 15, rounded up, c + 0.5 against
+# rounding. count: _recurrence minus COUNT_STEP's part, b = 4-50 on flat 64^2-512^2, stack x3
+# 128^2 and block 64^3, and si_memory's minres (SI_MINRES b + count) at b = 6 on the flat plates.
+SHELL_STEP = {
+    "9-block": (9.6, 17.1, 70e6),
+    "low": (13.9, 13.9, 106e6),
+    "polish": (26.7, 4.0, 128e6),
+    "count": (15.2, 5.8, 116e6),
+}
+
+
+@functools.lru_cache(maxsize=1)  # Mesh hashes by identity; keeps the last mesh alive
+def _shell_scan(mesh):
+    """(level-0 patch sizes in DOFs, shell DOFs, hex-only DOFs, shell fiber groups) of the
+    solid-shell AMG: the fibers and patches of amg's own scan, on the mesh's connectivity."""
+    n_nodes = len(mesh.points)
+    E = mesh.blocks["ssh8"]
+    group = _fibers(E, n_nodes)
+    sizes = 3 * (_columns(E, group, n_nodes) >= 0).sum(1)
+    shell = np.zeros(n_nodes, bool)
+    shell[E.ravel()] = True
+    return sizes, 3 * int(shell.sum()), 3 * int((~shell).sum()), len(np.unique(group[shell]))
+
+
+def _shell_amg_memory(mesh, m, max_coarse, degree):
+    if unsupported_shell(mesh.blocks):
+        raise ValueError(SHELL_BLOCKS)
+    sizes, n_s, n_h, n_f = _shell_scan(mesh)
+    n = 3 * len(mesh.points)
+    st = SHELL_STORAGE
+    storage = (schwarz.nbytes(sizes) + st["shell"] * n_s + st["fiber"] * n_f + st["hex"] * n_h
+               + 8 * min(n, max(max_coarse, 1000)) ** 2)  # fmt: skip
+    beta, g = SHELL_BUILD
+    hb = beta + storage + g["shell"] * n_s + g["hex"] * n_h
+    loop = 8 * m * AMG_LOOP_K if degree > 2 else 0
+
+    def term(key):
+        a, c, K0 = SHELL_STEP[key]
+        return 8 * n * (a * m + c) + K0 + loop
+
+    out = dict(storage=storage, build=hb, host_build=hb, step=term("9-block"),
+               step_low=term("low"), polish=term("polish"), count=term("count"))  # fmt: skip
+    return {k: int(v) for k, v in out.items()}
 
 
 @functools.lru_cache(maxsize=1)  # Mesh hashes by identity; keeps the last mesh alive
@@ -340,11 +405,12 @@ def amg_memory(mesh, m, max_coarse=1000, degree=2):
     max_coarse=max_coarse) applied to (n_dof, m) blocks: storage (the p-level exact from the
     mesh, the AMG levels per corner DOF, the coarsest factor), build and host_build (the setup
     host peak), step and step_low (extra LOBPCG step bytes over Jacobi), count (extra
-    count-recurrence bytes).
-    Calibrated on box meshes at max_coarse 1000; the coarse term uses max(max_coarse, 1000) (an
-    upper bound, loose above 1000)."""
+    count-recurrence bytes); meshes with ssh8 blocks also polish (the polish's PCG).
+    Calibrated on box meshes at max_coarse 1000 (the shell family on flat, stacked, web and
+    block meshes); the coarse term uses max(max_coarse, 1000) (an upper bound, loose above
+    1000)."""
     if "ssh8" in mesh.blocks:
-        raise no_shell("amg")
+        return _shell_amg_memory(mesh, m, max_coarse, degree)
     n_nodes = len(mesh.points)
     fam, n_c, tables = _amg_scan(mesh)
     n_dof = 3 * n_nodes
@@ -366,8 +432,14 @@ def amg_memory(mesh, m, max_coarse=1000, degree=2):
     return {k: int(v) for k, v in out.items()}
 
 
-def _models(mesh, mass, precond, precond_dtype, operator_options, precond_options):
-    """(op_memory, precond_memory) of solve_modes' operator and preconditioner: m -> estimate."""
+def _no_polish(pc, m):
+    return {k: v for k, v in pc(m).items() if k != "polish"}
+
+
+def _models(mesh, mass, precond, precond_dtype, operator_options, precond_options,
+            polish_options=None):  # fmt: skip
+    """(op_memory, precond_memory) of solve_modes' operator and preconditioner: m -> estimate
+    (no polish term with polish_options {"on": False})."""
     name = resolve_precond(mesh, precond, precond_dtype)
     voxel = mesh.voxel is not None
     op_opts = _check_options(
@@ -388,6 +460,8 @@ def _models(mesh, mass, precond, precond_dtype, operator_options, precond_option
             amg_memory, mesh, max_coarse=pc_opts.get("max_coarse", 1000),
             degree=pc_opts.get("degree", 2),
         )  # fmt: skip
+    if not check_polish_options(polish_options, name, label).get("on", True):
+        pc = functools.partial(_no_polish, pc)
     est = stencil_memory if voxel else unstructured_memory
     return functools.partial(est, mesh, mass=mass, **op_opts), pc
 
@@ -395,7 +469,7 @@ def _models(mesh, mass, precond, precond_dtype, operator_options, precond_option
 def solve_modes_memory(
     mesh, bcs, n_modes=None, *, mass="consistent", chunk=None, guards=None,
     basis_dtype="float64", low_memory=False, precond="auto", precond_dtype="float64",
-    n_rigid=None, operator_options=None, precond_options=None, band=None,
+    n_rigid=None, operator_options=None, precond_options=None, band=None, polish_options=None,
 ):  # fmt: skip
     """Estimated peak bytes of solve_modes(mesh, ..., bcs, n_modes, ...) with the same options:
     the operator, preconditioner and lobpcg estimates composed (lobpcg_memory's dict).
@@ -404,12 +478,15 @@ def solve_modes_memory(
     modes: about 20 GB at 100M DOF; pass n_rigid for large meshes). band=(0, f_max): the band
     solve expecting n_modes modes (n_modes and chunk default as band_defaults gives them, not
     the ladder's possibly halved chunk); its count fits by construction (solve_modes sizes the
-    probe block from this estimate)."""
+    probe block from this estimate). polish_options as in solve_modes ({"on": False} drops the
+    polish term)."""
     if band is not None and check_band(band)[0] > 0:
         raise ValueError("solve_modes_memory needs band=(0, f_max): no estimate of f1 > 0 yet")
     if band is None and n_modes is None:
         raise ValueError("pass n_modes or band")
-    op_memory, pc = _models(mesh, mass, precond, precond_dtype, operator_options, precond_options)
+    op_memory, pc = _models(
+        mesh, mass, precond, precond_dtype, operator_options, precond_options, polish_options
+    )
     free = dof_mask(mesh, bcs)
     if n_rigid is None:
         n_rigid = rigid_modes(mesh, free).shape[1]
@@ -489,6 +566,7 @@ def band_probe_block(mesh, bcs, n_modes, n_probes, host_bytes, *, n_rigid, **opt
     op_memory, pc = _models(
         mesh, options.get("mass", "consistent"), options.get("precond", "auto"), "float64",
         options.get("operator_options"), options.get("precond_options"),
+        options.get("polish_options"),
     )  # fmt: skip
     return probe_block(
         total - host_bytes, n_probes, op_memory, 3 * len(mesh.points),

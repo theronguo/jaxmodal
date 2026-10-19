@@ -274,7 +274,8 @@ def _recurrence(A, P, m, w0, gamma, d, lam_c, tau, maxit, verbose=False):
 
     def body(s):
         k, w_prev, w, u, it_sum, it_max, _ = s
-        t, info = _pcg(A, P, _mm(A.op, m, w), tau, maxit)
+        Q, w = lax.optimization_barrier((P, w))  # as in _pcg: the V-cycle setup stays inside
+        t, info = _pcg(A, Q, _mm(A.op, m, w), tau, maxit)
         first = k == 1
         w_new = jnp.where(first, 1.0, 2.0) * (2 * lam_c * t - w)
         w_new = w_new - jnp.where(first, 0.0, 1.0) * w_prev

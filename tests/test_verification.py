@@ -8,8 +8,7 @@ import itertools
 import numpy as np
 import pytest
 from exact import SIMPLY_SUPPORTED, SLIDING, lamb_sphere, mac, plate_modes, sliding_block, visscher
-from helpers import ORTHO, PLATES, H, R
-from scipy.sparse.linalg import eigsh
+from helpers import ORTHO, PLATES, H, R, lmax
 
 from jaxmodal.eigen import reference_modes
 from jaxmodal.materials import Material, isotropic, rotate
@@ -19,11 +18,6 @@ from jaxmodal.operators import assemble, dof_mask, restrict
 EPS = np.finfo(float).eps
 L = np.array([1.0, 0.83, 0.67])
 MATS = {"iso": Material(isotropic(3.0, 0.3), 2.0), "ortho": Material(ORTHO, 0.7)}
-
-
-def lmax(Kf, Mf):
-    """Largest eigenvalue; only its order of magnitude matters (round-off allowances)."""
-    return eigsh(Kf, 1, M=Mf, which="LA", tol=1e-3, return_eigenvectors=False)[0]
 
 
 @functools.cache

@@ -190,6 +190,11 @@ def owned_bytes(P, op):
     return sum(x.nbytes for i, x in leaves.items() if i not in shared)
 
 
+def lmax(Kf, Mf):
+    """Largest eigenvalue; only its order of magnitude matters (round-off allowances)."""
+    return float(spla.eigsh(Kf, 1, Mf, which="LA", tol=1e-3, return_eigenvectors=False)[0])
+
+
 def r_M(Kf, Mf, L, lam, X):
     """lam-scaled residuals in the M^-1 norm of M-normalized columns X (free DOFs), dense; L the
     dense lower Cholesky factor of Mf."""
@@ -203,6 +208,19 @@ def max_sine(Mf, L, Q, Qr):
     M Q)), never sqrt(1 - cos^2), which bottoms out near 1e-8."""
     E = Q - Qr @ (Qr.T @ (Mf @ Q))
     return np.linalg.norm(L.T @ E, 2)
+
+
+def r_M_sparse(Kf, Mf, lu, lam, X):
+    """r_M with lu = splu(Mf): ||L^-1 res|| = sqrt(res^T M^-1 res)."""
+    X = X / np.sqrt(np.einsum("ij,ij->j", X, Mf @ X))
+    res = Kf @ X - (Mf @ X) * lam
+    return np.sqrt(np.maximum(np.einsum("ij,ij->j", res, lu.solve(res)), 0)) / np.abs(lam)
+
+
+def max_sine_sparse(Mf, Q, Qr):
+    """max_sine without the factor: ||L^T E||_2 = sqrt(lambda_max(E^T M E))."""
+    E = Q - Qr @ (Qr.T @ (Mf @ Q))
+    return np.sqrt(max(np.linalg.eigvalsh(E.T @ (Mf @ E))[-1], 0))
 
 
 def cheb(A, Dinv, lmax, degree, ratio):

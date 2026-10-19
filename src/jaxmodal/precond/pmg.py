@@ -211,11 +211,6 @@ def _hex8_galerkin(A, pattern=None):
     return Ab, pattern
 
 
-def no_shell(name):
-    """The refusal of solve_modes' AMG and amg_memory on solid-shell blocks (until PR 18b)."""
-    return ValueError(f"{name} does not support ssh8 blocks; solid-shell AMG arrives in PR 18b")
-
-
 def _check(name, op, sigma, nonsingular=False):
     """The shared argument checks of pmg and amg; returns sigma as a float. sigma = 0 needs
     nonsingular (the caller's proof that A_P(0) is nonsingular)."""
