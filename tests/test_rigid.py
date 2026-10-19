@@ -171,7 +171,7 @@ def test_parts():
             with pytest.raises(ValueError, match="without sharing a whole face"):
                 f(m)
     assert parts(blocks([(0, 0, 0), (1, 0, 0)], (2, 2, 2))).max() == 0
-    big = blocks([np.s_[:30], np.s_[31:]], (61, 40, 25))  # > 2**16 nodes: key dtype range
+    big = blocks([np.s_[:30], np.s_[31:]], (61, 40, 25))  # the larger voxel-vs-generic case
     assert len(big.points) > 2**16 and (parts(big) == (big.points[:, 0] > 30.5)).all()
     assert parts(mesh("mixed")).max() == 0  # faces match across hex8/hex20 blocks
     b = box_mesh((2, 1, 1))
@@ -192,6 +192,44 @@ def test_parts():
     with pytest.raises(ValueError, match="max_parts"):
         rigid_modes(many)
     assert rigid_modes(many, max_parts=constraints.MAX_PARTS + 1).shape[1] == 66
+
+
+def generic(m):
+    return parts(dataclasses.replace(m, voxel=None))
+
+
+def test_parts_voxel(monkeypatch):
+    """Voxel meshes label the cell mask (ndimage.label): the same labels as the generic face
+    search, also after rcm and a random renumber; contacts raise on both paths."""
+    import scipy.ndimage
+
+    calls = []
+    real = scipy.ndimage.label
+    monkeypatch.setattr(scipy.ndimage, "label", lambda *a, **k: calls.append(1) or real(*a, **k))
+    mask = np.zeros((6, 3, 2), bool)
+    mask[:2] = True  # a block
+    mask[3:, 0, :] = mask[5, 1:, :] = True  # an L-shaped part across the gap at x = 2
+    mask[3, 2, 1] = True  # a lone cell
+    lshape = voxel_mesh((6, 3, 2), spacing=(1.0, 0.5, 2.0), mask=mask)
+    two = blocks([np.s_[:2], np.s_[3:]], (5, 2, 2))
+    big = blocks([np.s_[:30], np.s_[31:]], (61, 40, 25))
+    rng = np.random.default_rng(1)
+    cases = [lshape, two, big, rcm(lshape)[0]]
+    cases.append(
+        renumber(lshape, rng.permutation(len(lshape.points)), rng.permutation(lshape.n_el))
+    )
+    for m in cases:
+        calls.clear()
+        got = parts(m)
+        assert calls and np.array_equal(got, generic(m))
+    assert parts(lshape).max() == 2
+    calls.clear()
+    generic(lshape)
+    parts(mixed_mesh(np.random.default_rng(2)))
+    assert not calls
+    for cells in ([(0, 0, 0), (1, 1, 0)], [(0, 0, 0), (1, 1, 1)]):  # edge, vertex
+        with pytest.raises(ValueError, match="without sharing a whole face"):
+            parts(blocks(cells, (2, 2, 2)))
 
 
 def test_projector():
