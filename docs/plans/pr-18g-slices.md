@@ -1,73 +1,124 @@
 # PR 18g: slice efficiency (plan)
 
-Branch `pr-18g-slices`. Roadmap section "PR 18g: Slice efficiency" (`docs/ROADMAP.md`), the open items "Slice efficiency (PR 15c → PR 18e → PR 18f → PR 18g)" (`docs/open_items.md`).
+Branch `pr-18g-slices`. Roadmap section "PR 18g: Slice efficiency" (`docs/ROADMAP.md`), the open items "Slice efficiency (PR 15c → PR 18e → PR 18f → PR 18g)" (`docs/open_items.md`). Rev 2 (after plan review round 1).
 
 ## Goal
 
-1. **A slice's own modes below σ** (the main item). PR 18f deflates each slice's MINRES by the stored modes below σ, but a slice's own modes below σ stay undeflated, and they are the nearest, so the most expensive. Probe (2026-10-20, scratch `p18g/own.py`): the deep band's slice of PR 18f (hex20 $16^3$, AMG, σ = 443.93, the cut at 434.72, 957 known modes below it, 22 of the slice's own modes in [cut, σ)), one solve of 6 columns at τ = $10^{-8}$ with the exact eigsh vectors:
+1. **A slice's own modes** (the main item). PR 18f deflates each slice's MINRES by the stored modes below σ. The slice's own modes, the nearest to σ and so the most expensive, stay undeflated. Probe (2026-10-20; folded into `benchmarks/slice_study.py`, part `probe`): the deep band's slice of PR 18f (hex20 $16^3$, AMG, σ = 443.93, the cut at 434.72, 957 known modes below it, 22 own modes in [cut, σ), 29 in (σ, hi]), one solve of 6 columns at τ = $10^{-8}$, the vectors from the cached LOBPCG modes:
 
    | $Z$ | $n_z$ | MINRES iterations | s per iteration |
    |---|---|---|---|
-   | the 957 known (PR 18f) | 957 | 840 | 0.0681 |
-   | + the 11 farthest own | 968 | 640 | 0.0679 |
-   | + the 11 nearest own | 968 | 500 | 0.0682 |
-   | + all 22 own | 979 | 340 | 0.0682 |
+   | the 957 known (PR 18f) | 957 | 840 | 0.068 |
+   | + the 11 farthest own below σ | 968 | 640 | 0.068 |
+   | + the 11 nearest own below σ | 968 | 500 | 0.068 |
+   | + all 22 own below σ | 979 | 340 | 0.068 |
+   | + the 29 own above σ only | 986 | 460 | 0.068 |
+   | + all 51 own, both sides | 1008 | 120 | 0.068 |
+   | + the 22 below, perturbed $10^{-3}$ | 979 | 340 | 0.069 |
 
-   So deflating the own modes cuts the later steps' solves to about 0.4× at the same cost per iteration. PR 18f's slice ran 810–920 iterations per step over 37 steps (1839 s, 36 s per mode).
-2. **The deferred slice items** (PR 15c/15d → 18g): verification slices (remainders that find at most one new mode in 10–15 steps), a top remainder holding only known modes, the whole-slice requeue. Measured first, changed only where the study shows a gain (below).
+   Deflating the own modes on both sides of σ cuts a solve to 0.14×, at the same cost per iteration. Vectors with errors of $10^{-3}$ deflate as well as exact ones. PR 18f's slice ran 810–920 iterations per step over 37 steps, about 31,600 in total (1839 s, 36 s per mode).
+2. **The deferred slice items** (PR 15c/15d → 18g): verification slices (remainders that find at most one new mode in 10–15 steps), a top remainder holding only known modes ("no progress"), the whole-slice requeue. They are measured first and changed only where the study shows a gain (below).
 
 ## Design
 
 ### 1. Own-mode deflation in si_slice
 
-- **When:** after each kept Lanczos step, the step's accepted inside pairs (`last[2]`: converged by the stop rule's thresholds) with $\mu < \sigma$ are the own pairs. When their number grows, the deflation block is rebuilt before the next step's solve; otherwise it is kept. The Ritz vectors are formed from the current basis (`_form_v(Q, L0, Yr[:, own], c)`, host fp64, masked like `Q`).
-- **Exact:** the A-orthogonal deflation is exact for any $Z$ (PR 18f), so the Lanczos basis, the Ritz values and the returned pairs are those of the undeflated run up to the inner tolerance; only the MINRES iterations change. A Ritz vector that later moves (it was accepted, so it is converged to its threshold) only weakens the deflation, never the solve.
-- **Cap:** `si_slice(..., max_deflate=None)`: the total deflation columns, known plus own. None (the default) means `len(Z)`: no own columns beyond the given ones, today's behaviour. With a cap, the block is the own pairs (nearest σ first, at most `OWN_MAX` = $2c$) plus the nearest known columns that still fit: the known `Z` is ordered by ascending eigenvalue (farthest first) and its first columns are dropped. si_band passes its `max_deflate` (solve_modes: the plan's $d_Z$), so a slice whose store has fewer than $d_Z$ modes below σ (e.g. the first slice from 0 or from lo) deflates its own modes in the room left.
-- **Rebuild:** the old device block and $H$ are dropped (`Zd = H = None`) before the new upload (`_zblock`) and setup (`_deflate_setup`): no two blocks coexist. Cost: one upload and $\lceil n_z/c\rceil$ operator applies of width $c$ (1.5 s at $n_z$ = 957, 56k DOF, against about 50 s per step there); at most once per step that accepted a new own pair. A σ move recomputes $H$ as today. One compile per padded width (as PR 18f).
-- **si_band's `_z_cols`** returns the nearest $n$ indices ordered by ascending eigenvalue (today: ascending store index), so si_slice can drop the farthest first.
-- **si_checked** restarts pass the same known `Z` and cap; each run builds its own pairs afresh.
-- **info:** `deflated` stays `len(Z)` (the known columns given); new `own_deflated` (the own columns in the last step's block) and `z_columns` (per kept step, the block's columns used by its solve).
+- **Slots:** `si_slice(..., own=0)`: the number of own columns, appended after the known `Z` in one block of fixed padded width $\lceil (\mathrm{len}(Z) + \mathrm{own})/c \rceil c$. The block is allocated and the known columns uploaded once, at setup, as today. The own slots start zero, so `own = 0` is today's behaviour. `own` must be an int ≥ 0 (ValueError otherwise). With `own > 0` the deflated MINRES runs from the first step, also for `Z=None`: zero own columns give $H = 0$, so the first solves are plain MINRES. No switch happens mid-run.
+- **Which pairs:** after each kept step that does not end the loop, the own pairs are the candidates `_slice_check` evaluated (`cres`: inside pairs and the neighbours, both sides of σ) with relative residual $\le$ `OWN_RES` = $10^{-3}$, nearest $|\mu - \sigma|$ first, at most `own`. They are selected before acceptance: the deflation is exact for any $Z$ (PR 18f; checked again in review: $b - Ax = P_Z(b - A\tilde x)$ for any $Z$, and a rank-one deflation cannot push the spectrum outside $A$'s range). So the own set only changes the MINRES iterations, never the Lanczos basis beyond the inner tolerance, the Ritz values or the returned pairs. A pair accepted later, or never, costs nothing in correctness. A below-lo neighbour that is also a stored known column, or a near duplicate, drops out in the pinv (rcond $10^{-10}$, as PR 18f).
+- **Rebuild:** the own vectors are formed on the device ($Q_L Y_{\mathrm{own}}$ through `_combine`, masked like $Q$) and written into the block's own slots in place (the unused slots zeroed). Then $H$ is recomputed (`_deflate_setup` on the real columns). This happens every such step with a non-empty own set, because the Ritz vectors improve each step. No host vectors, no re-upload of the known columns, no second block, one compile (fixed width). Cost per rebuild: $\lceil n_z/c \rceil$ operator applies of width $c$, measured 1.5 s at $n_z$ = 957 against about 50 s per step in the deep slice. A σ move (only before the first kept step, so before any own column) recomputes $H$ as today; later rebuilds use the current A and σ.
+- **si_band:** with `max_deflate` = $d_Z$ > 0 it passes `own = min(OWN_MAX, max_deflate)` and the `max_deflate − own` nearest known columns (`_z_cols`, unchanged). The block stays within the plan's $d_Z$. `OWN_MAX` = 64: the deep slice had 51 candidates, and 64 columns add about 7% to the block of 957 there. Known columns given up for own slots are the farthest; the probe shows the own ones are worth far more.
+- **si_checked** restarts pass the same `Z` and `own`. Each run forms its own columns afresh. A restart puts the earlier runs' found modes into W, so they are neither own nor known columns in the restart: less deflation, not wrong answers. Restarts are rare; noted in the docs.
+- **info:** `deflated` stays the known columns given. New `own_columns` holds, per kept step, the own columns its solve used.
 
 ### 2. Memory
 
-- Device: unchanged, the block stays within the cap ($d_Z$ in `_slice_plan`).
-- Host: the own vectors, $8n \cdot \min(\texttt{OWN\_MAX}, d_Z)$, added to `si_memory`'s host term when `n_z` > 0 (exact). `_slice_plan` needs no other change.
+Unchanged. The device block is `len(Z) + own` ≤ $d_Z$ columns, as `_slice_plan` already sizes it (the `max_deflate` docstrings say known plus own). Forming the own vectors uses one `_combine` output of width `own` next to Q, below the final stage's `_form_v` chunk plus residual pass already in the model. The host has no new arrays.
 
 ### 3. The deferred slice items: measured
 
-`benchmarks/slice_study.py`, part `many`: hex20 $8\times6\times5$ clamped, AMG, the band of modes 5–200 at capacity 96 (the PR 15c code review case), `si_band` through `solve_modes(strategy="shift_invert", slice_options={"capacity": 96})`: per slice the interval, kind, new modes, steps, MINRES iterations and seconds; three runs:
+`benchmarks/slice_study.py` (results in `benchmarks/results/slice_study.json`; `--parts probe,many,deep`, each part within 1 h):
 
-1. `max_deflate` = 0 (PR 18e behaviour: no deflation);
-2. the default (PR 18f deflation plus own modes);
-3. 2 plus the **remainder σ rule** below.
+- **Part `probe`:** the table above, from `deep_band_study`'s LOBPCG cache. About 10 min (one band LOBPCG of 396 s on a cold cache).
+- **Part `many`:** hex20 $8\times6\times5$ clamped, AMG, the band of modes 5–200 at capacity 96 (the PR 15c code review case), through `solve_modes(strategy="shift_invert", slice_options={"capacity": 96})`. Per slice it records the interval, kind (first, remainder, verification, requeue), new modes, steps, MINRES iterations and seconds. Runs:
+  1. own deflation off (`OWN_MAX` = 0 patched in the study: PR 18f behaviour);
+  2. the default.
 
-**Remainder σ rule** (candidate): a work item with exactly one done edge (a remainder of a split) and stored modes inside places σ at the midpoint of its unexplored part: for $[a, x]$ with $x$ done, $\sigma = (a + l)/2$ with $l$ the smallest stored value in $(a, x]$; for $[x, e]$ with $x$ done, $\sigma = (u + e)/2$ with $u$ the largest stored value in $[x, e)$; without stored values inside, the midpoint as today. Adopted when run 3 against run 2 lowers the band's total MINRES iterations by $\ge 15\%$ with no more slices and every mode matching eigsh; otherwise not implemented, and the open items are closed with the study's numbers. The top-remainder and requeue items are recorded from the same runs (how often, at what cost) and closed or kept with the numbers.
+  A few minutes per run (PR 15c's case: 37 slices of about 10 s each).
+- **Remainder σ rule**, implemented and run (run 3) only if run 2's remainders with one done edge take ≥ 30% of the band's MINRES iterations. A work item whose own edges include exactly one done edge (`done ∩ {a, e}`; si_band's `done` also carries the parent's edges) and that has stored modes inside places σ at the midpoint of its unexplored part:
+  - for $[a, x]$ with $x$ done, $\sigma = (a + l)/2$ with $l$ the smallest stored value in $(a, x]$;
+  - for $[x, e]$ with $x$ done, $\sigma = (u + e)/2$ with $u$ the largest stored value in $[x, e)$;
+  - without stored values inside, the midpoint as today.
+
+  si_band builds the preconditioner at that σ (`make(σ)`, keeping the `p_sig` reuse), takes `_z_cols` at that σ, and passes `sigma` to si_checked internally; the user ban on `sigma` in `slice_options` stays. The rule is kept if it lowers the total MINRES iterations by ≥ 15% against run 2, with no more slices and every mode matching eigsh. Otherwise it is removed and the item is closed with the numbers.
+- **Top remainder and requeue:** counted in runs 1–2, with the slices and the share of MINRES iterations each takes. Each item is closed if it takes < 10% of the band's iterations; otherwise it is kept in `docs/open_items.md` with the numbers.
 
 ### 4. The deep band
 
-Part `deep` of the study: PR 18f's band (`deep_band_study.band`, the cached LOBPCG run, hex20 $16^3$, modes 951–1008) with own deflation: per step the MINRES iterations and $z$ columns, the slice's seconds per mode, against eigsh. About 40 min (LOBPCG 396 s, the slice).
+Part `deep`: PR 18f's band (`deep_band_study.band`, the cached LOBPCG run, hex20 $16^3$, modes 951–1008) with own deflation. Per step it records the MINRES iterations and own columns, plus the slice's seconds per mode, all against eigsh. About 40 min. PR 18f's slice log (scratch `p18f/study_band.log`) accepted no pair in steps 1–7, which is why the own set is gated by residual, not by acceptance.
 
 ## Acceptance
 
-- The deep band: every mode against eigsh ($\le 10^{-12}$ relative), the slice's MINRES iterations summed over its steps $\le 0.7\times$ PR 18f's, seconds per mode $\le 0.7\times$ (36 s).
-- The `many` band: every mode against eigsh in each run; the run-2 total MINRES iterations below run 1's.
+- **The deep band:**
+  - every mode against eigsh ($\le 10^{-12}$ relative);
+  - the slice's MINRES iterations summed over its steps $\le 0.7\times$ PR 18f's (about 31,600, so ≤ 22,100);
+  - seconds per mode $\le 0.75\times$ (36 s, so ≤ 27 s).
+
+  Predicted: about 0.5×, assuming the candidates reach $10^{-3}$ by about step 8 (when PR 18f accepted its first pairs at its thresholds, so earlier for the looser gate; the study logs it). Until then the steps run at PR 18f's cost; the steps after are at 0.15–0.4× (the probe's both-sides and below-only rows). The seconds include the rebuilds (1.5 s per step). If the target is missed but the sum is ≤ 0.85×, the feature is kept and the numbers recorded, with the gate (`OWN_RES`, candidates beyond the neighbours) logged as an open item. Above 0.85×, the gate is revisited before merging.
+- **The `many` band:** every mode against eigsh in each run, and the run-2 total MINRES iterations below run 1's.
 
 ## Tests
 
-1. `tests/test_deflation.py`: a slice above 30 modes of "hex20" with `Z` = the modes below lo and `max_deflate` = 30 + 12: the pairs match the `max_deflate=None` run and eigsh; `z_columns` grows over the steps; the summed MINRES iterations after the first own rebuild are below the run without own columns; `own_deflated` > 0.
-2. The cap: `max_deflate` = len(Z) + 2 with a spy on `_zblock`: each block holds at most the cap, the own columns first-built nearest σ, the farthest known columns dropped (by eigenvalue).
-3. The rebuild frees the previous block (weakref on `_zblock`'s output, as `test_zd_freed`).
-4. `_z_cols` ordering by eigenvalue (updated `test_z_cols`), si_band passing `max_deflate` to each slice (fake slices).
-5. `si_memory`'s host term with `n_z` > 0 (`test_memory_formulas`).
-6. If the remainder σ rule is adopted: si_band passes the rule's σ per work item (fake slices, crafted stores), and the `many` band end to end against eigsh (slow).
+`tests/test_deflation.py`, hex20 slice `edges(lr, 30, 42)` (12 inside, 7 own below σ, 16 steps, about 10 s), `Z` = the modes below lo, slow where it solves:
+
+1. **Exactness and gain:** `own` = 12 against `own` = 0:
+   - eigenvalues match to $10^{-10}$ relative and subspaces to small angles, and both match eigsh;
+   - `steps` and `basis` are equal;
+   - `own_columns` starts at 0 and grows;
+   - the mean MINRES iterations per step over the steps after the first own column are below the `own` = 0 run's over the same steps (about 60 against 110 measured with exact vectors).
+2. **The own set:** a spy on the own-slot write (and on `_deflate_setup`):
+   - every own column's Rayleigh quotient matches an evaluated candidate with residual ≤ `OWN_RES`;
+   - the count is ≤ `own`; the block width never changes;
+   - with `own` = 2, the two kept are the nearest $|\mu-\sigma|$ (some above σ when the candidates are).
+3. **`Z=None`, `own` > 0:** the pairs match eigsh and the plain run, `own_columns` > 0, later steps need fewer iterations. **`own` = 0:** no own write happens and `own_columns` is all 0. **`own` < 0** or a non-int raises ValueError.
+4. **Rebuilds:**
+   - `_zblock` is called once;
+   - `_deflate_setup` is called once at setup plus once per non-final step with a non-empty own set (kills both "never" and "every step including the last");
+   - no rebuild after the final step.
+5. **σ move:** extend `test_slice_deflated_move` with `own` > 0; every `_deflate_setup` after the move sees the moved operator (spy on the shift).
+6. **si_checked:** extend `test_checked_keeps_z`: each run gets the same `Z` and `own`, and each restart's first block has zero own columns.
+7. **si_band** (fake slices): with `max_deflate` = $d$ ≥ `OWN_MAX`, each slice gets `own` = `OWN_MAX` and the $d$ − `OWN_MAX` nearest known columns; with $d$ < `OWN_MAX`, `own` = $d$ and no known columns; with $d$ = 0, `own` = 0.
+8. If the remainder σ rule is adopted: si_band passes the rule's σ per work item (fake slices, crafted stores, a remainder of a remainder whose `done` carries a parent edge), and the `many` band end to end against eigsh (slow).
+
+Mutations to try in code review: the residual gate off (all candidates), the gate on acceptance only, the nearest ordering reversed, the slots not zeroed, a rebuild on the last step, stale A after a move, `own` ignored in si_band.
 
 ## Docs
 
-- `docs/eigensolvers.md`: the MINRES deflation section (own pairs, the cap, the rebuild), si_slice's options and info (`max_deflate`, `own_deflated`, `z_columns`), the slice memory model (the host term), the measured section (the study's tables), the test list.
-- `docs/ROADMAP.md`: the 18g section's status and results, the status paragraph at merge; `docs/open_items.md`: the slice-efficiency items closed or updated with the numbers, decisions without user input; README if user-visible behaviour changes (none planned: options stay internal to si_band/si_slice).
+- **README:**
+  - line 5 (status, order: 18g, then 18h);
+  - line 287 ("deflated by the known modes below its shift" → known and own modes, the numbers).
+- **`docs/eigensolvers.md`:**
+  - the MINRES deflation section (own columns, the gate, the slots, the rebuild, the restart note);
+  - si_slice's options and info (`own`, `own_columns`);
+  - `max_deflate` (known plus own);
+  - the measured section (the study's tables: the probe, `many`, `deep`), replacing PR 18f's deep-band numbers where superseded;
+  - the stale "PR 18g" forward references (lines about 153, 157, 196, 829, 887);
+  - the test list.
+- **Docstrings:**
+  - si_slice (`own`, `own_columns`);
+  - si_band and solve_modes (`max_deflate` counts known plus own; `own` stays internal: si_band rejects it in `slice_options`, as it does `Z`);
+  - `_slice_plan` and `si_memory` (the block is known plus own).
+- **`docs/ROADMAP.md`:**
+  - the 18g section's Contents and Tests rewritten to this scope, then its status and results;
+  - the status paragraph and the order lines (about 18, 92, 94);
+  - "Deferred GPU checks": the own rebuild's $H$ setup per step at 10M DOF (applies plus the $n_z \times n_z$ pinv on the host), the incremental $E$ update if it shows.
+- **`docs/open_items.md`:**
+  - the slice-efficiency items closed or updated with the numbers;
+  - the PR 18f residual-risk notes (about lines 155 and 335) updated;
+  - the decisions below.
 
 ## Decisions without user input
 
-- Own pairs only once accepted (not merely small residuals): the deflation stays tied to the stop rule's thresholds.
-- `OWN_MAX` = $2c$ bounds the host vectors; the probe's slice had 22 own modes below σ.
-- The remainder rule is decided by the study's numbers, not by argument.
+- Own columns are gated by residual ($10^{-3}$), not by acceptance, on both sides of σ: the probe shows both sides matter (0.14× against 0.4×) and perturbed vectors deflate as well; the deflation is exact for any vectors.
+- Fixed own slots (`OWN_MAX` = 64) inside the plan's $d_Z$, taken from the farthest known columns: one block, one compile, no memory-model change, no host vectors.
+- $H$ is recomputed in full per rebuild (1.5 s against about 50 s per step); an incremental $E$ (only the own rows) waits for a measured need (GPU checks).
+- The remainder σ rule runs only if remainders are costly (≥ 30% of iterations), and is kept by the numbers (≥ 15% fewer), not by argument.
