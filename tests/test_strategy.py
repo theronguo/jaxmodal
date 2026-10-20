@@ -1028,8 +1028,8 @@ def test_junction_case_b(fake_builds, monkeypatch, case):
 
 
 def test_junction_leaf_flagged(fake_builds, monkeypatch):
-    """Test 6: a flagged known leaf (_verify estimating 0.5, the boundary): counted once, not rerun, and the
-    leaf handed to si_band flagged."""
+    """Test 6: a flagged known leaf (_verify estimating 0.5, the boundary): counted once, not
+    rerun, and the leaf handed to si_band flagged."""
     seen, calls = {}, []
     monkeypatch.setattr(api, "_solve", capacity_stop("short", list(range(30))))
     monkeypatch.setattr(api, "si_band", stub_band(seen))
