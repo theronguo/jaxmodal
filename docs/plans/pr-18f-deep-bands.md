@@ -45,6 +45,15 @@ Branch `pr-18f-deep-bands` from `main` (0dc91a5, PR 18e merged). Roadmap: "PR 18
   - **Benchmark:** no undeflated reruns (cited); a band of 20 modes at depth 1000; single solves as their own part; times estimated.
   - **Goal:** iterations still grow with depth; the acceptance is a ratio.
   - **Docs:** the reviewers' added locations and a catch-all grep.
+- Rev 5 (plan review round 4: docs, performance and correctness satisfied):
+  - **No truncation.** LOBPCG's untruncated block (lazy zero tail) goes to si_band, whose one `resize` sizes the result, so the $j = 1$ case and the truncation fallback are gone.
+  - **The in-place check runs on the final parts:** a known prefix of length $p \le j$, with merged windows at the cut only shortening it.
+  - **$E$/$H$:**
+    - $E$ is trimmed before `pinv`;
+    - the setup runs in chunks of $c$, modelled with the operator's vectors.
+  - **$N_\text{new}$** is floored by the recomputed $D - j$.
+  - **Tests:** the selection helper `_z_cols`, the Moore–Penrose asserts, corrected expected values, the otf branches, the spies at call time.
+  - **Docs:** `:18`, `:115`, `:153`, $d_Z$, `:342`/`:346`.
 - Rev 4 (plan review round 3: performance satisfied):
   - **Junction:**
     - The count runs before the truncation, on $j + 1$ columns.
@@ -113,7 +122,7 @@ Setup:
 At hex20 $44^3$ (1.08M DOF, M3 Max):
 - One $A$ apply at $b$ = 6 takes 0.12 s, the AMG V-cycle 0.64 s.
 - The deflation update ($Z^\top y$ and $Z\,t$) runs at 0.20 s per 1000 columns, memory-bound.
-- $Z^\top(AZ_j)$ at $d$ = 1000 takes 20 s in chunks of 6 and 5.3 s in chunks of 96. The $d$ applies of $A$ add about 20 s, so a setup costs about 25 s per σ (70 s at $d$ = 2000), negligible against a 1M slice.
+- $Z^\top(AZ_j)$ at $n_z$ = 1000 takes 20 s in chunks of 6 and 5.3 s in chunks of 96. The $d$ applies of $A$ add about 20 s, so a setup costs about 25 s per σ (70 s at $n_z$ = 2000), negligible against a 1M slice.
 
 ## Goal (18f)
 
@@ -160,18 +169,18 @@ Plan review rounds 1 and 2 checked all of this on dense pencils with inexact, du
 In exact arithmetic this equals the $AZ$ form, at $8n\,n_z$ device bytes instead of $16n\,n_z$. The price is one $A$ apply per iteration: +7.5% at 56k DOF, about +11% at 1M with AMG.
 
 **$H$.**
-- `np.linalg.pinv((E + Eᵀ)/2, rcond=1e-10, hermitian=True)`, symmetric by construction.
+- `np.linalg.pinv((E + Eᵀ)/2, rcond=1e-10, hermitian=True)` on $E$ trimmed to $n_z \times n_z$ (the padding dropped), symmetric by construction; $H$ is padded back with zeros on the device.
 - Duplicate store columns (two runs' copies of one mode, merged only at the end) drop out.
-- $E$ is accumulated as $Z^\top (A Z_j)$ in chunks $Z_j$ of $4c$ columns, $c$ = `_chunk(block)`. Each chunk reads all of $Z$, so larger chunks are faster: at 1M, 5.3 s instead of 20 s for chunks of 6.
+- $E$ is accumulated as $Z^\top (A Z_j)$ in chunks $Z_j$ of $c$ columns, $c$ = `_chunk(block)`. Each chunk reads all of $Z$, so larger chunks are faster (at 1M, 5.3 s at 96 columns against 20 s at 6), but a chunk of $4c$ can become the binding memory phase (at 1M and on a 10M GPU), costing deflation columns worth far more than the saved seconds; $c$ never binds.
 
 **Tolerance.**
 - MINRES runs at the per-column tolerance $\tau\,\|b\|/\|P_Z b\|$ (`minres` broadcasts an array `tol`). The ratio $\|P_Z b\|/\|b\|$ can lie on either side of 1.
-- The returned relative residuals are scaled back by $\|P_Z b\|/\|b\|$. So `tau`, $\tau_\text{eff}$, the stagnation test and the σ-move threshold keep their meaning.
+- The returned relative residuals are scaled back by $\|P_Z b\|/\|b\|$ (`_div`, so $\|b\| = 0$ gives 0). So `tau`, $\tau_\text{eff}$, the stagnation test and the σ-move threshold keep their meaning.
 - No special case for columns already solved by $ZHZ^\top b$: the tolerance is $\tau\|b\|/\max(\|P_Z b\|, \text{tiny})$, and `_minres` already converges a zero column at once and a column with tolerance ≥ 1 at its first check.
 
 **si_slice.**
 - New argument `Z`: a sequence of host 1-D columns, never returned. si_band's store columns are such views.
-- `_upload(cols, n, c)` (shared with $W$) fills a zero device block of $\lceil n_z/c\rceil c$ columns in chunks of $c$ via `_insert`, with no full host or device copy. A reviewer measured +0.39 GB maxrss for a 3.84 GB block.
+- `_upload(cols, n, c)` (shared with $W$) copies the columns into fresh `np.zeros` chunks (never passing a store view to jax: jaxlib's held host view would block the final `resize`) and fills a zero device block of $\lceil n_z/c\rceil c$ columns in chunks of $c$ via `_insert`, with no full host or device copy. A reviewer measured +0.39 GB maxrss for a 3.84 GB block.
 - `_deflate_setup(A, Zd, c)` returns $H$.
 - `_dminres(A, rhs, P, Zd, H, tol, maxit)` does the right-hand side, MINRES on the `Partial` operator, the recombination and the residual scaling.
 - `Zd` and `H` are jit arguments, never closure constants. (A reviewer's closure capture duplicated them as 8.6–17 GB of constants.)
@@ -191,25 +200,24 @@ In exact arithmetic this equals the $AZ$ form, at $8n\,n_z$ device bytes instead
 - `"Z"` joins the slice options si_band sets itself (the reject set).
 
 **`known=[lam, V, residuals, thresholds, leaf]`** (new argument, None by default):
-- The locked pairs below the cut, ascending. `V` is the host block, fp64 and F-order (else a `ValueError`).
+- The $j$ locked pairs below the cut, ascending. `V` is LOBPCG's untruncated host block, F-order, $(n, C_\text{max} + k)$: the columns past the locked ones are lazily paged zeros, and the at most $w$ locked columns above the cut (about 0.2 GB at 1M) stay until the assembly. si_band uses `V[:, :j]`.
 - `leaf`: None, or `(interval, count)`, the known leaf's interval and count record from solve_modes (section 3). si_band puts `{interval, kind: "known", leaf: True, count}` first in `slices` and the pair into `leaves` before the loop, so `info["count"]` covers it on the normal and the error exit alike.
 - si_band takes the list's items and empties it (`known.clear()`), so the caller's list holds no reference.
 - They enter the store as run −1 (views of `V`'s columns). Their windows close the first slice's lower side as deflated $W$ modes, as any stored pair would.
-- Nothing else changes: the work starts at `lo`, and `r_s` comes from the slices as today.
+- Nothing else changes: the work starts at `lo`, and `r_s` comes from the slices as today. The known leaf's lower edge stays out of `bounds` (so `collapsed` keeps its meaning), and `complete_to`'s docstring covers the known leaf.
 
-**Assembly in place.** The known pairs all lie below the cut, and the slices start at or above it. So in the merge's ascending layout the known columns are normally the first $j$ parts, unmerged and in order. The in-place path applies when `order[:j]` is `arange(j)`, every window covering those columns holds run −1 only, $j \ge 2$ and `V` owns its data. ($j = 1$: an $(n, 1)$ block is also C-contiguous, and `resize` lays the grown array out in C order, scrambling it without error.) Then:
-1. the store's views of `V` are dropped and `gc.collect()` runs;
-2. `V.resize((n, j + n_\text{rest}))` keeps the leading columns, since F-order data is column after column;
-3. the other parts are written from column $j$ on.
+**Assembly in place.** The known pairs all lie below the cut, and the slices start at or above it. The check runs on the final `parts`, after the merge loop (a widened merge can pull the top known-only window in):
+- $p$ is the length of the leading prefix of index parts whose store indices concatenate to `arange(p)` (known columns in place, $p \le j$);
+- the in-place path applies when no later index part holds a known column (index $< j$) and `V` owns its data. A merged window's known inputs were already copied by `cols()`, so a slice that re-finds a known mode, or a chain across the cut, only shortens $p$.
 
-Otherwise the assembly copies as today, from `V` and the store by index, with the "returned modes copied" `RuntimeWarning`:
-- a merged window holding a known column: a mode LOBPCG missed below the cut, or a slice whose $r_\text{acc}$ is large enough to chain across the cut's gap;
-- $j = 1$;
-- a resize failure (another reference, or a borrowed block).
+Then:
+1. the store's views of `V` and si_band's own name for it are dropped and `gc.collect()` runs;
+2. `V.resize((n, p + n_\text{rest}))` ($n_\text{rest}$ = the columns of the parts after the prefix), one shrink or grow that keeps the leading columns, since F-order data is column after column (`assert V.flags.f_contiguous` before it: `V` has at least $C_\text{max} + k \ge 2$ columns, so it is never also C-contiguous; `V.shape[1] \ge j` is checked on entry);
+3. the other parts are written from column $p$ on.
 
-A C-order block is rejected up front: `resize` on it scrambles columns without error.
+Otherwise (a resize failure: another reference or a borrowed block; a known index part after a merged window) the assembly copies as today, from `V` and the store by index, with the "returned modes copied" `RuntimeWarning`.
 
-The `err.result` path assembles the same way. A reviewer measured an 8 GB F-order array grown by 10% with maxrss unchanged.
+The `err.result` path assembles the same way; si_band holds the known block under its own name (not the per-slice `V`) and drops it beside `del V_f`, with `traceback.clear_frames` in solve_modes as today. A reviewer measured an 8 GB F-order array grown by 10% with maxrss unchanged.
 
 ### 3. The junction (`solve_modes`, `eigen/api.py`)
 
@@ -217,7 +225,7 @@ After a capacity stop (`strategy="auto"`):
 
 1. **Sort.** The locked modes are sorted as on the "fits" path (`_permute(V, order)` also when stopped), with `info`'s residuals and thresholds. The aggregates are kept until the count is done.
 2. **The cut** `_cut(lam, t, w)`, with $w = \min(m, c)$ ($m$ = LOBPCG's block `info["block"]`, $c$ = `_chunk` of the slice block, 24 at $b$ = 6; $D$ = the number of locked modes at the stop):
-   - It takes the midpoint of the largest relative gap $(\lambda_{i+1} - \lambda_i)/\lambda_{i+1} \ge 100\max(t_\text{top}, \text{tol})$ among the top $w + 1$ locked modes. The tol term keeps the cut wider than the assembly's window chain ($100\,r_s$), so a slice mode does not merge with a known column (that would copy, at a host peak of about $2j$). $t_\text{top}$ is their thresholds, not all $D$: the lowest modes' round-off floors must not block it.
+   - It takes the midpoint of the largest relative gap $(\lambda_{i+1} - \lambda_i)/\lambda_{i+1} \ge 100\max(t_\text{top}, \text{tol})$ among the top $w + 1$ locked modes ($t_\text{top}$ the maximum over that window). The tol term keeps the cut wider than the assembly's window chain ($100\,r_s$), so a slice mode rarely merges with a known column (which only shortens the in-place prefix, section 2). $t_\text{top}$ is their thresholds, not all $D$: the lowest modes' round-off floors must not block it.
    - The midpoint must lie below hi, since in band mode a locked mode can reach $\lambda_{hi}(1 + 100t)$.
    - $j$ is the number of modes below the cut. At most $w$ locked modes lie above it, and the first slice recomputes them; a missed mode is most likely near the top, where the next chunk would have returned it.
    - With no qualifying gap (or $D < 2$) there is no junction. LOBPCG's modes are freed as today, and the band runs from its start, deflated by its own finds.
@@ -225,7 +233,7 @@ After a capacity stop (`strategy="auto"`):
 4. **The count**, only when the cut lies above lo. Below lo the known pairs are not returned, so their completeness is not part of the band.
    - `_verify` runs as on the "fits" path on `lam[:j+1]` and `V[:, :j+1]` (`count` needs every mode up to `lam_next` in $W$), with `n_band` = $j$, so it counts over [0, cut] with the first locked mode above the cut as `lam_next`.
    - It takes LOBPCG's `t_iteration`, block and solve time, with `reuse` and `probe_budget` as there and the final `op_opts`.
-5. **Truncate**, with no jax op after the count (the rule at api.py:779–788): `gc.collect()`, then `V.resize((n, j))`. The untouched columns are lazily paged zeros. A failed resize keeps `np.array(V[:, :j], order="F")` with the warning. solve_modes then builds `known = [lam[:j], V, r, t, leaf]` and drops its own names (`V = None`), so si_band's list holds the only reference.
+5. **Hand over**, with no jax op after the count (the rule at api.py:779–788): solve_modes builds `known = [lam[:j], V, r[:j], t[:j], leaf]` with the untruncated `V` and drops its own names (`V = None`), so si_band's list holds the only reference. No truncation: si_band's one resize sizes the result.
 6. **The leaf.**
    - solve_modes passes `((lo_b, cut), count)` as `known`'s leaf (lo_b = the band's lower edge), with `count` in `_count_out`'s keys (`passed` and `verifiable` False by default, `estimate`, `estimates`, `flagged`, `restarts` 0, `ran`, `reason`, `t_leaf`). si_band records it (section 2).
    - A flagged count is not rerun: rerunning a span of $j$ modes would deflate more than any slice's capacity. The leaf stays flagged, as on the "fits" path.
@@ -234,7 +242,7 @@ After a capacity stop (`strategy="auto"`):
    - `known`, lo = max(lo_b, cut), `edges` at or below the cut dropped;
    - `max_deflate` = the user's cap or $d$ (section 4), whichever is smaller.
 
-   The store is $N_s = j + N_\text{new}$ with $N_\text{new} = \lceil 1.25\,\max(n_\text{modes} - L_j, 0)\rceil$ when `n_modes` is given, else 200. $L_j$ is the number of known modes in the band. On `edge_rr_failed`, `complete_to` becomes lo_b; otherwise it is si_band's (at least the cut).
+   The store is $N_s = j + N_\text{new}$ with $N_\text{new} = \lceil 1.25\,\max(n_\text{modes} - L_j, D - j)\rceil$ when `n_modes` is given, else 200. $L_j$ is the number of known modes in the band, and $D - j$ (the recomputed locked modes) floors it, as today's $\max(n_\text{modes}, \lceil 1.25 L\rceil)$ does. On `edge_rr_failed`, `complete_to` becomes lo_b; otherwise it is si_band's (at least the cut).
 8. **Info.**
    - `info["junction"] = {"cut", "known": j}` (None without a junction).
    - `from_zero` and `mu1_ub` keep their meaning, applied to lo_b.
@@ -248,7 +256,7 @@ The "memory" path (no chunk fits) and forced "shift_invert" have no junction. Th
 
 **`si_memory(..., n_z=0)`:** the columns of $Z$, distinct from `n_deflate` (the Lanczos window $W$ inside $Q$). When $n_z > 0$ it adds:
 - device storage: $8n\lceil n_z/c\rceil c$ and $8 n_z^2$ (`H`);
-- the setup phase: input and output chunks $2 \cdot 8n \cdot 4c$, $8 n_z \cdot 4c$ and `op_memory(4c)["workspace"]`;
+- the setup phase: `op_memory(c)["vectors"]` + `op_memory(c)["workspace"]` + $8 n_z c$;
 - the MINRES phase: one $n \times b$ block (the second $A$ apply's output) plus $n_z \times b$;
 - host: $16 n_z^2$ ($E$ and $H$).
 
@@ -265,7 +273,7 @@ Why deflation comes first:
 - Halving the capacity adds slices, each with the fixed 84 columns. Three slices of 288 cost about 20% more Lanczos columns than one of 720.
 - An undeflated mode costs MINRES 6.5–12 iterations per step (the probes).
 
-With a given `capacity`, $d$ is the largest fitting beside it; `_largest`'s None becomes $d = 0$. `_slice_capacity` gains `n_z` and takes its need cap from `n_new`. On the paths without a junction, `n_new` = `n_store` as today, and with $d = 0$ the plan gives today's $C$.
+With a given `capacity`, $d$ is the largest fitting beside it; `_largest`'s None becomes $d = 0$. solve_modes calls only `_slice_plan`. `_slice_capacity` gains `n_z` and `n_new` (the need cap's count, default `n_store`). On the paths without a junction, `n_new` = `n_store` as today, and with $d = 0$ the plan gives today's $C$.
 
 **The assembly:** in place (section 2), so the host peak stays the store plus one slice block.
 
@@ -317,9 +325,9 @@ References: SciPy `eigsh` and dense NumPy (`tests/test_shift_invert.py`, `tests/
 Spies record `id(V)`, never a weakref: numpy refuses `resize` on an array that has one. Any spy that captures `known`, store or $Z$ columns copies them with `np.array`.
 
 1. **`_dminres`** (dense references, "tiny" and hex20 $4^3$ clamped, $K$ and $M$ assembled; σ in a relative gap ≥ $10^{-2}$ chosen from the spectrum):
-   - **Accuracy.** $Z$ is the eigsh modes below σ. MINRES at tolerance $10^{-12}$ gives $x$ to `np.linalg.solve(K - σM, b)` within $10^{3}\kappa\cdot10^{-12}$. At $10^{-8}$ the true residual is ≤ $1.01\,\tau$, both for that $Z$ and with $10^{-3}$ noise added (any $Z$ is exact).
+   - **Accuracy.** $Z$ is the eigsh modes below σ. MINRES at tolerance $10^{-12}$ gives $x$ to `np.linalg.solve(K - σM, b)` within $10^{3}\kappa\cdot10^{-12}$ (κ = cond₂(K − σM) on the free DOFs). At $10^{-8}$ the true residual is ≤ $1.01\,\tau$, both for that $Z$ and with $10^{-3}$ noise added (any $Z$ is exact).
    - **Any symmetric $H$.** With a random symmetric $H$ in place of $E^+$, through the real recombination: $b - Ax = P_Z b - P_Z A\tilde x$ to $10^{-12}$ relative.
-   - **Duplicates:** an exact duplicate column ($E$ singular: `inv` in place of `pinv` fails), a dropped near-duplicate (δ = $10^{-6}$, $|H|$ of order 1) and a kept one (δ = $10^{-3}$, $|H| \gg 1$): each leaves the true residual ≤ $1.01\,\tau$. $H$ is symmetric when $E$ is slightly nonsymmetric.
+   - **Duplicates:** an exact duplicate column ($E$ singular), a dropped near-duplicate (δ = $10^{-6}$, $|H|$ of order 1) and a kept one (δ = $10^{-3}$, $|H| \gg 1$): each leaves the true residual ≤ $1.01\,\tau$, and on the exact and dropped cases $H$ is finite with $HEH \approx H$ and $EHE \approx E$ (relative $10^{-10}$; `inv` fails these). $H$ is symmetric when $E$ is slightly nonsymmetric.
    - **Tolerance scaling,** with $b = M(Zc + 0.01\,\|Zc\|_M\,\text{noise})$ (noise of unit $M$-norm), so $\|P_Z b\|/\|b\| \le 0.1$:
      - a `minres` spy sees $\tau\|b\|/\|P_Z b\|$ per column;
      - the returned residuals are within 2× of `norm(b - A x) / norm(b)`, where unscaled values would be off by ≥ 10×.
@@ -332,19 +340,23 @@ Spies record `id(V)`, never a weakref: numpy refuses `resize` on an array that h
    - a monkeypatched first solve that stagnates moves σ, and a spy on `_deflate_setup` sees both σ values;
    - an si_checked restart (count monkeypatched to flag once) keeps `Z`.
 3. **si_band's Z selection** (a recording si_checked that saves `len(Z)` and the λ of the columns passed):
-   - stored modes crafted just below and just above an item's midpoint: only those below are passed, so `<` against `≤` and above-σ mutations fail;
+   - the selection is a small pure helper `_z_cols(lam_s, sigma, n)` (indices of the nearest $n$ with $\lambda < \sigma$), unit-tested with λ just below, exactly at and just above σ, so `<` against `≤` and above-σ mutations fail; in si_band, a full slice's lower remainder (stored modes above its σ) passes only those below;
    - the columns are views of the store;
    - `max_deflate` = 3 gives the 3 nearest, 0 (the default) gives none, None is rejected;
    - `Z` in `slice_options` raises.
 4. **`known` in si_band** (fakes and `test_band_merge`'s setup):
    - the known pairs come back first in `lam`, with LOBPCG's residuals and thresholds;
-   - `known` is empty after the call; a C-order or fp32 block raises;
+   - the first slice's `lam_W` (recorded λ only) holds the top known λ, so the known windows close its lower side;
+   - `known` is empty after the call;
    - the leaf: `slices[0]` is the known entry, and `info["count"]` covers it on the normal exit and in `err.result`;
-   - `err.result` after the first slice raises holds the known pairs, assembled in place (`id`);
+   - `err.result` after the first slice raises holds the known pairs, assembled in place (`id`); `check_partial`'s $10^{-8}$ M-orthogonality between LOBPCG and slice modes has a measured margin of about 3× (3.7e-9 at tol $10^{-8}$), noted in the test;
    - **in place:** `id(V_f)` = `id` of the given block, with no `RuntimeWarning`, and every column of `V_f` equals the expected vector (known, then the slices', as `assert_compacted`);
    - **fallbacks, each copying with the warning and the same contents:**
      - a second reference held;
-     - a slice that re-finds a known mode (a merged window holding a known column);
+     - a borrowed block (`big[:, :D]`);
+     - a known index part after a merged window (crafted);
+   - **shortened prefix, still in place** (no warning, `id` kept, contents as `assert_compacted`): a slice that re-finds the top known mode, and a widened merge that pulls in the top known-only window;
+   - a `known` block with fewer than $j$ columns raises;
    - `fake_band` (`test_shift_invert.py:1175`) is updated where the `max_deflate` or `known` kwarg reaches it, and records `len(Z)`, not `Z` (views would defeat the in-place path).
 5. **`_cut`** (crafted λ, t, $w$, hi):
    - the largest gap in the top $w + 1$, with a larger gap just outside that window ignored (off-by-one);
@@ -356,7 +368,7 @@ Spies record `id(V)`, never a weakref: numpy refuses `resize` on an array that h
    - None for no gap and for $D < 2$.
 6. **Junction end to end** (`test_capacity` updated: "short", chunk 5, 35 locked inside the band 25–45):
    - si_band receives `known` with the $j$ pairs below the cut (the 0.0898 gap, 5 locked modes above it ≤ $w$ = 10; $j$ = 30, asserted from `_cut`) and lo = the cut;
-   - the LOBPCG `V`'s `id` is si_band's known block, it has $j$ columns, and the returned `V`'s `id` is the same (truncate, append, compaction in place). `test_capacity`'s own `solve` spy drops `seen["V"] = weakref.ref(...)` and `v_dead` for these `id` checks;
+   - the LOBPCG `V`'s `id` is si_band's known block, si_band gets $j$ known pairs, and the returned `V`'s `id` is the same (one resize in si_band, then solve_modes' compaction in place). `test_capacity`'s own `solve` spy drops `seen["V"] = weakref.ref(...)` and `v_dead` for these `id` checks;
    - si_band's `max_deflate` equals `_slice_plan`'s $d$;
    - `aggs_dead` still holds at si_band's entry (the count ran before it);
    - the known leaf is `slices[0]` and passes, and `info["count"]` covers it;
@@ -366,14 +378,14 @@ Spies record `id(V)`, never a weakref: numpy refuses `resize` on an array that h
    - the band against eigsh (`check`), with every returned $\lambda \ge \lambda_{lo}(1 - 100t)$ and $V$ holding exactly the band's columns.
 
    Updated for the junction:
-   - `test_capacity_store`: interval (cut, hi) with the cut in the gap above the 20th locked mode; $N_s$ from that $j$. New cases: `n_modes` 30, and none (200).
+   - `test_capacity_store`: interval (cut, hi) with the cut in the gap above the 20th locked mode; $j$ = 20 and $D - j$ = 10, so `n_modes` 5 gives $N_s = 20 + 13 = 33$ (interior and zero); new cases: `n_modes` 30 ($N_s = 20 + \lceil 1.25\max(30 - L_j, 10)\rceil$, $L_j$ asserted per case) and none ($20 + 200$).
    - `test_error_result_capacity` (:915): $N_s$ from $j$; max_slices = 1 still raises, now with the first slice at the cut.
-   - `test_filter_capacity_sorted` (:840): λ becomes [1, 5, 1.2, 1.4] with lo = 1.1, hi = 9 (gaps 0.167, 0.143, 0.72): cut 3.2, and the count runs on the sorted [1, 1.2, 1.4] with `lam_next` = 5 (`rec["verify"]` asserted sorted).
+   - `test_filter_capacity_sorted` (:840): λ becomes [1, 5, 1.2, 1.4] with lo = 1.1, hi = 9 (gaps 0.167, 0.143, 0.72): cut 3.2, and the count runs on the sorted `lam[:j+1]` = [1, 1.2, 1.4, 5] (`n_band` 3, `lam_next` = 5); the existing `not rec["verify"]` assert flips.
 
    Other cases:
    - **No gap:** `harness` with λ spaced 0.5% apart and $t = 10^{-3}$; `info["junction"]` is None and the band runs from its start.
    - **Cut ≤ lo** (locked modes all below the band): no leaf, `_verify` not called, si_band from lo with `known`.
-   - **A held V at the truncation** (`harness` with `hold=`, as `test_filter_held`): the copy with the warning under `pytest.warns`.
+   - **A held V** (`harness` with `hold=`, as `test_filter_held`): the copy with the warning under `pytest.warns`, same contents.
    - **A flagged leaf** (`_verify` stubbed to estimate 0.6): no rerun; the leaf and `info["count"]` are flagged.
    - **`edge_rr_failed`** (stub_band): `complete_to` = lo_b.
 7. **Memory:**
@@ -384,18 +396,20 @@ Spies record `id(V)`, never a weakref: numpy refuses `resize` on an array that h
      - $C_0 < C_\text{lo}$;
      - a given capacity, with None → $d = 0$;
      - $d = 0$ equal to today's $C$.
-   - **A process peak** (slow, `peak`, macOS, PEAK_SETUP style in a subprocess):
+   - **A process peak** (slow, `peak`, macOS, PEAK_SETUP style in a subprocess; up to 4 Lanczos steps at the 72-column floor, 30–40 s each: about 3 min):
      - one si_slice step on voxel $48^3$ / GMG (353k DOF) with `Z` = 800 random masked columns, held as a host block; the slice lies below $\lambda_1$ (so $A$ and $E$ are SPD), with `maxit_inner` 200 and a loose `tau` (the peak, not convergence, is measured);
      - the peak is within 20% of `si_memory(..., n_modes=800, n_z=800)`'s total (about 4.6 GB plus the setup);
-     - the sensitivity: peak − `si_memory(n_z=0)` total ≥ 0.8 × (`si_memory(n_z=800)` − `si_memory(n_z=0)`) total (the $n_z$ terms are about 43% of the total, 2.3 of 5.3 GB); about 1 min (memory-bound MINRES, capped);
-     - the capacity is at its floor, so the run is about one step.
+     - the sensitivity: peak − `si_memory(n_modes=800, n_z=0)` total ≥ 0.8 × (`si_memory(n_modes=800, n_z=800)` − `si_memory(n_modes=800, n_z=0)`) total (the $n_z$ terms are about 43% of the total, 2.3 of 5.3 GB);
+     - the capacity is at its floor;
+     - a weakref on si_slice's device `Zd` is dead after it returns (consecutive items and restarts re-upload it).
 8. **Levers:**
    - `test_choose`'s rule-2 cases expect rule 3's pick (the cheapest within 5% of the best reach);
-   - `test_levers_unmargined`'s 1.2e8 sub-case (:1422; today rule 2 / "memory") expects the new pick;
-   - the 18e "Rule 2 can forgo levers" case (slow, voxel $10^3$, `n_modes` 12) now gets rule 3's pick and returns all 12, checked against eigsh;
+   - `test_levers_unmargined`'s 1.2e8 sub-case (:1422; today rule 2 / "memory"): the expected state, warning and `reason` computed with `state_reach` as the other lever tests ("capacity" if rule 3 has a state with a fitting chunk, else "memory");
+   - new (from open_items :321): the "Rule 2 can forgo levers" case (slow, voxel $10^3$, `n_modes` 12, the tight budget from a `state_reach` bisection) gets rule 3's pick and returns all 12, checked against eigsh;
    - **otf back to stored** (fake builds, `_choose` monkeypatched to otf, a capacity stop):
      - a second operator build without `mode` when the stored plan qualifies, with the otf operator dead (weakref on the operator, not on V) before it;
-     - none at $d_s = d_o - c - 1$, and a rebuild at $d_o - c$ (the boundary);
+     - none at $d_s = d_o - c - 1$, and a rebuild at $d_o - c$ (the boundary); none at $C_s = C_o - c - 1$;
+     - a stored plan raising the slice-floor error: otf kept, one build;
    - `test_levers_applied`: the rebuilt build and the capacity recorded after it (`builds`, `caps` updated);
    - `slice_options={"max_deflate": n}` reaches si_band as $\min(n, d)$: 0, a cap below $d$ (as given) and one above (as $d$), so a min/max swap fails; a bool, a non-int or a negative value raises.
 9. **`stagnation_risk`** (`test_stagnation_risk`, :2308; `_slice_plan` monkeypatched):
@@ -406,7 +420,7 @@ Spies record `id(V)`, never a weakref: numpy refuses `resize` on an array that h
    - depth 999 with $d < j$: False.
 10. **Deep band** (slow, about 3 min target, measured in implementation): hex20 $10^3$ clamped, `chunk=40` pinned, a budget that capacity-stops LOBPCG near depth 250, the band from mode 260 to 300, against eigsh at the band's centre ($k$ = 60):
     - every band mode is found, and the leaves are counted (`verify=True`);
-    - a recording spy on si_checked: each item's `len(Z)` equals the store's modes below its σ, capped by $d$ from `_slice_plan` at the run's budget (asserted to be the uncapped count here);
+    - a recording spy on si_checked: each item's `len(Z)` equals the modes below its σ in the store at call time (rebuilt in the spy from `known` and the earlier calls' returned λ), capped by $d$ from `_slice_plan` at the run's budget (asserted to be the uncapped count here);
     - one first MINRES solve at the first slice's σ, deflated against plain (`_dminres` and `linalg.minres` on copies of the run's store), with the iteration ratio asserted ≤ 0.5 and printed.
 
     The partial case runs at the si_band level on the first run's copied known pairs, a band of 10 modes with `max_deflate` = 100: every band mode found.
@@ -436,10 +450,11 @@ Spies record `id(V)`, never a weakref: numpy refuses `resize` on an array that h
 
 ## Docs (18f)
 
-- `docs/eigensolvers.md`:
+- `docs/eigensolvers.md` (the deflation cap is written $d_Z$ there: $d$ already means the count degree at `:119` and the depth at `:815`):
   - Interior bands and strategy:
+    - `:115` (`stopped`): a capacity stop continues from the junction cut with slices;
     - `:141`: the capacity stop → the junction, and the `stagnation_risk` definition;
-    - `:145–151` "Why memory-driven": the slice per-mode row and the crossover claim marked undeflated, with the study's figure;
+    - `:145–153` "Why memory-driven" (including "No crossover exists"): the slice per-mode row and the crossover claim marked undeflated, with the study's figure;
     - `:157`: "33–1260× cheaper" marked undeflated, with the study's figure;
     - `:166`: rule 2 removed (unreached known depths take rule 3's pick), and the residual risks;
     - `:182`: the slice capacity → `_slice_plan` ($C$ and $d$), the need cap from $n_\text{new}$, `n_z` in the fit;
@@ -462,7 +477,7 @@ Spies record `id(V)`, never a weakref: numpy refuses `resize` on an array that h
   - the status sentence: "split into 18a–18h", 18f's status, the order;
   - the interior-band paragraph (`:287`): the junction and the deflation, with the "33× … 1260×" ratio marked as undeflated (or replaced by the study's).
 - `docs/ROADMAP.md`:
-  - the status line, and `:626` ("seven parts … 18g last" → eight parts, 18h last);
+  - the status paragraph `:18` (the PR 18 split list → 18a–18h: 18f deep bands, 18g slices, 18h CalculiX), and `:626` ("seven parts … 18g last" → eight parts, 18h last);
   - the 18f section rewritten to its contents, with the acceptance as run;
   - a new 18g (slice efficiency, plus a slice's own modes below σ), and the old 18g → 18h;
   - the dependency rows and the order;
@@ -476,7 +491,8 @@ Spies record `id(V)`, never a weakref: numpy refuses `resize` on an array that h
 - `docs/open_items.md`:
   - "Shift-invert cost near mode 1000": stays in place, annotated "PR 18f: resolved on the Mac (the study's figures); the memory cap $d$ at 1M and 10M stays open (the zero-copy lever)";
   - `:175` (the 10M criteria): annotated with $d < D$;
-  - "σ-move retries": by the study's result;
+  - `:342` ("about 4 h per slice step at 1M"): annotated as undeflated;
+  - "σ-move retries" (`:344`, body `:346`): by the study's result;
   - `:155` ("Memory-driven strategy, no time-based crossover … 33× … 1260×"): annotated "PR 18f: the ratios are undeflated; the deflated figures are in deep_band_study";
   - the "Slice efficiency (PR 15c → PR 18e → PR 18f)" heading at `:332` and the bodies `:336–338`, `:375` ("→ PR 18f") → 18g; the headings at `:340` and `:344` by the study's result;
   - annotated in place with "PR 18f: …":
@@ -500,7 +516,7 @@ Spies record `id(V)`, never a weakref: numpy refuses `resize` on an array that h
 - The split (18g slice efficiency, 18h CalculiX) and the order.
 - The A-orthogonal deflation in its Z-only form: exact for any $Z$ and symmetric $H$, at half the memory of the $AZ$ form, for one $A$ apply per iteration (+7.5–11%).
 - Deflation before capacity in `_slice_plan` (at $C_\text{lo} = 2\,\texttt{SLICE\_MIN}$), and the nearest modes first when memory limits $d$.
-- The cut rule, the truncation at the cut (at most $w$ modes recomputed), the known leaf without a rerun when it flags (a regression against re-slicing $(\text{lo}, \text{cut})$), and no junction without a qualifying gap.
+- The cut rule, the known pairs ending at the cut (at most $w$ locked modes recomputed), the known leaf without a rerun when it flags (a regression against re-slicing $(\text{lo}, \text{cut})$), and no junction without a qualifying gap.
 - `merged_edges` without the cut.
 - Rule 2 removed (rule 3's 5% band for unreached known depths); otf back to stored within one chunk of $d$; the LOBPCG rerun closed; no levers for unknown depths with a fit.
 - The σ-move retry policy decided by the study.
