@@ -446,7 +446,7 @@ def test_step_memory(kind, pc):
 
 
 @pytest.mark.slow
-@pytest.mark.peak
+@pytest.mark.serial  # 10 GB: beside the peak tests it lowers their measured peaks
 @pytest.mark.parametrize("pc", ["jacobi", "mg"])
 @pytest.mark.parametrize("kind", ["ssh8", "hex20"])
 def test_step_memory_large(kind, pc):
