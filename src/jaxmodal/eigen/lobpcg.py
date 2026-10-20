@@ -564,7 +564,8 @@ def _solve(
     solve stops at the first chunk with a converged mode beyond the band [0, lam_stop]
     (_band_count); n_modes is the expected count (the basis grows past it, up to max_capacity
     columns, required) and chunk may exceed it. A lock needing more than max_capacity columns stops
-    the solve (info["stopped"] = "capacity", the stopping chunk dropped). Returns every converged
+    the solve (info["stopped"] = "capacity"; the stopping chunk, converged and confirmed, is kept
+    unlocked). Returns every converged
     mode, info["n_band"] of them in the band; band mode returns its preallocated (n_dof,
     max_capacity + block) F-order V, of which the first len(lam) columns are valid."""
     check_x64("lobpcg")
@@ -663,10 +664,9 @@ def _solve(
         if band and i < j:  # the final chunk, re-orthonormalized for the count: not locked
             Xi = X
             break
-        if band and count + k > max_capacity:  # the lock does not fit: stop, chunk dropped
+        if band and count + k > max_capacity:  # the lock does not fit: stop, chunk kept unlocked
             chunks[-1]["locked"] = 0
-            jj = i = 0
-            stopped = "capacity"
+            Xi, stopped = X, "capacity"
             break
         V[:, count : count + j] = np.asarray(X[:, :j])
         X0, Xi, args = Xi[:, j:], None, None  # free the old block before the next start

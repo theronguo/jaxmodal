@@ -11,6 +11,7 @@ import numpy as np
 from .eigen.api import (
     OPERATOR_OPTIONS,
     PRECOND_OPTIONS,
+    SLICE_MIN,
     _check_options,
     check_band,
     check_polish_options,
@@ -661,46 +662,59 @@ def band_probe_block(mesh, bcs, n_modes, n_probes, host_bytes, *, n_rigid, **opt
 SI_MINRES = 17.5
 SI_REORTHO = 4.0
 SI_RITZ = 6.0
+# Deflated MINRES (PR 18f): SI_DEFLATE blocks over SI_MINRES plus n_z x block (the projections'
+# compiled temporaries: +1.1 blocks with GMG to +6.9 measured, code review round 1).
+SI_DEFLATE = 7
 
 
 def si_memory(
     op_memory, n_dof, capacity, n_modes, block=6, precond_memory=None, n_rigid=0, n_deflate=0,
-    host_window=None,
+    host_window=None, n_z=0,
 ):  # fmt: skip
     """Estimated peak bytes of si_slice(...) with `capacity` Lanczos columns inside a band solve
     whose host store holds n_modes columns. op_memory, precond_memory: m -> the operator /
     preconditioner estimate (as lobpcg_memory); n_rigid: columns of R (R and M R are stored);
     n_deflate: columns of W on the device; host_window: W's host columns (default n_deflate;
-    si_band: the window and si_checked's restart copy).
+    si_band: the window and si_checked's restart copy). n_z: columns of the MINRES deflation
+    block Z (PR 18f; distinct from W): Z padded to zp (a multiple of c) and H on the device, the
+    setup phase E = Z^T A Z (an operator apply on c columns, n_z x c and a second zp x zp),
+    SI_DEFLATE more blocks and n_z x block in MINRES, E, H and the pseudo-inverse's temporaries on
+    the host (modelled: 8 (2 zp^2 + 4 n_z^2)).
 
     Returns storage (operator, preconditioner, basis, R and M R), host (the window, the store and
     the projected matrix), the phases minres, reortho, ritz, end (one device chunk of the host
-    V, while Q is alive), total = overhead + storage + host + max(operator build, preconditioner
-    build, phases), and the per-space entries of lobpcg_memory (device: storage and phases;
-    host: host + the host builds; exact: operator storage, basis, R, M R, window and store)."""
+    V, while Q is alive), setup (0 without Z), total = overhead + storage + host +
+    max(operator build, preconditioner build, phases), and the per-space entries of
+    lobpcg_memory (device: storage and phases; host: host + the host builds; exact: operator
+    storage, basis, R, M R, window and store)."""
     c = _chunk(block)
     capacity = -(-capacity // c) * c
     op_b = op_memory(block)
     pc = precond_memory(block) if precond_memory else dict(storage=0, build=0, count=0)
     v, b = 8 * n_dof, 8 * n_dof * block
+    zp = -(-n_z // c) * c
+    op_c = op_memory(c) if n_z else None
+    dz = 8 * (2 * zp**2 + 4 * n_z**2)  # the host E, H and pinv temporaries
     out = dict(
         storage=op_b["storage"] + pc["storage"] + v * (-(-n_deflate // c) * c + capacity)
-        + 2 * v * n_rigid,
+        + 2 * v * n_rigid + v * zp + 8 * zp**2,
         host=v * (n_deflate if host_window is None else host_window) + v * n_modes
-        + 8 * capacity**2,
-        minres=op_b["workspace"] + SI_MINRES * b + pc["count"],
+        + 8 * capacity**2 + dz,
+        minres=op_b["workspace"] + SI_MINRES * b + pc["count"]
+        + (SI_DEFLATE * b + 8 * n_z * block if n_z else 0),
         reortho=op_b["workspace"] + SI_REORTHO * b,
         ritz=op_b["workspace"] + SI_RITZ * b + v * c,
         end=v * (2 + c),
+        setup=op_c["vectors"] + op_c["workspace"] + 8 * n_z * c + 8 * zp**2 if n_z else 0,
     )  # fmt: skip
-    phases = max(out["minres"], out["reortho"], out["ritz"], out["end"])
+    phases = max(out["minres"], out["reortho"], out["ritz"], out["end"], out["setup"])
     out["total"] = (
         op_b["overhead"] + out["storage"] + out["host"] + max(op_b["build"], pc["build"], phases)
     )
     pc_dev, pc_host = _pc_builds(pc)
     out.update(
         device_exact=out["storage"] - pc["storage"],
-        host_exact=out["host"] - 8 * capacity**2,
+        host_exact=out["host"] - 8 * capacity**2 - dz,
         device_total=op_b["overhead"] + out["storage"] + max(pc_dev, phases),
         host_total=out["host"] + max(op_b["build"], pc_host),
     )
@@ -757,33 +771,65 @@ def _c_max(op_memory, pc, n_dof, *, chunk, guards, low, basis_dtype, n_rigid, n_
     return _largest(fits, c, min(_up(min(4 * chunk + k, need or math.inf), c), cap), cap)
 
 
-def _slice_capacity(op_memory, pc64, n_dof, *, n_store, block, n_rigid, budget, host_budget):
+def _slice_fits(op_memory, pc64, n_dof, C, n_z, *, n_store, block, n_rigid, budget, host_budget,
+                host_extra=0):  # fmt: skip
+    """The fit test of a slice of capacity C with the device window W = 2c inside C, the host
+    window and si_checked's restart copy 2 (C - 2 block), the store of n_store columns, n_z
+    MINRES deflation columns and host_extra exact host bytes."""
+    w = 2 * _chunk(block)
+    est = si_memory(op_memory, n_dof, C - w, n_store, block, pc64, n_rigid, n_deflate=w,
+                    host_window=2 * (C - 2 * block), n_z=n_z)  # fmt: skip
+    return _fits(est, budget, host_budget, host_extra)
+
+
+def _slice_capacity(op_memory, pc64, n_dof, *, n_store, block, n_z=0, n_new=None, **kw):
     """The slice capacity C (Lanczos and deflation columns, a multiple of c = _chunk(block)): the
-    largest passing the fit test with the device window W = 2c inside C, the host window and
-    si_checked's restart copy 2 (C - 2 block) and the store of n_store columns, between the
-    floor up(2c + 2 block, c) and the need cap up(1.25 (1.8 n_store + 84) + W, c); None when the
-    floor does not fit."""
+    largest passing _slice_fits, between the floor up(2c + 2 block, c) and the need cap
+    up(1.25 (1.8 n_new + 84) + 2c, c) (n_new default n_store); None when the floor does not
+    fit."""
     c = _chunk(block)
-    w = 2 * c
+    n_new = n_store if n_new is None else n_new
+    need = _up(int(np.ceil(1.25 * (1.8 * n_new + 84))) + 2 * c, c)
 
     def fits(C):
-        est = si_memory(op_memory, n_dof, C - w, n_store, block, pc64, n_rigid, n_deflate=w,
-                        host_window=2 * (C - 2 * block))  # fmt: skip
-        return _fits(est, budget, host_budget)
+        return _slice_fits(op_memory, pc64, n_dof, C, n_z, n_store=n_store, block=block, **kw)
 
-    need = _up(int(np.ceil(1.25 * (1.8 * n_store + 84))) + w, c)
     return _largest(fits, c, _up(2 * c + 2 * block, c), need)
 
 
+def _slice_plan(op_memory, pc64, n_dof, *, n_store, n_new, block, max_deflate=0, capacity=None,
+                **kw):  # fmt: skip
+    """(C, d): the slice capacity and the MINRES deflation columns d <= min(n_store,
+    max_deflate) (kw: n_rigid, budget, host_budget, host_extra as _slice_fits). d first, the
+    largest fitting at C_lo = min(up(2 SLICE_MIN, c), C_0) (C_0 the undeflated capacity, C_lo
+    at least the floor), then C the largest fitting beside d up to the need cap; a given capacity
+    keeps it with d the largest fitting beside it (0 when none). C None: the slice floor does
+    not fit (docs/eigensolvers.md#memory-budget)."""
+    c = _chunk(block)
+    kw |= dict(n_store=n_store, block=block)
+
+    def d_at(C):
+        fits = lambda d: _slice_fits(op_memory, pc64, n_dof, C, d, **kw)  # noqa: E731
+        return _largest(fits, 1, 0, min(n_store, max_deflate)) or 0
+
+    if capacity is not None:
+        return capacity, d_at(capacity)
+    C0 = _slice_capacity(op_memory, pc64, n_dof, n_new=n_new, **kw)
+    if C0 is None:
+        return None, 0
+    d = d_at(min(max(_up(2 * SLICE_MIN, c), _up(2 * c + 2 * block, c)), C0))
+    return _slice_capacity(op_memory, pc64, n_dof, n_z=d, n_new=n_new, **kw), d
+
+
 def _count_block(op_memory, pc64, n_dof, *, voxel, n_rigid, n_store, window, n_probes, budget,
-                 host_budget):  # fmt: skip
+                 host_budget, host_extra=0):  # fmt: skip
     """The largest probe block <= n_probes of a slice count passing the fit test with the store
-    (n_store columns) and the host window (window columns) as exact host terms; None when one
-    probe does not fit."""
+    (n_store columns), the host window (window columns) and host_extra bytes as exact host
+    terms; None when one probe does not fit."""
 
     def fits(b):
         est = count_memory(op_memory, n_dof, b, voxel=voxel, precond_memory=pc64, n_rigid=n_rigid)
-        return _fits(est, budget, host_budget, 8 * n_dof * (n_store + window))
+        return _fits(est, budget, host_budget, 8 * n_dof * (n_store + window) + host_extra)
 
     return _largest(fits, 1, 1, n_probes)
 
