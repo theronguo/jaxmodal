@@ -89,10 +89,10 @@ Status: final. Review rounds 1–30 incorporated (round 30: all 5 reviewers sati
 - **Frequency bands (PRs 14–15):**
   - **Strategy:** memory-driven (PR 15d; the roadmap's cost-model choice was replaced after measurement).
     - Chunked LOBPCG from 0 (then filtered to the band) is used while its deflation basis (every mode below the band's upper edge) fits the memory budget; otherwise shift-invert slices are used. The chunk comes from a ladder (the top chunk halved down to 5, the fastest whose basis cap reaches a known depth, else within 10% of the best reach).
-    - Measured (hex20 $16^3$, AMG, Mac CPU): LOBPCG from 0 is cheaper than a slice at every depth to 1005 (33× at depth 6, 1260× at depth 1005), so there is no time crossover. On the Mac budget the basis cap is 2112–2720 columns at 1M hex20 and 768–1440 at 2M voxel (fp64; up to 3750 / 2010 with the memory levers, 3710 with fp64 AMG); at 10M hex20 on a unified 76 GB pool, 120 (fp64 AMG) to 300 (fp32 AMG and basis, low memory, on the fly; PR 18c); on a 76 GB device with a separate host (node RAM above about 120 GB) fp32 AMG reaches 690 stored / 940 on the fly, roughly the 700–1000 target. At 100M, bands need multi-GPU.
+    - Measured (hex20 $16^3$, AMG, Mac CPU): LOBPCG from 0 is cheaper than a slice at every depth to 1005 (33× at depth 6, 1260× at depth 1005), so there is no time crossover (PR 15d's undeflated slices; with PR 18f's MINRES deflation still 52× near depth 1000, `benchmarks/results/deep_band_study.json`). On the Mac budget the basis cap is 2112–2720 columns at 1M hex20 and 768–1440 at 2M voxel (fp64; up to 3750 / 2010 with the memory levers, 3710 with fp64 AMG); at 10M hex20 on a unified 76 GB pool, 120 (fp64 AMG) to 300 (fp32 AMG and basis, low memory, on the fly; PR 18c); on a 76 GB device with a separate host (node RAM above about 120 GB) fp32 AMG reaches 690 stored / 940 on the fly, roughly the 700–1000 target. At 100M, bands need multi-GPU.
     - The stochastic count is controlled by `verify` (implemented in PR 14) for every strategy: `None` (default) enables it only when it is predicted to cost no more than the solve (PR 14b's rule, per leaf on slices); `True`/`False` force it. The predicted cost is always reported in `info`.
     - Near mode index 1000 (relative gap g ≈ 7e-4), shift-invert costs ~10³–10⁵ MINRES iterations per Lanczos step (worst case ∝ ln(1/τ)/δ, δ the relative distance from σ to the nearest eigenvalue; Krylov deflation of the few eigenvalues nearest σ moves it toward the low end; PR 15 calibrates this), and counting costs d ≈ 25/g ≈ 3.5e4 solves per probe block.
-      - Measured (PR 15a, `docs/eigensolvers.md#measured-minres-cost-floor-and-slices`): the iterations grow roughly linearly with the depth of σ in the spectrum, the rate rising with it (hex20 with AMG: 5–6.7 per mode below depth 100, 7.7 / 8.5 / 9.9 / 14.3 at depths 100 / 201 / 503 / 1005; voxel with GMG 4–5.5), barely with δ (≤ 20% over four decades), and not with the mesh size (1M and 2M DOF match $16^3$ / $32^3$). At depth 1000 a mid-gap solve takes about 14k iterations and is marginal (of two runs, one stagnated and one converged, by round-off), about 4 h per slice step at 1M DOF on the Mac. 15d fits $\alpha D(1 + D/D_0)$ on depth (evidence only), warns after a capacity stop at ≥ 1000 locked modes (`stagnation_risk`); remedies → PR 18f (MINRES deflated by the modes below σ). The floor at the largest Mac sizes (depth 6) is $7.0 \times 10^{-14}$ (1M hex20) and $3.3 \times 10^{-14}$ (2M voxel).
+      - Measured (PR 15a, `docs/eigensolvers.md#measured-minres-cost-floor-and-slices`): the iterations grow roughly linearly with the depth of σ in the spectrum, the rate rising with it (hex20 with AMG: 5–6.7 per mode below depth 100, 7.7 / 8.5 / 9.9 / 14.3 at depths 100 / 201 / 503 / 1005; voxel with GMG 4–5.5), barely with δ (≤ 20% over four decades), and not with the mesh size (1M and 2M DOF match $16^3$ / $32^3$). At depth 1000 a mid-gap solve takes about 14k iterations and is marginal (of two runs, one stagnated and one converged, by round-off), about 4 h per slice step at 1M DOF on the Mac. 15d fits $\alpha D(1 + D/D_0)$ on depth (evidence only), warns after a capacity stop at ≥ 1000 locked modes (`stagnation_risk`). These are undeflated; PR 18f deflates MINRES by the known modes below σ: 14,370 → 400 MINRES iterations at depth 1005 (0.028×) and 4970 → 220 at depth 503, with every LOBPCG mode below σ deflated (`docs/eigensolvers.md#deep-bands-deflated`), and the warning now fires only when the deflation is limited. The floor at the largest Mac sizes (depth 6) is $7.0 \times 10^{-14}$ (1M hex20) and $3.3 \times 10^{-14}$ (2M voxel).
   - **[0, f_max]:** chunked LOBPCG until λ > λ_c, with the cutoff λ_c = (2πf_max)².
   - **Band edges:** every cluster (relative gap < 100·tol) that reaches into the band is returned whole. The counting edge (and σ for the [0, f_max] count) is placed at the middle of the gap between the last returned mode and the first computed mode beyond it, and g is that gap. The same applies to f₁ and f₂; an edge at λ = 0 has no counting edge (the step polynomial already covers it). When no mode is returned, each counting edge sits midway between its band edge (2πf)² and the nearest converged neighbour outside the band, and g is the smaller of the edge gaps. A neighbour within 100·r_acc of a band edge is returned (it reaches into the band); if d still exceeds `MAX_DEGREE`, the count is flagged unverifiable. A band edge above the largest computed eigenvalue raises an error (15d: late errors only; PR 18e closed the up-front spectrum bound: a cheap rigorous bound is 2–4× too loose, and the late error carries `err.result`).
   - **Interior bands [f₁, f₂]:**
@@ -623,7 +623,7 @@ Split into three parts with unchanged acceptance criteria: **8a** the reference 
   - Normalized modes satisfy VᵀMV = I to 1e-12; the M-weighted MAC of a set with itself is the identity to 1e-12 and matches a NumPy MAC.
 
 ### PR 18: Performance pass
-Split into seven parts (2026-10-18, the PR 18a plan `docs/plans/pr-18a-shell-amg.md`; 2026-10-19, the PR 18c plan `docs/plans/pr-18c-fp32-amg.md` and the PR 18e plan `docs/plans/pr-18e-band.md`): 18a, then 18b; 18c, 18d and 18e after 18b; 18f after 18e; 18g last. Each part has its own reviewed plan.
+Split into eight parts (2026-10-18, the PR 18a plan `docs/plans/pr-18a-shell-amg.md`; 2026-10-19, the PR 18c plan `docs/plans/pr-18c-fp32-amg.md` and the PR 18e plan `docs/plans/pr-18e-band.md`; 2026-10-20, the PR 18f plan `docs/plans/pr-18f-deep-bands.md`): 18a, then 18b; 18c, 18d and 18e after 18b; 18f after 18e; 18g after 18f; 18h last. Each part has its own reviewed plan.
 
 #### PR 18a: Solid-shell AMG core
 - Status: done (`pr-18a-shell-amg`). The flat $128^2$ plate takes 12 / 21 iterations at $L/t$ = 10 / 1000 (1.75×, the configuration that ships: degree 2, $d$ = 1 / 2 smoothing steps); the curved $128^2$ panel 11 / 30 (reported); details in `docs/preconditioners.md`.
@@ -679,14 +679,20 @@ Split into seven parts (2026-10-18, the PR 18a plan `docs/plans/pr-18a-shell-amg
 - Status: merged 2026-10-20. Decisions without user input in `docs/open_items.md` (PR 18e section).
 
 #### PR 18f: Deep bands
-- Contents (from the PR 18e split):
-  - The hybrid LOBPCG/slice junction: after a capacity stop the locked modes are kept as known pairs instead of rerunning from 0.
-  - MINRES deflated by the known modes below σ (the depth-1000 remedy: PR 18e's probe on hex20 $16^3$ gave 1500 → 140 iterations at depth 197 and 4960 → 220 at 503 with every mode below σ deflated); probe with LOBPCG-accuracy modes, treat the residual coupling $W^\top A\Pi$, budget the device memory of $W$ and $MW$.
-  - Levers after a capacity stop: a LOBPCG rerun with levers when they raise $C_{max}$ well past the stop; otf for the slices only when the stored slice operator does not fit.
-  - The deferred slice items of PR 15c/15d (`docs/open_items.md`, "→ PR 18f"): verification slices, σ toward the unconverged neighbour, the top-remainder neighbour, the σ-move retry policy.
-- Tests: depth-500 and depth-1000 bands on the Mac against `eigsh` / the reference, with the deflated MINRES iteration counts recorded.
+- Contents (plan `docs/plans/pr-18f-deep-bands.md`, which split the old 18f into 18f and 18g):
+  - The hybrid LOBPCG/slice junction (`docs/eigensolvers.md#the-junction`): a capacity stop keeps the stopping chunk; the locked modes below a cut (or below lo) go to `si_band` as known pairs, with the known leaf's count, assembled in place in LOBPCG's block (`info["junction"]`).
+  - MINRES deflated by the known modes below σ (`docs/eigensolvers.md#minres-deflation`): the A-orthogonal deflation in its Z-only form, exact for any $Z$; si_band deflates each work item by the nearest stored modes below σ; `_slice_plan` budgets the deflation columns before the capacity (`slice_options["max_deflate"]`).
+  - Levers after a capacity stop: rule 2 removed (the junction keeps LOBPCG's reach); otf back to stored for the slices when the stored plan deflates as much, within one slice chunk; the LOBPCG rerun with levers closed.
+- Tests: the deflated MINRES against dense solves (any $Z$, duplicates, the tolerance scaling), the junction cases, the in-place assembly, the slice plan against a brute-force search, the deflation's peak (slow, macOS), and a deep band (hex20 $10^3$, a capacity stop at depth 283, the band of modes 285–305) against `eigsh`; `benchmarks/deep_band_study.py`: at depth 1005 400 MINRES iterations against 14,370 undeflated (0.028×; acceptance ≤ 0.1×), no column stagnated, residuals ≤ 1.01 τ; the cut-path band of modes 951–1008 (D = 964, 957 known) against eigsh to $3 \cdot 10^{-15}$.
+- Status: in code review.
 
-#### PR 18g: CalculiX comparison
+#### PR 18g: Slice efficiency
+- Contents (from the PR 18f split):
+  - A slice's own modes below σ: the MINRES iterations still grow with them (each undeflated mode 6.5–12 iterations per step); e.g. deflating the slice's converged Ritz pairs below σ between steps.
+  - The deferred slice items of PR 15c/15d (`docs/open_items.md`, "→ PR 18g"): verification slices, σ toward the unconverged neighbour, the top-remainder neighbour.
+- Tests: per item against `eigsh`, with the slice steps and MINRES iterations recorded.
+
+#### PR 18h: CalculiX comparison
 - Contents:
   - CalculiX `*FREQUENCY` and `solve_modes` on the same `.inp` meshes (C3D20/C3D8), about 100k–1M DOF, 20 and 200 modes: wall time, peak memory, frequency agreement, a SciPy shift-invert as second reference; ≤ 1 h per run; CalculiX in its own conda env (user request, 2026-10-18).
 - Tests:
@@ -805,7 +811,7 @@ Topology optimization targets the largest size the hardware allows, multi-GPU an
 - PR 13: 10M hex20 modal solve on one GPU: 20 modes, $m = 25$, stored Ke, 9-block step (71.5 GB total by `solve_modes_memory`, device about 70 GB, against the 76 GB pool); fallback on-the-fly Ke (about 60 GB, estimated) via `solve_modes(..., operator_options={"mode": "otf"})`; the host-side AMG setup needs about 15 GB of RAM (extrapolated from 1M).
 - PR 13b: the hex8 assembler's scatter-add on the GPU: determinism (summation order at rounding level) and speed against the CPU's 0.72 s at 1M hex20.
 - PR 5: scatter vs gather benchmark on GPU; sets the GPU default and re-tunes the $R$ rule (the CPU cap of 2 vectors gives $R = 32768$ at 1M DOF).
-- PR 15d: the LOBPCG / slice cost ratio on the GPU (memory-driven strategy kept unless a crossover appears); allocating the band basis at $C_{max}$ up front against fragmentation; the per-space fit test against the GPU pool and host RAM; the 10M hex20 band reach (on a separate device 560 / 810 locked modes with fp64 AMG, 690 / 940 with fp32 AMG, PR 18c; 180 / 260 and 220 / 300 in a unified pool) and its MINRES behaviour near depth 1000; the slice and count peaks against `si_memory` / `count_memory` on the device. A measured time crossover, if any, is recorded here.
+- PR 15d: the LOBPCG / slice cost ratio on the GPU (memory-driven strategy kept unless a crossover appears); allocating the band basis at $C_{max}$ up front against fragmentation; the per-space fit test against the GPU pool and host RAM; the 10M hex20 band reach (on a separate device 560 / 810 locked modes with fp64 AMG, 690 / 940 with fp32 AMG, PR 18c; 180 / 260 and 220 / 300 in a unified pool) and its MINRES behaviour near depth 1000 (deflated since PR 18f, up to the deflation cap); the slice and count peaks against `si_memory` / `count_memory` on the device. A measured time crossover, if any, is recorded here.
 - PR 18a: the Schwarz scan steps at 10M `ssh8` DOF (about 570 steps per apply, 2300 per V-cycle at degree 2): time the Schwarz apply at `chunk_bytes` CB and 8·CB, at $k = 1$ and at the production width ($m \approx 20$–25), with the step count per level; overhead ≈ $(t(\text{CB}) - t(8\,\text{CB}))\cdot 8/7$. Pass: below 25% of the V-cycle time at the production width (expected to fail at 32 MiB on an A100). The remedy ($g$ chunks per step chosen from $k$, or a larger `chunk_bytes` as a public option) is deferred with this check: not needed on CPU (PR 18d).
 - PR 18a: packed against full Schwarz inverses (the packed apply writes and rereads the unpacked chunk, about 2.5× the bytes of full inverses; fp32 full = fp64 packed bytes, with 18c's fp32 Schwarz item).
 - PR 18a: solid-shell AMG at 10M DOF on one GPU (about 2 kB per DOF fp64, 19–20 GB, plus the stored-Ke operator's 0.48 kB per DOF).
@@ -819,6 +825,9 @@ Topology optimization targets the largest size the hardware allows, multi-GPU an
 - PR 18d: the operator build's XLA kernel temporaries ("XLA kernel temporaries", `docs/open_items.md`): measured against `device_total` on the GPU.
 - PR 18e: `memory_analysis` of the count recurrence at 10M DOF unstructured against `count_memory`'s step (`COUNT_STEP` fitted to 1.6M and checked to 6M, the slope rising with $n$: 10.0 → 10.97 from 0.24M to 6M); the count's projector with a host W sends chunks without a sync (`_grow` syncs each): check that at most two are resident under async dispatch.
 - PR 18e: the lever cost factors per iteration on the GPU (fp32 V-cycle 1.0, fp32 basis 1.0, `low_memory` 1.6, otf 3.0; chunk factors 1.0 / 1.7 / 2.2 / 2.7), in particular the top chunk with `low_memory` against the first halving.
+- PR 18f: the MINRES deflation cap $d_Z$ at 10M DOF, where $Z$ costs 84 MB per column (twice on unified memory), so $d_Z < D$: partial-deflation MINRES near depth 1000 against the full deflation of the Mac study.
+- PR 18f: $Z$ stored in fp32 (exactness holds for any stored $Z$; the halved memory against the changed deflation).
+- PR 18f: the deflation's per-iteration overhead at 10M (the Z-only form's second $A$ apply and the $Z$ products; Mac: 1.36× per iteration at $n_z$ = 503 and 1.51× at 1005 on 56k DOF).
 - PR 19: weak scaling.
 - PR 24: harness Linux and GPU peak paths, checked with the PR 0 harness test cases.
 
@@ -857,8 +866,9 @@ Topology optimization targets the largest size the hardware allows, multi-GPU an
 | 18d Kernels | 5, 6, 11, 13, 15d, 17, 18b |
 | 18e Band follow-ups | 15d, 18b |
 | 18f Deep bands | 18e |
-| 18g CalculiX comparison | 18a–18f |
-| 19 Multi-GPU | 17, 18a–18f |
+| 18g Slice efficiency | 18f |
+| 18h CalculiX comparison | 18a–18g |
+| 19 Multi-GPU | 17, 18a–18g |
 | 20 MMA | 0 |
 | 21 Sensitivities | 9, 17 |
 | 22 FFD | 20, 21 |
@@ -866,7 +876,7 @@ Topology optimization targets the largest size the hardware allows, multi-GPU an
 | 23b Topology opt, sharded | 19, 23a |
 | 24 GPU validation | CUDA hardware; the PRs in the deferred list |
 
-- **Order from PR 18e on** (user, 2026-10-19; 18f inserted by the PR 18e split, it runs on the Mac CPU): 18e → 18f → 18g → 20 → 21 → 22 → 23a → 19 → 23b; PR 24 whenever CUDA hardware is available.
+- **Order from PR 18e on** (user, 2026-10-19; 18f inserted by the PR 18e split and 18g by the PR 18f split, both on the Mac CPU): 18e → 18f → 18g → 18h → 20 → 21 → 22 → 23a → 19 → 23b; PR 24 whenever CUDA hardware is available.
 - **Critical path:** 0 → 1 → 3 → 4 → 7 → 8 → 9, with PR 2 in parallel with 1 and PR 5 in parallel with 7–8. This gives first modes in pure JAX.
 - **Biggest risk:** M3 (preconditioning).
 - **Parallel work:** PRs 2, 6 and 20 can proceed alongside the critical path. PRs 16 and 17 can proceed alongside M3.
