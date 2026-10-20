@@ -2,15 +2,30 @@
 1-2): _dminres against dense references, si_slice with Z."""
 
 import functools
+import gc
+import sys
+import weakref
 
 import jax.numpy as jnp
 import numpy as np
 import pytest
 import scipy.linalg as sla
-from test_shift_invert import MAT, TAU, Spy, check, edges, precond, prob, si, solve
+from test_shift_invert import (
+    MAT,
+    TAU,
+    Spy,
+    check,
+    edges,
+    lam_voxel,
+    precond,
+    prob,
+    si,
+    solve,
+)
 
 from jaxmodal.linalg import minres
-from jaxmodal.mesh import box_mesh
+from jaxmodal.memory import gmg_memory, si_memory, stencil_memory
+from jaxmodal.mesh import box_mesh, voxel_mesh
 from jaxmodal.operators import ap_operator, assemble, dof_mask, unstructured
 
 
@@ -256,3 +271,76 @@ def test_checked_keeps_z(monkeypatch):
                                  capacity=300, tol=1e-10, tau=TAU, Z=Z)  # fmt: skip
     assert info["count"]["restarts"] == 1 and len(seen) == 2
     assert all(z is Z for z in seen) and info["runs"][1]["deflated"] == 30
+
+
+def test_zd_freed(monkeypatch):
+    """Test 7: si_slice's device Z block is dead after it returns (items and restarts upload
+    it again)."""
+    lr, Vr = prob("tiny")[6:]
+    lo, hi = edges(lr, 6, 9)
+    refs, real = [], si._upload
+
+    def upload(B, cols, c):
+        out = real(B, cols, c)
+        refs.append((len(cols), weakref.ref(out)))
+        return out
+
+    monkeypatch.setattr(si, "_upload", upload)
+    solve("tiny", lo, hi, Z=[Vr[:, i] for i in range(5)])
+    gc.collect()
+    z = [r for k, r in refs if k == 5]
+    assert len(z) == 1 and z[0]() is None
+
+
+Z_PEAK = """
+import numpy as np
+from jaxmodal import config
+config.enable_x64()
+from jaxmodal.eigen.shift_invert import si_slice
+from jaxmodal.materials import Material, isotropic
+from jaxmodal.mesh import voxel_mesh
+from jaxmodal.operators import dof_mask, stencil
+from jaxmodal.precond import gmg
+mats = {0: Material(isotropic(3.0, 0.3), 2.0)}
+mesh = voxel_mesh((48,) * 3, (1 / 48,) * 3)
+free = dof_mask(mesh, {"xmin": "xyz"})
+op = stencil(mesh, mats, mass="lumped")
+P = gmg(op, free, (LO + HI) / 2)
+def run(nz):
+    n, rng = op.n_dof, np.random.default_rng(0)
+    B = np.zeros((n, NZ), order="F")  # the host store's block, counted in the peak
+    for i in range(NZ):
+        B[:, i] = np.where(free, rng.standard_normal(n), 0.0)
+    Z = [B[:, i] for i in range(nz)] or None
+    return si_slice(op, free, LO, HI, P, capacity=72, tol=1e-6, tau=1e-2, maxit_inner=200,
+                    Z=Z)
+"""
+
+
+@pytest.mark.peak
+@pytest.mark.slow
+@pytest.mark.skipif(sys.platform != "darwin", reason="peak_bytes needs macOS")
+def test_z_peak():
+    """Test 7: one si_slice on voxel 48^3 / GMG (353k DOF) below lambda_1 (A and E SPD) with Z =
+    800 random masked columns of an 800-column host block, the capacity at its floor 72: the
+    process peak within 20% of si_memory(n_modes=800, n_z=800); against Z=None (same block)
+    the peak difference within 20% of the model's."""
+    from benchmarks import harness
+
+    lo, hi = (x * lam_voxel(8, 1)[0] for x in (0.2, 0.5))
+    mesh = voxel_mesh((48,) * 3, (1 / 48,) * 3)
+    n = 3 * len(mesh.points)
+
+    op_m = functools.partial(stencil_memory, mesh, mass="lumped")
+    pc_m = functools.partial(gmg_memory, mesh)
+
+    def est(nz):
+        return si_memory(op_m, n, 72, 800, precond_memory=pc_m, n_z=nz)["total"]
+
+    setup = Z_PEAK.replace("LO", repr(lo)).replace("HI", repr(hi)).replace("NZ", "800")
+    peak = {nz: harness.measure(f"run({nz})", setup)["peak_bytes"] for nz in (800, 0)}
+    print(f"Z peak: estimates {est(800) / 1e9:.2f} / {est(0) / 1e9:.2f} GB, peaks"
+          f" {peak[800] / 1e9:.2f} / {peak[0] / 1e9:.2f}")  # fmt: skip
+    assert abs(est(800) - peak[800]) <= 0.2 * peak[800]
+    delta = est(800) - est(0)
+    assert 0.8 * delta <= peak[800] - peak[0] <= 1.2 * delta
