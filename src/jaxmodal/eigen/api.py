@@ -80,7 +80,8 @@ PRECOND_OPTIONS = {
 SIGMA_OPTIONS = ("tol", "maxit", "rounds", "drop", "estimate_maxit")
 POLISH_OPTIONS = ("on", "tol", "maxit")
 COUNT_OPTIONS = ("n_probes", "seed", "tau", "degree", "block", "maxit", "verbose")
-SLICE_OPTIONS = ("tau", "maxit_inner", "block", "max_slices", "capacity", "edges", "verbose")
+SLICE_OPTIONS = ("tau", "maxit_inner", "block", "max_slices", "capacity", "edges", "verbose",
+                 "max_deflate")  # fmt: skip
 STRATEGIES = ("auto", "lobpcg", "shift_invert")
 MU1_MARGIN = 1e-2  # the lam_lo < mu_1 rule's margin: max(MU1_MARGIN, 300 tol)
 STAGNATION_DEPTH = 1000  # locked modes at a capacity stop above which MINRES may stagnate
@@ -178,6 +179,11 @@ def _check_slice_options(opts):
             raise ValueError(f"slice_options {key} must be an int >= 1, got {opts[key]!r}")
         if key in opts:
             opts[key] = int(opts[key])  # si_band takes Python ints only
+    x = opts.get("max_deflate", 0)
+    if isinstance(x, bool) or not isinstance(x, numbers.Integral) or x < 0:
+        raise ValueError(f"slice_options max_deflate must be an int >= 0, got {x!r}")
+    if "max_deflate" in opts:
+        opts["max_deflate"] = int(x)
     if "tau" in opts and not opts["tau"] > 0:
         raise ValueError(f"slice_options tau must be > 0, got {opts['tau']!r}")
     if "verbose" in opts and not isinstance(opts["verbose"], bool):

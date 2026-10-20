@@ -4,6 +4,7 @@ M-reorthogonalization, Rayleigh-Ritz on (K, M); si_checked adds the completeness
 restarts. See docs/eigensolvers.md#shift-invert-slices."""
 
 import functools
+import gc
 import time
 import warnings
 
@@ -876,9 +877,16 @@ def _band_count(leaves):
     )  # fmt: skip
 
 
+def _z_cols(lam, sigma, n):
+    """Indices of the n stored values nearest below sigma (lam < sigma), ascending."""
+    below = np.flatnonzero(lam < sigma)
+    return np.sort(below[np.argsort(sigma - lam[below], kind="stable")[:n]])
+
+
 def si_band(
     op, free, lo, hi, make, *, capacity, R=None, verify=True, edges=None, count_options=None,
-    tol=1e-6, block=6, seed=0, verbose=False, max_slices=64, n_store=None, **slice_options,
+    tol=1e-6, block=6, seed=0, verbose=False, max_slices=64, n_store=None, known=None,
+    max_deflate=0, **slice_options,
 ):  # fmt: skip
     """Eigenpairs of the masked pencil (K_m, M_m) in the band [lo, hi] (0 <= lo < hi) by si_checked
     slices, each within a device basis of capacity columns, deflation included. make(sigma): the SPD
@@ -898,6 +906,13 @@ def si_band(
     gap recorded; None: each leaf counted when predicted to cost no more than its slice,
     counting._decide). n_store: the store columns reserved by the caller (a warning, once, when the
     stored modes pass it). Slice i uses seed + (RESTARTS + 1) i, the count's seed likewise.
+    max_deflate: each slice's MINRES deflates the nearest max_deflate stored modes below its
+    midpoint (si_slice's Z; 0: none). known: solve_modes' junction (PR 18f), a list [lam, V,
+    residuals, thresholds, leaf] of j known pairs below lo (lam ascending; V the host F-order
+    block of at least j + 1 columns, its first j the pairs), emptied by si_band: stored as run
+    -1, returned first, and the result assembled in place in V (resized; copied with the
+    "returned modes copied" RuntimeWarning when it cannot be); leaf None or (interval, count),
+    recorded first in slices (kind "known") and in the band count.
     slice_options: si_checked's and si_slice's (tau, maxit_inner, ...; not sigma or count_precond).
     Without tau, slice [a, e] runs at tau = max(TAU_MIN, min(TAU0, tol a / (10 e))) (r_acc <= tol
     for a below neighbour down to a / 2; TAU_MIN from 0); sigma moves as at TAU0 (stag_tau).
@@ -929,7 +944,9 @@ def si_band(
         raise ValueError(f"capacity must be an int >= 2 block = {2 * block}, got {capacity!r}")
     if not (verify is None or isinstance(verify, bool)):
         raise ValueError(f"verify must be True, False or None, got {verify!r}")
-    if bad := sorted({"sigma", "count_precond", "stag_tau"} & set(slice_options)):
+    if isinstance(max_deflate, bool) or not isinstance(max_deflate, int) or max_deflate < 0:
+        raise ValueError(f"max_deflate must be an int >= 0, got {max_deflate!r}")
+    if bad := sorted({"sigma", "count_precond", "stag_tau", "Z"} & set(slice_options)):
         raise ValueError(f"si_band sets {bad} per slice (sigma the midpoint, make(sigma))")
     b, c = block, _chunk(block)
     opts = {"verbose": verbose, **(count_options or {})}
@@ -939,6 +956,20 @@ def si_band(
     # (a, e, edges done before, span reruns in the lineage)
     work = [(x0, x1, set(), 0) for x0, x1 in zip([lo, *cuts], [*cuts, hi], strict=True)]
     slices, leaves = [], []  # leaves: (interval, count info)
+    kv, j_k = None, 0  # the known block (run -1) and its pairs
+    if known is not None:
+        assert isinstance(known, list)
+        lam_s, kv, res_s, thr_s, leaf = known
+        known.clear()
+        j_k = len(lam_s)
+        assert kv.dtype == np.float64 and kv.flags.f_contiguous and not kv.flags.c_contiguous
+        assert kv.shape[0] == n and kv.shape[1] >= j_k + 1
+        assert (np.diff(lam_s) >= 0).all() and (not j_k or lam_s[-1] < lo)
+        run_s, vecs = np.full(j_k, -1), [kv[:, q] for q in range(j_k)]
+        if leaf is not None:
+            slices.append(dict(interval=leaf[0], kind="known", leaf=True, count=leaf[1]))
+            leaves.append(leaf)
+        leaf = None
     r_s, tau_eff, converged, reason, i, warned = 0.0, 0.0, True, None, 0, False
     err, stop, P, p_sig = None, hi, None, None  # stop: the failing slice's lower edge
     tau0 = slice_options.pop("tau", None)
@@ -959,7 +990,7 @@ def si_band(
         order = np.argsort(lam_s, kind="stable")
         rw, win, reruns, sd = max(r_s, tol), None, 0, (RESTARTS + 1) * i
         tau = tau0 if tau0 is not None else max(TAU_MIN, min(TAU0, tol * a / (10 * e)))
-        V = inf = None  # the previous slice's released first: one alive at a time
+        V = inf = Z = None  # the previous slice's released first: one alive at a time
         if (a + e) / 2 != p_sig:  # a slice requeued whole keeps its preconditioner
             P = None
             P, p_sig = make((a + e) / 2), (a + e) / 2
@@ -972,6 +1003,7 @@ def si_band(
                 if verbose:
                     print(f"si_band: slice {i} rerun, r_acc {rw:.3g} widens its window", flush=True)
             win, cap = wide, _up(capacity, c) - _up(len(wide), c)
+            Z = [vecs[q] for q in _z_cols(lam_s, (a + e) / 2, max_deflate)] or None
             if cap < 2 * b:
                 err = ValueError(
                     f"slice [{a:.6g}, {e:.6g}]: {len(win)} deflated modes leave {cap}"
@@ -982,7 +1014,7 @@ def si_band(
                 op, free, a, e, P, capacity=cap, W=cols(win) if len(win) else None,
                 lam_W=lam_s[win] if len(win) else None, count_options={**opts, "seed": c0 + sd},
                 verify=verify, seed=seed + sd, verbose=verbose, R=R, tol=tol, block=block,
-                tau=tau, stag_tau=stag, **slice_options,
+                tau=tau, stag_tau=stag, Z=Z, **slice_options,
             )  # fmt: skip
             rw = max(rw, inf["r_acc"])
         if err is not None:  # the rerun's block is discarded: V of the stored slice only
@@ -1074,7 +1106,7 @@ def si_band(
     order = np.argsort(lam_s, kind="stable")
     ls = lam_s[order]
     windows = np.split(order, np.flatnonzero(_starts(ls, 100 * r_s))[1:]) if len(ls) else []
-    V = inf = None  # the last run's block and info (its columns are in the store)
+    V = inf = Z = None  # the last run's block, info and Z (its columns are in the store)
     consts = None
     parts, ranges, dup, rr_failed, w = [], [], 0, False, 0  # parts: (lam, V or store idx, r, t)
     while w < len(windows):
@@ -1112,17 +1144,56 @@ def si_band(
     # windows are ascending and separated by gaps >= 100 r_acc: the parts are in order; a run's
     # block is freed once all its columns are copied, so the store and V_f stay about 1x + a block
     lam_f, res_f, thr_f = (np.concatenate([p[q] for p in parts] + [np.zeros(0)]) for q in (0, 2, 3))
-    V_f, k = np.empty((n, len(lam_f)), order="F"), 0  # a column touches only its own pages
-    while parts:  # popped, so a merged window's X is freed once copied
-        X = parts.pop(0)[1]
-        if X.ndim == 1:
-            for s in X:
-                V_f[:, k], vecs[s] = vecs[s], None
-                k += 1
-        else:
-            V_f[:, k : k + X.shape[1]] = X
-            k += X.shape[1]
-    bounds = sorted({x for (x0, x1), _ in leaves for x in (x0, x1)} - {lo, hi})
+    V_f = X = None
+    if kv is not None:  # in place in the known block (docs/eigensolvers.md#the-junction)
+        p, q = 0, 0  # the leading index parts already in place: the known columns 0, ..., p - 1
+        for _, X, *_ in parts:
+            if X.ndim != 1 or not np.array_equal(X, np.arange(p, p + len(X))) or X[-1] >= j_k:
+                break
+            p, q = p + len(X), q + 1
+        if not any(X.ndim == 1 and (X < j_k).any() for _, X, *_ in parts[q:]):
+            for s in range(j_k):
+                vecs[s] = None
+            gc.collect()
+            try:  # the probe grow: raises for another reference or a borrowed block
+                kv.resize((n, kv.shape[1] + c))
+            except ValueError:
+                pass
+            else:
+                del parts[:q]
+                k = p
+                while parts:  # popped, so a merged window's X is freed once copied
+                    X = parts.pop(0)[1]
+                    wd = len(X) if X.ndim == 1 else X.shape[1]
+                    while kv.shape[1] < k + wd:
+                        kv.resize((n, kv.shape[1] + c))
+                    if X.ndim == 1:
+                        for s in X:
+                            kv[:, k], vecs[s] = vecs[s], None
+                            k += 1
+                    else:
+                        kv[:, k : k + wd] = X
+                        k += wd
+                    X = None
+                kv.resize((n, k))
+                V_f, kv = kv, None
+        if V_f is None:
+            warnings.warn("returned modes copied: si_band could not assemble in the known block",
+                          RuntimeWarning, stacklevel=2)  # fmt: skip
+    if V_f is None:
+        V_f, k = np.empty((n, len(lam_f)), order="F"), 0  # a column touches only its own pages
+        while parts:  # popped, so a merged window's X is freed once copied
+            X = parts.pop(0)[1]
+            if X.ndim == 1:
+                for s in X:
+                    V_f[:, k], vecs[s] = (kv[:, s] if s < j_k else vecs[s]), None
+                    k += 1
+            else:
+                V_f[:, k : k + X.shape[1]] = X
+                k += X.shape[1]
+        kv = None
+    k0 = int(bool(slices) and slices[0]["kind"] == "known")  # the known leaf: not a slice edge
+    bounds = sorted({x for (x0, x1), _ in leaves[k0:] for x in (x0, x1)} - {lo, hi})
     rel = 100 * r_s
     merged = [s for s in bounds if any(v0 * (1 - rel) <= s <= v1 * (1 + rel) for v0, v1 in ranges)]
     info = dict(

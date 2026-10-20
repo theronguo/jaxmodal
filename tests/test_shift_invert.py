@@ -1184,15 +1184,21 @@ def new_modes(a, e, kw, name="short"):
 def fake_band(monkeypatch, script, name="short", count=(0.1, True, False), post=None):
     """si_checked replaced by script(call, a, e, kw) -> (pairs, reason, ritz, count info);
     pairs: mode indices or (lam, V); the neighbours are the reference modes beyond a and e;
-    post(call, info) -> info edits the returned info. _count_slice returns (estimate,
-    verifiable, capped) = count (or count(call)); a _predict call returns the degree only and is
-    not recorded. Returns the recorded si_checked kwargs (plus interval, P) and _count_slice
-    calls (args, kwargs)."""
+    post(call, info) -> info edits the returned info. Z is recorded as its count (Z), the
+    columns' Rayleigh quotients (Z_lam) and whether each is a view (Z_view). _count_slice
+    returns (estimate, verifiable, capped) = count (or count(call)); a _predict call returns the
+    degree only and is not recorded. Returns the recorded si_checked kwargs (plus interval, P)
+    and _count_slice calls (args, kwargs)."""
     lr, Vr = prob(name)[6:]
     calls, counts = [], []
 
     def fake(op, free, a, e, P, **kw):
-        calls.append(dict(kw, interval=(a, e), P=P))
+        z = kw.pop("Z", None) or []  # recorded without keeping a store view (PR 18f)
+        K, M = prob(name)[3:5]
+        calls.append(dict(kw, interval=(a, e), P=P, Z=len(z),
+                          Z_view=[x.base is not None for x in z],
+                          Z_lam=[x @ (K @ x) / (x @ (M @ x)) for x in z]))  # fmt: skip
+        z = None
         pairs, reason, ritz, cnt = script(len(calls), a, e, kw)
         lam, V = (lr[pairs], Vr[:, pairs]) if isinstance(pairs, list) else pairs
         below, above = np.flatnonzero(lr < a), np.flatnonzero(lr > e)
