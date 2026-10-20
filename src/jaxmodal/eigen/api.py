@@ -84,7 +84,7 @@ SLICE_OPTIONS = ("tau", "maxit_inner", "block", "max_slices", "capacity", "edges
                  "max_deflate")  # fmt: skip
 STRATEGIES = ("auto", "lobpcg", "shift_invert")
 MU1_MARGIN = 1e-2  # the lam_lo < mu_1 rule's margin: max(MU1_MARGIN, 300 tol)
-STAGNATION_DEPTH = 1000  # locked modes at a capacity stop above which MINRES may stagnate
+STAGNATION_DEPTH = 1000  # capacity-stop depth above which undeflated MINRES may stagnate
 SLICE_MIN = 96  # PR 15c's measured slice minimum at block 6: a smaller capacity warns
 # the memory levers a band solve may set (option, value, cost per iteration, Mac CPU), and the
 # cost of the ladder's chunks by position (top, first, second, third halving: eigensolvers.md)
