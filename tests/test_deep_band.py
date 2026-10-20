@@ -91,6 +91,7 @@ def test_deep_band(monkeypatch):
     assert len(lam) == len(ref) and np.allclose(lam, ref, rtol=1e-7)
     f = np.flatnonzero(free)
     Mf = M[f][:, f]
+    # across runs that deflate neither the other only to residual level (si_band's bound)
     assert np.abs(V[f].T @ (Mf @ V[f]) - np.eye(len(lam))).max() <= 1e-6
     runs = [s for s in info["slices"] if s["kind"] == "run"]
     assert runs and all(s["deflated"] > 0 for s in runs)

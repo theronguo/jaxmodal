@@ -57,7 +57,7 @@ def setup(name, nz=None, noise=0.0, seed=0):
     rng = np.random.default_rng(seed)
     Z += noise * free[:, None] * rng.standard_normal(Z.shape) * np.abs(Z).max()
     c = 24
-    Zd = si._upload(jnp.zeros((op.n_dof, si._up(Z.shape[1], c))), list(Z.T), c)
+    Zd = si._zblock(list(Z.T), op.n_dof, c)
     return A, Z, Zd, si._deflate_setup(A, Zd, Z.shape[1], c), sigma
 
 
@@ -118,7 +118,7 @@ def test_dminres_duplicates(delta):
     dup = Z[:, -1] + delta * free * rng.standard_normal(len(free)) * np.abs(Z[:, -1]).max()
     Z2 = np.c_[Z, dup]
     nz, c = Z2.shape[1], 24
-    Zd = si._upload(jnp.zeros((op.n_dof, si._up(nz, c))), list(Z2.T), c)
+    Zd = si._zblock(list(Z2.T), op.n_dof, c)
     H = si._deflate_setup(A, Zd, nz, c)
     b = rhs("hex20")
     x, inf = si._dminres(A, b, None, Zd, H, TAU, 20000)
@@ -204,7 +204,7 @@ def test_dminres_solved_columns(monkeypatch):
 
 
 @pytest.mark.slow
-def test_slice_deflated(monkeypatch):
+def test_slice_deflated():
     """Test 2: a slice above 30 modes of "hex20": with Z = the 30 modes below it the pairs
     match the Z=None run and eigsh, info["deflated"] = 30, and the first step's MINRES needs
     <= 0.6x the iterations; window modes below sigma (not the lo neighbour) passed both as W
@@ -250,13 +250,12 @@ def test_slice_deflated_move(monkeypatch):
     assert sig[1] == -info["sigma"] != sig[0]
 
 
-@pytest.mark.slow
 def test_checked_keeps_z(monkeypatch):
     """Test 2: an si_checked restart (the count flagged once) passes the same Z again."""
-    _, free, op, *_ = prob("hex20")
-    lr, Vr = prob("hex20")[6:]
-    lo, hi = edges(lr, 30, 36)
-    Z = [Vr[:, i] for i in range(30)]
+    _, free, op, *_ = prob("tiny")
+    lr, Vr = prob("tiny")[6:]
+    lo, hi = edges(lr, 6, 9)
+    Z = [Vr[:, i] for i in range(5)]
     seen, real = [], si.si_slice
     monkeypatch.setattr(si, "si_slice",
                         lambda *a, **kw: seen.append(kw.get("Z")) or real(*a, **kw))  # fmt: skip
@@ -267,10 +266,10 @@ def test_checked_keeps_z(monkeypatch):
         return (out if _predict else next(est, out)), ci
 
     monkeypatch.setattr(si, "band_count", bc)
-    lam, V, info = si.si_checked(op, free, lo, hi, precond("hex20", (lo + hi) / 2),
-                                 capacity=300, tol=1e-10, tau=TAU, Z=Z)  # fmt: skip
+    lam, V, info = si.si_checked(op, free, lo, hi, precond("tiny", (lo + hi) / 2),
+                                 capacity=300, tol=1e-10, tau=TAU, Z=Z, verify=True)  # fmt: skip
     assert info["count"]["restarts"] == 1 and len(seen) == 2
-    assert all(z is Z for z in seen) and info["runs"][1]["deflated"] == 30
+    assert all(z is Z for z in seen) and info["runs"][1]["deflated"] == 5
 
 
 def test_zd_freed(monkeypatch):

@@ -64,13 +64,20 @@ def known_block(j, width=None, base=None):
     return [lr[:j].copy(), V, np.arange(j) * 1e-12, np.full(j, 1e-9), None]
 
 
+def counted(x0, x1, est):
+    """A known leaf on (x0, x1) with a count estimate est (flagged at >= 0.5)."""
+    bad = est >= 0.5
+    c = dict(passed=not bad, verifiable=True, ran=True, flagged=bad, estimate=est)
+    return (x0, x1), c | dict(estimates=[est], reason="flagged" if bad else None, restarts=0)
+
+
 def band(j, top=15):
     """(lo, hi) at the midpoints below mode j and above mode top - 1."""
     lr = prob("short")[6]
     return (lr[j - 1] + lr[j]) / 2, (lr[top - 1] + lr[top]) / 2
 
 
-def run_known(known, lo, hi, *, held=False, warn=False, **kw):
+def run_known(known, lo, hi, *, warn=False, **kw):
     """fband with known, asserting the in-place path (the block's id returned, no warning) or,
     with warn, the copy and its RuntimeWarning."""
     vid = id(known[1])
@@ -110,8 +117,7 @@ def test_known(monkeypatch):
     assert lr[4] in calls[0]["lam_W"] and lr[0] not in calls[0]["lam_W"]
     assert [s["kind"] for s in info["slices"]] == ["run", "run"]
     # a flagged leaf: slices[0], and the band count covers it
-    leaf = ((0.0, lo), dict(passed=False, verifiable=True, ran=True, flagged=True, estimate=0.6,
-                            estimates=[0.6], reason="flagged", restarts=0))  # fmt: skip
+    leaf = counted(0.0, lo, 0.6)
     known = known_block(5)
     known[4] = leaf
     lam, V, info = run_known(known, lo, hi, edges=[(lr[9] + lr[10]) / 2])
@@ -130,9 +136,7 @@ def test_known_error(monkeypatch):
     lo, hi = band(5)
     fake_band(monkeypatch, found)
     known = known_block(5)
-    leaf = ((0.0, lo), dict(passed=True, verifiable=True, ran=True, flagged=False,
-                            estimate=0.1, estimates=[0.1], reason=None, restarts=0))  # fmt: skip
-    known[4], vid = leaf, id(known[1])
+    known[4], vid = counted(0.0, lo, 0.1), id(known[1])
     with pytest.raises(RuntimeError, match="max_slices") as err:
         fband("short", lo, hi, known=known, edges=[(lr[9] + lr[10]) / 2], max_slices=1)
     lam, V, info = err.value.result
@@ -206,7 +210,8 @@ def test_known_prefix(monkeypatch, j):
 def test_known_widened(monkeypatch):
     """Test 4: a merged window (known mode 4 and a slice's junk vector at its value) fails its
     re-check and widens over the known-only window below it (mode 3) and the window above: the
-    prefix shortens to 3, still in place, edge_rr_failed."""
+    prefix shortens to 3, still in place, edge_rr_failed. A known leaf whose lower edge lies in
+    that merged window is no slice edge: nothing merged, not collapsed."""
     lr, Vr = prob("short")[6:]
     free, M = prob("short")[1], prob("short")[4]
     lo, hi = band(5)
@@ -226,3 +231,8 @@ def test_known_widened(monkeypatch):
     assert np.allclose(np.abs(Vr[:, 3:6].T @ (M @ V[:, 3:6])), np.eye(3), atol=1e-8)
     for q in range(6, 15):
         assert np.array_equal(V[:, q + 1], Vr[:, q])
+    fake_band(monkeypatch, junk)
+    known = known_block(5)
+    known[4] = counted((lr[3] + lr[4]) / 2, lo, 0.1)
+    lam, V, info = run_known(known, lo, hi)
+    assert info["edge_rr_failed"] and info["merged_edges"] == [] and not info["collapsed"]

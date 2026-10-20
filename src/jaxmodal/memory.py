@@ -662,6 +662,9 @@ def band_probe_block(mesh, bcs, n_modes, n_probes, host_bytes, *, n_rigid, **opt
 SI_MINRES = 17.5
 SI_REORTHO = 4.0
 SI_RITZ = 6.0
+# Deflated MINRES (PR 18f): SI_DEFLATE blocks over SI_MINRES plus n_z x block (the projections'
+# compiled temporaries: +1.1 blocks with GMG to +6.9 measured, code review round 1).
+SI_DEFLATE = 7
 
 
 def si_memory(
@@ -673,9 +676,10 @@ def si_memory(
     preconditioner estimate (as lobpcg_memory); n_rigid: columns of R (R and M R are stored);
     n_deflate: columns of W on the device; host_window: W's host columns (default n_deflate;
     si_band: the window and si_checked's restart copy). n_z: columns of the MINRES deflation
-    block Z (PR 18f; distinct from W): Z padded to a multiple of c and H on the device, the
-    setup phase E = Z^T A Z (an operator apply on c columns plus n_z x c), two more blocks and
-    n_z x block in MINRES, E and H on the host.
+    block Z (PR 18f; distinct from W): Z padded to zp (a multiple of c) and H on the device, the
+    setup phase E = Z^T A Z (an operator apply on c columns, n_z x c and a second zp x zp),
+    SI_DEFLATE more blocks and n_z x block in MINRES, E, H and the pseudo-inverse's temporaries on
+    the host (modelled: 8 (2 zp^2 + 4 n_z^2)).
 
     Returns storage (operator, preconditioner, basis, R and M R), host (the window, the store and
     the projected matrix), the phases minres, reortho, ritz, end (one device chunk of the host
@@ -690,17 +694,18 @@ def si_memory(
     v, b = 8 * n_dof, 8 * n_dof * block
     zp = -(-n_z // c) * c
     op_c = op_memory(c) if n_z else None
+    dz = 8 * (2 * zp**2 + 4 * n_z**2)  # the host E, H and pinv temporaries
     out = dict(
         storage=op_b["storage"] + pc["storage"] + v * (-(-n_deflate // c) * c + capacity)
         + 2 * v * n_rigid + v * zp + 8 * zp**2,
         host=v * (n_deflate if host_window is None else host_window) + v * n_modes
-        + 8 * capacity**2 + 16 * n_z**2,
-        minres=op_b["workspace"] + SI_MINRES * b + pc["count"] + (2 * b + 8 * n_z * block
-                                                                  if n_z else 0),
+        + 8 * capacity**2 + dz,
+        minres=op_b["workspace"] + SI_MINRES * b + pc["count"]
+        + (SI_DEFLATE * b + 8 * n_z * block if n_z else 0),
         reortho=op_b["workspace"] + SI_REORTHO * b,
         ritz=op_b["workspace"] + SI_RITZ * b + v * c,
         end=v * (2 + c),
-        setup=op_c["vectors"] + op_c["workspace"] + 8 * n_z * c if n_z else 0,
+        setup=op_c["vectors"] + op_c["workspace"] + 8 * n_z * c + 8 * zp**2 if n_z else 0,
     )  # fmt: skip
     phases = max(out["minres"], out["reortho"], out["ritz"], out["end"], out["setup"])
     out["total"] = (
@@ -709,7 +714,7 @@ def si_memory(
     pc_dev, pc_host = _pc_builds(pc)
     out.update(
         device_exact=out["storage"] - pc["storage"],
-        host_exact=out["host"] - 8 * capacity**2,
+        host_exact=out["host"] - 8 * capacity**2 - dz,
         device_total=op_b["overhead"] + out["storage"] + max(pc_dev, phases),
         host_total=out["host"] + max(op_b["build"], pc_host),
     )

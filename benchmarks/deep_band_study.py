@@ -2,7 +2,7 @@
 solves: the first MINRES solve at the stored sigma of shift_invert_study's depths 503 and 1005
 (6 columns, M q, tau 1e-8), deflated by every LOBPCG mode below sigma and by the nearest half,
 and the deflation's per-iteration overhead; Z from a chunk-40 LOBPCG run to 1045 modes cached
-in --cache (about 8 min without it). band: solve_modes(band=...) from mode ~952 to ~1005 at
+in --cache (about 8 min without it). band: solve_modes(band=...) from mode ~951 to ~1008 at
 chunk 40 with levers=False, verify=False and a budget whose C_max = 960 capacity-stops LOBPCG at
 D = 964 (the cut path of the junction), per slice the MINRES iterations, deflation and sigma
 moves, the band against eigsh at its centre. About 20 + 45 min; progress on stdout. --parts
@@ -71,7 +71,7 @@ def deflated(op, free, P, sigma, cols, tau=TAU, maxit=20000):
     residual, stagnation, the setup and per-iteration seconds."""
     A, b, c = ap_operator(op, free, -sigma), rhs(op, free), si._chunk(6)
     t = time.perf_counter()
-    Zd = si._upload(jnp.zeros((op.n_dof, -(-len(cols) // c) * c)), cols, c)
+    Zd = si._zblock(cols, op.n_dof, c)
     H = si._deflate_setup(A, Zd, len(cols), c)
     H.block_until_ready()
     t_setup = time.perf_counter() - t

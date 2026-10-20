@@ -179,10 +179,10 @@ def _check_slice_options(opts):
             raise ValueError(f"slice_options {key} must be an int >= 1, got {opts[key]!r}")
         if key in opts:
             opts[key] = int(opts[key])  # si_band takes Python ints only
-    x = opts.get("max_deflate", 0)
-    if isinstance(x, bool) or not isinstance(x, numbers.Integral) or x < 0:
-        raise ValueError(f"slice_options max_deflate must be an int >= 0, got {x!r}")
     if "max_deflate" in opts:
+        x = opts["max_deflate"]
+        if isinstance(x, bool) or not isinstance(x, numbers.Integral) or x < 0:
+            raise ValueError(f"slice_options max_deflate must be an int >= 0, got {x!r}")
         opts["max_deflate"] = int(x)
     if "tau" in opts and not opts["tau"] > 0:
         raise ValueError(f"slice_options tau must be > 0, got {opts['tau']!r}")
@@ -506,6 +506,19 @@ def solve_modes(
                 est_cache[key] = [f and functools.cache(f) for f in fs]
             return est_cache[key]
 
+        def models64(ops=None):  # the operator model and the fp64 preconditioner model
+            pc = models(precond_dtype, ops)
+            return pc[0], models("float64", ops)[1] if precond_dtype == "float32" else pc[1]
+
+        def probe_budget(n_eff, n_cols, chunk):  # the count's probe block, n_cols columns held
+            return lambda n_probes: mem.band_probe_block(
+                mesh, bcs, n_eff, n_probes, 8 * n * n_cols + _nbytes(aggs),
+                n_rigid=k, mass=mass, chunk=chunk, guards=guards, basis_dtype=basis_dtype,
+                low_memory=low_memory, precond=precond, precond_dtype=precond_dtype,
+                operator_options=op_opts, precond_options=pc_opts, band=(0.0, f2),
+                polish_options=po_opts,
+            )  # fmt: skip
+
         otf_ok = not voxel and "ssh8" not in mesh.blocks
 
         def rows(hint=False):  # the LEVERS rows still at their defaults (applicable unless hint)
@@ -589,8 +602,7 @@ def solve_modes(
                     f" raise memory_budget, or pass {lever_hint(min(reach))}, or"
                     " strategy='shift_invert'"
                 )  # fmt: skip
-        op_memory, pc = models(precond_dtype)
-        pc64 = models("float64")[1] if precond_dtype == "float32" else pc
+        op_memory, pc64 = models64()
     op = build(mesh, materials, orientations, mass=mass, nodal_mass=nodal_mass, **op_opts)
     t0 = time.perf_counter()
     aggs, R = None, jnp.asarray(rigid_modes(mesh, free))
@@ -702,20 +714,10 @@ def solve_modes(
             info.update(converged=False, stopped="sorted cut at the end")
             info["count"] = dict(ran=False, reason="sorted cut at the end")
         else:
-
-            def probe_budget(n_probes):  # n_eff: the count the grown basis serves
-                return mem.band_probe_block(
-                    mesh, bcs, n_eff, n_probes, 8 * n * len(lam) + _nbytes(aggs),
-                    n_rigid=k, mass=mass, chunk=info["chunk"], guards=guards,
-                    basis_dtype=basis_dtype, low_memory=low_memory, precond=precond,
-                    precond_dtype=precond_dtype, operator_options=op_opts,
-                    precond_options=pc_opts, band=(0.0, f2), polish_options=po_opts,
-                )  # fmt: skip
-
             info["count"] = _verify(
                 verify, cn_opts, op, free, Rd, lam, V[:, : len(lam)], nb, lam_hi, m,
-                info["t_iteration"], solve_s,
-                reuse, probe_budget,
+                info["t_iteration"], solve_s, reuse,
+                probe_budget(n_eff, len(lam), info["chunk"]),  # n_eff: the grown basis' count
             )  # fmt: skip
         aggs = None
         i0, i1 = _keep(lam, info["thresholds"], lam_lo, nb), nb
@@ -744,12 +746,13 @@ def solve_modes(
         lo_b, b = 0.0 if out["from_zero"] else lam_lo, sl_opts.get("block", 6)
         # the junction (docs/eigensolvers.md#the-junction): j known pairs below the cut (a) or
         # below lo_b (b), handed to si_band
-        cut, j, known, extra = None, 0, None, 0
+        cut, j, known, extra, leaf = None, 0, None, 0, None
         if stopped == "capacity":
             r_l, t_l = info["residuals"], info["thresholds"]
             cut = _cut(lam, t_l, min(info["block"], _chunk(b)), lo_b, lam_hi, tol)
+            ok = lam < lo_b * (1 - 100 * np.maximum(t_l, tol))  # case (b): the leading run
             j = int(np.searchsorted(lam, cut) if cut is not None else
-                    np.sum(lam < lo_b * (1 - 100 * np.maximum(t_l, tol))))  # fmt: skip
+                    len(ok) if ok.all() else np.argmin(ok))  # fmt: skip
             if not j:
                 V = lam = info = aggs = None  # LOBPCG's modes and aggregates freed
         if j:
@@ -760,8 +763,7 @@ def solve_modes(
         C_given = sl_opts.get("capacity")
 
         def plan(ops, host_extra):  # (C, d) with the operator options ops
-            op_m, pc_m = models(precond_dtype, ops)
-            p64 = models("float64", ops)[1] if precond_dtype == "float32" else pc_m
+            op_m, p64 = models64(ops)
             return mem._slice_plan(op_m, p64, n, n_store=n_store, n_new=n_new, block=b,
                                    n_rigid=k, budget=budget, host_budget=host_budget,
                                    max_deflate=sl_opts.get("max_deflate", n_store),
@@ -776,23 +778,12 @@ def solve_modes(
                 op_opts = stored
                 op = build(mesh, materials, orientations, mass=mass, nodal_mass=nodal_mass,
                            **op_opts)  # fmt: skip
-                op_memory, pc = models(precond_dtype)
-                pc64 = models("float64")[1] if precond_dtype == "float32" else pc
+                op_memory, pc64 = models64()
         if cut is not None:  # case (a): the known leaf [lo_b, cut] counted as on the fits path
-            n_eff = info["n_modes"]
-
-            def probe_budget(n_probes):  # held: every touched locked column and the aggregates
-                return mem.band_probe_block(
-                    mesh, bcs, n_eff, n_probes, 8 * n * depth + _nbytes(aggs),
-                    n_rigid=k, mass=mass, chunk=info["chunk"], guards=guards,
-                    basis_dtype=basis_dtype, low_memory=low_memory, precond=precond,
-                    precond_dtype=precond_dtype, operator_options=op_opts,
-                    precond_options=pc_opts, band=(0.0, f2), polish_options=po_opts,
-                )  # fmt: skip
-
-            c = _verify(
+            c = _verify(  # held: every touched locked column and the aggregates
                 verify, cn_opts, op, free, Rd, lam[: j + 1], V[:, : j + 1], j, lam_hi,
-                info["block"], info["t_iteration"], solve_s, reuse, probe_budget,
+                info["block"], info["t_iteration"], solve_s, reuse,
+                probe_budget(info["n_modes"], depth, info["chunk"]),
             )  # fmt: skip
             est, ran = c.get("estimate", np.nan), c["ran"]
             flagged = bool(ran and c.get("verifiable") and est >= 0.5)
@@ -802,7 +793,7 @@ def solve_modes(
                                   "t_leaf": solve_s})  # fmt: skip
         aggs = None
         if j:  # no jax op from here to si_band: its list holds the only reference to V
-            known = [lam[:j], V, r_l[:j], t_l[:j], leaf if cut is not None else None]
+            known = [lam[:j], V, r_l[:j], t_l[:j], leaf]
             V = lam = info = r_l = t_l = c = None
         C, d = plan(op_opts, extra)
         if C is None:
@@ -849,7 +840,7 @@ def solve_modes(
                 cn = {**cn_opts, "block": bp}
         lo_s = lo_b if cut is None else max(lo_b, cut)
         rest = {key: x for key, x in sl_opts.items() if key not in ("capacity", "max_deflate")}
-        if "edges" in rest:  # edges at or below lo_s dropped
+        if rest.get("edges") is not None:  # edges at or below lo_s dropped
             rest["edges"] = [x for x in rest["edges"] if x > lo_s] or None
         try:
             lam, V, info = si_band(
@@ -866,7 +857,7 @@ def solve_modes(
             info["complete_to"] = lo_b
         info["complete_to_hz"] = math.sqrt(max(info["complete_to"], 0)) / (2 * np.pi)
         if no_count and verify is not False:  # prefixed: a failed known leaf keeps its reason
-            r = info["count"]["reason"]
+            r = info["count"]["reason"] if leaf is not None else None
             info["count"]["reason"] = f"{no_count}; {r}" if r else no_count
         info["slice_reason"] = info.pop("reason")  # si_band's; reason is the strategy's
         i0, i1 = _keep(lam, info["r_acc"], lam_lo, len(lam)), len(lam)
