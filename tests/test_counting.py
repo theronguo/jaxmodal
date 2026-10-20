@@ -445,6 +445,35 @@ def test_step_memory(kind, pc):
             assert lo <= inc / pcm(b)["count"] <= 1.0, inc / pcm(b)["count"]
 
 
+@pytest.mark.slow
+@pytest.mark.serial  # 10 GB: beside the peak tests it lowers their measured peaks
+@pytest.mark.parametrize("pc", ["jacobi", "mg"])
+@pytest.mark.parametrize("kind", ["ssh8", "hex20"])
+def test_step_memory_large(kind, pc):
+    """PR 18e test 13: COUNT_STEP's refit at >= 1M DOF (ssh8 515^2, 1.6M; hex20 44^3, 1.08M):
+    the step (without its 2 b blocks) >= the recurrence, within 1.2x with Jacobi (the fitted
+    part) and 1.3x with multigrid (measured 1.03-1.05 ssh8, 1.18-1.23 hex20: the kept count
+    terms over-count by the refit's increase), b = 16 and 32."""
+    if kind == "ssh8":
+        import test_shell_amg as T
+
+        mesh = T.plate(515, 100)[0]
+    else:
+        mesh = box_mesh((44,) * 3, (1 / 44,) * 3, type="hex20")
+    op, est = unstructured(mesh, STEEL), functools.partial(unstructured_memory, mesh)
+    free = np.ones(op.n_dof, bool)
+    free[:12] = False  # A_P(1) SPD, no rigid modes
+    free = jnp.asarray(free)
+    P = amg(op, free, 1.0, mesh.points) if pc == "mg" else jacobi(op, free, 1.0)
+    pcm = functools.partial(amg_memory, mesh) if pc == "mg" else None
+    assert op.n_dof >= 1_000_000
+    for b in (16, 32):
+        got = _recurrence_temps(op, free, P, b)
+        model = count_memory(est, op.n_dof, b, precond_memory=pcm)["step"] - 2 * 8 * op.n_dof * b
+        print(f"{kind} {pc} b={b}: {got / 1e6:.1f} MB, model {model / 1e6:.1f} MB")
+        assert got <= model <= (1.3 if pc == "mg" else 1.2) * got, model / got
+
+
 def test_sampling_memory():
     """Test 9b: the sampling kernels <= the sampling phase <= the step phase."""
     from jaxmodal.linalg.krylov import _pcg
@@ -639,6 +668,38 @@ def test_chunks(monkeypatch):
     bad[:, 9] *= 1.01
     with pytest.raises(ValueError, match="M-orthonormal"):
         count(op, free, bad, lam[:KEEP], lam[5], lam[6])
+
+
+def test_project_transposed():
+    """PR 18e test 9: _project's transposed chunks (host F- and C-order W, device W, a mixed
+    tuple; widths 5 to 128, a padded last chunk) against the dense Y - W W^T M Y (masked)."""
+    _, op, free, K, M, lam, W = ref()
+    m = jnp.asarray(free, jnp.float64)[:, None]
+    Y = np.random.default_rng(0).standard_normal((len(free), 3))
+    Z = jnp.zeros((len(free), 0))
+    Mm = M.multiply(free[:, None]).multiply(free[None, :])
+    for w in (5, 37, 64, 100, 128):
+        Wf = np.asfortranarray(W[:, :w])
+        ref_p = free[:, None] * (Y - Wf @ (Wf.T @ (Mm @ Y)))
+        for Ws in ((Wf,), (np.ascontiguousarray(Wf),), (jnp.asarray(Wf),),
+                   (Wf[:, : w // 2], jnp.asarray(Wf[:, w // 2 :]))):  # fmt: skip
+            out = np.asarray(counting._project(op, m, Ws, Z, Z, jnp.asarray(Y)))
+            assert np.abs(out - ref_p).max() <= 1e-14 * np.abs(Y).max() * w, (w, type(Ws[0]))
+
+
+def test_sketch_seeds():
+    """PR 18e test 11: the NumPy sketch accepts M-orthonormal W (host F and C order, device,
+    fp64 and fp32) and rejects a perturbed column, for seeds 0, -1 and 2**40 (NumPy ints too)."""
+    _, op, free, K, M, lam, W = ref()
+    m = jnp.asarray(free, jnp.float64)[:, None]
+    Wf = np.asfortranarray(W[:, :70])
+    bad = Wf.copy()
+    bad[:, 66] *= 1.01
+    for seed in (0, -1, 2**40, np.int64(-1)):
+        for Ws in (Wf, np.ascontiguousarray(Wf), jnp.asarray(Wf), Wf.astype(np.float32)):
+            counting._check_ortho(op, m, Ws, seed)
+        with pytest.raises(ValueError, match="M-orthonormal"):
+            counting._check_ortho(op, m, bad, seed)
 
 
 # ---------------------------------------------------------------- PR 15b: band-pass count

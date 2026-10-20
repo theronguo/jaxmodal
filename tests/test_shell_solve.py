@@ -584,7 +584,8 @@ def test_polish_lever(off):
     kw = dict(polish_options={"on": False}) if off else {}
     budget = 0.8 * solve_modes_memory(mesh, SS, 20, **kw)["total"]
     with pytest.warns(UserWarning, match="levers") as w, pytest.raises(ValueError, match="slice"):
-        solve_modes(mesh, STEEL, SS, band=(0, 400.0), memory_budget=budget, verify=False, **kw)
+        solve_modes(mesh, STEEL, SS, band=(0, 400.0), memory_budget=budget, verify=False,
+                    levers=False, **kw)  # fmt: skip
     msg = [str(x.message) for x in w if "levers" in str(x.message)][0]
     assert ("polish_options={'on': False}" in msg) != off
 
@@ -598,7 +599,7 @@ def test_polish_lever_hex(dtype):
     budget = 0.8 * solve_modes_memory(mesh, bcs, 2, precond_dtype=dtype)["total"]
     with pytest.warns(UserWarning, match="levers") as w, pytest.raises(ValueError, match="slice"):
         solve_modes(mesh, STEEL, bcs, band=(0, 1e4), memory_budget=budget, verify=False,
-                    precond_dtype=dtype)  # fmt: skip
+                    precond_dtype=dtype, levers=False)  # fmt: skip
     msg = [str(x.message) for x in w if "levers" in str(x.message)][0]
     assert "polish_options={'on': False}" in msg
     assert ("precond_dtype='float32'" in msg) == (dtype == "float64")

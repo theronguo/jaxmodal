@@ -225,7 +225,8 @@ def lobpcg_memory(
         host_exact=V,
         device_total=op["overhead"] + op["storage"] + out["precond"] + out["basis"]
         + out["rigid"] + out["host"] - V + max(out["step"], pc_dev),
-        # a band growth refills the basis from V: a host chunk and its F -> C copy
+        # a band growth refills the basis from V: a host chunk and its F -> C copy (since PR 18e
+        # the chunk goes as a transposed view, no copy: kept, conservative by one chunk)
         host_total=max(op["build"], V + pc_host, V + (2 * 8 * n_dof * c if band else 0)),
     )  # fmt: skip
     return {k: int(v) for k, v in out.items()}
@@ -549,7 +550,11 @@ def solve_modes_memory(
     probe block from this estimate). polish_options as in solve_modes ({"on": False} drops the
     polish term)."""
     if band is not None and check_band(band)[0] > 0:
-        raise ValueError("solve_modes_memory needs band=(0, f_max): no estimate of f1 > 0 yet")
+        raise ValueError(
+            "solve_modes_memory needs band=(0, f2): solve_modes sizes an interior band to"
+            " memory_budget itself; band=(0, f2) with n_modes = the expected depth estimates"
+            " its LOBPCG run"
+        )
     if band is None and n_modes is None:
         raise ValueError("pass n_modes or band")
     op_memory, pc = _models(
@@ -569,10 +574,12 @@ def solve_modes_memory(
 # Count (docs/eigensolvers.md#completeness-count). Recurrence step with Jacobi (memory_analysis
 # temporaries of _recurrence): workspace + 8 n (a b + c), and on the stencil at least
 # 2 workspace + 8 n a_dup b (the slab workspace appears twice while a slab covers most of the
-# grid); upper envelope of hex20 12^3-28^3, ssh8 120^2-200^2 and voxel 16^3-64^3, b = 4-32
-# (meshes below about 20k DOF, where one chunk holds the whole mesh, are outside it). Plus w0
-# and u (2 blocks).
-COUNT_STEP = {"unstructured": (10.3, 3.0, 0.0), "stencil": (10.2, 1.0, 2.2)}
+# grid); upper envelope of hex20 12^3-44^3, ssh8 120^2-515^2 (to 1.6M DOF; PR 18e: the slope
+# rises with n, 10.0 at 0.24M to 10.97 at 6M with c up to 1.3, so a = 11 and c = 2 cover the
+# points measured to 6M DOF; a 10M check is a deferred GPU check) and voxel 16^3-64^3,
+# b = 4-32 (meshes below about 20k DOF, where one chunk holds the whole mesh, are outside
+# it). Plus w0 and u (2 blocks).
+COUNT_STEP = {"unstructured": (11.0, 2.0, 0.0), "stencil": (10.2, 1.0, 2.2)}
 # Sampling: the y PCG on M_P, workspace + 6 vectors per probe (memory_analysis, hex20 20^3,
 # voxel 64^3), plus g and y.
 COUNT_SAMPLE = 8.0
@@ -585,7 +592,8 @@ def count_memory(
     """Estimated peak device bytes of count(...) at probe block b. op_memory: m -> the operator
     estimate (unstructured_memory or stencil_memory, voxel=True for the latter);
     precond_memory: m -> gmg_memory or amg_memory (its "count" term), None for Jacobi. W stays
-    on the host: one chunk of `chunk` columns is on the device at a time.
+    on the host: one chunk of `chunk` columns is on the device at a time. The unstructured step
+    (COUNT_STEP) is fitted to 1.6M DOF and checked to 6M (10M: a deferred GPU check).
 
     Returns storage, sampling, step, projector, total = overhead + storage + max(phases) and
     the per-space entries of lobpcg_memory (all device; exact: operator storage, R and M R)."""
