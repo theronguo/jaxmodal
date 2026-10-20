@@ -970,21 +970,21 @@ def band_solve(cap, lam_stop, n_modes=30, chunk=5, dtype="float64", maxit=200):
 def test_solve_capacity_sequence(monkeypatch):
     """Test 12: every basis width a multiple of c_L = 40 (chunk 5, k = 10), growing by 3/2 and
     clamped at the cap 160 (40 -> 80 -> 120 -> 160, not 180), then the capacity stop below
-    lam_stop: 150 + k = 160 locks, 155 stops."""
+    lam_stop: 150 + k = 160 locks, 155 stops and keeps its chunk of 5 (PR 18f)."""
     news, real = [], lob._grow
     monkeypatch.setattr(lob, "_grow", lambda V, count, new, c, dt: news.append(new)
                         or real(V, count, new, c, dt))  # fmt: skip
     lam, V, info = band_solve(160, 10 * prob("short")[6][-1])
     assert news == [80, 120, 160] and info["capacity"] == 160 and info["stopped"] == "capacity"
-    assert len(lam) == 155 and V.shape == (V.shape[0], 170)
+    assert len(lam) == 160 and V.shape == (V.shape[0], 170)
 
 
 def test_solve_boundary(monkeypatch):
     """Test 12: C_max = 40 at chunk 5: count 30 (count + k = C_max) locks to 35 (a >= mutant
-    stops at 30), the next lock stops and is dropped; V is the preallocated F-order zeros
-    array of C_max + k columns, zero from the locked count on; the initial basis is capped
-    (n_modes 60 -> C_max - k = 30)."""
-    n = prob("short")[2].n_dof
+    stops at 30), the next lock stops and its converged chunk is kept unlocked (PR 18f: 40
+    modes, M-orthonormal); V is the preallocated F-order zeros array of C_max + k columns, zero
+    past them; the initial basis is capped (n_modes 60 -> C_max - k = 30)."""
+    n, M = prob("short")[2].n_dof, prob("short")[4]
     made, real = [], np.zeros
 
     def zeros(shape, *a, **kw):
@@ -996,15 +996,18 @@ def test_solve_boundary(monkeypatch):
     monkeypatch.setattr(np, "zeros", zeros)
     lam, V, info = band_solve(40, prob("short")[6][-1], n_modes=60)
     monkeypatch.undo()
-    assert info["stopped"] == "capacity" and len(lam) == 35 and info["capacity"] == 40
-    assert len(info["residuals"]) == len(info["thresholds"]) == 35
+    assert info["stopped"] == "capacity" and len(lam) == 40 and info["capacity"] == 40
+    assert len(info["residuals"]) == len(info["thresholds"]) == 40
     assert info["chunks"][-1]["locked"] == 0 and made == [id(V)]
-    assert V.shape == (n, 50) and V.flags.f_contiguous and not V[:, 35:].any()
+    assert V.shape == (n, 50) and V.flags.f_contiguous and not V[:, 40:].any()
+    W = V[:, :40]
+    assert np.abs(W.T @ (M @ W) - np.eye(40)).max() <= 1e-8
     assert info["n_modes"] == 30
 
 
 def test_solve_boundary_one(monkeypatch):
-    """Test 12: chunks locking one mode each reach count + k = C_max + 1 at count 31: stop."""
+    """Test 12: chunks locking one mode each reach count + k = C_max + 1 at count 31: stop,
+    keeping the stopping chunk's mode (32)."""
     real = lob._iterate
 
     def one(*a, **kw):
@@ -1013,7 +1016,7 @@ def test_solve_boundary_one(monkeypatch):
 
     monkeypatch.setattr(lob, "_iterate", one)
     lam, _, info = band_solve(40, prob("short")[6][-1])
-    assert info["stopped"] == "capacity" and len(lam) == 31
+    assert info["stopped"] == "capacity" and len(lam) == 32
 
 
 def test_solve_capped_start():
