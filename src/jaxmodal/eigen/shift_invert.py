@@ -11,8 +11,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import scipy.linalg as sla
+from jax.tree_util import Partial
 
-from ..linalg.krylov import minres
+from ..linalg.krylov import _div, _norm, minres
 from ..operators import ap_operator
 from ..operators.common import check_x64
 from . import counting
@@ -209,9 +210,74 @@ def _random_block(key, n, b):
     return jax.random.normal(key, (n, b))
 
 
+def _upload(B, cols, c):
+    """B with the host columns cols (a sequence of 1-D arrays, or the rows of W.T) written from
+    column 0, c at a time through fresh zero chunks: no host view of cols reaches jax (a held
+    view would block si_band's final resize)."""
+    for i in range(0, len(cols), c):
+        Wc = np.zeros((B.shape[0], c))
+        for j in range(i, min(i + c, len(cols))):
+            Wc[:, j - i] = cols[j]
+        B = _insert(B, jnp.asarray(Wc), jnp.asarray(i, jnp.int32))
+    return B
+
+
+@functools.partial(jax.jit, static_argnames="c")
+def _zaz(A, Zd, c):
+    """E = Z^T A Z, accumulated over column chunks Z_j of c: Z^T (A Z_j)."""
+
+    def body(i, E):
+        Zc = jax.lax.dynamic_slice_in_dim(Zd, i * c, c, 1)
+        return jax.lax.dynamic_update_slice_in_dim(E, Zd.T @ A(Zc), i * c, 1)
+
+    nz = Zd.shape[1]
+    return jax.lax.fori_loop(0, nz // c, body, jnp.zeros((nz, nz)))
+
+
+def _deflate_setup(A, Zd, nz, c):
+    """H = pinv(E) of the symmetrized E = Z^T A Z trimmed to the nz real columns (rcond 1e-10:
+    duplicate columns drop out), zero-padded back to Zd's width on the device."""
+    E = np.asarray(_zaz(A, Zd, c=c))[:nz, :nz]
+    H = np.zeros((Zd.shape[1], Zd.shape[1]))
+    Hn = np.linalg.pinv((E + E.T) / 2, rcond=1e-10, hermitian=True)
+    H[:nz, :nz] = (Hn + Hn.T) / 2  # exactly symmetric (pinv's U S U^T is so to round-off)
+    return jnp.asarray(H)
+
+
+def _zh(Zd, H, y):
+    return Zd @ (H @ (Zd.T @ y))
+
+
+def _zop(A, Zd, H, v):  # P_Z A v = A (v - Z H Z^T A v)
+    return A(v - _zh(Zd, H, A(v)))
+
+
+@jax.jit
+def _dprep(A, Zd, H, b, tau):
+    """x0 = Z H Z^T b, P_Z b = b - A x0, the per-column tolerance tau ||b|| / ||P_Z b|| and the
+    scale ||P_Z b|| / ||b|| of the returned residuals."""
+    x0 = _zh(Zd, H, b)
+    pb = b - A(x0)
+    nb, npb = _norm(b), _norm(pb)
+    return x0, pb, tau * nb / jnp.maximum(npb, jnp.finfo(b.dtype).tiny), _div(npb, nb)
+
+
+@jax.jit
+def _drecomb(A, Zd, H, x0, xt):
+    return x0 + xt - _zh(Zd, H, A(xt))  # x = Z H Z^T b + P_Z^T x~
+
+
+def _dminres(A, rhs, P, Zd, H, tol, maxit):
+    """MINRES on A x = rhs deflated by Z (Z-only form, docs/eigensolvers.md#minres-deflation):
+    P_Z A x~ = P_Z b, x = Z H Z^T b + P_Z^T x~; residuals relative to ||b|| as minres's."""
+    x0, pb, tc, scale = _dprep(A, Zd, H, rhs, tol)
+    xt, inf = minres(Partial(_zop, A, Zd, H), pb, P, tol=tc, maxit=maxit)
+    return _drecomb(A, Zd, H, x0, xt), {**inf, "residuals": inf["residuals"] * scale}
+
+
 def si_slice(
     op, free, lo, hi, precond, *, capacity, sigma=None, R=None, W=None, lam_W=None, tol=1e-6,
-    tau=TAU0, block=6, maxit_inner=20000, seed=0, verbose=False, stag_tau=None,
+    tau=TAU0, block=6, maxit_inner=20000, seed=0, verbose=False, stag_tau=None, Z=None,
 ):  # fmt: skip
     """Eigenpairs of the masked pencil (K_m, M_m) in the slice [lo, hi] (eigenvalues, 0 <= lo <
     hi) by block shift-invert Lanczos at sigma (default the midpoint). precond: SPD
@@ -224,7 +290,9 @@ def si_slice(
     Pair i is accepted at r_i <= t_i = max(tol, 10 tau_eff delta_i, round-off floor). sigma
     moves when the first solve stagnates above STAGNATION max(stag_tau, TAU_MIN) (stag_tau
     default tau; si_band passes its untightened tau). verbose: print one progress line per
-    Lanczos step (and on a sigma move).
+    Lanczos step (and on a sigma move). Z: known modes below sigma (a sequence of host 1-D
+    masked columns, never returned) deflating each inner MINRES solve (A-orthogonal deflation,
+    exact for any Z; distinct from W, which deflates the Lanczos space).
 
     Returns lam (ascending: the converged pairs in [lo, hi] widened by 100 r_acc and over
     clusters straddling an edge), V (host fp64, M-orthonormal) and info:
@@ -233,8 +301,8 @@ def si_slice(
     the first; one step: its cold mean; None without a step), inner_cap, inner_maxit, tau_eff,
     tau_raised, r_acc, delta_max, residuals, thresholds, neighbours ({"lo": (lam, v) or None, "hi":
     ...}; Ritz neighbours only), capacity_full, edge_unreached, ritz ((values, converged) of the
-    last step's Ritz values and lam_W merged, ascending; None before the first step), time (setup,
-    minres, ortho, ritz, total)."""
+    last step's Ritz values and lam_W merged, ascending; None before the first step), deflated
+    (len(Z)), time (setup (the deflation setups included), minres, ortho, ritz, total)."""
     check_x64("si_slice")
     t0 = time.perf_counter()
     n = op.n_dof
@@ -277,11 +345,7 @@ def si_slice(
     if lam_W.ndim != 1 or len(lam_W) not in (0, nw):
         raise ValueError(f"lam_W must have shape ({nw},), got {lam_W.shape}")
     L0 = _up(nw, c)  # the Lanczos columns start at a chunk boundary
-    Q = jnp.zeros((n, L0 + capacity))
-    for i in range(0, nw, c):  # c columns at a time (zero-padded): no n x nW device copy
-        Wc = np.zeros((n, c))
-        Wc[:, : min(c, nw - i)] = W[:, i : i + c]
-        Q = _insert(Q, jnp.asarray(Wc), jnp.asarray(i, jnp.int32))
+    Q = _upload(jnp.zeros((n, L0 + capacity)), W.T if nw else (), c)  # no n x nW device copy
     key, sub = jax.random.split(jax.random.key(seed))
     consts = _consts(op, m, sub, tol)
     limit = min(capacity, n_avail)
@@ -308,6 +372,12 @@ def si_slice(
     key, sub = jax.random.split(key)
     key = add(_random_block(sub, n, b), key)
     A = ap_operator(op, free, -sigma)
+    nz = 0 if Z is None else len(Z)
+    if nz:  # the deflation block, zero-padded to a multiple of c (one compile per padded width)
+        Zd = _upload(jnp.zeros((n, _up(nz, c))), Z, c)
+        H = _deflate_setup(A, Zd, nz, c)
+    solve = (lambda A, rhs, cap: _dminres(A, rhs, precond, Zd, H, tau, cap)) if nz else (
+        lambda A, rhs, cap: minres(A, rhs, precond, tol=tau, maxit=cap))  # fmt: skip
     tau_eff, r = tau, tol
     iters, cap, moved, inner_maxit, reason = [], maxit_inner, None, False, None
     t_its = []  # each kept step's MINRES seconds (the discarded move solve in t_move)
@@ -321,7 +391,7 @@ def si_slice(
             break
         t = time.perf_counter()
         rhs = _M(op, m, jax.lax.dynamic_slice_in_dim(Q, L0 + k - b, b, 1))
-        X, inf = minres(A, rhs, precond, tol=tau, maxit=cap)
+        X, inf = solve(A, rhs, cap)
         res = np.asarray(inf["residuals"])
         its = int(np.asarray(inf["iterations"]).max())
         capped = ~np.asarray(inf["converged"]) & ~np.asarray(inf["stagnated"])
@@ -336,6 +406,10 @@ def si_slice(
             sigma += SIGMA_MOVE * (hi - lo)  # sigma on an eigenvalue: move once, repeat
             A, moved = ap_operator(op, free, -sigma), its  # the discarded solve's iterations
             t_move = dt
+            if nz:  # A changed, Z kept
+                t = time.perf_counter()
+                H = _deflate_setup(A, Zd, nz, c)
+                times["setup"] += time.perf_counter() - t
             if verbose:
                 print(f"si_slice: sigma moved to {sigma:.6g} ({its} its discarded)", flush=True)
             continue
@@ -421,6 +495,7 @@ def si_slice(
         capacity_full=reason == "capacity full",
         edge_unreached="both" if len(unreached) == 2 else (unreached + [None])[0],
         ritz=ritz,
+        deflated=nz,
         time=times,
     )
     return lam_out, V, info
