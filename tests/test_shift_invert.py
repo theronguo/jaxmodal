@@ -588,7 +588,7 @@ def gmg_like():
 def test_memory_formulas():
     """Test 15: storage = operator + preconditioner + basis (chunk-rounded) + R and M R; the
     host term (window, store of n_modes columns, Gram matrix); the end phase; total = overhead +
-    storage + host + max(builds, phases)."""
+    storage + host + max(builds, phases); the exact n_z terms."""
     mesh = voxel_mesh((16,) * 3, (1 / 16,) * 3)
     n = 3 * len(mesh.points)
     est = functools.partial(stencil_memory, mesh)
@@ -602,7 +602,16 @@ def test_memory_formulas():
     phases = max(e[k] for k in ("minres", "reortho", "ritz", "end"))
     assert e["ritz"] < e["minres"] and e["reortho"] < e["minres"]
     total = OVERHEAD + storage + e["host"] + max(est(6)["build"], pcm(6)["build"], phases)
-    assert e["total"] == total
+    assert e["total"] == total and e["setup"] == 0
+    # 30 MINRES deflation columns (PR 18f): Z padded to 48 and H on the device, E and H on the
+    # host, two blocks and n_z x block in MINRES, the setup phase
+    z = si_memory(est, n, 50, 30, precond_memory=pcm, n_rigid=6, n_deflate=10, n_z=30)
+    assert z["storage"] - e["storage"] == z["device_exact"] - e["device_exact"] == (
+        v * 48 + 8 * 48**2)  # fmt: skip
+    assert z["host"] - e["host"] == z["host_exact"] - e["host_exact"] == 16 * 30**2
+    assert z["minres"] - e["minres"] == 2 * v * 6 + 8 * 30 * 6
+    assert z["setup"] == est(24)["vectors"] + est(24)["workspace"] + 8 * 30 * 24
+    assert (z["reortho"], z["ritz"], z["end"]) == (e["reortho"], e["ritz"], e["end"])
 
 
 PEAK_SETUP = """

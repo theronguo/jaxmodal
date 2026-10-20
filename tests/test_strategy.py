@@ -1626,6 +1626,70 @@ def test_slice_capacity(name):
         mem.probe_block(1.0, 50, op, n, precond_memory=pc)
 
 
+def plan_brute(name, B, n_store, n_new, d_max, host_extra=0):
+    """_slice_plan by exhaustive search: d at C_lo = min(max(up(2 SLICE_MIN), floor), C_0),
+    then the largest C beside it."""
+    op, pc = models(name)
+    n, c = prob(name)[2].n_dof, 24
+    floor, cap = 72, mem._up(math.ceil(1.25 * (1.8 * n_new + 84)) + 2 * c, c)
+
+    def fits(C, d):
+        est = mem.si_memory(op, n, C - 2 * c, n_store, 6, pc, 0, n_deflate=2 * c,
+                            host_window=2 * (C - 12), n_z=d)  # fmt: skip
+        return mem._fits(est, B, None, host_extra)
+
+    def c_of(d):
+        return max((C for C in range(floor, cap + 1, c) if fits(C, d)), default=None)
+
+    if c_of(0) is None:
+        return None, 0
+    lo = min(max(mem._up(2 * api.SLICE_MIN, c), floor), c_of(0))
+    d = max(x for x in range(d_max + 1) if x == 0 or fits(lo, x))
+    return c_of(d), d
+
+
+def test_slice_plan():
+    """Test 7: _slice_plan against brute force over (C, d) at budgets from the floor up (d*
+    below n_store at C_lo, C_0 below 2 SLICE_MIN), full deflation, d_max not a multiple of c,
+    a need cap below 2 SLICE_MIN, a given capacity (None -> d = 0), d = 0 giving today's C, the
+    n_new cap, host_extra binding."""
+
+    def plan(B, n_store=40, n_new=40, d=40, name="tiny", **kw):
+        op, pc = models(name)
+        return mem._slice_plan(op, pc, prob(name)[2].n_dof, n_store=n_store, n_new=n_new,
+                               block=6, n_rigid=0, budget=B, host_budget=None, max_deflate=d,
+                               **kw)  # fmt: skip
+
+    f = slice_budget("voxel", 72, 40)
+    seen = set()
+    for B in np.linspace(f, 2 * f, 21):  # C_0 < 192 (d 0), then d* < 40, then full deflation
+        got = plan(B, name="voxel")
+        assert got == plan_brute("voxel", B, 40, 40, 40), B
+        seen.add((got[0] < 192, 0 < got[1] < 40, got[1] == 40))
+    assert {(True, False, False), (False, True, False), (False, False, True)} <= seen, seen
+    op, pc = models("tiny")
+    n = prob("tiny")[2].n_dof
+    floor = slice_budget("tiny", 72, 40)
+    assert plan(floor * (1 - 1e-6)) == (None, 0)
+    big = 1e12
+    cap = mem._up(math.ceil(1.25 * (1.8 * 40 + 84)) + 48, 24)
+    assert plan(big) == (cap, 40)  # full deflation at the need cap
+    assert plan(big, n_store=50, d=37) == (mem._up(math.ceil(1.25 * (1.8 * 40 + 84)) + 48, 24),
+                                           37)  # fmt: skip
+    assert plan(big, n_new=5) == (168, 40)  # the need cap 168 < 192
+    assert plan(big, n_new=10, n_store=60, d=0)[0] == mem._up(
+        math.ceil(1.25 * (1.8 * 10 + 84)) + 48, 24)  # the n_new cap  # fmt: skip
+    for B in (floor, 2 * floor, big):  # d = 0: today's C
+        today = mem._slice_capacity(op, pc, n, n_store=40, block=6, n_rigid=0, budget=B,
+                                    host_budget=None)  # fmt: skip
+        assert plan(B, d=0) == (today, 0)
+    assert plan(big, capacity=96) == (96, 40)
+    assert plan(floor, capacity=600) == (600, 0)  # nothing fits beside it
+    B, x = 1.8 * f, 8 * prob("voxel")[2].n_dof * 20
+    extra = plan_brute("voxel", B, 40, 40, 40, host_extra=x)
+    assert plan(B, name="voxel", host_extra=x) == extra != plan(B, name="voxel")
+
+
 def test_c_max_caps():
     """Test 11: C_max is the free-space cap (a multiple of c_L) at a large budget, the budget's
     largest fit below it, None below the initial basis."""
