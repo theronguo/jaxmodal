@@ -1028,19 +1028,19 @@ def test_junction_case_b(fake_builds, monkeypatch, case):
 
 
 def test_junction_leaf_flagged(fake_builds, monkeypatch):
-    """Test 6: a flagged known leaf (_verify estimating 0.6): counted once, not rerun, and the
+    """Test 6: a flagged known leaf (_verify estimating 0.5, the boundary): counted once, not rerun, and the
     leaf handed to si_band flagged."""
     seen, calls = {}, []
     monkeypatch.setattr(api, "_solve", capacity_stop("short", list(range(30))))
     monkeypatch.setattr(api, "si_band", stub_band(seen))
     monkeypatch.setattr(api, "_verify", lambda *a: calls.append(1) or dict(
-        ran=True, passed=False, verifiable=True, estimate=0.6, reason=None))  # fmt: skip
+        ran=True, passed=False, verifiable=True, estimate=0.5, reason=None))  # fmt: skip
     lr = prob("short")[6]
     with pytest.warns(UserWarning, match="modes locked"):
         run("short", (freq((lr[9] + lr[10]) / 2), freq((lr[30] + lr[31]) / 2)), verify=True)
     leaf = seen["known"]["leaf"][1]
     assert calls == [1] and leaf["flagged"] and not leaf["passed"] and leaf["restarts"] == 0
-    assert leaf["reason"] == "count >= 0.5" and leaf["estimates"] == [0.6]
+    assert leaf["reason"] == "count >= 0.5" and leaf["estimates"] == [0.5]
 
 
 def test_junction_no_count(fake_builds, monkeypatch):

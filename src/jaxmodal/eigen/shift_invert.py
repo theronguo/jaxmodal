@@ -1154,7 +1154,6 @@ def si_band(
     # block is freed once all its columns are copied, so the store and V_f stay about 1x + a block
     lam_f, res_f, thr_f = (np.concatenate([p[q] for p in parts] + [np.zeros(0)]) for q in (0, 2, 3))
     V_f = X = None
-    grow = False
     if kv is not None:  # in place in the known block (docs/eigensolvers.md#the-junction)
         p, q = 0, 0  # the leading index parts already in place: the known columns 0, ..., p - 1
         for _, X, *_ in parts:
@@ -1165,13 +1164,13 @@ def si_band(
             for s in range(j_k):
                 vecs[s] = None
             gc.collect()
-            try:  # the probe grow: raises for another reference or a borrowed block
-                kv.resize((n, kv.shape[1] + c))
+            try:  # the final width + 1 (a size change: raises for another reference or a
+                kv.resize((n, len(lam_f) + 1))  # borrowed block), trimmed at the end
             except ValueError:
                 pass
-            else:  # grown in place after the columns already there
+            else:  # filled in place after the columns already there
                 del parts[:q]
-                V_f, kv, k, grow = kv, None, p, True
+                V_f, kv, k = kv, None, p
         if V_f is None:
             warnings.warn("returned modes copied: si_band could not assemble in the known block",
                           RuntimeWarning, stacklevel=2)  # fmt: skip
@@ -1179,20 +1178,17 @@ def si_band(
         V_f, k = np.empty((n, len(lam_f)), order="F"), 0  # a column touches only its own pages
     while parts:  # popped, so a merged window's X is freed once copied
         X = parts.pop(0)[1]
-        wd = len(X) if X.ndim == 1 else X.shape[1]
-        while grow and V_f.shape[1] < k + wd:
-            V_f.resize((n, V_f.shape[1] + c))
         if X.ndim == 1:
             for s in X:  # kv: a known column when the block was not grown
                 V_f[:, k], vecs[s] = (kv[:, s] if s < j_k else vecs[s]), None
                 k += 1
         else:
-            V_f[:, k : k + wd] = X
-            k += wd
+            V_f[:, k : k + X.shape[1]] = X
+            k += X.shape[1]
         X = None
-    if grow:
+    kv = None  # the copy path held it to the end: about 2x the known columns (warned)
+    if V_f.shape[1] > k:
         V_f.resize((n, k))
-    kv = None
     k0 = int(bool(slices) and slices[0]["kind"] == "known")  # the known leaf: not a slice edge
     bounds = sorted({x for (x0, x1), _ in leaves[k0:] for x in (x0, x1)} - {lo, hi})
     rel = 100 * r_s

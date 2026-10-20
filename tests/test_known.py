@@ -153,7 +153,7 @@ def test_known_error(monkeypatch):
 
 
 def test_known_grow(monkeypatch):
-    """Test 4: slice parts wider than the spare columns plus c grow the block in steps (block 2:
+    """Test 4: slice parts wider than the spare columns plus c grow the block (block 2:
     c = 8; V of j + 1 columns, 20 slice modes), in place, contents exact."""
     lo, hi = band(5, 25)
     fake_band(monkeypatch, found)
