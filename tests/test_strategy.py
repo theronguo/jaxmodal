@@ -171,60 +171,76 @@ def test_fits(fake_builds):
 
 @pytest.mark.slow
 def test_capacity(fake_builds, monkeypatch):
-    """Test 2: chunk 5 (k = 10, c_L = 40) at the top of the C_max = 40 window: LOBPCG stops at
-    the cap (35 locked: test 12's rule) inside the band (modes 25-45), L = 10; si_band runs on
-    the band itself with LOBPCG's state, V and aggregates freed; mu1_ub = min(pre-estimate,
-    lowest Ritz value); n_store = n_modes = 22. The same budget under "lobpcg" raises."""
+    """Test 2 / 18f test 6: chunk 5 (k = 10, c_L = 40) at the top of the C_max = 40 window:
+    LOBPCG stops at the cap with D = 40 (35 locked and the kept chunk) inside the band (modes
+    25-45); the junction cuts at the largest gap of the top w + 1 = 11 (0.0898, above mode 29:
+    j = 30), counts the known leaf [lam_lo, cut] (aggregates freed after it), and hands si_band
+    the known block in place (the same array returned); si_band runs on (cut, hi) with
+    max_deflate = _slice_plan's d and n_store = 30 + ceil(1.25 max(22 - L_j, 10)) = 52; mu1_ub
+    = min(pre-estimate, lowest Ritz value). The same budget under "lobpcg" raises."""
     lr = prob("short")[6]
     budget = need(lob_est("short", 5, 80)) - 1
     assert c_max("short", 5, budget) == 40
     f1, f2 = fband("short", 25, 46)
     lo, hi = (2 * np.pi * f1) ** 2, (2 * np.pi * f2) ** 2
-    seen, calls = {}, dict(pre=0, est=0)
+    seen, calls, plans = {}, dict(pre=0, est=0), []
     real_band, real_pre, real_est = api.si_band, api._precond_sigma, api.sigma_estimate
+    real_plan, real_cut = mem._slice_plan, api._cut
 
     def band(op, free, a, b, make, **kw):
         gc.collect()
+        k = kw["known"]
         seen.update(
-            interval=(a, b),
-            n_store=kw["n_store"],
-            v_dead=seen["V"]() is None,
+            interval=(a, b), n_store=kw["n_store"], max_deflate=kw["max_deflate"],
+            known_id=id(k[1]), j=len(k[0]), leaf=k[4],
             aggs_dead=[r() is None for r in fake_builds["aggs"]],
             basis=[x.shape for x in jax.live_arrays() if x.shape == (op.n_dof, 40)],
-        )
+        )  # fmt: skip
+        k = None
         return real_band(op, free, a, b, make, **kw)
-
-    real_solve = api._solve
-
-    def solve(*a, **kw):
-        out = real_solve(*a, **kw)
-        seen["V"] = weakref.ref(out[1])  # the one allowed weakref: nothing resizes this V
-        return out
 
     def pre(*a, **kw):
         calls["pre"] += 1
         return real_pre(*a, **kw)
 
-    monkeypatch.setattr(api, "_solve", solve)
+    def cut(lam, t, w, *a):
+        seen["w"] = w
+        return real_cut(lam, t, w, *a)
+
     monkeypatch.setattr(api, "si_band", band)
+    monkeypatch.setattr(api, "_cut", cut)
     monkeypatch.setattr(api, "_precond_sigma", pre)
+    monkeypatch.setattr(mem, "_slice_plan", lambda *a, **kw: plans.append(real_plan(*a, **kw)) or
+                        plans[-1])  # fmt: skip
     monkeypatch.setattr(api, "sigma_estimate",
                         lambda *a, **kw: calls.update(est=1) or real_est(*a, **kw))  # fmt: skip
     kw = dict(n_modes=22, chunk=5, memory_budget=budget, slice_options={"capacity": 96},
               verify=True)  # fmt: skip
-    with pytest.warns(UserWarning, match="35 modes locked"):
+    with pytest.warns(UserWarning, match="40 modes locked.*continues from the cut"):
         lam, V, info = run("short", (f1, f2), **kw)
     (s,) = fake_builds["solves"]
-    assert s["stopped"] == "capacity" and s["locked"] == 35 and lr[34] < hi
+    assert s["stopped"] == "capacity" and s["locked"] == 40 and lr[39] < hi
     assert info["stopped"] == "capacity" and info["reason"] == "capacity"
     assert info["strategy"] == "shift_invert" and not info["from_zero"]
-    assert seen["interval"] == (lo, hi) and seen["v_dead"] and not seen["basis"]
-    assert seen["aggs_dead"] and all(seen["aggs_dead"])
+    c = (lr[29] + lr[30]) / 2
+    assert seen["w"] == 10 and info["junction"]["known"] == seen["j"] == 30
+    assert np.isclose(info["junction"]["cut"], c, rtol=1e-6) and seen["interval"][1] == hi
+    assert seen["interval"][0] == info["junction"]["cut"] and not seen["basis"]
+    assert seen["known_id"] == s["id"] == id(V)  # in place: LOBPCG's block returned
+    assert seen["aggs_dead"] and all(seen["aggs_dead"])  # the count ran before si_band
+    assert seen["max_deflate"] == plans[-1][1]
+    assert seen["leaf"][0] == (lo, info["junction"]["cut"]) and seen["leaf"][1]["passed"]
+    assert info["slices"][0]["kind"] == "known" and info["slices"][0]["count"]["passed"]
     assert info["mu1_ub"] <= s["lam0"] and info["mu1_ub"] == min(s["lam0"], info["sigma"])
-    assert info["n_store"] == seen["n_store"] == 22 and calls == dict(pre=1, est=0)
+    L_j = int(np.sum(lr[:30] >= lo))
+    assert info["n_store"] == seen["n_store"] == 30 + math.ceil(1.25 * max(22 - L_j, 10)) == 52
+    assert calls == dict(pre=1, est=0)
     assert all(e < 0.5 for e in info["count"]["estimates"]) and info["count"]["passed"]
-    assert all(s.get("count", {}).get("degree") is None or s["count"]["degree"] <= 1000
+    # from the cut the remainders' edges land in smaller gaps than from lam_lo (measured: up
+    # to degree 4949, against <= 1000 before PR 18f)
+    assert all(s.get("count", {}).get("degree") is None or s["count"]["degree"] <= 5000
                for s in info["slices"])  # fmt: skip
+    assert (lam >= lo * (1 - 100 * info["r_acc"])).all() and V.shape[1] == len(lam)
     check("short", f1, f2, lam, V, info)
     with pytest.raises(ValueError, match="reached its basis cap"):
         run("short", (f1, f2), **(kw | {"strategy": "lobpcg"}))
@@ -246,10 +262,17 @@ def capacity_stop(name, locked):
     return solve
 
 
-def stub_band(seen):
-    """An api.si_band stand-in recording its interval and kwargs, returning no modes."""
+def stub_band(seen, edge_rr_failed=False):
+    """An api.si_band stand-in recording its interval and kwargs (known as a copy of its pairs,
+    the list emptied), returning no modes."""
 
     def band(op, free, a, b, make, **kw):
+        if kw.get("known"):  # copied: the stub keeps no reference to the known block
+            lam, V, r, t, leaf = kw["known"]
+            kw["known"].clear()
+            kw["known"] = dict(lam=lam.copy(), V=np.array(V[:, : len(lam)]), r=r.copy(),
+                               t=t.copy(), leaf=leaf, id=id(V))  # fmt: skip
+            V = None
         seen.update(kw, interval=(a, b))
         info = dict(
             converged=True,
@@ -260,34 +283,59 @@ def stub_band(seen):
             count=dict(ran=False, reason=None),
             complete_to=b,
             time={},
+            slices=[],
+            merged_edges=[],
+            edge_rr_failed=edge_rr_failed,
         )
         return np.zeros(0), np.zeros((op.n_dof, 0), order="F"), info
 
     return band
 
 
+@pytest.mark.parametrize("n_modes", [5, 30, None])
 @pytest.mark.parametrize("case", ["interior", "zero"])
-def test_capacity_store(fake_builds, monkeypatch, case):
-    """Test 2 (b): 10 locked modes below lam_lo and 20 in band, n_modes 5: n_store = ceil(1.25
-    L) = 25 (all locked would give 38), received by the need cap and si_band; (c) f1 = 0 with 30
-    locked: si_band on (0, lam_hi), from_zero, n_store 38."""
-    seen, caps = {}, []
-    real_cap = mem._slice_capacity
+def test_capacity_store(fake_builds, monkeypatch, case, n_modes):
+    """Test 6 (PR 18f): 30 locked modes (10 below lam_lo, 20 in band, case "interior"; f1 = 0,
+    case "zero"): the cut lies in the gap above the 20th locked mode (the largest of the top
+    w + 1 = 11), so j = 20 known pairs, D - j = 10; si_band on (cut, hi) with known, n_store =
+    j + _n_new (n_modes 5: 20 + 13; 30: 20 + ceil(1.25 max(30 - L_j, 10)); None: 20 + 200),
+    received by _slice_plan, whose host_extra (and _count_block's) is 8 n (D - j); the count's
+    probe budget holds 8 n D."""
+    seen, plans, blocks, probes = {}, [], [], []
+    real_plan, real_block, real_probe = mem._slice_plan, mem._count_block, mem.band_probe_block
     monkeypatch.setattr(api, "_solve", capacity_stop("short", list(range(30))))
     monkeypatch.setattr(api, "si_band", stub_band(seen))
-    monkeypatch.setattr(
-        mem, "_slice_capacity", lambda *a, **kw: caps.append(kw["n_store"]) or real_cap(*a, **kw)
-    )
+    monkeypatch.setattr(mem, "_slice_plan", lambda *a, **kw: plans.append(kw) or
+                        real_plan(*a, **kw))  # fmt: skip
+    monkeypatch.setattr(mem, "_count_block", lambda *a, **kw: blocks.append(kw) or
+                        real_block(*a, **kw))  # fmt: skip
+    monkeypatch.setattr(mem, "band_probe_block", lambda *a, **kw: probes.append(a[4]) or
+                        real_probe(*a, **kw))  # fmt: skip
     lr = prob("short")[6]
+    n = prob("short")[2].n_dof
     f1 = 0.0 if case == "zero" else freq((lr[9] + lr[10]) / 2)
     f2 = freq((lr[30] + lr[31]) / 2)
-    with pytest.warns(UserWarning, match="30 modes locked"):
-        _, _, info = run("short", (f1, f2), n_modes=5)
-    want = 38 if case == "zero" else 25
-    assert info["n_store"] == seen["n_store"] == caps[0] == want
+    with pytest.warns(UserWarning, match="30 modes locked.*continues from the cut"):
+        _, _, info = run("short", (f1, f2), n_modes=n_modes, verify=False)
+    cut = (lr[19] + lr[20]) / 2
+    assert info["junction"] == {"cut": cut, "known": 20}
+    L_j = 20 if case == "zero" else 10
+    assert seen["known"]["lam"].tolist() == lr[:20].tolist() and seen["known"]["leaf"][0] == (
+        0.0 if case == "zero" else (2 * np.pi * f1) ** 2, cut)  # fmt: skip
+    n_new = api._n_new(n_modes, L_j, 30, 20)
+    assert n_new == {5: 13, 30: math.ceil(1.25 * max(30 - L_j, 10)), None: 200}[n_modes]
+    assert info["n_store"] == seen["n_store"] == plans[-1]["n_store"] == 20 + n_new
+    assert all(p["host_extra"] == 8 * n * 10 for p in plans) and plans[-1]["n_new"] == n_new
+    assert blocks[0]["host_extra"] == 8 * n * 10
+    assert probes == [8 * n * 30]  # no aggregates held under the fake builds
     assert info["from_zero"] == (case == "zero")
-    assert seen["interval"] == (0.0 if case == "zero" else (2 * np.pi * f1) ** 2,
-                                (2 * np.pi * f2) ** 2)  # fmt: skip
+    assert seen["interval"] == (cut, (2 * np.pi * f2) ** 2)
+
+
+def test_n_new():
+    """Test 6: _n_new: without n_modes max(200, ceil(1.25 (D - j))); with it the D - j floor."""
+    assert api._n_new(None, 0, 30, 20) == 200 and api._n_new(None, 0, 420, 20) == 500
+    assert api._n_new(5, 3, 30, 20) == 13 and api._n_new(40, 3, 30, 20) == math.ceil(1.25 * 37)
 
 
 # ---------------------------------------------------------------- 3: memory and the ladder
@@ -329,7 +377,8 @@ def test_memory_bracket(fake_builds):
 def test_memory(fake_builds, monkeypatch, case):
     """Test 3, "memory" at 1.15x: lam_lo < mu_1 counts from 0 ("below"; band=(0, f) under
     "auto": "zero"), lam_lo well above mu_1 slices (lam_lo, lam_hi) and its counts pass; the
-    capacity is the search's, the count block si_band receives the searched one (< n_probes)."""
+    capacity is _slice_plan's and si_band's max_deflate its d (no junction), the count block si_band
+    receives the searched one (< n_probes)."""
     fake_builds["name"] = "voxel"
     lr, B = prob("voxel")[6], voxel_budget(1.15)
     f2 = fband("voxel", 0, 10)[1]
@@ -338,10 +387,10 @@ def test_memory(fake_builds, monkeypatch, case):
         f2 = fband("voxel", 3, 12)[1]
     seen, blocks, caps, kws = {}, [], [], []
     spy_band(monkeypatch, seen)
-    real_block, real_cap = mem._count_block, mem._slice_capacity
+    real_block, real_plan = mem._count_block, mem._slice_plan
     monkeypatch.setattr(mem, "_count_block", lambda *a, **kw: kws.append(kw) or
                         blocks.append(real_block(*a, **kw)) or blocks[-1])  # fmt: skip
-    monkeypatch.setattr(mem, "_slice_capacity", lambda *a, **kw: caps.append(real_cap(*a, **kw))
+    monkeypatch.setattr(mem, "_slice_plan", lambda *a, **kw: caps.append(real_plan(*a, **kw))
                         or caps[-1])  # fmt: skip
     with pytest.warns(UserWarning, match="no LOBPCG chunk fits"):
         lam, V, info = run(
@@ -350,9 +399,11 @@ def test_memory(fake_builds, monkeypatch, case):
     assert info["reason"] == "memory" and info["from_zero"] == (case != "above")
     lo, hi = (2 * np.pi * f1) ** 2, (2 * np.pi * f2) ** 2
     assert seen["interval"] == ((lo, hi) if case == "above" else (0.0, hi))
-    assert len(caps) == 1 and caps[0] >= 72 and info["capacity"] == seen["capacity"] == caps[0]
+    ((C, d),) = caps  # _slice_plan's (C, d): the capacity and si_band's max_deflate
+    assert C >= 72 and info["capacity"] == seen["capacity"] == C and seen["max_deflate"] == d
+    assert info["junction"] is None and seen["known"] is None
     assert blocks[0] is not None and blocks[0] < 50 and seen["count_options"]["block"] == blocks[0]
-    assert kws[0]["window"] == 2 * (caps[0] - 12) and kws[0]["n_store"] == info["n_store"]
+    assert kws[0]["window"] == 2 * (C - 12) and kws[0]["n_store"] == info["n_store"]
     if case == "above":  # from 0 the count's degree is 1912 here (147 s)
         assert info["count"]["passed"] and all(e < 0.5 for e in info["count"]["estimates"])
     check("voxel", f1, f2, lam, V, info)
@@ -707,13 +758,15 @@ def test_permute(seed):
     assert V.flags.f_contiguous and V.ctypes.data == ptr
 
 
-def harness(monkeypatch, lam, n_band, *, t=TOL, stopped=None, converged=True, hold=None):
+def harness(monkeypatch, lam, n_band, *, t=TOL, stopped=None, converged=True, hold=None,
+            edge_rr_failed=False):  # fmt: skip
     """solve_modes' band path on "short" with api._solve returning the crafted Ritz values lam
     (residuals 1e-12 lam, thresholds t: per mode or one value), F-order V of 3 spare zero columns
     with column j filled with j + 1, built inside (only its id kept, or the array appended to
-    hold). rec: the id, the lam api._verify received (its stand-in returns a no-count record),
-    the si_band calls."""
-    rec = dict(verify=[], band=[])
+    hold). rec: the id, the lam and n_band api._verify received (its stand-in returns a no-count
+    record), the si_band calls (intervals) and the last one's kwargs (seen; stub_band's, with
+    edge_rr_failed)."""
+    rec = dict(verify=[], n_band=[], band=[], seen={})
     lam = np.array(lam, float)
     n = prob("short")[2].n_dof
 
@@ -731,15 +784,14 @@ def harness(monkeypatch, lam, n_band, *, t=TOL, stopped=None, converged=True, ho
             info["stopped"] = stopped
         return lam.copy(), V, info
 
-    def verify(verify, opts, op, free, R, lam, *a):
+    def verify(verify, opts, op, free, R, lam, V, n_band, *a):
         rec["verify"].append(lam.copy())
+        rec["n_band"].append(n_band)
         return dict(ran=False, reason="faked")
-
-    seen = {}
 
     def band(*a, **kw):
         rec["band"].append(a[2:4])
-        return stub_band(seen)(*a, **kw)
+        return stub_band(rec["seen"], edge_rr_failed)(*a, **kw)
 
     monkeypatch.setattr(api, "_solve", solve)
     monkeypatch.setattr(api, "_verify", verify)
@@ -836,12 +888,179 @@ def test_filter_cut_at_end(fake_builds, monkeypatch):
 
 
 def test_filter_capacity_sorted(fake_builds, monkeypatch):
-    """Test 8: a capacity stop with values out of order still falls back to si_band."""
-    rec = harness(monkeypatch, [1, 5, 2, 3], 4, stopped="capacity")
+    """Test 6: a capacity stop with values out of order (1, 5, 1.2, 1.4; lo 1.1, hi 9; gaps
+    0.167, 0.143, 0.72): sorted with V, residuals and thresholds (_permute also when stopped),
+    the cut 3.2 above j = 3, the known leaf counted on lam[:j + 1] = [1, 1.2, 1.4, 5] with
+    n_band 3, and si_band gets known (V columns 1, 3, 4: column i holds i + 1)."""
+    t = [1e-8, 2e-8, 3e-8, 4e-8]
+    rec = harness(monkeypatch, [1, 5, 1.2, 1.4], 4, t=t, stopped="capacity")
     with pytest.warns(UserWarning, match="4 modes locked"):
-        _, _, info = fake_run(1.5, 9.0)
-    assert len(rec["band"]) == 1 and not rec["verify"] and info["reason"] == "capacity"
+        _, _, info = fake_run(1.1, 9.0)
+    assert len(rec["band"]) == 1 and info["reason"] == "capacity"
     assert info["mu1_ub"] == 1.0 and info["stopped"] == "capacity"
+    assert info["junction"] == {"cut": 3.2, "known": 3} and rec["band"][0] == (3.2, 9.0)
+    (lv,) = rec["verify"]
+    assert lv.tolist() == [1, 1.2, 1.4, 5] and rec["n_band"] == [3]
+    k = rec["seen"]["known"]
+    assert k["V"][0].tolist() == [1, 3, 4] and k["t"].tolist() == [1e-8, 3e-8, 4e-8]
+    assert k["r"].tolist() == (1e-12 * np.array([1, 1.2, 1.4])).tolist()
+    assert k["lam"].tolist() == [1, 1.2, 1.4] and k["id"] == rec["id"]
+    assert k["leaf"][0] == (1.1, 3.2) and k["leaf"][1]["reason"] == "faked"
+
+
+def test_junction_no_gap(fake_builds, monkeypatch):
+    """Test 6: no qualifying gap (0.5% spacing, t = 1e-3): case (b), j = the modes below lo_b
+    (1 - 100 max(t, tol)), no count and no leaf; from 0 (j = 0) no junction."""
+    lam = 1.0 * 1.005 ** np.arange(60)
+    rec = harness(monkeypatch, lam, 60, t=1e-3, stopped="capacity")
+    lo = lam[40] * 1.001
+    with pytest.warns(UserWarning, match="continues from lo with 20 locked modes known"):
+        _, _, info = fake_run(lo, 9.0)
+    j = int(np.sum(lam < lo * (1 - 100 * 1e-3)))  # not lam < lo (40) nor tol only (41)
+    assert j == 20 and info["junction"] == {"cut": None, "known": j}
+    assert not rec["verify"] and rec["seen"]["known"]["leaf"] is None
+    assert np.isclose(rec["band"][0][0], lo, rtol=1e-14)
+    assert rec["seen"]["known"]["lam"].tolist() == lam[:j].tolist()
+    rec = harness(monkeypatch, lam, 60, t=1e-3, stopped="capacity")
+    with pytest.warns(UserWarning, match="continues with shift-invert slices"):
+        _, _, info = run("short", (0.0, freq(9.0)), sigma=0.5)
+    assert info["junction"] is None and rec["seen"]["known"] is None and rec["band"][0][0] == 0
+
+
+def test_junction_rr_failed(fake_builds, monkeypatch):
+    """Test 6: si_band's edge_rr_failed after a junction: complete_to = lo_b."""
+    harness(monkeypatch, [1, 1.2, 1.4, 5], 4, stopped="capacity", edge_rr_failed=True)
+    with pytest.warns(UserWarning, match="modes locked"):
+        _, _, info = fake_run(1.1, 9.0)
+    assert info["junction"]["cut"] == 3.2 and info["complete_to"] == 1.1
+
+
+def test_junction_edges(fake_builds, monkeypatch):
+    """Test 6: slice_options edges at or below the cut are dropped."""
+    rec = harness(monkeypatch, [1, 1.2, 1.4, 5], 4, stopped="capacity")
+    with pytest.warns(UserWarning, match="modes locked"):
+        fake_run(1.1, 9.0, slice_options={"edges": [2.0, 6.0]})
+    assert rec["seen"]["edges"] == [6.0]
+
+
+def test_cut():
+    """Test 5: _cut on crafted spectra: the top w + 1 window (a larger gap just outside it
+    ignored), the gap relative to lam[i+1], the exact >= 100 max(t_top, tol) boundary (t and
+    tol each deciding; dyadic), a large t below the window not blocking, midpoints at or above
+    hi and at or below lo skipped, w = 5 against w = 10, None without a gap or for D < 2."""
+    cut = api._cut
+    top = 2.01 * 1.001 ** np.arange(11)
+    top[6:] *= 1.004  # the largest gap of the top 11: 5-6
+    lam = np.r_[1.0, 1.99, top]  # the 1% gap 1.99-2.01 just outside the top w + 1 = 11
+    t = np.zeros(len(lam))
+    assert cut(lam, t, 10, 0.0, 99.0, 0.0) == (top[5] + top[6]) / 2
+    assert cut(lam, t, 11, 0.0, 99.0, 0.0) == (1.99 + 2.01) / 2  # one wider: taken
+    lam = np.array([1.0, 1.9, 2.0, 3.0])  # rel. to lam[i+1]: 0.474, 0.05, 0.333
+    assert cut(lam, t[:4], 3, 0.0, 99.0, 0.3 / 100) == 1.45
+    assert cut(lam, t[:4], 3, 0.0, 99.0, 0.45 / 100) == 1.45 and cut(
+        lam, t[:4], 3, 0.0, 99.0, 0.48 / 100) is None  # 0.474 = 0.9 / 1.9, not 0.9 / 1  # fmt: skip
+    a, e = 0.8046875, 1.0  # (e - a) / e = 100 * 2**-9 exactly
+    x = 2.0**-9
+    assert cut(np.array([a, e]), np.array([x, 0.0]), 1, 0.0, 9.0, 0.0) == (a + e) / 2
+    assert cut(np.array([a, e]), np.array([0.0, np.nextafter(x, 1)]), 1, 0.0, 9.0, 0.0) is None
+    assert cut(np.array([a, e]), np.zeros(2), 1, 0.0, 9.0, x) == (a + e) / 2
+    assert cut(np.array([a, e]), np.zeros(2), 1, 0.0, 9.0, np.nextafter(x, 1)) is None
+    lam = np.array([1.0, 2.0, 3.0, 5.0])
+    t = np.array([1.0, 1e-9, 1e-9, 1e-9])  # mode 0 outside the top 3: its t does not block
+    assert cut(lam, t, 2, 0.0, 9.0, 1e-9) == 4.0
+    assert cut(lam, t, 2, 0.0, 4.0, 1e-9) == 2.5  # the midpoint 4 = hi excluded: next largest
+    assert cut(lam, t, 2, 4.0, 9.0, 1e-9) is None  # 4 = lo excluded, nothing above
+    assert cut(lam, t, 2, 2.5, 9.0, 1e-9) == 4.0
+    lam = np.r_[1.0, 1.5, 1.5 * 1.01 ** np.arange(1, 5), 1.6 * 1.01 ** np.arange(1, 6)]
+    t = np.zeros(len(lam))
+    w10, w5 = cut(lam, t, 10, 0.0, 9.0, 0.0), cut(lam, t, 5, 0.0, 9.0, 0.0)
+    assert w10 == 1.25 and w5 != w10 and w5 > 1.5
+    assert cut(np.array([1.0, 1.001]), np.zeros(2), 1, 0.0, 9.0, 1e-4) is None
+    assert cut(np.array([1.0]), np.zeros(1), 1, 0.0, 9.0, 0.0) is None
+
+
+@pytest.mark.parametrize("case", ["below", "one_inside"])
+def test_junction_case_b(fake_builds, monkeypatch, case):
+    """Test 6, case (b) with the real si_band (fake slices recording len(Z), _slice_plan's d >=
+    D): 20 locked modes all below the band, or mode 19 just inside it (lo in ((lr18 + lr19) / 2,
+    lr19)): no qualifying cut above lo_b, so j = the modes below lo_b (1 - 100 max(t, tol)) are
+    known (20, 19: mode 19 recomputed), no leaf, no count, si_band from lo_b, the first slice
+    deflates all j."""
+    lr = prob("short")[6]
+    lo = dict(below=(lr[24] + lr[25]) / 2, one_inside=lr[19] - 0.1 * (lr[19] - lr[18]))[case]
+    hi = (lr[29] + lr[30]) / 2
+    monkeypatch.setattr(api, "_solve", capacity_stop("short", list(range(20))))
+    calls, _ = fake_band(monkeypatch, tsi.found)
+    real_plan, verified = mem._slice_plan, []
+    monkeypatch.setattr(mem, "_slice_plan", lambda *a, **kw: (real_plan(*a, **kw)[0], 20))
+    monkeypatch.setattr(api, "_verify", lambda *a: verified.append(1))
+    j = 20 if case == "below" else 19
+    with pytest.warns(UserWarning, match=f"continues from lo with {j} locked modes known"):
+        lam, V, info = run("short", (freq(lo), freq(hi)), verify=False)
+    assert info["junction"] == {"cut": None, "known": j} and not verified
+    assert j == int(np.sum(lr[:20] < lo * (1 - 100 * TOL)))
+    assert np.isclose(calls[0]["interval"][0], lo, rtol=1e-12) and calls[0]["Z"] == j
+    assert info["slices"][0]["kind"] == "run"
+    want = np.flatnonzero((lr >= lo) & (lr <= hi))
+    assert np.allclose(lam, lr[want], rtol=1e-12) and (case == "below") == (want[0] == 25)
+    assert np.array_equal(V, prob("short")[7][:, want])  # the fake slices' exact copies
+
+
+def test_junction_leaf_flagged(fake_builds, monkeypatch):
+    """Test 6: a flagged known leaf (_verify estimating 0.6): counted once, not rerun, and the
+    leaf handed to si_band flagged."""
+    seen, calls = {}, []
+    monkeypatch.setattr(api, "_solve", capacity_stop("short", list(range(30))))
+    monkeypatch.setattr(api, "si_band", stub_band(seen))
+    monkeypatch.setattr(api, "_verify", lambda *a: calls.append(1) or dict(
+        ran=True, passed=False, verifiable=True, estimate=0.6, reason=None))  # fmt: skip
+    lr = prob("short")[6]
+    with pytest.warns(UserWarning, match="modes locked"):
+        run("short", (freq((lr[9] + lr[10]) / 2), freq((lr[30] + lr[31]) / 2)), verify=True)
+    leaf = seen["known"]["leaf"][1]
+    assert calls == [1] and leaf["flagged"] and not leaf["passed"] and leaf["restarts"] == 0
+    assert leaf["reason"] == "count >= 0.5" and leaf["estimates"] == [0.6]
+
+
+def test_junction_no_count(fake_builds, monkeypatch):
+    """Test 6: the slice counts do not fit (_count_block None, verify=True): the band count's
+    reason starts with no_count and keeps the failed known leaf's ("faked")."""
+    monkeypatch.setattr(api, "_solve", capacity_stop("short", list(range(30))))
+    fake_band(monkeypatch, tsi.found)
+    monkeypatch.setattr(mem, "_count_block", lambda *a, **kw: None)
+    monkeypatch.setattr(api, "_verify", lambda *a: dict(ran=False, passed=False, reason="faked"))
+    lr = prob("short")[6]
+    f1 = freq((lr[9] + lr[10]) / 2)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        _, _, info = run("short", (f1, freq((lr[30] + lr[31]) / 2)), verify=True)
+    r, cut = info["count"]["reason"], info["junction"]["cut"]
+    assert r.startswith("the slice counts do not fit memory_budget (one probe)")
+    assert r.endswith(f"; [{(2 * np.pi * f1) ** 2:.6g}, {cut:.6g}]: faked")
+
+
+@pytest.mark.parametrize("cap", [None, 0, 3, 10**6])
+def test_max_deflate_option(fake_builds, monkeypatch, cap):
+    """Test 8: slice_options max_deflate reaches _slice_plan (default n_store) and si_band gets
+    its d: 0, a cap below the memory's d (the cap), one above (the memory's d = n_store)."""
+    seen, plans = {}, []
+    real_plan = mem._slice_plan
+    monkeypatch.setattr(mem, "_slice_plan", lambda *a, **kw: plans.append((kw,
+                        real_plan(*a, **kw))) or plans[-1][1])  # fmt: skip
+    monkeypatch.setattr(api, "si_band", stub_band(seen))
+    opts = {} if cap is None else {"max_deflate": cap}
+    _, _, info = run("short", fband("short", 15, 25), n_modes=12, strategy="shift_invert",
+                     verify=False, slice_options=opts)  # fmt: skip
+    ((kw, (C, d)),) = plans
+    assert kw["max_deflate"] == (info["n_store"] if cap is None else cap)
+    assert seen["max_deflate"] == d == min(info["n_store"], 10**6 if cap is None else cap)
+
+
+def test_max_deflate_bad():
+    """Test 8: a bool, a non-int or a negative max_deflate raises."""
+    for bad in (True, 1.5, -1, "3"):
+        with pytest.raises(ValueError, match="max_deflate must be an int >= 0"):
+            run("short", fband("short", 15, 25), slice_options={"max_deflate": bad})
 
 
 # ---------------------------------------------------------------- 9, 10: clusters, the top
@@ -919,13 +1138,13 @@ def test_error_result_capacity(fake_builds):
     f1, f2 = fband("short", 25, 46)
     kw = dict(n_modes=22, chunk=5, levers=False, memory_budget=budget,
               slice_options={"capacity": 96, "max_slices": 1})  # fmt: skip
-    with pytest.warns(UserWarning, match="35 modes locked"):
+    with pytest.warns(UserWarning, match="40 modes locked"):
         with pytest.raises(RuntimeError, match="max_slices = 1") as e:
             run("short", (f1, f2), **kw)
     lam, V, info = e.value.result
     assert info["stopped"] == "capacity" and "lobpcg" in info["time"]
     assert info["reason"] == "capacity" and info["strategy"] == "shift_invert"
-    assert info["n_store"] == 22 and info["mu1_ub"] is not None  # as test_capacity
+    assert info["n_store"] == 52 and info["mu1_ub"] is not None  # as test_capacity
     check_partial("short", f1, lam, V, info)
 
 
@@ -1285,9 +1504,11 @@ def test_choose():
     assert known({(0,): {40: 50}, (1,): {40: 55}}, 48, chunks=top) == ((1,), 40)
     # the margined need unreached, the unmargined reached
     assert known({(): {40: 44}, (2,): {40: 46}}, 48, 40, chunks=top) == ((), 40)
-    # rule 2: neither need reached -> None, with and without a lever-free fit
-    assert known({(): {40: 30}, (0,): {40: 35}}, 48, 40, chunks=top) is None
-    assert known({(): {40: None}, (0,): {40: 35}}, 48, 40, chunks=top) is None
+    # neither need reached: rule 3 (PR 18f; the junction keeps the reach), with and without a
+    # lever-free fit
+    assert known({(): {40: 30}, (0,): {40: 35}}, 48, 40, chunks=top) == ((0,), 40)
+    assert known({(): {40: None}, (0,): {40: 35}}, 48, 40, chunks=top) == ((0,), 40)
+    assert known({(): {40: 34}, (0,): {40: 35}}, 48, 40, chunks=top) == ((), 40)  # within 5%
     # rule 3: the ladder chunk's reach ranks (92 at 40 for (0,), not its max 100)
     r = {(): {40: None, 20: None}, (0,): {40: 92, 20: 100}, (1,): {40: 97, 20: None}}
     assert api._choose(r, [], [40, 20]) == ((1,), 40)
@@ -1383,9 +1604,10 @@ def test_levers_unknown(fake_builds):
 
 def test_levers_applied(fake_builds, monkeypatch):
     """Test 2: _choose forced to {precond, otf} at chunk 5, at a budget where that state reaches
-    40 (a capacity stop at depth 46): one operator build, in otf mode; the slice capacity sees the
-    otf model's op_memory and the fp64 model's pc64; the capacity-stop warning lists low_memory
-    and neither precond_dtype nor otf."""
+    40 (a capacity stop at depth 46): the LOBPCG build in otf mode, then (PR 18f) a stored rebuild
+    for the slices, whose plan beats otf's; _slice_plan sees the otf model, the stored one (the
+    decision), then the stored one again (the final plan), each with the fp64 model's pc64; the
+    capacity-stop warning lists low_memory and neither precond_dtype nor otf."""
     lo, hi = 1e8, 1e9
     while hi - lo > 1e4:  # the budget at which {precond, otf} just reaches 40 at chunk 5
         mid = (lo + hi) / 2
@@ -1394,7 +1616,7 @@ def test_levers_applied(fake_builds, monkeypatch):
     assert state_reach("short", (0, 3), 5, B, 40) == 40
     assert (state_reach("short", (), 40, B, 50) or 0) < 50  # the top chunk misses: a trigger
     builds, caps, seen = [], [], []
-    real_build, real_cap = api.unstructured, mem._slice_capacity
+    real_build, real_cap = api.unstructured, mem._slice_plan
 
     def build(*a, **kw):
         builds.append(kw.get("mode"))
@@ -1405,29 +1627,70 @@ def test_levers_applied(fake_builds, monkeypatch):
         return real_cap(op_memory, pc64, *a, **kw)
 
     monkeypatch.setattr(api, "unstructured", build)
-    monkeypatch.setattr(mem, "_slice_capacity", cap)
+    monkeypatch.setattr(mem, "_slice_plan", cap)
     monkeypatch.setattr(api, "si_band", stub_band({}))
     spy_choose(monkeypatch, seen, pick=((0, 3), 5))
     with pytest.warns(UserWarning, match="modes locked") as w:
         _, _, info = run("short", (0.0, fband("short", 0, 46)[1]), n_modes=30, memory_budget=B,
                          verify=False)  # fmt: skip
-    assert builds == ["otf"] and info["reason"] == "capacity"
+    assert builds == ["otf", None] and info["reason"] == "capacity"
     assert info["levers"] == {"precond_dtype": "float32", "operator_options": {"mode": "otf"}}
     assert info["levers"]["operator_options"] is not api.LEVERS[3][1]  # a copy
     mesh = prob("short")[0]
     otf = mem._models(mesh, "consistent", "auto", "float64", {"mode": "otf"}, None)
-    assert caps == [(otf[0](6), otf[1](6))]
+    st = mem._models(mesh, "consistent", "auto", "float64", {}, None)
+    assert caps == [(otf[0](6), otf[1](6)), (st[0](6), st[1](6)), (st[0](6), st[1](6))]
     (msg,) = [str(x.message) for x in w if "modes locked" in str(x.message)]
     hint = msg.split("levers:")[1]
     assert "low_memory=True" in hint and "precond_dtype" not in hint and "otf" not in hint
 
 
+@pytest.mark.parametrize("case", ["below", "boundary", "no_fit"])
+def test_otf_back(fake_builds, monkeypatch, case):
+    """Test 8: levers set otf, a capacity stop: the operator is rebuilt stored (the otf one dead
+    first) when the stored plan's d_s >= d_o - c ("boundary", c = 24), not at d_o - c - 1
+    ("below") or when the stored plan does not fit ("no_fit": otf kept, one build)."""
+    builds, order, refs = [], [], []
+    real_build = api.unstructured
+
+    def build(*a, **kw):
+        if refs:
+            builds.append(refs[-1]() is None)  # the otf operator dead before the rebuild
+        op = real_build(*a, **kw)
+        refs.append(weakref.ref(op))
+        return op
+
+    mesh = prob("short")[0]
+    otf6 = mem._models(mesh, "consistent", "auto", "float64", {"mode": "otf"}, None)[0](6)
+    d_o = 100
+    d_s = dict(below=d_o - 25, boundary=d_o - 24, no_fit=d_o)[case]
+
+    def plan(op_memory, *a, **kw):
+        tag = "otf" if op_memory(6) == otf6 else "stored"
+        order.append(tag)
+        if tag == "otf":
+            return 96, d_o
+        return (None, 0) if case == "no_fit" and len(order) == 2 else (96, d_s)
+
+    monkeypatch.setattr(api, "unstructured", build)
+    monkeypatch.setattr(mem, "_slice_plan", plan)
+    monkeypatch.setattr(api, "si_band", stub_band({}))
+    monkeypatch.setattr(api, "_solve", capacity_stop("short", list(range(30))))
+    spy_choose(monkeypatch, [], pick=((3,), 5))
+    with pytest.warns(UserWarning, match="modes locked"):
+        run("short", (0.0, fband("short", 0, 46)[1]), n_modes=150, tol=1e-7, verify=False,
+            memory_budget=1.2e8)  # a trigger (test_levers_unmargined)  # fmt: skip
+    rebuilt = case == "boundary"
+    assert builds == ([True] if rebuilt else [])
+    assert order == ["otf", "stored", "stored" if rebuilt else "otf"]
+
+
 def test_levers_unmargined(fake_builds, monkeypatch):
     """Test 2: n_modes 150 from 0 (needs 198 margined, 160 unmargined at chunk 5): at 1.2135e8
     no state reaches 198 and {precond} reaches 160, searched from 160 (rule 1, unmargined); at
-    1.2e8 none reaches 160 (rule 2: no levers, "memory"). Chunk 40, n_modes 120 (needs 198 / 168)
-    at 4.57e8: {precond} reaches 192 only when searched from the unmargined need (rule 1's
-    unmargined pass)."""
+    1.2e8 none reaches 160 (PR 18f: rule 3 on the same reaches, a capacity stop). Chunk 40,
+    n_modes 120 (needs 198 / 168) at 4.57e8: {precond} reaches 192 only when searched from the
+    unmargined need (rule 1's unmargined pass)."""
     monkeypatch.setattr(api, "si_band", stub_band({}))
     monkeypatch.setattr(api, "_solve", capacity_stop("short", list(range(30))))
     f2 = fband("short", 0, 30)[1]
@@ -1440,9 +1703,15 @@ def test_levers_unmargined(fake_builds, monkeypatch):
         _, _, info = run("short", (0.0, f2), memory_budget=1.2135e8, **kw)
     assert info["levers"] == {"precond_dtype": "float32"} and info["chunk"] == 5
     assert all((state_reach("short", S, 5, 1.2e8, 160) or 0) < 160 for S in S4)
-    with pytest.warns(UserWarning, match="no LOBPCG chunk fits"):
+    picks, real = [], api._choose
+    monkeypatch.setattr(api, "_choose", lambda r, nd, ch: picks.append(real(r, [], ch)) or
+                        real(r, nd, ch))  # fmt: skip
+    with pytest.warns(UserWarning, match="30 modes locked") as w:
         _, _, info = run("short", (0.0, f2), memory_budget=1.2e8, **kw)
-    assert info["levers"] == {} and info["reason"] == "memory"
+    ((S, c),) = picks  # rule 3's pick: the cheapest state within 5% of the best ladder reach
+    assert info["levers"] == {api.LEVERS[i][0]: api.LEVERS[i][1] for i in S} != {}
+    assert info["reason"] == "capacity" and info["chunk"] == c
+    assert all(api.LEVERS[i][0] not in str(w[0].message).split("levers:")[1] for i in S)
     B = 4.57e8
     assert (state_reach("short", (), 40, B, 168) or 0) < 168
     assert state_reach("short", (0,), 40, B, 198) is None
@@ -2356,10 +2625,10 @@ def test_fp32_slices(fake_builds, monkeypatch, name):
 
     monkeypatch.setattr(api, "si_band", band)
     pc = "gmg" if name == "voxel" else "amg"
-    real_g, real_cap = getattr(api, pc), mem._slice_capacity
+    real_g, real_cap = getattr(api, pc), mem._slice_plan
     monkeypatch.setattr(api, pc, lambda *a, **kw: kws.append(kw) or real_g(*a, **kw))
     real_cb = mem._count_block
-    monkeypatch.setattr(mem, "_slice_capacity", lambda *a, **kw: pcs.append(a[1]) or
+    monkeypatch.setattr(mem, "_slice_plan", lambda *a, **kw: pcs.append(a[1]) or
                         real_cap(*a, **kw))  # fmt: skip
     monkeypatch.setattr(mem, "_count_block", lambda *a, **kw: pcs.append(a[1]) or
                         real_cb(*a, **kw))  # fmt: skip
@@ -2371,14 +2640,42 @@ def test_fp32_slices(fake_builds, monkeypatch, name):
     assert want != model(prob(name)[0], 6, dtype="float32")
 
 
-@pytest.mark.parametrize("depth, risk", [(999, False), (1000, True)])
-def test_stagnation_risk(fake_builds, monkeypatch, depth, risk):
-    """Test 16: a capacity stop at 1000 locked modes sets stagnation_risk (999 does not)."""
-    harness(monkeypatch, np.linspace(1.0, 2.0, depth), depth, stopped="capacity")
+@pytest.mark.parametrize("case, depth, risk", [
+    ("short", 1000, True), ("full", 1000, False), ("short", 999, False), ("cap", 1000, True),
+    ("no_junction", 1000, True), ("below", 1000, False),
+])  # fmt: skip
+def test_stagnation_risk(fake_builds, monkeypatch, case, depth, risk):
+    """Test 9: stagnation_risk = depth >= 1000 and (no junction or d < j): d = j - 1 ("short",
+    at 1000 and 999), d = j ("full"), max_deflate below j through the real _slice_plan
+    ("cap"), no junction (f1 = 0, no qualifying gap: j = 0), every mode below the band with
+    d >= D ("below")."""
+    t = 1e-3 if case == "no_junction" else TOL
+    rec = harness(monkeypatch, np.linspace(1.0, 2.0, depth), depth, t=t, stopped="capacity")
+    real_plan, got = mem._slice_plan, []
+
+    def plan(*a, **kw):
+        C, d = real_plan(*a, **kw)
+        if case in ("short", "full"):  # j = n_store - 200 (n_modes None, D - j <= 160)
+            d = kw["n_store"] - 200 - (case == "short")
+        got.append(d)
+        return C, d
+
+    monkeypatch.setattr(mem, "_slice_plan", plan)
+    band = dict(no_junction=(0.0, 3.0), below=(3.0, 4.0)).get(case, (1.5, 3.0))
+    opts = {"slice_options": {"max_deflate": 5}} if case == "cap" else {}
     with pytest.warns(UserWarning, match=f"{depth} modes locked") as w:
-        _, _, info = fake_run(1.5, 3.0)
+        _, _, info = run("short", (freq(band[0]), freq(band[1])), sigma=0.5, **opts)
     assert info["stagnation_risk"] is risk
-    assert any("MINRES may stagnate" in str(x.message) for x in w) is risk
+    j = (info["junction"] or {}).get("known", 0)
+    assert (j == 0) == (case == "no_junction") and rec["seen"]["max_deflate"] == got[-1]
+    if case == "below":
+        assert info["junction"] == {"cut": None, "known": depth} and got[-1] >= depth
+    msgs = [str(x.message) for x in w if "modes locked" in str(x.message)]
+    assert any("MINRES may stagnate" in m for m in msgs) is risk
+    if risk and j:
+        assert any(f"deflation limited to {got[-1]} of {j} known modes" in m for m in msgs)
+    if case == "no_junction":
+        assert any("no junction" in m for m in msgs)
 
 
 def test_not_converged(fake_builds, monkeypatch):
