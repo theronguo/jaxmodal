@@ -123,7 +123,7 @@ Branch `pr-18f-deep-bands` from `main` (0dc91a5, PR 18e merged). Roadmap: "PR 18
   - **Tests:** $p$ = 0 and 1 in place, a need cap below 192, `no_count` with the real si_band, `n_band` recorded.
 - Rev 10 (plan review round 9: correctness, tests and performance satisfied):
   - **The assembly** writes into `V` from column $p$ with no shrink first (a macOS shrink frees nothing and the next grow moves the block).
-  - **$D$** = the locked modes plus the kept chunk (`len(lam)`), used for every "locked modes" count.
+  - **$D$** = the locked modes plus the kept chunk (`chunks[-1]["kept"]`), used for every "locked modes" count.
   - **The benchmark band** runs with `levers=False` and checks $D$, the cut and $d \ge j$ before LOBPCG.
   - **Docs:** `eigensolvers.md:999`, `lobpcg.py:567`/`:666`, `api.py:648`, the catch-all, and the kept chunk logged.
   - **Tests:** the kept chunk's updated tests named; test 6 at $D$ = 40 with 10 above the cut; test 10's $D$ below the band; `no_count`'s `_verify` stub.
@@ -132,6 +132,10 @@ Branch `pr-18f-deep-bands` from `main` (0dc91a5, PR 18e merged). Roadmap: "PR 18
   - **$D$** = `len(lam)`; no `kept` key.
   - **MINRES phase** models two $n \times b$ temporaries.
   - **Tests:** test 10 with `levers=False`; `no_count`'s expected reason built from `info["junction"]`; `test_mac_growth_peak` checked; test 6's off-by-one wording.
+- Rev 12 (plan review round 11: all five satisfied; minors applied):
+  - **The assembly:** one "no shrink" sentence, the entry assert in its own bullet, the probe grow as the ownership check, the fallback reading known columns from `V`, the last item's `Z` list dropped before the probe.
+  - **Tests:** two grows after the probe, a `break`-path in-place case, `no_count`'s stub with `passed=False`.
+  - **Docs:** `eigensolvers.md:184`, `:757–759` (si_checked), `:166`'s otf and "until 18f" clauses; the Rev 10 entry restored.
 
 ## Split (decision without user input)
 
@@ -265,14 +269,15 @@ In exact arithmetic this equals the $AZ$ form, at $8n\,n_z$ device bytes instead
 
 **Assembly in place.** The known pairs all lie below si_band's lo = max(lo_b, cut), and the slices start at or above it. The check runs on the final `parts`, after the merge loop (a widened merge can pull the top known-only window in):
 - $p$ is the length of the leading prefix of index parts whose store indices concatenate to `arange(p)` (known columns in place, $p \le j$);
-- the in-place path applies when no later index part holds a known column (index $< j$), `V` owns its data and is not C-contiguous (an $(n, 1)$ block is both, and `resize` would lay it out in C order). A merged window's known inputs were already copied by `cols()`, so a slice that re-finds a known mode, or a chain across the cut, only shortens $p$.
+- the in-place path applies when no later index part holds a known column (index $< j$) (the entry assert below already excludes a C-contiguous block, which `resize` would lay out in C order; ownership is checked by the probe grow below, not separately). A merged window's known inputs were already copied by `cols()`, so a slice that re-finds a known mode, or a chain across the cut, only shortens $p$.
+- `known` is internal: one entry `assert` that `known` is a list, `V` is fp64, F-contiguous and not C-contiguous (LOBPCG's band block has `max_capacity` + $m$ columns, $m$ = `info["block"]`, at least 2), `V.shape[0] == n` and `V.shape[1] >= j + 1` (the count reads `V[:, :j+1]`), and `lam` is ascending with `lam[-1] < lo`.
 
 Then:
-1. the store entries of the known block (indices $< j$) are set to None and every other name for it (the per-slice `V`, the unpacked `known` items) dropped, leaving the one name used for the resize; the slice entries stay until written; `gc.collect()` runs;
-2. the parts are written straight into `V`'s columns from $p$ on, each part's store entries set to None after its write. `V` already has `max_capacity` + $m$ columns (the $D$ touched ones, then lazy zero pages); only a part that does not fit grows it, by `resize` in steps of $c$ columns (numpy zero-fills a grown tail, so one up-front grow would hold the slice columns twice), and one final `resize` sets the result width. No shrink comes first: on macOS a shrink of a touched block frees nothing and the next grow moves it, holding $8n(D - p)$ twice (a reviewer's measurement: maxrss 4.68 GB against 2.76 GB in place). Overwriting the known columns from $p$ on is safe under the in-place condition: no later index part refers to them, merged parts hold `cols()` copies, and the locked columns above the cut are not in the store. No shrink comes first, so `V` never drops to an $(n, \le 1)$ C-contiguous shape before the final resize (from which a `resize` would lay it out in C order). Each resize keeps the leading columns, since F-order data is column after column (`known` is internal: one entry `assert` that `known` is a list, `V` is fp64, F-contiguous and not C-contiguous (at least 2 columns: LOBPCG's band block has `max_capacity` + $m$ columns, $m$ = `info["block"]`) with `V.shape[0] == n` and `V.shape[1] >= j + 1` (the count reads `V[:, :j+1]`), and `lam` is ascending with `lam[-1] < lo`);
+1. the store entries of the known block (indices $< j$) are set to None and every other name for it (the per-slice `V`, the unpacked `known` items, the last item's `Z` list, which a `break` exit leaves bound) dropped, leaving the one name used for the resize; the slice entries stay until written; `gc.collect()` runs;
+2. the parts are written straight into `V`'s columns from $p$ on, each part's store entries set to None after its write. `V` already has `max_capacity` + $m$ columns (the $D$ touched ones, then lazy zero pages); only a part that does not fit grows it, by `resize` in steps of $c$ columns (numpy zero-fills a grown tail, so one up-front grow would hold the slice columns twice), and one final `resize` sets the result width. Each resize keeps the leading columns, since F-order data is column after column. No shrink comes first: on macOS a shrink of a touched block frees nothing and the next grow moves it, holding $8n(D - p)$ twice (a reviewer's measurement: maxrss 4.68 GB against 2.76 GB in place), and `V` never drops to an $(n, \le 1)$ C-contiguous shape before the final resize. Overwriting the known columns from $p$ on is safe under the in-place condition: no later index part refers to them, merged parts hold `cols()` copies, and the locked columns above the cut are not in the store;
 3. so the host peak is $V$ plus the unwritten store plus one part; a large `realloc` is an `mremap` on Linux (no copy); measured on macOS: resizes of about 10 ms each (no copy), maxrss after reading every column about 5% above a plain fill (no doubling); macOS maxrss undercounts realloc-grown pages until they are read, so a peak check reads all of `V` first.
 
-Every failure is found before any write: the known-index check above, then (after step 1) one probe grow `V.resize((n, V.shape[1] + c))`, the first of the steps-of-$c$ grows ($8nc$ committed), which raises for another reference or a borrowed block (numpy raises only on a size change, so a later grow or the final resize would fail after columns were overwritten). On a failure the assembly copies as today, from `V` and the store by index, with the "returned modes copied" `RuntimeWarning`.
+Every failure is found before any write: the known-index check above, then (after step 1) one probe grow `V.resize((n, V.shape[1] + c))`, the first of the steps-of-$c$ grows ($8nc$ committed), which raises for another reference or a borrowed block (numpy raises only on a size change, so a later grow or the final resize would fail after columns were overwritten). On a failure the assembly copies as today, with the "returned modes copied" `RuntimeWarning`: a known index $s < j$ is read from `V[:, s]` (step 1 may already have set its store entry to None; nothing is written before the probe), a slice index from the store.
 
 The `err.result` path assembles the same way; si_band holds the known block under its own name (not the per-slice `V`) and drops it beside `del V_f`, with `traceback.clear_frames` in solve_modes as today.
 
@@ -417,7 +422,7 @@ Spies record `id(V)`, never a weakref: numpy refuses `resize` on an array that h
    - `known` is empty after the call;
    - the leaf (also a flagged one): `slices[0]` is the known entry, and `info["count"]` covers it on the normal exit and in `err.result`;
    - `err.result` after the first slice raises holds the known pairs, assembled in place (`id`);
-   - **in place:** `id(V_f)` = `id` of the given block, with no `RuntimeWarning`, and every column of `V_f` equals the expected vector (known, then the slices', as `assert_compacted`);
+   - **in place:** `id(V_f)` = `id` of the given block, with no `RuntimeWarning`, and every column of `V_f` equals the expected vector (known, then the slices', as `assert_compacted`); one in-place case ends on a `break` path (a non-converged slice; `id` kept, no warning), one in-place case has slice parts wider than the given block plus $c$, so at least two grows after the probe run (same `id`, no warning, contents as `assert_compacted`);
    - **fallbacks, each copying with the warning and the same contents:**
      - a second reference held (found by the probe grow before any write: the holder's array unchanged);
      - a borrowed block (`big[:, :D]`);
@@ -454,7 +459,7 @@ Spies record `id(V)`, never a weakref: numpy refuses `resize` on an array that h
    - **Case (b)** (`capacity_stop("short", locked)` with the real si_band and `fake_band` recording `len(Z)`; `_slice_plan` monkeypatched to $d \ge D$), two cases: all locked modes below the band, and exactly one locked mode $D-1$ inside it with f1 chosen so that lo lies in $((\lambda_{D-2} + \lambda_{D-1})/2, \lambda_{D-1})$ ($j = D - 1$, mode $D-1$ recomputed and asserted). The case-(b) warning text is matched. Common asserts: `info["junction"]` = {cut: None, known: $j$}, $j$ = the modes below $\text{lo}_b(1 - 100\max(t_i, \text{tol}))$ (asserted per case), no leaf, `_verify` not called, si_band from lo, and the first item's `len(Z)` = $j$.
    - **A flagged leaf** (`_verify` stubbed to estimate 0.6): `_verify` called once (no rerun) and the leaf the stub captured is flagged; si_band's recording of a flagged leaf into `info["count"]` is test 4's.
    - **`edge_rr_failed`** (stub_band): `complete_to` = lo_b.
-   - **`no_count`** (`capacity_stop` with the real si_band and `fake_band`, its own `api._verify` stub returning `reason="faked"`, `_count_block` → None, `verify=True`): the reason starts with `no_count` and contains `_band_count`'s reason for the known leaf, built in the test from lo_b and `info["junction"]["cut"]` in `_band_count`'s format with `": faked"` (the known leaf first, `_count_out`'s keys filled by solve_modes).
+   - **`no_count`** (`capacity_stop` with the real si_band and `fake_band`, its own `api._verify` stub returning `passed=False` and `reason="faked"`, `_count_block` → None, `verify=True`): the reason starts with `no_count` and contains `_band_count`'s reason for the known leaf, built in the test from lo_b and `info["junction"]["cut"]` in `_band_count`'s format with `": faked"` (the known leaf first, `_count_out`'s keys filled by solve_modes).
    - **`probe_budget`** (test_capacity_store, a `mem.band_probe_block` spy): the held term is $8nD$ plus the aggregates.
    - **edges** (`slice_options={"edges": [x_below_cut, x_above_cut]}`): si_band receives only the one above the cut.
    - **No-junction paths:** `info["junction"]` None in test_memory ("memory") and test_slice_reason (forced "shift_invert"), and si_band's `max_deflate` equal to `_slice_plan`'s $d$ (test_memory's spy).
@@ -531,10 +536,12 @@ Spies record `id(V)`, never a weakref: numpy refuses `resize` on an array that h
     - `:141`: the capacity stop → the junction, and the `stagnation_risk` definition;
     - `:145–153` "Why memory-driven" (including "No crossover exists"): the slice per-mode row and the crossover claim marked undeflated, with the study's figure;
     - `:157`: "33–1260× cheaper" marked undeflated, with the study's figure;
-    - `:166`: rule 2 removed (unreached known depths take rule 3's pick), and the residual risks;
+    - `:166`: rule 2 removed (unreached known depths take rule 3's pick), and the residual risks: otf back to stored before the slices (when $d_s \ge d_o - c$), and the "until 18f's junction" clause resolved;
     - `:182`: the slice capacity → `_slice_plan` ($C$ and $d$), the need cap from $n_\text{new}$, `n_z` in the fit;
     - `:175`: the 10M reach discussion gains the deflation cap $d_Z < D$;
     - `:183`: the store $N_s$;
+    - `:184`: at a junction the count block also leaves room for the $8n(D - j)$ locked columns above the cut;
+    - `:757`–`:759` (si_checked): `Z` passed through, kept on restarts (same σ), $H$ recomputed per run;
     - `:187`: `from_zero` and `mu1_ub` after a junction;
     - `:193`: the filter, sort and compaction after a junction;
     - `:197` Errors: forced "lobpcg" for an unreached known depth, the `slice_options` key `max_deflate`, the discarded LOBPCG run → kept;
